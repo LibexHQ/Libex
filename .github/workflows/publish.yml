@@ -26,11 +26,19 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Generate image tags
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/libexhq/libex
+          images: |
+            ghcr.io/libexhq/libex
+            sunbrolynk/libex
           tags: |
             type=raw,value=latest,enable=true
             type=sha,prefix=sha-

@@ -24,10 +24,13 @@ class Settings(BaseSettings):
     # Audible
     default_region: str = "us"
     
+    # Database
+    database_url: str = "postgresql+asyncpg://libex:libex@localhost:5432/libex"
+    database_echo: bool = False
+    
     # Logging - Axiom (optional)
     axiom_token: str = ""
     axiom_dataset: str = "libex"
-    axiom_org_id: str = ""
 
     class Config:
         env_file = ".env"

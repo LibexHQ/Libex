@@ -5,10 +5,16 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-# Local
+# Core
 from app.core.config import get_settings
 from app.core.logging import setup_logging
 from app.core.exceptions import LibexException
+
+# Database
+from app.db.session import engine
+from app.db.base import Base
+
+# Routes
 from app.api.routes.books import router as books_router
 from app.api.routes.authors import router as authors_router
 from app.api.routes.series import router as series_router

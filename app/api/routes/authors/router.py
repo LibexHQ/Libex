@@ -27,7 +27,7 @@ from app.services.audible.authors import (
 
 # Core
 from app.core.logging import get_logger
-from app.core.middleware import is_valid_asin
+from app.core.middleware import is_valid_asin, valid_region
 from app.core.exceptions import NotFoundException
 
 logger = get_logger()
@@ -41,7 +41,7 @@ router = APIRouter(prefix="/author", tags=["Authors"])
 @router.get("/search", response_model=list[AuthorResponse])
 async def search(
     name: Annotated[str, Query(description="Author name to search for")],
-    region: Annotated[str, Query(description="Audible region code")] = "us",
+    region: str = Depends(valid_region),
     session: AsyncSession = Depends(get_session),
 ) -> list[AuthorResponse]:
     """Search for authors by name."""
@@ -52,7 +52,7 @@ async def search(
 @router.get("/books", response_model=AuthorBooksResponse)
 async def get_books_by_author_name(
     name: Annotated[str, Query(description="Author name")],
-    region: Annotated[str, Query(description="Audible region code")] = "us",
+    region: str = Depends(valid_region),
     session: AsyncSession = Depends(get_session),
 ) -> AuthorBooksResponse:
     """
@@ -67,7 +67,7 @@ async def get_books_by_author_name(
 @router.get("/books/{asin}", response_model=AuthorBooksResponse)
 async def get_books_by_author(
     asin: Annotated[str, Path(description="Author ASIN")],
-    region: Annotated[str, Query(description="Audible region code")] = "us",
+    region: str = Depends(valid_region),
     cache: Annotated[bool, Query(description="Return cached data if available")] = False,
     session: AsyncSession = Depends(get_session),
 ) -> AuthorBooksResponse:
@@ -85,7 +85,7 @@ async def get_books_by_author(
 @router.get("/{asin}", response_model=AuthorResponse)
 async def get_author_by_asin(
     asin: Annotated[str, Path(description="Author ASIN")],
-    region: Annotated[str, Query(description="Audible region code")] = "us",
+    region: str = Depends(valid_region),
     cache: Annotated[bool, Query(description="Return cached data if available")] = False,
     session: AsyncSession = Depends(get_session),
 ) -> AuthorResponse:

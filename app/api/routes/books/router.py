@@ -22,7 +22,7 @@ from app.services.audible.books import get_book_by_asin, get_books_by_asins, get
 # Core
 from app.core.exceptions import NotFoundException
 from app.core.logging import get_logger
-from app.core.middleware import is_valid_asin
+from app.core.middleware import is_valid_asin, valid_region
 
 logger = get_logger()
 
@@ -35,7 +35,7 @@ router = APIRouter(prefix="/book", tags=["Books"])
 @router.get("/{asin}", response_model=BookResponse)
 async def get_book(
     asin: Annotated[str, Path(description="Audible ASIN")],
-    region: Annotated[str, Query(description="Audible region code")] = "us",
+    region: str = Depends(valid_region),
     cache: Annotated[bool, Query(description="Return cached data if available")] = False,
     session: AsyncSession = Depends(get_session),
 ) -> BookResponse:
@@ -49,7 +49,7 @@ async def get_book(
 @router.get("/{asin}/chapters", response_model=ChapterInfo)
 async def get_book_chapters(
     asin: Annotated[str, Path(description="Audible ASIN")],
-    region: Annotated[str, Query(description="Audible region code")] = "us",
+    region: str = Depends(valid_region),
     session: AsyncSession = Depends(get_session),
 ) -> ChapterInfo:
     """Get chapter information for a book by ASIN."""
@@ -62,7 +62,7 @@ async def get_book_chapters(
 @router.get("", response_model=list[BookResponse])
 async def get_books_bulk(
     asins: Annotated[str, Query(description="Comma-separated ASINs, max 1000")],
-    region: Annotated[str, Query(description="Audible region code")] = "us",
+    region: str = Depends(valid_region),
     cache: Annotated[bool, Query(description="Return cached data if available")] = False,
     session: AsyncSession = Depends(get_session),
 ) -> list[BookResponse]:

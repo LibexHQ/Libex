@@ -22,7 +22,7 @@ from app.services.audible.series import get_series, get_series_books, search_ser
 
 # Core
 from app.core.logging import get_logger
-from app.core.middleware import is_valid_asin
+from app.core.middleware import is_valid_asin, valid_region
 from app.core.exceptions import NotFoundException
 
 logger = get_logger()
@@ -36,7 +36,7 @@ router = APIRouter(prefix="/series", tags=["Series"])
 @router.get("/search", response_model=list[SeriesResponse])
 async def search(
     name: Annotated[str, Query(description="Series name to search for")],
-    region: Annotated[str, Query(description="Audible region code")] = "us",
+    region: str = Depends(valid_region),
     session: AsyncSession = Depends(get_session),
 ) -> list[SeriesResponse]:
     """Search for series by name."""
@@ -47,7 +47,7 @@ async def search(
 @router.get("/books/{asin}", response_model=SeriesBooksResponse)
 async def get_books_by_series(
     asin: Annotated[str, Path(description="Series ASIN")],
-    region: Annotated[str, Query(description="Audible region code")] = "us",
+    region: str = Depends(valid_region),
     cache: Annotated[bool, Query(description="Return cached data if available")] = False,
     session: AsyncSession = Depends(get_session),
 ) -> SeriesBooksResponse:
@@ -64,7 +64,7 @@ async def get_books_by_series(
 @router.get("/{asin}", response_model=SeriesResponse)
 async def get_series_by_asin(
     asin: Annotated[str, Path(description="Series ASIN")],
-    region: Annotated[str, Query(description="Audible region code")] = "us",
+    region: str = Depends(valid_region),
     cache: Annotated[bool, Query(description="Return cached data if available")] = False,
     session: AsyncSession = Depends(get_session),
 ) -> SeriesResponse:

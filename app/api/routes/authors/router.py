@@ -27,6 +27,8 @@ from app.services.audible.authors import (
 
 # Core
 from app.core.logging import get_logger
+from app.core.middleware import is_valid_asin
+from app.core.exceptions import NotFoundException
 
 logger = get_logger()
 
@@ -74,6 +76,8 @@ async def get_books_by_author(
     Uses Android endpoint with continuation token pagination.
     Compatible with AudiMeta /author/books/:asin endpoint.
     """
+    if not is_valid_asin(asin):
+        raise NotFoundException(f"Invalid ASIN format: {asin}")
     asins = await get_author_books(asin, region, session, cache)
     return AuthorBooksResponse(asin=asin, region=region, book_asins=asins, total=len(asins))
 
@@ -86,5 +90,7 @@ async def get_author_by_asin(
     session: AsyncSession = Depends(get_session),
 ) -> AuthorResponse:
     """Get author profile by ASIN."""
+    if not is_valid_asin(asin):
+        raise NotFoundException(f"Invalid ASIN format: {asin}")
     data = await get_author(asin, region, session, cache)
     return AuthorResponse(**data)

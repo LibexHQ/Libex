@@ -15,10 +15,8 @@ Open, unrestricted Audible metadata API for the audiobook automation community.
 
 ## Public Instance
 
-A free public instance of Libex is available at:
-```
-https://libex.lostcartographer.xyz
-```
+A free public instance of Libex is available at [Libex](https://libex.lostcartographer.xyz)
+
 
 This instance is maintained by the Libex project and is free for community use. No API key required. No rate limits beyond what Audible naturally enforces.
 

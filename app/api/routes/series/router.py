@@ -22,6 +22,8 @@ from app.services.audible.series import get_series, get_series_books, search_ser
 
 # Core
 from app.core.logging import get_logger
+from app.core.middleware import is_valid_asin
+from app.core.exceptions import NotFoundException
 
 logger = get_logger()
 
@@ -53,6 +55,8 @@ async def get_books_by_series(
     Get all book ASINs for a series, sorted by position.
     Compatible with AudiMeta /series/books/:asin endpoint.
     """
+    if not is_valid_asin(asin):
+        raise NotFoundException(f"Invalid ASIN format: {asin}")
     asins = await get_series_books(asin, region, session, cache)
     return SeriesBooksResponse(asin=asin, region=region, book_asins=asins, total=len(asins))
 
@@ -68,5 +72,7 @@ async def get_series_by_asin(
     Get series metadata by ASIN.
     Compatible with AudiMeta /series/:asin endpoint.
     """
+    if not is_valid_asin(asin):
+        raise NotFoundException(f"Invalid ASIN format: {asin}")
     data = await get_series(asin, region, session, cache)
     return SeriesResponse(**data)

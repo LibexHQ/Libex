@@ -5,10 +5,13 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
+
 # Core
 from app.core.config import get_settings
 from app.core.logging import setup_logging
 from app.core.exceptions import LibexException
+from app.core.middleware import setup_middleware
+
 
 # Database
 from app.db.session import engine
@@ -83,6 +86,12 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
         status_code=500,
         content={"error": "Internal server error", "status_code": 500},
     )
+
+# ============================================================
+# MIDDLEWARE
+# ============================================================
+
+setup_middleware(app)
 
 # ============================================================
 # ROUTERS

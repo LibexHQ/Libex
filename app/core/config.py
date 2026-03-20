@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     app_version: str = "0.1.0"
     debug: bool = False
     host: str = "0.0.0.0"
-    port: int = 8080
+    port: int = 3333
 
     # Cache
     cache_enabled: bool = True

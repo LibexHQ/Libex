@@ -38,10 +38,11 @@ def _generate_session_id() -> str:
 
 def _normalize_author(data: dict, asin: str, region: str) -> dict[str, Any]:
     contributor = data.get("contributor", {})
+    bio = contributor.get("bio") or ""
     return {
         "asin": asin,
         "name": contributor.get("name", "").replace("\t", "").strip(),
-        "description": contributor.get("bio", "").replace("\t", "").strip() or None,
+        "description": bio.replace("\t", "").strip() or None,
         "image": contributor.get("profile_image_url"),
         "region": region,
     }

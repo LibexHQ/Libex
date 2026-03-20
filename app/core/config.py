@@ -3,11 +3,20 @@ Core configuration for Libex.
 Settings are loaded from environment variables with sensible defaults.
 """
 
-from pydantic_settings import BaseSettings
+# Standard library
 from functools import lru_cache
+
+# Third party
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+    )
+    
     # Application
     app_name: str = "Libex"
     app_version: str = "0.1.0"
@@ -31,12 +40,6 @@ class Settings(BaseSettings):
     # Logging - Axiom (optional)
     axiom_token: str = ""
     axiom_dataset: str = "libex"
-
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        case_sensitive = False
-
 
 @lru_cache()
 def get_settings() -> Settings:

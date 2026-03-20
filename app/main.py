@@ -1,4 +1,5 @@
 # Standard library
+from contextlib import asynccontextmanager
 
 # Third party
 from fastapi import FastAPI, Request
@@ -38,11 +39,30 @@ openapi_tags = [
     {"name": "Search", "description": "Search Audible catalog by title, author, or keyword"},
 ]
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("Database tables verified")
+    except Exception as e:
+        logger.warning(f"Database unavailable on startup: {e}")
+    logger.info(f"Libex {settings.app_version} starting up")
+
+    yield
+
+    # Shutdown
+    await engine.dispose()
+    logger.info("Libex shutting down")
+
+
 app = FastAPI(
     title="Libex",
     description="Open, unrestricted Audible metadata API for the audiobook automation community.",
     version=settings.app_version,
     openapi_tags=openapi_tags,
+    lifespan=lifespan,
 )
 
 # ============================================================
@@ -63,26 +83,6 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
         status_code=500,
         content={"error": "Internal server error", "status_code": 500},
     )
-
-# ============================================================
-# STARTUP & SHUTDOWN
-# ============================================================
-
-@app.on_event("startup")
-async def startup():
-    try:
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        logger.info("Database tables verified")
-    except Exception as e:
-        logger.warning(f"Database unavailable on startup: {e}")
-    logger.info(f"Libex {settings.app_version} starting up")
-
-
-@app.on_event("shutdown")
-async def shutdown():
-    await engine.dispose()
-    logger.info("Libex shutting down")
 
 # ============================================================
 # ROUTERS

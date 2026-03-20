@@ -43,7 +43,7 @@ UNRELEASED_PLACEHOLDER = "2200-01-01T00:00:00Z"
 # HELPERS
 # ============================================================
 
-def _best_image(product_images: dict) -> str | None:
+def _best_image(product_images: dict | None) -> str | None:
     """Returns the highest resolution image URL with size suffix stripped."""
     if not product_images:
         return None

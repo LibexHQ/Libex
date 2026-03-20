@@ -4,7 +4,6 @@ Defines request parameters and response models for author endpoints.
 """
 
 # Standard library
-from typing import Any
 
 # Third party
 from pydantic import BaseModel, Field

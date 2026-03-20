@@ -23,8 +23,6 @@ from app.core.logging import get_logger
 # Services
 from app.services.audible.client import audible_get
 from app.services.audible.books import get_books_by_asins
-from app.services.cache.manager import search_key
-from app.services.cache import manager as cache
 
 logger = get_logger()
 

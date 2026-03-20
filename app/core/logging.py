@@ -1,7 +1,6 @@
 # Standard library
 import logging
 import sys
-from typing import Optional
 
 # Local
 from app.core.config import get_settings

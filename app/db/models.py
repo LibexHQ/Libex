@@ -6,7 +6,7 @@ Database models for Libex.
 from datetime import datetime, timezone
 
 # Third party
-from sqlalchemy import DateTime, String, Text
+from sqlalchemy import DateTime, String
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 

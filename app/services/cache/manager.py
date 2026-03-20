@@ -9,13 +9,12 @@ store results here, and fall back to cache on Audible failure.
 
 # Standard library
 from datetime import datetime, timezone, timedelta
-from typing import Any, cast
+from typing import Any
 
 # Third party
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.engine.cursor import CursorResult
 
 
 # Database

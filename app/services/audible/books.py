@@ -21,7 +21,7 @@ from app.core.logging import get_logger
 # Services
 from app.services.audible.client import audible_get
 from app.services.cache import manager as cache
-from app.services.cache.manager import book_key, books_bulk_key, chapters_key
+from app.services.cache.manager import book_key, chapters_key
 
 logger = get_logger()
 

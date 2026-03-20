@@ -1,5 +1,4 @@
 # Standard library
-import logging
 
 # Third party
 from fastapi import FastAPI, Request
@@ -13,6 +12,7 @@ from app.core.exceptions import LibexException
 # Database
 from app.db.session import engine
 from app.db.base import Base
+from app.db.models import Cache # noqa: F401
 
 # Routes
 from app.api.routes.books import router as books_router
@@ -70,10 +70,18 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
 
 @app.on_event("startup")
 async def startup():
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("Database tables verified")
+    except Exception as e:
+        logger.warning(f"Database unavailable on startup: {e}")
     logger.info(f"Libex {settings.app_version} starting up")
+
 
 @app.on_event("shutdown")
 async def shutdown():
+    await engine.dispose()
     logger.info("Libex shutting down")
 
 # ============================================================

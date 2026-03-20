@@ -20,7 +20,7 @@ from app.core.exceptions import NotFoundException
 from app.core.logging import get_logger
 
 # Services
-from app.services.audible.client import audible_get, get_audible_url, get_region_headers, LOCALE_MAP
+from app.services.audible.client import audible_get, LOCALE_MAP
 from app.services.cache import manager as cache
 from app.services.cache.manager import author_key, author_books_key
 

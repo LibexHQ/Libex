@@ -4,7 +4,7 @@ Defines request parameters and response models for series endpoints.
 """
 
 # Third party
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 # ============================================================

@@ -116,6 +116,7 @@ Logging is completely optional. Leave `AXIOM_TOKEN` empty and Libex logs to stdo
 | GET | `/book/{asin}` | Get book by ASIN |
 | GET | `/book` | Get multiple books by ASIN (comma-separated, max 1000) |
 | GET | `/book/{asin}/chapters` | Get chapter information |
+| GET | `/book/sku/{sku}` | Get books by SKU group (501 - planned) |
 | GET | `/author/{asin}` | Get author profile |
 | GET | `/author/books/{asin}` | Get all books by author ASIN |
 | GET | `/author/books` | Get books by author name |
@@ -125,6 +126,8 @@ Logging is completely optional. Leave `AXIOM_TOKEN` empty and Libex logs to stdo
 | GET | `/series/search` | Search series by name |
 | GET | `/search` | Search Audible catalog |
 | GET | `/quick-search` | Quick search via suggestions |
+| GET | `/{region}/search` | Regional search for Audiobookshelf compatibility |
+| GET | `/{region}/quick-search/search` | Regional quick search for Audiobookshelf compatibility |
 | GET | `/health` | Health check |
 
 Full interactive documentation available at `/docs` when running.

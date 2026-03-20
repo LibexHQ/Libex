@@ -4,17 +4,22 @@ services:
     container_name: libex
     restart: unless-stopped
     ports:
-      - "8080:8080"
-    env_file:
-      - .env
+      - "3333:3333"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://libex:${DB_PASSWORD}@postgres:5432/libex
+      - CACHE_ENABLED=true
+      - CACHE_TTL=86400
+      - DEFAULT_REGION=us
+      - AXIOM_TOKEN=${AXIOM_TOKEN}
+      - AXIOM_DATASET=libex
     volumes:
-      - ./logs:/app/logs
       - ./data:/app/data
+      - ./logs:/app/logs
     depends_on:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:3333/health"]
       interval: 30s
       timeout: 10s
       retries: 3

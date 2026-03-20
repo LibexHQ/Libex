@@ -1,9 +1,16 @@
+<div align="center">
+
 # Libex
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Tests](https://github.com/LibexHQ/Libex/actions/workflows/tests.yml/badge.svg)](https://github.com/LibexHQ/Libex/actions/workflows/tests.yml)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io%2Flibexhq%2Flibex-blue)](https://github.com/LibexHQ/Libex/pkgs/container/libex)
 
+Open, unrestricted Audible metadata API for the audiobook automation community.
+
+</div>
+
+---
 
 ## Public Instance
 
@@ -183,6 +190,20 @@ Planned features:
 ## Disclaimer
 
 Libex is a metadata tool that fetches publicly available information from Audible's API. It does not host, distribute, or provide access to copyrighted audio content. Users are responsible for ensuring their use complies with applicable laws and Audible's terms of service.
+
+---
+
+## Acknowledgements
+
+**Audible** — All metadata is sourced from Audible's public API. Libex is an independent project and is not affiliated with, endorsed by, or sponsored by Audible or Amazon.
+
+**[Axiom](https://axiom.co)** — Structured logging for the public instance. Axiom provides the observability layer that helps us monitor and improve Libex.
+
+**[AudiMeta](https://github.com/Vito0912/AudiMeta)** — The original Audible metadata service that inspired Libex and demonstrated the community need for this tooling. Credit to Vito0912 for pioneering this space.
+
+**[FastAPI](https://fastapi.tiangolo.com)** — The modern Python web framework powering Libex.
+
+**[SQLAlchemy](https://www.sqlalchemy.org)** — Database toolkit for Python used for cache persistence.
 
 ---
 

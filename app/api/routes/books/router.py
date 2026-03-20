@@ -7,7 +7,7 @@ Endpoints for fetching book metadata by ASIN, bulk ASINs, and chapters.
 from typing import Annotated
 
 # Third party
-from fastapi import APIRouter, Query, Path, Depends
+from fastapi import APIRouter, Query, Path, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Database
@@ -85,3 +85,19 @@ async def get_books_bulk(
 
     data = await get_books_by_asins(asin_list, region, session, cache)
     return [BookResponse(**book) for book in data]
+
+@router.get("/sku/{sku}", response_model=list[BookResponse])
+async def get_book_by_sku(
+    sku: Annotated[str, Path(description="Audible SKU group")],
+    region: str = Depends(valid_region),
+) -> list[BookResponse]:
+    """
+    Get books by SKU group.
+    Note: Requires normalized database storage.
+    This feature is planned for a future release.
+    See: https://github.com/LibexHQ/Libex/issues
+    """
+    raise HTTPException(
+        status_code=501,
+        detail="SKU lookup requires normalized database storage, planned for future release."
+    )

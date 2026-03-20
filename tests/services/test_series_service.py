@@ -7,7 +7,8 @@ Tests normalization helpers without hitting Audible.
 import pytest
 
 # Local
-from app.services.audible.series import _normalize_series, _clean_description
+from app.services.audible.series import _normalize_series
+from app.core.utils import strip_html
 
 
 # ============================================================
@@ -16,35 +17,35 @@ from app.services.audible.series import _normalize_series, _clean_description
 
 def test_clean_description_strips_html():
     """HTML tags are stripped from description."""
-    result = _clean_description("<p>A great series.</p>")
+    result = strip_html("<p>A great series.</p>")
     assert result == "A great series."
 
 
 def test_clean_description_strips_nested_html():
     """Nested HTML tags are stripped."""
-    result = _clean_description("<p><strong>Bold</strong> text.</p>")
+    result = strip_html("<p><strong>Bold</strong> text.</p>")
     assert result == "Bold text."
 
 
 def test_clean_description_returns_none_for_empty():
     """Empty string returns None."""
-    assert _clean_description("") is None
+    assert strip_html("") is None
 
 
 def test_clean_description_returns_none_for_none():
     """None input returns None."""
-    assert _clean_description(None) is None
+    assert strip_html(None) is None
 
 
 def test_clean_description_strips_whitespace():
     """Leading and trailing whitespace is stripped."""
-    result = _clean_description("  A great series.  ")
+    result = strip_html("  A great series.  ")
     assert result == "A great series."
 
 
 def test_clean_description_returns_none_for_whitespace_only():
     """Whitespace-only string returns None."""
-    assert _clean_description("   ") is None
+    assert strip_html("   ") is None
 
 
 # ============================================================

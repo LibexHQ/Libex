@@ -8,7 +8,6 @@ Cache is used only as a fallback when Audible is unavailable.
 """
 
 # Standard library
-import re
 from typing import Any
 
 # Third party
@@ -17,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # Core
 from app.core.exceptions import NotFoundException
 from app.core.logging import get_logger
+from app.core.utils import strip_html, strip_image_size_suffix
 
 # Services
 from app.services.audible.client import audible_get
@@ -52,7 +52,7 @@ def _best_image(product_images: dict | None) -> str | None:
         return None
     url = product_images.get(str(highest_key))
     if url:
-        url = re.sub(r'\._\w+_', '', url)
+        url = strip_image_size_suffix(url)
     return url
 
 
@@ -126,8 +126,8 @@ def _normalize_product(product: dict, region: str) -> dict[str, Any]:
         "series_position": series_list[0].get("position") if series_list else None,
         "series_region": series_list[0].get("region") if series_list else None,
         "cover_url": _best_image(product.get("product_images", {})),
-        "description": product.get("merchandising_summary"),
-        "summary": product.get("publisher_summary"),
+        "description": strip_html(product.get("merchandising_summary")),
+        "summary": strip_html(product.get("publisher_summary")),
         "publisher": product.get("publisher_name"),
         "language": product.get("language"),
         "runtime_length_min": product.get("runtime_length_min"),

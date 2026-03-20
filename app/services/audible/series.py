@@ -8,7 +8,6 @@ Cache is used only as a fallback when Audible is unavailable.
 """
 
 # Standard library
-import re
 from typing import Any
 
 # Third party
@@ -17,6 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # Core
 from app.core.exceptions import NotFoundException
 from app.core.logging import get_logger
+from app.core.utils import strip_html
+
 
 # Services
 from app.services.audible.client import audible_get
@@ -33,20 +34,12 @@ SERIES_BOOKS_RESPONSE_GROUPS = "relationships"
 # HELPERS
 # ============================================================
 
-def _clean_description(text: str | None) -> str | None:
-    """Strips HTML tags from series descriptions."""
-    if not text:
-        return None
-    cleaned = re.sub(r'<[^>]+>', '', text)
-    return cleaned.strip() or None
-
-
 def _normalize_series(product: dict, region: str) -> dict[str, Any]:
     """Normalizes raw Audible product data into Libex series format."""
     return {
         "asin": product.get("asin"),
         "title": product.get("title"),
-        "description": _clean_description(product.get("publisher_summary")),
+        "description": strip_html(product.get("publisher_summary")),
         "region": region,
     }
 

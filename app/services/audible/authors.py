@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # Core
 from app.core.exceptions import NotFoundException
 from app.core.logging import get_logger
+from app.core.utils import strip_html
 
 # Services
 from app.services.audible.client import audible_get, LOCALE_MAP
@@ -38,11 +39,11 @@ def _generate_session_id() -> str:
 
 def _normalize_author(data: dict, asin: str, region: str) -> dict[str, Any]:
     contributor = data.get("contributor", {})
-    bio = contributor.get("bio") or ""
+    bio = contributor.get("bio")
     return {
         "asin": asin,
         "name": contributor.get("name", "").replace("\t", "").strip(),
-        "description": bio.replace("\t", "").strip() or None,
+        "description": strip_html(bio),
         "image": contributor.get("profile_image_url"),
         "region": region,
     }

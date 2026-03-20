@@ -4,7 +4,8 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Tests](https://github.com/LibexHQ/Libex/actions/workflows/tests.yml/badge.svg)](https://github.com/LibexHQ/Libex/actions/workflows/tests.yml)
-[![Docker](https://img.shields.io/badge/docker-ghcr.io%2Flibexhq%2Flibex-blue)](https://github.com/LibexHQ/Libex/pkgs/container/libex)
+[![GHCR](https://img.shields.io/badge/ghcr.io-libexhq%2Flibex-blue)](https://github.com/LibexHQ/Libex/pkgs/container/libex)
+[![Docker Hub](https://img.shields.io/badge/docker%20hub-sunbrolynk%2Flibex-blue)](https://hub.docker.com/r/sunbrolynk/libex)
 
 Open, unrestricted Audible metadata API for the audiobook automation community.
 
@@ -41,8 +42,19 @@ Libex exists to be a permanent, community-owned alternative:
 ---
 
 ## Quick Start
+
+Pull the image:
 ```bash
-# 1. Create a directory for Libex
+# GHCR
+docker pull ghcr.io/libexhq/libex:latest
+
+# Docker Hub
+docker pull sunbrolynk/libex:latest
+```
+
+Deploy:
+```bash
+# 1. Create a directory
 mkdir libex && cd libex
 
 # 2. Download the compose file
@@ -50,13 +62,13 @@ curl -O https://raw.githubusercontent.com/LibexHQ/Libex/main/docker-compose.yml
 
 # 3. Create your environment file
 cp .env.example .env
-# Edit .env and set DB_PASSWORD and DATABASE_URL
+# Edit .env and set DB_PASSWORD
 
 # 4. Start Libex
 docker compose up -d
 
-# 5. Verify it's running
-curl http://localhost:8080/health
+# 5. Verify
+curl http://localhost:3333/health
 ```
 
 ---
@@ -145,14 +157,6 @@ DEFAULT_REGION=us
 AXIOM_TOKEN=
 AXIOM_DATASET=libex
 ```
-
----
-
-## Logging
-
-Libex logs to stdout by default. Optionally, structured logging via [Axiom](https://axiom.co) is supported by setting `AXIOM_TOKEN` and `AXIOM_DATASET` in your `.env`.
-
-This is disclosed transparently — if you run a public instance and configure Axiom, your instance's request logs go to your Axiom dataset. No data is sent anywhere by default.
 
 ---
 

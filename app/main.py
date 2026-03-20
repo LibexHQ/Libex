@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 
 # Third party
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 # Core
 from app.core.config import get_settings
@@ -100,3 +100,16 @@ app.include_router(search_router)
 @app.get("/health", tags=["System"])
 async def health():
     return {"status": "ok", "version": settings.app_version}
+
+# ============================================================
+# DOCS REDIRECT
+# ============================================================
+
+@app.get("/", include_in_schema=False)
+async def root_redirect():
+    return RedirectResponse(url="/docs")
+
+
+@app.get("/api-docs", include_in_schema=False)
+async def api_docs_redirect():
+    return RedirectResponse(url="/docs")

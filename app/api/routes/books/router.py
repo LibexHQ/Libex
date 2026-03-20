@@ -22,6 +22,7 @@ from app.services.audible.books import get_book_by_asin, get_books_by_asins, get
 # Core
 from app.core.exceptions import NotFoundException
 from app.core.logging import get_logger
+from app.core.middleware import is_valid_asin
 
 logger = get_logger()
 
@@ -39,6 +40,8 @@ async def get_book(
     session: AsyncSession = Depends(get_session),
 ) -> BookResponse:
     """Get a single book by ASIN."""
+    if not is_valid_asin(asin):
+        raise NotFoundException(f"Invalid ASIN format: {asin}")
     data = await get_book_by_asin(asin, region, session, cache)
     return BookResponse(**data)
 
@@ -50,6 +53,8 @@ async def get_book_chapters(
     session: AsyncSession = Depends(get_session),
 ) -> ChapterInfo:
     """Get chapter information for a book by ASIN."""
+    if not is_valid_asin(asin):
+        raise NotFoundException(f"Invalid ASIN format: {asin}")
     data = await get_chapters(asin, region, session)
     return ChapterInfo(**data)
 
@@ -67,6 +72,10 @@ async def get_books_bulk(
     Automatically chunks requests to respect Audible's 50 ASIN limit.
     """
     asin_list = [a.strip() for a in asins.split(",") if a.strip()]
+    
+    invalid = [a for a in asin_list if not is_valid_asin(a)]
+    if invalid:
+        raise NotFoundException(f"Invalid ASIN format: {', '.join(invalid)}")
 
     if not asin_list:
         raise NotFoundException("No valid ASINs provided")

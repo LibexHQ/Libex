@@ -133,3 +133,26 @@ async def test_bulk_books_rejects_over_1000_asins(async_client):
         asins = ",".join([f"B{str(i).zfill(9)}" for i in range(1001)])
         response = await async_client.get(f"/book?asins={asins}")
         assert response.status_code == 404
+
+@pytest.mark.asyncio
+async def test_get_book_rejects_invalid_asin(async_client):
+    """Book endpoint rejects malformed ASIN."""
+    response = await async_client.get("/book/not-an-asin")
+    assert response.status_code == 404
+    assert "Invalid ASIN" in response.json()["error"]
+
+
+@pytest.mark.asyncio
+async def test_get_book_chapters_rejects_invalid_asin(async_client):
+    """Chapters endpoint rejects malformed ASIN."""
+    response = await async_client.get("/book/not-an-asin/chapters")
+    assert response.status_code == 404
+    assert "Invalid ASIN" in response.json()["error"]
+
+
+@pytest.mark.asyncio
+async def test_bulk_books_rejects_invalid_asin_in_list(async_client):
+    """Bulk book endpoint rejects list containing invalid ASIN."""
+    response = await async_client.get("/book?asins=B08G9PRS1K,not-an-asin")
+    assert response.status_code == 404
+    assert "Invalid ASIN" in response.json()["error"]

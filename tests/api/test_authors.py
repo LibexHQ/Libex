@@ -265,3 +265,18 @@ async def test_search_authors_all_regions(async_client):
         for region in regions:
             response = await async_client.get(f"/author/search?name=Frank+Herbert&region={region}")
             assert response.status_code == 200, f"Failed for region: {region}"
+
+@pytest.mark.asyncio
+async def test_get_author_rejects_invalid_asin(async_client):
+    """Author endpoint rejects malformed ASIN."""
+    response = await async_client.get("/author/not-an-asin")
+    assert response.status_code == 404
+    assert "Invalid ASIN" in response.json()["error"]
+
+
+@pytest.mark.asyncio
+async def test_get_author_books_rejects_invalid_asin(async_client):
+    """Author books endpoint rejects malformed ASIN."""
+    response = await async_client.get("/author/books/not-an-asin")
+    assert response.status_code == 404
+    assert "Invalid ASIN" in response.json()["error"]

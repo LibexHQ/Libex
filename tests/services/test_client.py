@@ -6,7 +6,6 @@ Tests region validation, URL building, and header generation.
 # Third party
 import pytest
 
-# Local
 from app.services.audible.client import (
     validate_region,
     get_audible_url,
@@ -15,7 +14,9 @@ from app.services.audible.client import (
     LOCALE_MAP,
     VALID_REGIONS,
 )
+
 from app.core.exceptions import RegionException
+from app.core.middleware import is_valid_asin
 
 
 # ============================================================
@@ -140,3 +141,27 @@ def test_locale_map_covers_all_valid_regions():
     """Every valid region has a locale mapping."""
     for region in VALID_REGIONS:
         assert region in LOCALE_MAP, f"Missing locale for region: {region}"
+    
+def test_is_valid_asin_accepts_valid():
+    """Valid ASIN passes validation."""
+    assert is_valid_asin("B08G9PRS1K") is True
+
+
+def test_is_valid_asin_rejects_too_short():
+    """ASIN shorter than 10 chars fails validation."""
+    assert is_valid_asin("B08G9PRS") is False
+
+
+def test_is_valid_asin_rejects_too_long():
+    """ASIN longer than 10 chars fails validation."""
+    assert is_valid_asin("B08G9PRS1K1") is False
+
+
+def test_is_valid_asin_rejects_special_chars():
+    """ASIN with special characters fails validation."""
+    assert is_valid_asin("not-an-asin") is False
+
+
+def test_is_valid_asin_accepts_uppercase():
+    """ASIN validation is case insensitive."""
+    assert is_valid_asin("b08g9prs1k") is True

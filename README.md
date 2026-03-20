@@ -97,6 +97,18 @@ Logging is completely optional. Leave `AXIOM_TOKEN` empty and Libex logs to stdo
 
 ---
 
+## API Behavior
+
+**HTML content:** `description` and `summary` fields on book responses, `description` on author responses, and `description` on series responses are returned as plain text with HTML stripped. 
+
+**Image URLs:** Cover image URLs are returned with Audible size suffixes stripped, giving you the base high-resolution image URL.
+
+**ASIN validation:** All ASIN parameters are validated against Audible's 10-character alphanumeric format. Invalid ASINs return a 404 with a clear error message.
+
+**Region validation:** All region parameters are validated against supported Audible regions. Invalid regions return a 400 error.
+
+---
+
 ## API Endpoints
 
 | Method | Endpoint | Description |

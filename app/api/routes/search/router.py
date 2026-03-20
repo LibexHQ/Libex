@@ -22,6 +22,7 @@ from app.services.audible.search import search, quick_search
 
 # Core
 from app.core.logging import get_logger
+from app.core.middleware import valid_region
 
 logger = get_logger()
 
@@ -33,7 +34,7 @@ router = APIRouter(tags=["Search"])
 
 @router.get("/search", response_model=list[BookResponse])
 async def search_books(
-    region: Annotated[str, Query(description="Audible region code")] = "us",
+    region: str = Depends(valid_region),
     title: Annotated[str | None, Query(description="Book title")] = None,
     author: Annotated[str | None, Query(description="Author name")] = None,
     keywords: Annotated[str | None, Query(description="Keywords")] = None,
@@ -53,7 +54,7 @@ async def search_books(
 @router.get("/quick-search", response_model=list[BookResponse])
 async def quick_search_books(
     keywords: Annotated[str, Query(description="Search keywords")],
-    region: Annotated[str, Query(description="Audible region code")] = "us",
+    region: str = Depends(valid_region),
     session: AsyncSession = Depends(get_session),
 ) -> list[BookResponse]:
     """

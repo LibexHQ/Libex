@@ -15,6 +15,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        extra="ignore",  # ignore extra env vars
     )
     
     # Application
@@ -36,6 +37,7 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "postgresql+asyncpg://libex:libex@localhost:5432/libex"
     database_echo: bool = False
+    db_password: str = ""
     
     # Logging - Axiom (optional)
     axiom_token: str = ""

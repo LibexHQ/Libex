@@ -271,7 +271,7 @@ async def get_books_by_asins(
             all_products.extend(products)
 
         if not all_products:
-            raise NotFoundException("No books found for provided ASINs")
+            return []
 
         normalized = [_normalize_product(p, region) for p in all_products]
 
@@ -310,6 +310,8 @@ async def get_book_by_asin(
 ) -> dict[str, Any]:
     """Fetches a single book by ASIN."""
     books = await get_books_by_asins([asin], region, session, use_cache)
+    if not books:
+        raise NotFoundException(f"Book not found: {asin}")
     return books[0]
 
 

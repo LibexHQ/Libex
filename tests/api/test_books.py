@@ -28,29 +28,37 @@ MOCK_BOOK = {
     "asin": "B08G9PRS1K",
     "title": "Test Book",
     "subtitle": None,
-    "authors": [{"name": "Test Author", "asin": "B000TEST01", "region": "us"}],
-    "narrators": ["Test Narrator"],
-    "series": [],
-    "series_name": None,
-    "series_asin": None,
-    "series_position": None,
-    "series_region": None,
-    "cover_url": "https://example.com/cover.jpg",
     "description": "A test book description",
     "summary": "A test summary",
-    "publisher": "Test Publisher",
-    "language": "english",
-    "runtime_length_min": 600,
-    "rating": 4.5,
-    "genres": ["Fiction"],
-    "release_date": "2021-01-01",
-    "explicit": False,
-    "has_pdf": False,
-    "whisper_sync": False,
-    "isbn": None,
-    "content_type": "Product",
-    "sku": None,
     "region": "us",
+    "regions": ["us"],
+    "publisher": "Test Publisher",
+    "copyright": None,
+    "isbn": None,
+    "language": "english",
+    "rating": 4.5,
+    "bookFormat": None,
+    "releaseDate": "2021-01-01",
+    "explicit": False,
+    "hasPdf": False,
+    "whisperSync": False,
+    "imageUrl": "https://example.com/cover.jpg",
+    "lengthMinutes": 600,
+    "link": "https://audible.com/pd/B08G9PRS1K",
+    "contentType": "Product",
+    "contentDeliveryType": None,
+    "episodeNumber": None,
+    "episodeType": None,
+    "sku": None,
+    "skuGroup": None,
+    "isListenable": True,
+    "isAvailable": True,
+    "isBuyable": True,
+    "updatedAt": None,
+    "authors": [{"id": None, "asin": "B000TEST01", "name": "Test Author", "region": "us", "image": None, "updatedAt": None}],
+    "narrators": [{"name": "Test Narrator", "updatedAt": None}],
+    "genres": [{"asin": None, "name": "Fiction", "type": "Genres", "betterType": "genre", "updatedAt": None}],
+    "series": [],
 }
 
 
@@ -82,7 +90,7 @@ async def test_get_book_response_has_required_fields(async_client):
         data = response.json()
         required_fields = [
             "asin", "title", "authors", "narrators",
-            "series", "region", "cover_url", "description",
+            "series", "region", "imageUrl", "description",
         ]
         for field in required_fields:
             assert field in data, f"Missing required field: {field}"
@@ -116,13 +124,27 @@ async def test_bulk_books_requires_asins(async_client):
 
 
 @pytest.mark.asyncio
-async def test_bulk_books_returns_list(async_client):
-    """Bulk book endpoint returns a list."""
+async def test_bulk_books_returns_correct_structure(async_client):
+    """Bulk book endpoint returns books and notFound dict."""
     with patch("app.api.routes.books.router.get_books_by_asins", new_callable=AsyncMock) as mock:
         mock.return_value = [MOCK_BOOK]
         response = await async_client.get("/book?asins=B08G9PRS1K")
         assert response.status_code == 200
-        assert isinstance(response.json(), list)
+        data = response.json()
+        assert "books" in data
+        assert "notFound" in data
+        assert isinstance(data["books"], list)
+        assert isinstance(data["notFound"], list)
+
+
+@pytest.mark.asyncio
+async def test_bulk_books_not_found_asins_listed(async_client):
+    """Bulk book endpoint lists ASINs not found."""
+    with patch("app.api.routes.books.router.get_books_by_asins", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        response = await async_client.get("/book?asins=B08G9PRS1K,B000000001")
+        data = response.json()
+        assert "B000000001" in data["notFound"]
 
 
 @pytest.mark.asyncio
@@ -133,6 +155,7 @@ async def test_bulk_books_rejects_over_1000_asins(async_client):
         asins = ",".join([f"B{str(i).zfill(9)}" for i in range(1001)])
         response = await async_client.get(f"/book?asins={asins}")
         assert response.status_code == 404
+
 
 @pytest.mark.asyncio
 async def test_get_book_rejects_invalid_asin(async_client):

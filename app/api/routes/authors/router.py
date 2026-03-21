@@ -1,6 +1,5 @@
 """
 Authors router.
-Endpoints for fetching author metadata, books, and search.
 Compatible with AudiMeta endpoint structure for drop-in replacement.
 """
 
@@ -15,7 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_session
 
 # Routes
-from app.api.routes.authors.schemas import AuthorResponse, AuthorBooksResponse
+from app.api.routes.authors.schemas import AuthorResponse
+from app.api.routes.books.schemas import BookResponse
 
 # Services
 from app.services.audible.authors import (
@@ -24,6 +24,7 @@ from app.services.audible.authors import (
     get_author_books_by_name,
     search_authors,
 )
+from app.services.audible.books import get_books_by_asins
 
 # Core
 from app.core.logging import get_logger
@@ -38,48 +39,72 @@ router = APIRouter(prefix="/author", tags=["Authors"])
 # ENDPOINTS
 # ============================================================
 
-@router.get("/search", response_model=list[AuthorResponse])
+@router.get("", response_model=list[AuthorResponse])
 async def search(
     name: Annotated[str, Query(description="Author name to search for")],
     region: str = Depends(valid_region),
     session: AsyncSession = Depends(get_session),
 ) -> list[AuthorResponse]:
-    """Search for authors by name."""
+    """Search for authors by name. Returns 404 if none found."""
     authors = await search_authors(name, region, session)
+    if not authors:
+        raise NotFoundException("No authors found")
     return [AuthorResponse(**a) for a in authors]
 
 
-@router.get("/books", response_model=AuthorBooksResponse)
+@router.get("/books", response_model=list[BookResponse])
 async def get_books_by_author_name(
     name: Annotated[str, Query(description="Author name")],
     region: str = Depends(valid_region),
     session: AsyncSession = Depends(get_session),
-) -> AuthorBooksResponse:
+) -> list[BookResponse]:
     """
-    Get book ASINs by author name.
+    Get books by author name.
     Used when no author ASIN is available.
-    Compatible with AudiMeta /author/books endpoint.
+    Returns full book objects matching AudiMeta's BookDto format.
     """
     asins = await get_author_books_by_name(name, region, session)
-    return AuthorBooksResponse(asin="", region=region, book_asins=asins, total=len(asins))
+    if not asins:
+        raise NotFoundException("No books found for author")
+    books = await get_books_by_asins(asins, region, session)
+    return [BookResponse(**b) for b in books]
 
 
-@router.get("/books/{asin}", response_model=AuthorBooksResponse)
+@router.get("/books/{asin}", response_model=list[BookResponse])
 async def get_books_by_author(
     asin: Annotated[str, Path(description="Author ASIN")],
     region: str = Depends(valid_region),
     cache: Annotated[bool, Query(description="Return cached data if available")] = False,
     session: AsyncSession = Depends(get_session),
-) -> AuthorBooksResponse:
+) -> list[BookResponse]:
     """
-    Get all book ASINs for an author by ASIN.
-    Uses Android endpoint with continuation token pagination.
-    Compatible with AudiMeta /author/books/:asin endpoint.
+    Get all books by author ASIN.
+    Returns full book objects matching AudiMeta's BookDto format.
     """
     if not is_valid_asin(asin):
         raise NotFoundException(f"Invalid ASIN format: {asin}")
     asins = await get_author_books(asin, region, session, cache)
-    return AuthorBooksResponse(asin=asin, region=region, book_asins=asins, total=len(asins))
+    if not asins:
+        raise NotFoundException("No books found for author")
+    books = await get_books_by_asins(asins, region, session)
+    return [BookResponse(**b) for b in books]
+
+
+@router.get("/{asin}/books", response_model=list[BookResponse], include_in_schema=False)
+async def get_books_by_author_primary(
+    asin: Annotated[str, Path(description="Author ASIN")],
+    region: str = Depends(valid_region),
+    cache: Annotated[bool, Query(description="Return cached data if available")] = False,
+    session: AsyncSession = Depends(get_session),
+) -> list[BookResponse]:
+    """Legacy endpoint. Use /author/books/{asin} instead."""
+    if not is_valid_asin(asin):
+        raise NotFoundException(f"Invalid ASIN format: {asin}")
+    asins = await get_author_books(asin, region, session, cache)
+    if not asins:
+        raise NotFoundException("No books found for author")
+    books = await get_books_by_asins(asins, region, session)
+    return [BookResponse(**b) for b in books]
 
 
 @router.get("/{asin}", response_model=AuthorResponse)

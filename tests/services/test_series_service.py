@@ -59,11 +59,11 @@ def test_normalize_series_extracts_asin():
     assert result["asin"] == "B000SERIES1"
 
 
-def test_normalize_series_extracts_title():
-    """Normalized series includes title."""
+def test_normalize_series_extracts_name():
+    """Normalized series includes name field matching AudiMeta SeriesDto."""
     product = {"asin": "B000SERIES1", "title": "Dune Chronicles", "publisher_summary": None}
     result = _normalize_series(product, "us")
-    assert result["title"] == "Dune Chronicles"
+    assert result["name"] == "Dune Chronicles"
 
 
 def test_normalize_series_sets_region():
@@ -88,8 +88,8 @@ def test_normalize_series_description_none_when_missing():
 
 
 def test_normalize_series_returns_required_fields():
-    """Normalized series contains all required fields."""
+    """Normalized series contains all required fields matching AudiMeta SeriesDto."""
     product = {"asin": "B000SERIES1", "title": "Dune", "publisher_summary": None}
     result = _normalize_series(product, "us")
-    for field in ["asin", "title", "description", "region"]:
+    for field in ["asin", "name", "description", "region"]:
         assert field in result, f"Missing field: {field}"

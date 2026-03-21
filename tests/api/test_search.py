@@ -16,29 +16,37 @@ MOCK_BOOK = {
     "asin": "B08G9PRS1K",
     "title": "Test Book",
     "subtitle": None,
-    "authors": [{"name": "Test Author", "asin": "B000TEST01", "region": "us"}],
-    "narrators": ["Test Narrator"],
-    "series": [],
-    "series_name": None,
-    "series_asin": None,
-    "series_position": None,
-    "series_region": None,
-    "cover_url": "https://example.com/cover.jpg",
     "description": "A test book description",
     "summary": "A test summary",
-    "publisher": "Test Publisher",
-    "language": "english",
-    "runtime_length_min": 600,
-    "rating": 4.5,
-    "genres": ["Fiction"],
-    "release_date": "2021-01-01",
-    "explicit": False,
-    "has_pdf": False,
-    "whisper_sync": False,
-    "isbn": None,
-    "content_type": "Product",
-    "sku": None,
     "region": "us",
+    "regions": ["us"],
+    "publisher": "Test Publisher",
+    "copyright": None,
+    "isbn": None,
+    "language": "english",
+    "rating": 4.5,
+    "bookFormat": None,
+    "releaseDate": "2021-01-01",
+    "explicit": False,
+    "hasPdf": False,
+    "whisperSync": False,
+    "imageUrl": "https://example.com/cover.jpg",
+    "lengthMinutes": 600,
+    "link": "https://audible.com/pd/B08G9PRS1K",
+    "contentType": "Product",
+    "contentDeliveryType": None,
+    "episodeNumber": None,
+    "episodeType": None,
+    "sku": None,
+    "skuGroup": None,
+    "isListenable": True,
+    "isAvailable": True,
+    "isBuyable": True,
+    "updatedAt": None,
+    "authors": [{"id": None, "asin": "B000TEST01", "name": "Test Author", "region": "us", "image": None, "updatedAt": None}],
+    "narrators": [{"name": "Test Narrator", "updatedAt": None}],
+    "genres": [{"asin": None, "name": "Fiction", "type": "Genres", "betterType": "genre", "updatedAt": None}],
+    "series": [],
 }
 
 
@@ -62,13 +70,12 @@ async def test_search_returns_list(async_client):
 
 
 @pytest.mark.asyncio
-async def test_search_returns_empty_list_on_no_results(async_client):
-    """Search endpoint returns empty list when nothing found."""
+async def test_search_returns_404_on_no_results(async_client):
+    """Search endpoint returns 404 when nothing found."""
     with patch("app.api.routes.search.router.search", new_callable=AsyncMock) as mock:
         mock.return_value = []
         response = await async_client.get("/search?title=xyznotarealbook")
-        assert response.status_code == 200
-        assert response.json() == []
+        assert response.status_code == 404
 
 
 @pytest.mark.asyncio
@@ -86,3 +93,12 @@ async def test_quick_search_returns_list(async_client):
         response = await async_client.get("/quick-search?keywords=dune")
         assert response.status_code == 200
         assert isinstance(response.json(), list)
+
+
+@pytest.mark.asyncio
+async def test_quick_search_returns_404_on_no_results(async_client):
+    """Quick search endpoint returns 404 when nothing found."""
+    with patch("app.api.routes.search.router.quick_search", new_callable=AsyncMock) as mock:
+        mock.return_value = []
+        response = await async_client.get("/quick-search?keywords=xyznotarealbook")
+        assert response.status_code == 404

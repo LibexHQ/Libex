@@ -1,20 +1,21 @@
 """
 Books router.
 Endpoints for fetching book metadata by ASIN, bulk ASINs, and chapters.
+Response formats match AudiMeta exactly for drop-in compatibility.
 """
 
 # Standard library
 from typing import Annotated
 
 # Third party
-from fastapi import APIRouter, Query, Path, Depends, HTTPException
+from fastapi import APIRouter, Query, Path, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Database
 from app.db.session import get_session
 
 # Routes
-from app.api.routes.books.schemas import BookResponse, ChapterInfo
+from app.api.routes.books.schemas import BookResponse, BulkBookResponse, ChapterResponse
 
 # Services
 from app.services.audible.books import get_book_by_asin, get_books_by_asins, get_chapters
@@ -39,40 +40,55 @@ async def get_book(
     cache: Annotated[bool, Query(description="Return cached data if available")] = False,
     session: AsyncSession = Depends(get_session),
 ) -> BookResponse:
-    """Get a single book by ASIN."""
+    """
+    Get a single book by ASIN.
+    Returns a single book object directly.
+    """
     if not is_valid_asin(asin):
         raise NotFoundException(f"Invalid ASIN format: {asin}")
     data = await get_book_by_asin(asin, region, session, cache)
     return BookResponse(**data)
 
 
-@router.get("/{asin}/chapters", response_model=ChapterInfo)
+@router.get("/{asin}/chapters", response_model=ChapterResponse)
 async def get_book_chapters(
     asin: Annotated[str, Path(description="Audible ASIN")],
     region: str = Depends(valid_region),
     session: AsyncSession = Depends(get_session),
-) -> ChapterInfo:
+) -> ChapterResponse:
     """Get chapter information for a book by ASIN."""
     if not is_valid_asin(asin):
         raise NotFoundException(f"Invalid ASIN format: {asin}")
     data = await get_chapters(asin, region, session)
-    return ChapterInfo(**data)
+    return ChapterResponse(**data)
 
 
-@router.get("", response_model=list[BookResponse])
+@router.get("/chapters/{asin}", response_model=ChapterResponse, include_in_schema=False)
+async def get_book_chapters_legacy(
+    asin: Annotated[str, Path(description="Audible ASIN")],
+    region: str = Depends(valid_region),
+    session: AsyncSession = Depends(get_session),
+) -> ChapterResponse:
+    """Legacy endpoint. Use /book/{asin}/chapters instead."""
+    if not is_valid_asin(asin):
+        raise NotFoundException(f"Invalid ASIN format: {asin}")
+    data = await get_chapters(asin, region, session)
+    return ChapterResponse(**data)
+
+
+@router.get("", response_model=BulkBookResponse)
 async def get_books_bulk(
     asins: Annotated[str, Query(description="Comma-separated ASINs, max 1000")],
     region: str = Depends(valid_region),
     cache: Annotated[bool, Query(description="Return cached data if available")] = False,
     session: AsyncSession = Depends(get_session),
-) -> list[BookResponse]:
+) -> BulkBookResponse:
     """
     Get multiple books by ASIN.
-    Accepts a comma-separated list of up to 1000 ASINs.
-    Automatically chunks requests to respect Audible's 50 ASIN limit.
+    Returns {"books": [...], "notFound": [...]} matching AudiMeta's bulk format.
     """
     asin_list = [a.strip() for a in asins.split(",") if a.strip()]
-    
+
     invalid = [a for a in asin_list if not is_valid_asin(a)]
     if invalid:
         raise NotFoundException(f"Invalid ASIN format: {', '.join(invalid)}")
@@ -84,20 +100,11 @@ async def get_books_bulk(
         raise NotFoundException("Maximum 1000 ASINs per request")
 
     data = await get_books_by_asins(asin_list, region, session, cache)
-    return [BookResponse(**book) for book in data]
 
-@router.get("/sku/{sku}", response_model=list[BookResponse])
-async def get_book_by_sku(
-    sku: Annotated[str, Path(description="Audible SKU group")],
-    region: str = Depends(valid_region),
-) -> list[BookResponse]:
-    """
-    Get books by SKU group.
-    Note: Requires normalized database storage.
-    This feature is planned for a future release.
-    See: https://github.com/LibexHQ/Libex/issues
-    """
-    raise HTTPException(
-        status_code=501,
-        detail="SKU lookup requires normalized database storage, planned for future release."
+    found_asins = {book["asin"] for book in data}
+    not_found = [a for a in asin_list if a not in found_asins]
+
+    return BulkBookResponse(
+        books=[BookResponse(**book) for book in data],
+        notFound=not_found,
     )

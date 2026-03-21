@@ -1,10 +1,5 @@
 """
 Audible search service.
-Searches the Audible catalog and returns full book metadata.
-
-DESIGN PHILOSOPHY: Audible-first.
-Search results are always fresh from Audible.
-Cache is used for individual book data fetched after search.
 """
 
 # Standard library
@@ -27,18 +22,9 @@ from app.services.audible.books import get_books_by_asins
 logger = get_logger()
 
 
-# ============================================================
-# HELPERS
-# ============================================================
-
 def _generate_session_id() -> str:
-    """Generates a random session ID for Audible requests."""
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=32))
 
-
-# ============================================================
-# PUBLIC API
-# ============================================================
 
 async def search(
     region: str,
@@ -47,15 +33,19 @@ async def search(
     author: str | None = None,
     keywords: str | None = None,
     limit: int = 10,
+    narrator: str | None = None,
+    publisher: str | None = None,
+    products_sort_by: str | None = None,
+    page: int = 0,
 ) -> list[dict[str, Any]]:
     """
     Searches Audible catalog and returns full book metadata.
-    Passes search params directly to Audible's catalog products endpoint.
-    Compatible with AudiMeta /search endpoint.
+    Passes all search params directly to Audible matching AudiMeta's behavior.
     """
     try:
         params: dict[str, Any] = {
             "num_results": min(limit, 50),
+            "page": page,
         }
 
         if title:
@@ -64,6 +54,12 @@ async def search(
             params["author"] = author
         if keywords:
             params["keywords"] = keywords
+        if narrator:
+            params["narrator"] = narrator
+        if publisher:
+            params["publisher"] = publisher
+        if products_sort_by:
+            params["products_sort_by"] = products_sort_by
 
         data = await audible_get(region, "/1.0/catalog/products/", params)
         products = data.get("products", [])
@@ -72,18 +68,10 @@ async def search(
             return []
 
         asins = [p.get("asin") for p in products if p.get("asin")]
-
         if not asins:
             return []
 
-        books = await get_books_by_asins(asins, region, session)
-
-        logger.info(f"Search returned {len(books)} results", extra={
-            "region": region,
-            "params": params,
-        })
-
-        return books
+        return await get_books_by_asins(asins, region, session)
 
     except NotFoundException:
         return []
@@ -97,11 +85,7 @@ async def quick_search(
     region: str,
     session: AsyncSession,
 ) -> list[dict[str, Any]]:
-    """
-    Quick search using Audible search suggestions.
-    Returns full book metadata for matched ASINs.
-    Compatible with AudiMeta /quick-search endpoint.
-    """
+    """Quick search using Audible search suggestions."""
     try:
         params = {
             "keywords": keywords,
@@ -124,14 +108,7 @@ async def quick_search(
         if not asins:
             return []
 
-        books = await get_books_by_asins(asins, region, session)
-
-        logger.info(f"Quick search returned {len(books)} results", extra={
-            "keywords": keywords,
-            "region": region,
-        })
-
-        return books
+        return await get_books_by_asins(asins, region, session)
 
     except Exception as e:
         logger.error(f"Quick search failed: {e}")

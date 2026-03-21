@@ -38,9 +38,11 @@ def _normalize_series(product: dict, region: str) -> dict[str, Any]:
     """Normalizes raw Audible product data into Libex series format."""
     return {
         "asin": product.get("asin"),
-        "title": product.get("title"),
+        "name": product.get("title"),  # AudiMeta uses 'name' not 'title'
         "description": strip_html(product.get("publisher_summary")),
         "region": region,
+        "position": None,
+        "updatedAt": None,
     }
 
 

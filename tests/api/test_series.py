@@ -17,12 +17,49 @@ from app.core.exceptions import NotFoundException
 
 MOCK_SERIES = {
     "asin": "B00SERIES1",
-    "title": "Dune Chronicles",
+    "name": "Dune Chronicles",
     "description": "The Dune Chronicles is a science fiction series.",
     "region": "us",
+    "position": None,
+    "updatedAt": None,
 }
 
-MOCK_SERIES_BOOKS = ["B08G9PRS1K", "B000000001", "B000000002", "B000000003"]
+MOCK_BOOK = {
+    "asin": "B08G9PRS1K",
+    "title": "Test Book",
+    "subtitle": None,
+    "description": "A test book description",
+    "summary": "A test summary",
+    "region": "us",
+    "regions": ["us"],
+    "publisher": "Test Publisher",
+    "copyright": None,
+    "isbn": None,
+    "language": "english",
+    "rating": 4.5,
+    "bookFormat": None,
+    "releaseDate": "2021-01-01",
+    "explicit": False,
+    "hasPdf": False,
+    "whisperSync": False,
+    "imageUrl": "https://example.com/cover.jpg",
+    "lengthMinutes": 600,
+    "link": "https://audible.com/pd/B08G9PRS1K",
+    "contentType": "Product",
+    "contentDeliveryType": None,
+    "episodeNumber": None,
+    "episodeType": None,
+    "sku": None,
+    "skuGroup": None,
+    "isListenable": True,
+    "isAvailable": True,
+    "isBuyable": True,
+    "updatedAt": None,
+    "authors": [{"id": None, "asin": "B000TEST01", "name": "Test Author", "region": "us", "image": None, "updatedAt": None}],
+    "narrators": [{"name": "Test Narrator", "updatedAt": None}],
+    "genres": [{"asin": None, "name": "Fiction", "type": "Genres", "betterType": "genre", "updatedAt": None}],
+    "series": [],
+}
 
 
 @pytest.fixture
@@ -105,13 +142,13 @@ async def test_get_series_description_can_be_none(async_client):
 
 
 @pytest.mark.asyncio
-async def test_get_series_title_can_be_none(async_client):
-    """Series endpoint handles series with no title."""
+async def test_get_series_name_can_be_none(async_client):
+    """Series endpoint handles series with no name."""
     with patch("app.api.routes.series.router.get_series", new_callable=AsyncMock) as mock:
-        mock.return_value = {**MOCK_SERIES, "title": None}
+        mock.return_value = {**MOCK_SERIES, "name": None}
         response = await async_client.get("/series/B00SERIES1")
         assert response.status_code == 200
-        assert response.json()["title"] is None
+        assert response.json()["name"] is None
 
 
 # ============================================================
@@ -121,31 +158,25 @@ async def test_get_series_title_can_be_none(async_client):
 @pytest.mark.asyncio
 async def test_get_series_books_returns_200(async_client):
     """Series books endpoint returns 200."""
-    with patch("app.api.routes.series.router.get_series_books", new_callable=AsyncMock) as mock:
-        mock.return_value = MOCK_SERIES_BOOKS
+    with patch("app.api.routes.series.router.get_series_books", new_callable=AsyncMock) as mock_series, \
+         patch("app.api.routes.series.router.get_books_by_asins", new_callable=AsyncMock) as mock_books:
+        mock_series.return_value = ["B08G9PRS1K"]
+        mock_books.return_value = [MOCK_BOOK]
         response = await async_client.get("/series/books/B00SERIES1")
         assert response.status_code == 200
 
 
 @pytest.mark.asyncio
-async def test_get_series_books_returns_asin_list(async_client):
-    """Series books endpoint returns list of ASINs."""
-    with patch("app.api.routes.series.router.get_series_books", new_callable=AsyncMock) as mock:
-        mock.return_value = MOCK_SERIES_BOOKS
+async def test_get_series_books_returns_list_of_books(async_client):
+    """Series books endpoint returns a list of full book objects."""
+    with patch("app.api.routes.series.router.get_series_books", new_callable=AsyncMock) as mock_series, \
+         patch("app.api.routes.series.router.get_books_by_asins", new_callable=AsyncMock) as mock_books:
+        mock_series.return_value = ["B08G9PRS1K"]
+        mock_books.return_value = [MOCK_BOOK]
         response = await async_client.get("/series/books/B00SERIES1")
         data = response.json()
-        assert "book_asins" in data
-        assert isinstance(data["book_asins"], list)
-
-
-@pytest.mark.asyncio
-async def test_get_series_books_returns_correct_total(async_client):
-    """Series books endpoint returns correct total count."""
-    with patch("app.api.routes.series.router.get_series_books", new_callable=AsyncMock) as mock:
-        mock.return_value = MOCK_SERIES_BOOKS
-        response = await async_client.get("/series/books/B00SERIES1")
-        data = response.json()
-        assert data["total"] == len(MOCK_SERIES_BOOKS)
+        assert isinstance(data, list)
+        assert data[0]["asin"] == "B08G9PRS1K"
 
 
 @pytest.mark.asyncio
@@ -158,22 +189,14 @@ async def test_get_series_books_returns_404_when_not_found(async_client):
 
 
 @pytest.mark.asyncio
-async def test_get_series_books_sorted_by_position(async_client):
-    """Series books endpoint returns ASINs in series order."""
-    ordered_asins = ["B000000001", "B000000002", "B000000003"]
-    with patch("app.api.routes.series.router.get_series_books", new_callable=AsyncMock) as mock:
-        mock.return_value = ordered_asins
-        response = await async_client.get("/series/books/B00SERIES1")
-        assert response.json()["book_asins"] == ordered_asins
-
-
-@pytest.mark.asyncio
 async def test_get_series_books_default_region_is_us(async_client):
     """Series books endpoint defaults to US region."""
-    with patch("app.api.routes.series.router.get_series_books", new_callable=AsyncMock) as mock:
-        mock.return_value = MOCK_SERIES_BOOKS
+    with patch("app.api.routes.series.router.get_series_books", new_callable=AsyncMock) as mock_series, \
+         patch("app.api.routes.series.router.get_books_by_asins", new_callable=AsyncMock) as mock_books:
+        mock_series.return_value = ["B08G9PRS1K"]
+        mock_books.return_value = [MOCK_BOOK]
         await async_client.get("/series/books/B00SERIES1")
-        assert mock.call_args[0][1] == "us"
+        assert mock_series.call_args[0][1] == "us"
 
 
 # ============================================================
@@ -206,13 +229,12 @@ async def test_search_series_returns_list(async_client):
 
 
 @pytest.mark.asyncio
-async def test_search_series_returns_empty_list_when_none_found(async_client):
-    """Series search endpoint returns empty list when nothing found."""
+async def test_search_series_returns_404_when_none_found(async_client):
+    """Series search returns 404 when nothing found."""
     with patch("app.api.routes.series.router.search_series", new_callable=AsyncMock) as mock:
         mock.return_value = []
         response = await async_client.get("/series/search?name=NotASeries")
-        assert response.status_code == 200
-        assert response.json() == []
+        assert response.status_code == 404
 
 
 @pytest.mark.asyncio
@@ -224,7 +246,8 @@ async def test_search_series_all_regions(async_client):
         for region in regions:
             response = await async_client.get(f"/series/search?name=Dune&region={region}")
             assert response.status_code == 200, f"Failed for region: {region}"
-            
+
+
 @pytest.mark.asyncio
 async def test_get_series_rejects_invalid_asin(async_client):
     """Series endpoint rejects malformed ASIN."""

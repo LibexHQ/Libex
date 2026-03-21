@@ -91,15 +91,24 @@ def test_parse_authors_returns_empty_for_no_authors():
     assert _parse_authors({}, "us") == []
 
 
+def test_parse_authors_includes_id_field():
+    """Author dict includes id field matching AudiMeta MinimalAuthorDto."""
+    product = {"authors": [{"name": "Frank Herbert", "asin": "B000APF21M"}]}
+    result = _parse_authors(product, "us")
+    assert "id" in result[0]
+
+
 # ============================================================
 # NARRATOR TESTS
 # ============================================================
 
-def test_parse_narrators_returns_names():
-    """Returns list of narrator name strings."""
+def test_parse_narrators_returns_dicts():
+    """Returns list of narrator dicts with name and updatedAt."""
     product = {"narrators": [{"name": "Scott Brick"}, {"name": "Kate Reading"}]}
     result = _parse_narrators(product)
-    assert result == ["Scott Brick", "Kate Reading"]
+    assert len(result) == 2
+    assert result[0]["name"] == "Scott Brick"
+    assert "updatedAt" in result[0]
 
 
 def test_parse_narrators_returns_empty_for_none():
@@ -123,6 +132,18 @@ def test_parse_series_extracts_series():
     assert result[0]["asin"] == "B000SERIES1"
 
 
+def test_parse_series_uses_name_field():
+    """Series dict uses name field matching AudiMeta MinimalSeriesDto."""
+    product = {
+        "relationships": [
+            {"relationship_type": "series", "asin": "B000SERIES1", "title": "Dune", "sequence": "1"}
+        ]
+    }
+    result = _parse_series(product, "us")
+    assert "name" in result[0]
+    assert result[0]["name"] == "Dune"
+
+
 def test_parse_series_ignores_non_series():
     """Ignores relationships that are not series."""
     product = {
@@ -143,15 +164,51 @@ def test_parse_series_returns_empty_for_no_relationships():
 # GENRE TESTS
 # ============================================================
 
-def test_parse_genres_extracts_names():
-    """Extracts genre names from category ladders."""
+def test_parse_genres_extracts_dicts():
+    """Extracts genre dicts from category ladders."""
     product = {
         "category_ladders": [
             {"ladder": [{"name": "Science Fiction"}, {"name": "Space Opera"}]}
         ]
     }
     result = _parse_genres(product)
-    assert "Science Fiction" in result
+    names = [g["name"] for g in result]
+    assert "Science Fiction" in names
+
+
+def test_parse_genres_includes_type():
+    """Genre dict includes type field."""
+    product = {
+        "category_ladders": [
+            {"ladder": [{"name": "Fiction"}]}
+        ]
+    }
+    result = _parse_genres(product)
+    assert "type" in result[0]
+    assert result[0]["type"] == "Genres"
+
+
+def test_parse_genres_includes_better_type():
+    """Genre dict includes betterType field matching AudiMeta GenreDto."""
+    product = {
+        "category_ladders": [
+            {"ladder": [{"name": "Fiction"}]}
+        ]
+    }
+    result = _parse_genres(product)
+    assert "betterType" in result[0]
+
+
+def test_parse_genres_tags_for_nested():
+    """Second rung in ladder gets Tags type."""
+    product = {
+        "category_ladders": [
+            {"ladder": [{"name": "Fiction"}, {"name": "Thriller"}]}
+        ]
+    }
+    result = _parse_genres(product)
+    assert result[0]["type"] == "Genres"
+    assert result[1]["type"] == "Tags"
 
 
 def test_parse_genres_deduplicates():
@@ -163,7 +220,8 @@ def test_parse_genres_deduplicates():
         ]
     }
     result = _parse_genres(product)
-    assert result.count("Fiction") == 1
+    names = [g["name"] for g in result]
+    assert names.count("Fiction") == 1
 
 
 # ============================================================
@@ -201,7 +259,7 @@ def test_filter_products_returns_empty_for_empty_input():
 # ============================================================
 
 def test_normalize_product_returns_required_fields():
-    """Normalized product contains all required fields."""
+    """Normalized product contains all required fields matching AudiMeta BookDto."""
     product = {
         "asin": "B08G9PRS1K",
         "title": "Dune",
@@ -213,13 +271,41 @@ def test_normalize_product_returns_required_fields():
         "rating": {"overall_distribution": {"average_rating": 4.8}},
     }
     result = _normalize_product(product, "us")
-    required = ["asin", "title", "authors", "narrators", "series", "region"]
+    required = [
+        "asin", "title", "authors", "narrators", "series", "region",
+        "imageUrl", "lengthMinutes", "releaseDate", "hasPdf", "whisperSync",
+        "regions", "link", "isListenable", "isBuyable",
+    ]
     for field in required:
         assert field in result, f"Missing field: {field}"
 
 
 def test_normalize_product_sets_region():
     """Normalized product has correct region."""
-    product = {"asin": "B08G9PRS1K", "title": "Dune", "authors": [], "narrators": [], "relationships": [], "product_images": {}, "category_ladders": [], "rating": {}}
+    product = {
+        "asin": "B08G9PRS1K", "title": "Dune", "authors": [], "narrators": [],
+        "relationships": [], "product_images": {}, "category_ladders": [], "rating": {}
+    }
     result = _normalize_product(product, "uk")
     assert result["region"] == "uk"
+
+
+def test_normalize_product_sets_regions_list():
+    """Normalized product includes regions list."""
+    product = {
+        "asin": "B08G9PRS1K", "title": "Dune", "authors": [], "narrators": [],
+        "relationships": [], "product_images": {}, "category_ladders": [], "rating": {}
+    }
+    result = _normalize_product(product, "us")
+    assert result["regions"] == ["us"]
+
+
+def test_normalize_product_sets_link():
+    """Normalized product includes Audible link."""
+    product = {
+        "asin": "B08G9PRS1K", "title": "Dune", "authors": [], "narrators": [],
+        "relationships": [], "product_images": {}, "category_ladders": [], "rating": {}
+    }
+    result = _normalize_product(product, "us")
+    assert "audible.com" in result["link"]
+    assert "B08G9PRS1K" in result["link"]

@@ -1,77 +1,144 @@
 """
 Books route schemas.
-Defines request parameters and response models for book endpoints.
+All field names match AudiMeta's BookDto exactly for drop-in compatibility.
 """
 
 # Standard library
-from typing import Any
 
 # Third party
 from pydantic import BaseModel, Field
 
 
 # ============================================================
-# RESPONSE MODELS
+# NESTED OBJECT SCHEMAS
 # ============================================================
 
-class AuthorRef(BaseModel):
+class NarratorResponse(BaseModel):
     name: str
+    updatedAt: str | None = None
+
+
+class GenreResponse(BaseModel):
     asin: str | None = None
+    name: str | None = None
+    type: str | None = None
+    betterType: str | None = None
+    updatedAt: str | None = None
+
+
+class SeriesRefResponse(BaseModel):
+    asin: str | None = None
+    name: str | None = None
     region: str | None = None
-
-
-class SeriesRef(BaseModel):
-    asin: str | None = None
-    title: str | None = None
     position: str | None = None
-    region: str | None = None
+    updatedAt: str | None = None
 
+
+class AuthorRefResponse(BaseModel):
+    id: int | None = None
+    asin: str | None = None
+    name: str | None = None
+    region: str | None = None
+    image: str | None = None
+    updatedAt: str | None = None
+
+
+# ============================================================
+# BOOK RESPONSE
+# ============================================================
 
 class BookResponse(BaseModel):
     asin: str
     title: str | None = None
     subtitle: str | None = None
-    authors: list[AuthorRef] = Field(default_factory=list)
-    narrators: list[str] = Field(default_factory=list)
-    series: list[SeriesRef] = Field(default_factory=list)
-    series_name: str | None = None
-    series_asin: str | None = None
-    series_position: str | None = None
-    series_region: str | None = None
-    cover_url: str | None = None
     description: str | None = None
     summary: str | None = None
+    region: str
+    regions: list[str] = Field(default_factory=list)
     publisher: str | None = None
-    language: str | None = None
-    runtime_length_min: int | None = None
-    rating: float | None = None
-    genres: list[str] = Field(default_factory=list)
-    release_date: str | None = None
-    explicit: bool = False
-    has_pdf: bool = False
-    whisper_sync: bool = False
+    copyright: str | None = None
     isbn: str | None = None
-    content_type: str | None = None
+    language: str | None = None
+    rating: float | None = None
+    bookFormat: str | None = None
+    releaseDate: str | None = None
+    explicit: bool = False
+    hasPdf: bool = False
+    whisperSync: bool = False
+    imageUrl: str | None = None
+    lengthMinutes: int | None = None
+    link: str | None = None
+    contentType: str | None = None
+    contentDeliveryType: str | None = None
+    episodeNumber: str | None = None
+    episodeType: str | None = None
     sku: str | None = None
-    region: str
+    skuGroup: str | None = None
+    isListenable: bool = False
+    isAvailable: bool = False
+    isBuyable: bool = False
+    updatedAt: str | None = None
+    authors: list[AuthorRefResponse] = Field(default_factory=list)
+    narrators: list[NarratorResponse] = Field(default_factory=list)
+    genres: list[GenreResponse] = Field(default_factory=list)
+    series: list[SeriesRefResponse] = Field(default_factory=list)
 
 
-class ChapterInfo(BaseModel):
-    chapters: list[dict[str, Any]]
+# ============================================================
+# BULK BOOK RESPONSE
+# ============================================================
+
+class BulkBookResponse(BaseModel):
+    books: list[BookResponse]
+    notFound: list[str] = Field(default_factory=list)
+
+
+# ============================================================
+# CHAPTERS RESPONSE
+# ============================================================
+
+class ChapterItem(BaseModel):
+    lengthMs: int = 0
+    startOffsetMs: int = 0
+    startOffsetSec: int = 0
+    title: str = ""
+
+
+class ChapterResponse(BaseModel):
+    brandIntroDurationMs: int = 0
+    brandOutroDurationMs: int = 0
+    isAccurate: bool = False
+    runtimeLengthMs: int = 0
+    runtimeLengthSec: int = 0
+    chapters: list[ChapterItem] = Field(default_factory=list)
+
+
+# ============================================================
+# ABS BOOK RESPONSE
+# ============================================================
+
+class AbsSeriesRef(BaseModel):
+    series: str | None = None
+    sequence: str | None = None
+
+
+class AbsBookResponse(BaseModel):
     asin: str
-    region: str
+    title: str | None = None
+    subtitle: str | None = None
+    description: str | None = None
+    cover: str | None = None
+    publisher: str | None = None
+    publishedYear: str | None = None
+    isbn: str | None = None
+    language: str | None = None
+    duration: str | None = None
+    author: str | None = None
+    narrator: str | None = None
+    tags: list[str] | None = None
+    genres: list[str] | None = None
+    series: list[AbsSeriesRef] | None = None
 
 
-# ============================================================
-# REQUEST PARAMS
-# ============================================================
-
-class BookQueryParams(BaseModel):
-    region: str = Field(default="us", description="Audible region code")
-    cache: bool = Field(default=False, description="Return cached data if available")
-
-
-class BulkBookQueryParams(BaseModel):
-    asins: str = Field(description="Comma-separated list of ASINs, max 1000")
-    region: str = Field(default="us", description="Audible region code")
-    cache: bool = Field(default=False, description="Return cached data if available")
+class AbsSearchResponse(BaseModel):
+    matches: list[AbsBookResponse]

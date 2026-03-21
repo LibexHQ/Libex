@@ -118,12 +118,14 @@ Logging is completely optional. Leave `AXIOM_TOKEN` empty and Libex logs to stdo
 | GET | `/book/{asin}/chapters` | Get chapter information |
 | GET | `/book/sku/{sku}` | Get books by SKU group (501 - planned) |
 | GET | `/author/{asin}` | Get author profile |
-| GET | `/author/books/{asin}` | Get all books by author ASIN |
+| GET | `/author/{asin}/books` | Get all books by author ASIN |
+| GET | `/author/books/{asin}` | Get all books by author ASIN (legacy) |
 | GET | `/author/books` | Get books by author name |
-| GET | `/author/search` | Search authors by name |
+| GET | `/author` | Search authors by name |
 | GET | `/series/{asin}` | Get series metadata |
-| GET | `/series/books/{asin}` | Get all books in a series |
-| GET | `/series/search` | Search series by name |
+| GET | `/series/{asin}/books` | Get all books in a series |
+| GET | `/series/books/{asin}` | Get all books in a series (legacy) |
+| GET | `/series` | Search series by name |
 | GET | `/search` | Search Audible catalog |
 | GET | `/quick-search` | Quick search via suggestions |
 | GET | `/{region}/search` | Regional search for Audiobookshelf compatibility |

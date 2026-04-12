@@ -9,6 +9,7 @@ Cache is used only as a fallback when Audible is unavailable.
 
 # Standard library
 from typing import Any
+import time
 
 # Third party
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -154,14 +155,19 @@ async def search_series(
     session: AsyncSession,
 ) -> list[dict[str, Any]]:
     """
-    Searches for series by name using Audible catalog search.
-    Audible-first: always returns fresh results directly from Audible.
+    Searches for series by name.
+    Searches Audible products by title, extracts unique series from relationships,
+    then fetches each series by ASIN. Returns a deduplicated list sorted by relevance.
+    Audible-first: when DB is available this can be augmented with local results.
     """
     try:
+        start = time.monotonic()
+
+        # Step 1: Search Audible products by title to find books in matching series
         path = "/1.0/catalog/products"
         params = {
             "title": name,
-            "response_groups": SERIES_RESPONSE_GROUPS,
+            "response_groups": "relationships",
             "num_results": 10,
         }
         data = await audible_get(region, path, params)
@@ -170,8 +176,40 @@ async def search_series(
         if not products:
             raise NotFoundException(f"No series found for: {name}")
 
-        results = [_normalize_series(p, region) for p in products]
-        logger.info(f"Found {len(results)} series for query: {name}", extra={"region": region})
+        # Step 2: Extract unique series ASINs from product relationships
+        seen_asins: set[str] = set()
+        series_asins: list[str] = []
+        for product in products:
+            for rel in product.get("relationships", []):
+                if rel.get("relationship_type") == "series":
+                    asin = rel.get("asin")
+                    if asin and asin not in seen_asins:
+                        seen_asins.add(asin)
+                        series_asins.append(asin)
+
+        if not series_asins:
+            raise NotFoundException(f"No series found for: {name}")
+
+        # Step 3: Fetch full series metadata for each unique series ASIN
+        results = []
+        for asin in series_asins:
+            try:
+                series = await get_series(asin, region, session)
+                results.append(series)
+            except NotFoundException:
+                continue
+
+        search_took = round((time.monotonic() - start) * 1000, 2)
+
+        if not results:
+            raise NotFoundException(f"No series found for: {name}")
+
+        logger.info("Searched Audible for series", extra={
+            "series_result_num": len(results),
+            "search_took": search_took,
+            "region": region,
+        })
+
         return results
 
     except NotFoundException:

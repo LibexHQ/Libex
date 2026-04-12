@@ -5,10 +5,13 @@ CORS and request validation.
 
 # Standard library
 import re
+import time
 
 # Third party
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
 
 # Services
 from app.services.audible.client import validate_region
@@ -31,6 +34,7 @@ def is_valid_asin(asin: str) -> bool:
     """Validates that a string matches Audible ASIN format."""
     return bool(ASIN_PATTERN.match(asin.upper()))
 
+
 # ============================================================
 # REGION VALIDATION
 # ============================================================
@@ -44,12 +48,46 @@ def valid_region(
     except RegionException:
         raise
 
+
+# ============================================================
+# HTTP LOGGING
+# ============================================================
+
+class LoggingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        start = time.monotonic()
+        response = await call_next(request)
+        took = round((time.monotonic() - start) * 1000, 2)
+
+        ip = (
+            request.headers.get("CF-Connecting-IP")
+            or request.headers.get("x-real-ip")
+            or (request.client.host if request.client else None)
+        )
+
+        logger.info(
+            "Request completed",
+            extra={
+                "method": request.method,
+                "url": request.url.path,
+                "status": response.status_code,
+                "userAgent": request.headers.get("user-agent"),
+                "took": took,
+                "ip": ip,
+            },
+        )
+
+        return response
+
+
 # ============================================================
 # SETUP
 # ============================================================
 
 def setup_middleware(app: FastAPI) -> None:
     """Configures all middleware for the application."""
+
+    app.add_middleware(LoggingMiddleware)
 
     app.add_middleware(
         CORSMiddleware,

@@ -77,14 +77,14 @@ The public instance uses [Axiom](https://axiom.co) for structured request loggin
 
 **What is logged:**
 - Request path and parameters (e.g. which ASIN was requested, which region)
-- Response time and status
+- Response time and status code
+- IP address
+- User agent
 - Cache hit/miss
 - Errors and exceptions
 
 **What is NOT logged:**
-- IP addresses
-- User agents
-- Any personally identifiable information
+- Any personally identifiable information beyond the above
 
 **Why we log:**
 Logging helps us understand how Libex is being used, identify broken endpoints, debug errors, and improve the service. Without visibility into what's failing, we can't fix it.

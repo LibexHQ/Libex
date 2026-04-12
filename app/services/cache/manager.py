@@ -84,10 +84,10 @@ async def get(session: AsyncSession, key: str) -> Any | None:
     entry = result.scalar_one_or_none()
 
     if entry is None:
-        logger.debug(f"Cache miss: {key}")
+        logger.info("Cache miss", extra={"cacheKey": key})
         return None
 
-    logger.debug(f"Cache hit: {key}")
+    logger.info("Cache hit", extra={"cacheKey": key})
     return entry.value
 
 
@@ -121,7 +121,7 @@ async def set(
 
     await session.execute(stmt)
     await session.commit()
-    logger.debug(f"Cache set: {key} (ttl={ttl}s)")
+    logger.info("Cache set", extra={"cacheKey": key, "ttl": ttl})
 
 
 async def invalidate(session: AsyncSession, key: str) -> None:

@@ -6,6 +6,7 @@ CORS and request validation.
 # Standard library
 import re
 import time
+import uuid
 
 # Third party
 from fastapi import FastAPI, Query
@@ -55,6 +56,7 @@ def valid_region(
 
 class LoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
+        request_id = str(uuid.uuid4())
         start = time.monotonic()
         response = await call_next(request)
         took = round((time.monotonic() - start) * 1000, 2)
@@ -68,6 +70,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         logger.info(
             "Request completed",
             extra={
+                "request_id": request_id,
                 "method": request.method,
                 "url": request.url.path,
                 "status": response.status_code,

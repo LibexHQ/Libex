@@ -38,7 +38,7 @@ MOCK_BOOK = {
     "language": "english",
     "rating": 4.5,
     "bookFormat": None,
-    "releaseDate": "2021-01-01",
+    "releaseDate": "2021-01-01T00:00:00+00:00",
     "explicit": False,
     "hasPdf": False,
     "whisperSync": False,
@@ -55,7 +55,7 @@ MOCK_BOOK = {
     "isAvailable": True,
     "isBuyable": True,
     "updatedAt": None,
-    "authors": [{"id": None, "asin": "B000TEST01", "name": "Test Author", "region": "us", "image": None, "updatedAt": None}],
+    "authors": [{"id": None, "asin": "B000TEST01", "name": "Test Author", "region": "us", "regions": ["us"], "image": None, "updatedAt": None}],
     "narrators": [{"name": "Test Narrator", "updatedAt": None}],
     "genres": [{"asin": None, "name": "Fiction", "type": "Genres", "betterType": "genre", "updatedAt": None}],
     "series": [],
@@ -94,6 +94,28 @@ async def test_get_book_response_has_required_fields(async_client):
         ]
         for field in required_fields:
             assert field in data, f"Missing required field: {field}"
+
+
+@pytest.mark.asyncio
+async def test_get_book_author_has_regions_field(async_client):
+    """Book endpoint author objects include regions list matching AudiMeta."""
+    with patch("app.api.routes.books.router.get_book_by_asin", new_callable=AsyncMock) as mock:
+        mock.return_value = MOCK_BOOK
+        response = await async_client.get("/book/B08G9PRS1K")
+        data = response.json()
+        assert "regions" in data["authors"][0]
+        assert isinstance(data["authors"][0]["regions"], list)
+
+
+@pytest.mark.asyncio
+async def test_get_book_release_date_is_iso(async_client):
+    """Book endpoint releaseDate is in ISO 8601 format."""
+    with patch("app.api.routes.books.router.get_book_by_asin", new_callable=AsyncMock) as mock:
+        mock.return_value = MOCK_BOOK
+        response = await async_client.get("/book/B08G9PRS1K")
+        data = response.json()
+        if data["releaseDate"]:
+            assert "T" in data["releaseDate"]
 
 
 @pytest.mark.asyncio

@@ -8,6 +8,7 @@ Cache is used only as a fallback when Audible is unavailable.
 """
 
 # Standard library
+from datetime import datetime, timezone
 from typing import Any
 
 # Third party
@@ -61,6 +62,20 @@ def _audible_link(asin: str, region: str) -> str:
     return f"https://audible{tld}/pd/{asin}"
 
 
+def _parse_release_date(raw: str | None) -> str | None:
+    """
+    Converts a raw Audible release date string to ISO 8601 format.
+    Audimeta stores dates as DateTime and outputs .toISO(), e.g. "2021-03-02T00:00:00.000+00:00".
+    """
+    if not raw:
+        return None
+    try:
+        dt = datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        return dt.isoformat()
+    except ValueError:
+        return raw
+
+
 def _parse_authors(product: dict, region: str) -> list[dict]:
     """Extracts author objects matching AudiMeta's MinimalAuthorDto."""
     authors = []
@@ -75,6 +90,7 @@ def _parse_authors(product: dict, region: str) -> list[dict]:
                 "asin": asin,
                 "name": name,
                 "region": region,
+                "regions": [region],
                 "image": None,
                 "updatedAt": None,
             })
@@ -94,7 +110,7 @@ def _parse_genres(product: dict) -> list[dict]:
     """Extracts genre objects matching AudiMeta's GenreDto with type and betterType."""
     genres = []
     seen = set()
-    for ladder_index, ladder in enumerate(product.get("category_ladders", [])):
+    for ladder in product.get("category_ladders", []):
         for rung_index, rung in enumerate(ladder.get("ladder", [])):
             name = rung.get("name")
             asin = rung.get("id")
@@ -134,6 +150,9 @@ def _normalize_product(product: dict, region: str) -> dict[str, Any]:
     asin = product.get("asin", "")
     series_list = _parse_series(product, region)
 
+    content_type = product.get("content_type")
+    is_podcast = content_type and content_type.lower() == "podcast"
+
     return {
         "asin": asin,
         "title": product.get("title"),
@@ -148,17 +167,17 @@ def _normalize_product(product: dict, region: str) -> dict[str, Any]:
         "language": product.get("language"),
         "rating": product.get("rating", {}).get("overall_distribution", {}).get("average_rating"),
         "bookFormat": product.get("format_type"),
-        "releaseDate": product.get("release_date"),
+        "releaseDate": _parse_release_date(product.get("release_date")),
         "explicit": product.get("is_adult_product", False),
         "hasPdf": product.get("is_pdf_url_available", False),
         "whisperSync": product.get("read_along_support", False),
         "imageUrl": _best_image(product.get("product_images", {})),
         "lengthMinutes": product.get("runtime_length_min"),
         "link": _audible_link(asin, region),
-        "contentType": product.get("content_type"),
+        "contentType": content_type,
         "contentDeliveryType": product.get("content_delivery_type"),
-        "episodeNumber": str(product.get("episode_number")) if product.get("episode_number") else None,
-        "episodeType": product.get("episode_type"),
+        "episodeNumber": str(product.get("episode_number")) if is_podcast and product.get("episode_number") else None,
+        "episodeType": product.get("episode_type") if is_podcast else None,
         "sku": product.get("sku"),
         "skuGroup": product.get("sku_lite"),
         "isListenable": product.get("is_listenable", False),

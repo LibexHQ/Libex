@@ -39,6 +39,7 @@ class AuthorRefResponse(BaseModel):
     asin: str | None = None
     name: str | None = None
     region: str | None = None
+    regions: list[str] = Field(default_factory=list)
     image: str | None = None
     updatedAt: str | None = None
 

@@ -1,7 +1,10 @@
 # Standard library
 from contextlib import asynccontextmanager
+import asyncio
 
 # Third party
+from alembic import command
+from alembic.config import Config
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
@@ -15,8 +18,6 @@ from app.core.middleware import setup_middleware
 
 # Database
 from app.db.session import engine
-from app.db.base import Base
-from app.db.models import Cache # noqa: F401
 
 # Routes
 from app.api.routes.books import router as books_router
@@ -46,15 +47,15 @@ openapi_tags = [
 async def lifespan(app: FastAPI):
     # Startup
     try:
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        logger.info("Database tables verified")
+        alembic_cfg = Config("alembic.ini")
+        await asyncio.to_thread(command.upgrade, alembic_cfg, "head")
+        logger.info("Database migrations applied")
     except Exception as e:
         logger.warning(f"Database unavailable on startup: {e}")
     logger.info(f"Libex {settings.app_version} starting up")
-
+    
     yield
-
+    
     # Shutdown
     await engine.dispose()
     logger.info("Libex shutting down")

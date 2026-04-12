@@ -19,7 +19,7 @@ except ImportError:
 JsonFormatter = None
 
 try:
-    from pythonjsonlogger.jsonlogger import JsonFormatter  # type: ignore
+    from pythonjsonlogger.json import JsonFormatter  # type: ignore
     JSON_LOGGER_AVAILABLE = True
 except ImportError:
     JSON_LOGGER_AVAILABLE = False

@@ -14,7 +14,15 @@ from sqlalchemy.ext.asyncio import create_async_engine
 # Local
 from app.core.config import get_settings
 from app.db.base import Base
-from app.db.models import Cache  # noqa: F401 - import models to register with Base
+from app.db.models import (  # noqa: F401 - import all models to register with Base
+    Cache,
+    Book,
+    Author,
+    Series,
+    Narrator,
+    Genre,
+    Track,
+)
 
 settings = get_settings()
 

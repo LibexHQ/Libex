@@ -18,7 +18,6 @@ from app.core.exceptions import NotFoundException
 from app.core.logging import get_logger
 from app.core.utils import strip_html
 
-
 # Services
 from app.services.audible.client import audible_get
 from app.services.cache import manager as cache
@@ -38,7 +37,7 @@ def _normalize_series(product: dict, region: str) -> dict[str, Any]:
     """Normalizes raw Audible product data into Libex series format."""
     return {
         "asin": product.get("asin"),
-        "name": product.get("title"),  # AudiMeta uses 'name' not 'title'
+        "name": product.get("title"),
         "description": strip_html(product.get("publisher_summary")),
         "region": region,
         "position": None,
@@ -124,7 +123,6 @@ async def get_series_books(
         product = data.get("product", {})
         relationships = product.get("relationships", [])
 
-        # Filter to items with both asin and sort position, then sort by position
         items = sorted(
             [r for r in relationships if r.get("asin") and r.get("sort")],
             key=lambda r: float(r.get("sort", 0)),
@@ -157,8 +155,7 @@ async def search_series(
 ) -> list[dict[str, Any]]:
     """
     Searches for series by name using Audible catalog search.
-    Unlike AudiMeta which searched a local database,
-    Libex searches Audible directly for fresh results.
+    Audible-first: always returns fresh results directly from Audible.
     """
     try:
         path = "/1.0/catalog/products"
@@ -174,7 +171,7 @@ async def search_series(
             raise NotFoundException(f"No series found for: {name}")
 
         results = [_normalize_series(p, region) for p in products]
-        logger.info(f"Found {len(results)} series for query: {name}")
+        logger.info(f"Found {len(results)} series for query: {name}", extra={"region": region})
         return results
 
     except NotFoundException:

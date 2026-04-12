@@ -8,9 +8,9 @@ Cache is used only as a fallback when Audible is unavailable.
 """
 
 # Standard library
+import time
+from datetime import datetime, timezone
 from typing import Any
-import random
-import string
 
 # Third party
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,19 +33,29 @@ logger = get_logger()
 # ============================================================
 
 def _generate_session_id() -> str:
-    """Generates a random session ID for Android app endpoint requests."""
-    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=32))
+    """
+    Generates a random session ID matching AudiMeta's format.
+    Format: 000-XXXXXXX-XXXXXXX
+    """
+    import random
+    def random_digits() -> str:
+        return str(random.randint(0, 9999999)).zfill(7)
+    return f"000-{random_digits()}-{random_digits()}"
 
 
 def _normalize_author(data: dict, asin: str, region: str) -> dict[str, Any]:
     contributor = data.get("contributor", {})
     bio = contributor.get("bio")
     return {
+        "id": None,
         "asin": asin,
         "name": contributor.get("name", "").replace("\t", "").strip(),
         "description": strip_html(bio),
         "image": contributor.get("profile_image_url"),
         "region": region,
+        "regions": [region],
+        "genres": [],
+        "updatedAt": datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -57,7 +67,6 @@ async def _fetch_author_details(asin: str, region: str) -> dict[str, Any]:
     """
     Fetches author profile from Audible contributors endpoint.
     Returns bio, image, and name.
-    Credits: https://github.com/sunbrolynk
     """
     path = f"/1.0/catalog/contributors/{asin}"
     params = {
@@ -82,7 +91,7 @@ async def _fetch_author_books_page(
         "title_source": "all",
         "session_id": _generate_session_id(),
         "applicationType": "Android_App",
-        "local_time": __import__("datetime").datetime.utcnow().isoformat(),
+        "local_time": datetime.utcnow().isoformat(),
         "response_groups": "always-returned",
         "surface": "Android",
     }
@@ -92,7 +101,8 @@ async def _fetch_author_books_page(
     return await audible_get(region, path, params)
 
 
-async def _fetch_author_books_by_name(name: str, region: str) -> list[str]:
+async def _fetch_author_books_by_name(name: str, region: str) -> tuple[list[str], int]:
+    """Returns (asins, pages_fetched)."""
     asins: list[str] = []
     page = 0
 
@@ -112,13 +122,14 @@ async def _fetch_author_books_by_name(name: str, region: str) -> list[str]:
             break
 
         for product in products:
-            # Match by author name to filter false positives
             matches = any(
                 a.get("name", "").lower() == name.lower()
                 for a in product.get("authors", [])
             )
+            language = product.get("language", "").lower()
+            is_english = language.startswith("english") or language == "englisch"
             asin = product.get("asin")
-            if asin and matches and asin not in asins:
+            if asin and matches and is_english and asin not in asins:
                 asins.append(asin)
 
         if len(products) < 50:
@@ -126,7 +137,7 @@ async def _fetch_author_books_by_name(name: str, region: str) -> list[str]:
 
         page += 1
 
-    return asins
+    return asins, page
 
 
 # ============================================================
@@ -149,7 +160,9 @@ async def get_author(
             return cached
 
     try:
+        start = time.monotonic()
         data = await _fetch_author_details(asin, region)
+        author_took = round((time.monotonic() - start) * 1000, 2)
 
         if not data or data.get("contributor", {}).get("name") is None:
             raise NotFoundException(f"Author not found: {asin}")
@@ -157,7 +170,10 @@ async def get_author(
         normalized = _normalize_author(data, asin, region)
         await cache.set(session, author_key(asin, region), normalized)
 
-        logger.info(f"Fetched author {asin}", extra={"region": region})
+        logger.info("Requested Audible Author", extra={
+            "author_took": author_took,
+            "region": region,
+        })
         return normalized
 
     except NotFoundException:
@@ -179,7 +195,6 @@ async def get_author_books(
     """
     Fetches all book ASINs for an author using the Android endpoint.
     Uses continuation token pagination.
-    Returns list of ASINs for the caller to fetch full book data.
     """
     if use_cache:
         cached = await cache.get(session, author_books_key(asin, region))
@@ -187,6 +202,7 @@ async def get_author_books(
             return cached
 
     try:
+        start = time.monotonic()
         asins: list[str] = []
         pagination_token: str | None = None
         first_run = True
@@ -207,11 +223,18 @@ async def get_author_books(
 
             page += 1
 
+        author_book_took = round((time.monotonic() - start) * 1000, 2)
+
         if not asins:
             raise NotFoundException(f"No books found for author: {asin}")
 
         await cache.set(session, author_books_key(asin, region), asins)
-        logger.info(f"Fetched {len(asins)} book ASINs for author {asin}")
+
+        logger.info("Requested Audible Author Books", extra={
+            "author_book_num": len(asins),
+            "author_book_took": author_book_took,
+            "region": region,
+        })
         return asins
 
     except NotFoundException:
@@ -234,10 +257,22 @@ async def get_author_books_by_name(
     Used when no ASIN is available.
     """
     try:
-        asins = await _fetch_author_books_by_name(name, region)
+        start = time.monotonic()
+        asins, pages_fetched = await _fetch_author_books_by_name(name, region)
+        author_book_took = round((time.monotonic() - start) * 1000, 2)
+
         if not asins:
             raise NotFoundException(f"No books found for author name: {name}")
+
+        logger.info("Requested Audible Author Books By Name", extra={
+            "author_name": name,
+            "author_book_num": len(asins),
+            "pages_fetched": pages_fetched,
+            "author_book_took": author_book_took,
+            "region": region,
+        })
         return asins
+
     except NotFoundException:
         raise
     except Exception:
@@ -254,17 +289,19 @@ async def search_authors(
     Returns list of author profiles.
     """
     try:
+        start = time.monotonic()
         path = "/1.0/searchsuggestions"
         params = {
             "keywords": name,
             "key_strokes": name,
             "site_variant": "android-mshop",
             "session_id": _generate_session_id(),
-            "local_time": __import__("datetime").datetime.utcnow().isoformat(),
+            "local_time": datetime.utcnow().isoformat(),
             "surface": "Android",
         }
 
         data = await audible_get(region, path, params)
+        search_took = round((time.monotonic() - start) * 1000, 2)
         asins: list[str] = []
 
         for item in data.get("model", {}).get("items", []):
@@ -272,6 +309,11 @@ async def search_authors(
                 asin = item.get("model", {}).get("person_metadata", {}).get("asin")
                 if asin:
                     asins.append(asin)
+
+        logger.info("Requested Audible Author Search", extra={
+            "search_took": search_took,
+            "region": region,
+        })
 
         if not asins:
             return []
@@ -284,7 +326,6 @@ async def search_authors(
             except NotFoundException:
                 continue
 
-        logger.info(f"Found {len(authors)} authors for query: {name}")
         return authors
 
     except NotFoundException:

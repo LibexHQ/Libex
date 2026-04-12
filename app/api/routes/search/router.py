@@ -21,11 +21,8 @@ from app.services.audible.search import search, quick_search
 from app.services.audible.client import validate_region
 
 # Core
-from app.core.logging import get_logger
 from app.core.middleware import valid_region
 from app.core.exceptions import NotFoundException, RegionException
-
-logger = get_logger()
 
 router = APIRouter(tags=["Search"])
 

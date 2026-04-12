@@ -22,11 +22,8 @@ from app.services.audible.series import get_series, get_series_books, search_ser
 from app.services.audible.books import get_books_by_asins
 
 # Core
-from app.core.logging import get_logger
 from app.core.middleware import is_valid_asin, valid_region
 from app.core.exceptions import NotFoundException
-
-logger = get_logger()
 
 router = APIRouter(prefix="/series", tags=["Series"])
 

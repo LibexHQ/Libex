@@ -22,10 +22,7 @@ from app.services.audible.books import get_book_by_asin, get_books_by_asins, get
 
 # Core
 from app.core.exceptions import NotFoundException
-from app.core.logging import get_logger
 from app.core.middleware import is_valid_asin, valid_region
-
-logger = get_logger()
 
 router = APIRouter(prefix="/book", tags=["Books"])
 

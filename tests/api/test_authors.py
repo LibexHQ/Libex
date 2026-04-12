@@ -16,13 +16,15 @@ from app.main import app
 from app.core.exceptions import NotFoundException
 
 MOCK_AUTHOR = {
+    "id": None,
     "asin": "B000APF21M",
     "name": "Frank Herbert",
     "description": "Frank Herbert was an American science fiction author.",
     "image": "https://example.com/frank-herbert.jpg",
     "region": "us",
+    "regions": ["us"],
     "genres": [],
-    "updatedAt": None,
+    "updatedAt": "2024-01-01T00:00:00+00:00",
 }
 
 MOCK_BOOK = {
@@ -39,7 +41,7 @@ MOCK_BOOK = {
     "language": "english",
     "rating": 4.5,
     "bookFormat": None,
-    "releaseDate": "2021-01-01",
+    "releaseDate": "2021-01-01T00:00:00+00:00",
     "explicit": False,
     "hasPdf": False,
     "whisperSync": False,
@@ -56,7 +58,7 @@ MOCK_BOOK = {
     "isAvailable": True,
     "isBuyable": True,
     "updatedAt": None,
-    "authors": [{"id": None, "asin": "B000TEST01", "name": "Test Author", "region": "us", "image": None, "updatedAt": None}],
+    "authors": [{"id": None, "asin": "B000TEST01", "name": "Test Author", "region": "us", "regions": ["us"], "image": None, "updatedAt": None}],
     "narrators": [{"name": "Test Narrator", "updatedAt": None}],
     "genres": [{"asin": None, "name": "Fiction", "type": "Genres", "betterType": "genre", "updatedAt": None}],
     "series": [],
@@ -101,8 +103,17 @@ async def test_get_author_returns_required_fields(async_client):
         mock.return_value = MOCK_AUTHOR
         response = await async_client.get("/author/B000APF21M")
         data = response.json()
-        for field in ["asin", "name", "region"]:
+        for field in ["asin", "name", "region", "regions", "genres"]:
             assert field in data, f"Missing required field: {field}"
+
+
+@pytest.mark.asyncio
+async def test_get_author_returns_regions_list(async_client):
+    """Author endpoint returns regions as a list."""
+    with patch("app.api.routes.authors.router.get_author", new_callable=AsyncMock) as mock:
+        mock.return_value = MOCK_AUTHOR
+        response = await async_client.get("/author/B000APF21M")
+        assert isinstance(response.json()["regions"], list)
 
 
 @pytest.mark.asyncio
@@ -118,7 +129,7 @@ async def test_get_author_default_region_is_us(async_client):
 async def test_get_author_accepts_region_parameter(async_client):
     """Author endpoint passes region parameter to service."""
     with patch("app.api.routes.authors.router.get_author", new_callable=AsyncMock) as mock:
-        mock.return_value = {**MOCK_AUTHOR, "region": "uk"}
+        mock.return_value = {**MOCK_AUTHOR, "region": "uk", "regions": ["uk"]}
         await async_client.get("/author/B000APF21M?region=uk")
         assert mock.call_args[0][1] == "uk"
 

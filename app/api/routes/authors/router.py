@@ -27,11 +27,8 @@ from app.services.audible.authors import (
 from app.services.audible.books import get_books_by_asins
 
 # Core
-from app.core.logging import get_logger
 from app.core.middleware import is_valid_asin, valid_region
 from app.core.exceptions import NotFoundException
-
-logger = get_logger()
 
 router = APIRouter(prefix="/author", tags=["Authors"])
 

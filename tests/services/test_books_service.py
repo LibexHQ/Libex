@@ -2,10 +2,6 @@
 Books service unit tests.
 Tests normalization and helper functions without hitting Audible.
 """
-
-# Third party
-import pytest
-
 # Local
 from app.services.audible.books import (
     _best_image,
@@ -15,6 +11,7 @@ from app.services.audible.books import (
     _parse_genres,
     _normalize_product,
     _filter_products,
+    _parse_release_date,
 )
 
 
@@ -47,6 +44,39 @@ def test_best_image_returns_none_for_none():
 
 
 # ============================================================
+# RELEASE DATE TESTS
+# ============================================================
+
+def test_parse_release_date_converts_to_iso():
+    """Converts Audible date string to ISO 8601 format matching AudiMeta .toISO()."""
+    result = _parse_release_date("2021-03-02")
+    assert result == "2021-03-02T00:00:00+00:00"
+
+
+def test_parse_release_date_returns_none_for_none():
+    """Returns None for None input."""
+    assert _parse_release_date(None) is None
+
+
+def test_parse_release_date_returns_none_for_empty():
+    """Returns None for empty string."""
+    assert _parse_release_date("") is None
+
+
+def test_parse_release_date_includes_timezone():
+    """Converted date includes UTC timezone offset."""
+    result = _parse_release_date("2021-03-02")
+    assert result is not None
+    assert "+00:00" in result
+
+
+def test_parse_release_date_fallback_on_bad_format():
+    """Returns raw string if format is unrecognized."""
+    result = _parse_release_date("not-a-date")
+    assert result == "not-a-date"
+
+
+# ============================================================
 # AUTHOR PARSING TESTS
 # ============================================================
 
@@ -70,6 +100,13 @@ def test_parse_authors_includes_region():
     product = {"authors": [{"name": "Frank Herbert", "asin": "B000APF21M"}]}
     result = _parse_authors(product, "uk")
     assert result[0]["region"] == "uk"
+
+
+def test_parse_authors_includes_regions_list():
+    """Author dict includes regions list matching AudiMeta MinimalAuthorDto."""
+    product = {"authors": [{"name": "Frank Herbert", "asin": "B000APF21M"}]}
+    result = _parse_authors(product, "us")
+    assert result[0]["regions"] == ["us"]
 
 
 def test_parse_authors_strips_tabs():
@@ -309,3 +346,42 @@ def test_normalize_product_sets_link():
     result = _normalize_product(product, "us")
     assert "audible.com" in result["link"]
     assert "B08G9PRS1K" in result["link"]
+
+
+def test_normalize_product_release_date_is_iso():
+    """Normalized product releaseDate is in ISO 8601 format."""
+    product = {
+        "asin": "B08G9PRS1K", "title": "Dune", "authors": [], "narrators": [],
+        "relationships": [], "product_images": {}, "category_ladders": [], "rating": {},
+        "release_date": "2021-03-02",
+    }
+    result = _normalize_product(product, "us")
+    assert result["releaseDate"] == "2021-03-02T00:00:00+00:00"
+
+
+def test_normalize_product_episode_fields_none_for_non_podcast():
+    """episodeNumber and episodeType are None for non-podcast content."""
+    product = {
+        "asin": "B08G9PRS1K", "title": "Dune", "authors": [], "narrators": [],
+        "relationships": [], "product_images": {}, "category_ladders": [], "rating": {},
+        "content_type": "Book",
+        "episode_number": 5,
+        "episode_type": "full",
+    }
+    result = _normalize_product(product, "us")
+    assert result["episodeNumber"] is None
+    assert result["episodeType"] is None
+
+
+def test_normalize_product_episode_fields_set_for_podcast():
+    """episodeNumber and episodeType are set for podcast content."""
+    product = {
+        "asin": "B08G9PRS1K", "title": "Podcast Ep", "authors": [], "narrators": [],
+        "relationships": [], "product_images": {}, "category_ladders": [], "rating": {},
+        "content_type": "Podcast",
+        "episode_number": 5,
+        "episode_type": "full",
+    }
+    result = _normalize_product(product, "us")
+    assert result["episodeNumber"] == "5"
+    assert result["episodeType"] == "full"

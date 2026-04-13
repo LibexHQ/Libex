@@ -7,6 +7,8 @@ from alembic import command
 from alembic.config import Config
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
+from sqlalchemy import inspect
+from sqlalchemy import create_engine as sync_create_engine
 
 
 # Core
@@ -47,15 +49,27 @@ openapi_tags = [
 async def lifespan(app: FastAPI):
     # Startup
     try:
-        alembic_cfg = Config("alembic.ini")
-        await asyncio.to_thread(command.upgrade, alembic_cfg, "head")
+        async def run_migrations():
+            alembic_cfg = Config("alembic.ini")
+
+            engine_sync = sync_create_engine(settings.database_url.replace("+asyncpg", "+psycopg2"))
+            inspector = inspect(engine_sync)
+            has_alembic = "alembic_version" in inspector.get_table_names()
+            has_cache = "cache" in inspector.get_table_names()
+            engine_sync.dispose()
+
+            if has_cache and not has_alembic:
+                command.stamp(alembic_cfg, "9203c248b749")
+
+            command.upgrade(alembic_cfg, "head")
+
+        await asyncio.to_thread(run_migrations)
         logger.info("Database migrations applied")
     except Exception as e:
         logger.warning(f"Database unavailable on startup: {e}")
+
     logger.info(f"Libex {settings.app_version} starting up")
-    
     yield
-    
     # Shutdown
     await engine.dispose()
     logger.info("Libex shutting down")

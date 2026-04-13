@@ -4,10 +4,12 @@ Fetches book metadata directly from the Audible API.
 
 DESIGN PHILOSOPHY: Audible-first.
 Always fetches fresh data from Audible.
-Cache is used only as a fallback when Audible is unavailable.
+Writes every result to the relational DB for persistence.
+Falls back to DB when Audible is unavailable.
 """
 
 # Standard library
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -23,6 +25,8 @@ from app.core.utils import strip_html, strip_image_size_suffix
 from app.services.audible.client import audible_get, REGION_MAP
 from app.services.cache import manager as cache
 from app.services.cache.manager import book_key, chapters_key
+from app.services.db.writer import upsert_book, upsert_track
+from app.services.db.reader import get_book_from_db, get_books_from_db, get_track_from_db
 
 logger = get_logger()
 
@@ -76,6 +80,20 @@ def _parse_release_date(raw: str | None) -> str | None:
         return raw
 
 
+def _parse_release_date(raw: str | None) -> str | None:
+    """
+    Converts a raw Audible release date string to ISO 8601 format.
+    Audimeta stores dates as DateTime and outputs .toISO(), e.g. "2021-03-02T00:00:00.000+00:00".
+    """
+    if not raw:
+        return None
+    try:
+        dt = datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        return dt.isoformat()
+    except ValueError:
+        return raw
+
+
 def _parse_authors(product: dict, region: str) -> list[dict]:
     """Extracts author objects matching AudiMeta's MinimalAuthorDto."""
     authors = []
@@ -90,6 +108,7 @@ def _parse_authors(product: dict, region: str) -> list[dict]:
                 "asin": asin,
                 "name": name,
                 "region": region,
+                "regions": [region],
                 "regions": [region],
                 "image": None,
                 "updatedAt": None,
@@ -110,6 +129,7 @@ def _parse_genres(product: dict) -> list[dict]:
     """Extracts genre objects matching AudiMeta's GenreDto with type and betterType."""
     genres = []
     seen = set()
+    for ladder in product.get("category_ladders", []):
     for ladder in product.get("category_ladders", []):
         for rung_index, rung in enumerate(ladder.get("ladder", [])):
             name = rung.get("name")
@@ -168,6 +188,7 @@ def _normalize_product(product: dict, region: str) -> dict[str, Any]:
         "rating": product.get("rating", {}).get("overall_distribution", {}).get("average_rating"),
         "bookFormat": product.get("format_type"),
         "releaseDate": _parse_release_date(product.get("release_date")),
+        "releaseDate": _parse_release_date(product.get("release_date")),
         "explicit": product.get("is_adult_product", False),
         "hasPdf": product.get("is_pdf_url_available", False),
         "whisperSync": product.get("read_along_support", False),
@@ -175,7 +196,10 @@ def _normalize_product(product: dict, region: str) -> dict[str, Any]:
         "lengthMinutes": product.get("runtime_length_min"),
         "link": _audible_link(asin, region),
         "contentType": content_type,
+        "contentType": content_type,
         "contentDeliveryType": product.get("content_delivery_type"),
+        "episodeNumber": str(product.get("episode_number")) if is_podcast and product.get("episode_number") else None,
+        "episodeType": product.get("episode_type") if is_podcast else None,
         "episodeNumber": str(product.get("episode_number")) if is_podcast and product.get("episode_number") else None,
         "episodeType": product.get("episode_type") if is_podcast else None,
         "sku": product.get("sku"),
@@ -192,9 +216,7 @@ def _normalize_product(product: dict, region: str) -> dict[str, Any]:
 
 
 def _normalize_chapters(data: dict, asin: str) -> dict[str, Any]:
-    """
-    Normalizes raw Audible chapter data into AudiMeta's TrackContentDto format.
-    """
+    """Normalizes raw Audible chapter data into AudiMeta's TrackContentDto format."""
     chapter_info = data.get("content_metadata", {}).get("chapter_info", {})
     raw_chapters = chapter_info.get("chapters", [])
 
@@ -269,7 +291,8 @@ async def get_books_by_asins(
 ) -> list[dict[str, Any]]:
     """
     Fetches one or more books by ASIN from Audible.
-    Returns normalized book data with field names matching AudiMeta's BookDto.
+    Writes results to relational DB and cache.
+    Falls back to DB then cache when Audible is unavailable.
     """
     if not asins:
         raise NotFoundException("No ASINs provided")
@@ -283,24 +306,29 @@ async def get_books_by_asins(
             return [cached]
 
     try:
+        start = time.monotonic()
         chunks = [unique_asins[i:i + 50] for i in range(0, len(unique_asins), 50)]
         all_products = []
         for chunk in chunks:
             products = await _fetch_chunk(chunk, region)
             all_products.extend(products)
 
+        requested_took = round((time.monotonic() - start) * 1000, 2)
+
         if not all_products:
             return []
 
         normalized = [_normalize_product(p, region) for p in all_products]
 
+        # Write to DB and cache
         for book in normalized:
             if book.get("asin"):
+                await upsert_book(session, book)
                 await cache.set(session, book_key(book["asin"], region), book)
 
-        logger.info(f"Fetched {len(normalized)} books from Audible", extra={
-            "requested": len(unique_asins),
-            "returned": len(normalized),
+        logger.info("Requested books from Audible", extra={
+            "requested_num": len(unique_asins),
+            "requested_took": requested_took,
             "region": region,
         })
 
@@ -310,7 +338,14 @@ async def get_books_by_asins(
         raise
 
     except Exception:
-        logger.warning(f"Audible unavailable, attempting cache fallback for {unique_asins}")
+        logger.warning(f"Audible unavailable, attempting DB fallback for {unique_asins}")
+
+        # Try relational DB first
+        db_results = await get_books_from_db(session, unique_asins)
+        if db_results:
+            return db_results
+
+        # Fall back to cache
         results = []
         for asin in unique_asins:
             cached = await cache.get(session, book_key(asin, region))
@@ -318,6 +353,7 @@ async def get_books_by_asins(
                 results.append(cached)
         if results:
             return results
+
         raise NotFoundException("Audible unavailable and no cached data found")
 
 
@@ -350,22 +386,38 @@ async def get_chapters(
             "quality": "High",
         }
 
+        start = time.monotonic()
         data = await audible_get(region, path, params)
+        chapters_took = round((time.monotonic() - start) * 1000, 2)
 
         if not data.get("content_metadata", {}).get("chapter_info"):
             raise NotFoundException(f"No chapter information found for {asin}")
 
         result = _normalize_chapters(data, asin)
+
+        # Write to DB and cache
+        await upsert_track(session, asin, result)
         await cache.set(session, chapters_key(asin, region), result)
 
-        logger.info(f"Fetched chapters for {asin}", extra={"region": region})
+        logger.info("Requested chapters from Audible", extra={
+            "chapters_took": chapters_took,
+            "region": region,
+        })
+
         return result
 
     except NotFoundException:
         raise
 
     except Exception:
+        # Try DB first
+        db_result = await get_track_from_db(session, asin)
+        if db_result:
+            return db_result
+
+        # Fall back to cache
         cached = await cache.get(session, chapters_key(asin, region))
         if cached:
             return cached
+
         raise NotFoundException("Audible unavailable and no cached chapter data found")

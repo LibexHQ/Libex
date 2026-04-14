@@ -4,7 +4,6 @@ Ensures exceptions carry correct status codes and messages.
 """
 
 # Third party
-import pytest
 
 # Local
 from app.core.exceptions import (

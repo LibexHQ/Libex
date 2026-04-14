@@ -38,7 +38,7 @@ MOCK_BOOK = {
     "language": "english",
     "rating": 4.5,
     "bookFormat": None,
-    "releaseDate": "2021-01-01",
+    "releaseDate": "2021-01-01T00:00:00+00:00",
     "explicit": False,
     "hasPdf": False,
     "whisperSync": False,
@@ -55,7 +55,7 @@ MOCK_BOOK = {
     "isAvailable": True,
     "isBuyable": True,
     "updatedAt": None,
-    "authors": [{"id": None, "asin": "B000TEST01", "name": "Test Author", "region": "us", "image": None, "updatedAt": None}],
+    "authors": [{"id": None, "asin": "B000TEST01", "name": "Test Author", "region": "us", "regions": ["us"], "image": None, "updatedAt": None}],
     "narrators": [{"name": "Test Narrator", "updatedAt": None}],
     "genres": [{"asin": None, "name": "Fiction", "type": "Genres", "betterType": "genre", "updatedAt": None}],
     "series": [],
@@ -149,6 +149,16 @@ async def test_get_series_name_can_be_none(async_client):
         response = await async_client.get("/series/B00SERIES1")
         assert response.status_code == 200
         assert response.json()["name"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_series_falls_back_to_db(async_client):
+    """Series endpoint returns DB result when Audible is unavailable."""
+    with patch("app.api.routes.series.router.get_series", new_callable=AsyncMock) as mock:
+        mock.return_value = {**MOCK_SERIES, "updatedAt": "2024-01-01T00:00:00+00:00"}
+        response = await async_client.get("/series/B00SERIES1")
+        assert response.status_code == 200
+        assert response.json()["asin"] == "B00SERIES1"
 
 
 # ============================================================
@@ -246,6 +256,53 @@ async def test_search_series_all_regions(async_client):
         for region in regions:
             response = await async_client.get(f"/series/search?name=Dune&region={region}")
             assert response.status_code == 200, f"Failed for region: {region}"
+
+
+@pytest.mark.asyncio
+async def test_search_series_returns_series_not_books(async_client):
+    """Series search returns series objects not book objects."""
+    with patch("app.api.routes.series.router.search_series", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_SERIES]
+        response = await async_client.get("/series/search?name=Dune")
+        data = response.json()
+        assert isinstance(data, list)
+        assert "asin" in data[0]
+        assert "name" in data[0]
+        assert "title" not in data[0]
+
+
+@pytest.mark.asyncio
+async def test_search_series_returns_multiple_matches(async_client):
+    """Series search can return multiple series matches."""
+    mock_series_2 = {**MOCK_SERIES, "asin": "B00SERIES2", "name": "Dune Messiah"}
+    with patch("app.api.routes.series.router.search_series", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_SERIES, mock_series_2]
+        response = await async_client.get("/series/search?name=Dune")
+        data = response.json()
+        assert len(data) == 2
+        assert data[0]["asin"] == "B00SERIES1"
+        assert data[1]["asin"] == "B00SERIES2"
+
+
+@pytest.mark.asyncio
+async def test_search_series_deduplicates_results(async_client):
+    """Series search does not return duplicate series."""
+    with patch("app.api.routes.series.router.search_series", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_SERIES]
+        response = await async_client.get("/series/search?name=Dune")
+        data = response.json()
+        asins = [s["asin"] for s in data]
+        assert len(asins) == len(set(asins))
+
+
+@pytest.mark.asyncio
+async def test_search_series_legacy_endpoint_works(async_client):
+    """Legacy series search endpoint also returns series list."""
+    with patch("app.api.routes.series.router.search_series", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_SERIES]
+        response = await async_client.get("/series?name=Dune")
+        assert response.status_code == 200
+        assert isinstance(response.json(), list)
 
 
 @pytest.mark.asyncio

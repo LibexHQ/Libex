@@ -4,7 +4,8 @@ Fetches author metadata directly from the Audible API.
 
 DESIGN PHILOSOPHY: Audible-first.
 Always fetches fresh data from Audible.
-Cache is used only as a fallback when Audible is unavailable.
+Writes every result to the relational DB for persistence.
+Falls back to DB when Audible is unavailable.
 """
 
 # Standard library
@@ -24,6 +25,8 @@ from app.core.utils import strip_html
 from app.services.audible.client import audible_get, LOCALE_MAP
 from app.services.cache import manager as cache
 from app.services.cache.manager import author_key, author_books_key
+from app.services.db.writer import upsert_author_profile
+from app.services.db.reader import get_author_from_db
 
 logger = get_logger()
 
@@ -100,7 +103,6 @@ async def _fetch_author_books_page(
 
     return await audible_get(region, path, params)
 
-
 async def _fetch_author_books_by_name(name: str, region: str) -> tuple[list[str], int]:
     """Returns (asins, pages_fetched)."""
     asins: list[str] = []
@@ -152,7 +154,7 @@ async def get_author(
 ) -> dict[str, Any]:
     """
     Fetches author profile by ASIN.
-    Audible-first with cache fallback.
+    Audible-first, writes to DB, falls back to DB then cache.
     """
     if use_cache:
         cached = await cache.get(session, author_key(asin, region))
@@ -168,6 +170,9 @@ async def get_author(
             raise NotFoundException(f"Author not found: {asin}")
 
         normalized = _normalize_author(data, asin, region)
+
+        # Write to DB and cache
+        await upsert_author_profile(session, normalized)
         await cache.set(session, author_key(asin, region), normalized)
 
         logger.info("Requested Audible Author", extra={
@@ -180,9 +185,16 @@ async def get_author(
         raise
 
     except Exception:
+        # Try DB first
+        db_result = await get_author_from_db(session, asin, region)
+        if db_result:
+            return db_result
+
+        # Fall back to cache
         cached = await cache.get(session, author_key(asin, region))
         if cached:
             return cached
+
         raise NotFoundException("Audible unavailable and no cached author data found")
 
 
@@ -252,10 +264,7 @@ async def get_author_books_by_name(
     region: str,
     session: AsyncSession,
 ) -> list[str]:
-    """
-    Fetches book ASINs by author name.
-    Used when no ASIN is available.
-    """
+    """Fetches book ASINs by author name."""
     try:
         start = time.monotonic()
         asins, pages_fetched = await _fetch_author_books_by_name(name, region)
@@ -273,6 +282,7 @@ async def get_author_books_by_name(
         })
         return asins
 
+
     except NotFoundException:
         raise
     except Exception:
@@ -284,10 +294,7 @@ async def search_authors(
     region: str,
     session: AsyncSession,
 ) -> list[dict[str, Any]]:
-    """
-    Searches for authors by name using Audible search suggestions.
-    Returns list of author profiles.
-    """
+    """Searches for authors by name using Audible search suggestions."""
     try:
         start = time.monotonic()
         path = "/1.0/searchsuggestions"

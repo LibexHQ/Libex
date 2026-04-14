@@ -4,7 +4,6 @@ Tests get, set, invalidate, and purge with mocked database sessions.
 """
 
 # Standard library
-from datetime import datetime, timezone, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Third party

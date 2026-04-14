@@ -26,7 +26,7 @@ from app.services.audible.client import audible_get, REGION_MAP
 from app.services.cache import manager as cache
 from app.services.cache.manager import book_key, chapters_key
 from app.services.db.writer import upsert_book, upsert_track
-from app.services.db.reader import get_book_from_db, get_books_from_db, get_track_from_db
+from app.services.db.reader import get_books_from_db, get_track_from_db
 
 logger = get_logger()
 
@@ -109,7 +109,6 @@ def _parse_authors(product: dict, region: str) -> list[dict]:
                 "name": name,
                 "region": region,
                 "regions": [region],
-                "regions": [region],
                 "image": None,
                 "updatedAt": None,
             })
@@ -187,7 +186,6 @@ def _normalize_product(product: dict, region: str) -> dict[str, Any]:
         "rating": product.get("rating", {}).get("overall_distribution", {}).get("average_rating"),
         "bookFormat": product.get("format_type"),
         "releaseDate": _parse_release_date(product.get("release_date")),
-        "releaseDate": _parse_release_date(product.get("release_date")),
         "explicit": product.get("is_adult_product", False),
         "hasPdf": product.get("is_pdf_url_available", False),
         "whisperSync": product.get("read_along_support", False),
@@ -195,10 +193,7 @@ def _normalize_product(product: dict, region: str) -> dict[str, Any]:
         "lengthMinutes": product.get("runtime_length_min"),
         "link": _audible_link(asin, region),
         "contentType": content_type,
-        "contentType": content_type,
         "contentDeliveryType": product.get("content_delivery_type"),
-        "episodeNumber": str(product.get("episode_number")) if is_podcast and product.get("episode_number") else None,
-        "episodeType": product.get("episode_type") if is_podcast else None,
         "episodeNumber": str(product.get("episode_number")) if is_podcast and product.get("episode_number") else None,
         "episodeType": product.get("episode_type") if is_podcast else None,
         "sku": product.get("sku"),

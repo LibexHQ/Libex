@@ -4,7 +4,6 @@ Audible search service.
 
 # Standard library
 import time
-import time
 from datetime import datetime
 from typing import Any
 
@@ -35,7 +34,6 @@ def _generate_session_id() -> str:
     Generates a random session ID matching AudiMeta's format.
     Format: 000-XXXXXXX-XXXXXXX
     """
-    import random
     def random_digits() -> str:
         return str(random.randint(0, 9999999)).zfill(7)
     return f"000-{random_digits()}-{random_digits()}"

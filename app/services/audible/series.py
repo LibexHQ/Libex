@@ -11,7 +11,6 @@ Falls back to DB when Audible is unavailable.
 # Standard library
 import time
 from typing import Any
-import time
 
 # Third party
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,7 +41,6 @@ def _normalize_series(product: dict, region: str) -> dict[str, Any]:
     """Normalizes raw Audible product data into Libex series format."""
     return {
         "asin": product.get("asin"),
-        "name": product.get("title"),
         "name": product.get("title"),
         "description": strip_html(product.get("publisher_summary")),
         "region": region,
@@ -197,7 +195,6 @@ async def search_series(
         path = "/1.0/catalog/products"
         params = {
             "title": name,
-            "response_groups": "relationships",
             "response_groups": "relationships",
             "num_results": 10,
         }

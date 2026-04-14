@@ -3,7 +3,7 @@ Test configuration and fixtures.
 """
 
 # Standard library
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 # Third party
 import pytest

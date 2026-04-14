@@ -9,7 +9,6 @@ The DB is used as a fallback when Audible is unavailable.
 
 # Standard library
 from datetime import datetime, timezone
-from typing import Any
 
 # Third party
 from sqlalchemy.ext.asyncio import AsyncSession

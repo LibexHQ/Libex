@@ -26,7 +26,7 @@ from app.services.audible.client import audible_get, REGION_MAP
 from app.services.cache import manager as cache
 from app.services.cache.manager import book_key, chapters_key
 from app.services.db.writer import upsert_book, upsert_track
-from app.services.db.reader import get_book_from_db, get_books_from_db, get_track_from_db
+from app.services.db.reader import get_books_from_db, get_track_from_db
 
 logger = get_logger()
 
@@ -65,21 +65,6 @@ def _audible_link(asin: str, region: str) -> str:
     tld = REGION_MAP.get(region, ".com")
     return f"https://audible{tld}/pd/{asin}"
 
-
-def _parse_release_date(raw: str | None) -> str | None:
-    """
-    Converts a raw Audible release date string to ISO 8601 format.
-    Audimeta stores dates as DateTime and outputs .toISO(), e.g. "2021-03-02T00:00:00.000+00:00".
-    """
-    if not raw:
-        return None
-    try:
-        dt = datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        return dt.isoformat()
-    except ValueError:
-        return raw
-
-
 def _parse_release_date(raw: str | None) -> str | None:
     """
     Converts a raw Audible release date string to ISO 8601 format.
@@ -108,7 +93,6 @@ def _parse_authors(product: dict, region: str) -> list[dict]:
                 "asin": asin,
                 "name": name,
                 "region": region,
-                "regions": [region],
                 "regions": [region],
                 "image": None,
                 "updatedAt": None,

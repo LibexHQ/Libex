@@ -4,11 +4,8 @@ Tests cache key builders and cache operations with mocked database.
 """
 
 # Standard library
-from datetime import datetime, timezone, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
 
 # Third party
-import pytest
 
 # Local
 from app.services.cache.manager import (

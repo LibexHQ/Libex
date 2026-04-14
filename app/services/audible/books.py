@@ -65,7 +65,6 @@ def _audible_link(asin: str, region: str) -> str:
     tld = REGION_MAP.get(region, ".com")
     return f"https://audible{tld}/pd/{asin}"
 
-
 def _parse_release_date(raw: str | None) -> str | None:
     """
     Converts a raw Audible release date string to ISO 8601 format.

@@ -2,6 +2,13 @@
 Books service unit tests.
 Tests normalization and helper functions without hitting Audible.
 """
+
+# Standard library
+from unittest.mock import AsyncMock, patch
+
+# Third party
+import pytest
+
 # Local
 from app.services.audible.books import (
     _best_image,
@@ -385,3 +392,74 @@ def test_normalize_product_episode_fields_set_for_podcast():
     result = _normalize_product(product, "us")
     assert result["episodeNumber"] == "5"
     assert result["episodeType"] == "full"
+
+
+# ============================================================
+# DB FALLBACK TESTS
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_get_books_falls_back_to_db_when_audible_fails():
+    """Falls back to DB when Audible is unavailable."""
+    from app.services.audible.books import get_books_by_asins
+
+    mock_session = AsyncMock()
+
+    with patch("app.services.audible.books.audible_get", side_effect=Exception("Audible down")), \
+         patch("app.services.audible.books.get_books_from_db", new_callable=AsyncMock, return_value=[{"asin": "B08G9PRS1K", "title": "Dune"}]), \
+         patch("app.services.audible.books.cache.get", return_value=None):
+        result = await get_books_by_asins(["B08G9PRS1K"], "us", mock_session)
+        assert len(result) == 1
+        assert result[0]["asin"] == "B08G9PRS1K"
+
+
+@pytest.mark.asyncio
+async def test_get_books_falls_back_to_cache_when_db_empty():
+    """Falls back to cache when Audible is down and DB has no results."""
+    from app.services.audible.books import get_books_by_asins
+
+    mock_session = AsyncMock()
+    cached_book = {"asin": "B08G9PRS1K", "title": "Dune (cached)"}
+
+    with patch("app.services.audible.books.audible_get", side_effect=Exception("Audible down")), \
+         patch("app.services.audible.books.get_books_from_db", new_callable=AsyncMock, return_value=[]), \
+         patch("app.services.audible.books.cache.get", return_value=cached_book):
+        result = await get_books_by_asins(["B08G9PRS1K"], "us", mock_session)
+        assert len(result) == 1
+        assert result[0]["title"] == "Dune (cached)"
+
+
+@pytest.mark.asyncio
+async def test_get_books_writes_to_db_on_success():
+    """Writes book data to DB after successful Audible fetch."""
+    from app.services.audible.books import get_books_by_asins
+
+    mock_session = AsyncMock()
+    mock_product = {
+        "asin": "B08G9PRS1K", "title": "Dune", "authors": [], "narrators": [],
+        "relationships": [], "product_images": {}, "category_ladders": [],
+        "rating": {"overall_distribution": {"average_rating": 4.8}},
+        "publication_datetime": "2021-01-01T00:00:00Z",
+    }
+
+    with patch("app.services.audible.books.audible_get", return_value={"product": mock_product}), \
+         patch("app.services.audible.books.upsert_book", new_callable=AsyncMock) as mock_upsert, \
+         patch("app.services.audible.books.cache.get", return_value=None), \
+         patch("app.services.audible.books.cache.set", new_callable=AsyncMock):
+        await get_books_by_asins(["B08G9PRS1K"], "us", mock_session)
+        mock_upsert.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_get_chapters_falls_back_to_db():
+    """Chapters falls back to DB when Audible is unavailable."""
+    from app.services.audible.books import get_chapters
+
+    mock_session = AsyncMock()
+    cached_chapters = {"chapters": [], "runtimeLengthMs": 0}
+
+    with patch("app.services.audible.books.audible_get", side_effect=Exception("Audible down")), \
+         patch("app.services.audible.books.get_track_from_db", new_callable=AsyncMock, return_value=cached_chapters), \
+         patch("app.services.audible.books.cache.get", return_value=None):
+        result = await get_chapters("B08G9PRS1K", "us", mock_session)
+        assert result == cached_chapters

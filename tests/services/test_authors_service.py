@@ -2,6 +2,13 @@
 Authors service unit tests.
 Tests normalization helpers without hitting Audible.
 """
+
+# Standard library
+from unittest.mock import AsyncMock, patch
+
+# Third party
+import pytest
+
 # Local
 from app.services.audible.authors import _normalize_author, _generate_session_id
 
@@ -132,3 +139,68 @@ def test_normalize_author_handles_missing_contributor():
     data = {"name": "Frank Herbert", "bio": "An author.", "profile_image_url": None}
     result = _normalize_author(data, "B000APF21M", "us")
     assert result["asin"] == "B000APF21M"
+
+
+# ============================================================
+# DB FALLBACK TESTS
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_get_author_falls_back_to_db_when_audible_fails():
+    """Falls back to DB when Audible is unavailable."""
+    from app.services.audible.authors import get_author
+
+    mock_session = AsyncMock()
+    db_author = {
+        "id": 1, "asin": "B000APF21M", "name": "Frank Herbert",
+        "region": "us", "regions": ["us"], "description": "From DB",
+        "image": None, "genres": [], "updatedAt": "2024-01-01T00:00:00+00:00",
+    }
+
+    with patch("app.services.audible.authors.audible_get", side_effect=Exception("Audible down")), \
+         patch("app.services.audible.authors.get_author_from_db", new_callable=AsyncMock, return_value=db_author), \
+         patch("app.services.audible.authors.cache.get", return_value=None):
+        result = await get_author("B000APF21M", "us", mock_session)
+        assert result["name"] == "Frank Herbert"
+        assert result["description"] == "From DB"
+
+
+@pytest.mark.asyncio
+async def test_get_author_falls_back_to_cache_when_db_empty():
+    """Falls back to cache when Audible is down and DB has no results."""
+    from app.services.audible.authors import get_author
+
+    mock_session = AsyncMock()
+    cached_author = {
+        "id": None, "asin": "B000APF21M", "name": "Frank Herbert (cached)",
+        "region": "us", "regions": ["us"], "description": None,
+        "image": None, "genres": [], "updatedAt": None,
+    }
+
+    with patch("app.services.audible.authors.audible_get", side_effect=Exception("Audible down")), \
+         patch("app.services.audible.authors.get_author_from_db", new_callable=AsyncMock, return_value=None), \
+         patch("app.services.audible.authors.cache.get", return_value=cached_author):
+        result = await get_author("B000APF21M", "us", mock_session)
+        assert result["name"] == "Frank Herbert (cached)"
+
+
+@pytest.mark.asyncio
+async def test_get_author_writes_to_db_on_success():
+    """Writes author profile to DB after successful Audible fetch."""
+    from app.services.audible.authors import get_author
+
+    mock_session = AsyncMock()
+    mock_response = {
+        "contributor": {
+            "name": "Frank Herbert",
+            "bio": "An author.",
+            "profile_image_url": None,
+        }
+    }
+
+    with patch("app.services.audible.authors.audible_get", return_value=mock_response), \
+         patch("app.services.audible.authors.upsert_author_profile", new_callable=AsyncMock) as mock_upsert, \
+         patch("app.services.audible.authors.cache.get", return_value=None), \
+         patch("app.services.audible.authors.cache.set", new_callable=AsyncMock):
+        await get_author("B000APF21M", "us", mock_session)
+        mock_upsert.assert_called_once()

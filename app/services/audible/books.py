@@ -79,20 +79,6 @@ def _parse_release_date(raw: str | None) -> str | None:
         return raw
 
 
-def _parse_release_date(raw: str | None) -> str | None:
-    """
-    Converts a raw Audible release date string to ISO 8601 format.
-    Audimeta stores dates as DateTime and outputs .toISO(), e.g. "2021-03-02T00:00:00.000+00:00".
-    """
-    if not raw:
-        return None
-    try:
-        dt = datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        return dt.isoformat()
-    except ValueError:
-        return raw
-
-
 def _parse_authors(product: dict, region: str) -> list[dict]:
     """Extracts author objects matching AudiMeta's MinimalAuthorDto."""
     authors = []

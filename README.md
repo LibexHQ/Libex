@@ -187,7 +187,7 @@ Libex is API-compatible with AudiMeta. To migrate:
 
 ## Self-Hosting Notes
 
-- Libex uses PostgreSQL for caching — no Redis required
+- Libex uses PostgreSQL for caching and persistent database — no Redis required
 - Cache entries expire after `CACHE_TTL` seconds (default 24 hours)
 - Expired entries are purged automatically
 - Data directory: `./data` (relative to your compose file)

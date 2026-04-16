@@ -30,13 +30,6 @@ def _generate_session_id() -> str:
     def random_digits() -> str:
         return str(random.randint(0, 9999999)).zfill(7)
     return f"000-{random_digits()}-{random_digits()}"
-    """
-    Generates a random session ID matching AudiMeta's format.
-    Format: 000-XXXXXXX-XXXXXXX
-    """
-    def random_digits() -> str:
-        return str(random.randint(0, 9999999)).zfill(7)
-    return f"000-{random_digits()}-{random_digits()}"
 
 
 async def search(
@@ -90,12 +83,6 @@ async def search(
             "region": region,
         })
 
-        logger.info("Requested Audible Search", extra={
-            "search_params": search_params,
-            "search_took": search_took,
-            "region": region,
-        })
-
         if not products:
             return []
 
@@ -129,10 +116,7 @@ async def quick_search(
         }
 
         start = time.monotonic()
-        start = time.monotonic()
         data = await audible_get(region, "/1.0/searchsuggestions", params)
-        search_took = round((time.monotonic() - start) * 1000, 2)
-
         search_took = round((time.monotonic() - start) * 1000, 2)
 
         asins: list[str] = []
@@ -142,11 +126,6 @@ async def quick_search(
                 asin = item.get("model", {}).get("product_metadata", {}).get("asin")
                 if asin:
                     asins.append(asin)
-
-        logger.info("Requested Audible Quick Search", extra={
-            "search_took": search_took,
-            "region": region,
-        })
 
         logger.info("Requested Audible Quick Search", extra={
             "search_took": search_took,

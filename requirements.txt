@@ -10,4 +10,5 @@ psycopg2-binary>=2.9.0
 axiom-py>=0.10.0
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
-
+python-json-logger==4.1.0
+starlette==0.52.1

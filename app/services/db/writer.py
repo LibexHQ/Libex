@@ -3,7 +3,7 @@ Database writer service.
 Persists Audible API responses to relational tables.
 
 Called after every successful Audible fetch to keep the DB in sync.
-Writes are upserts — always update with the latest data from Audible.
+Writes are upserts — existing non-null values are never overwritten with null.
 The DB is used as a fallback when Audible is unavailable.
 """
 
@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 # Third party
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, func
 
 # Database
 from app.db.models import (
@@ -24,6 +24,7 @@ from app.db.models import (
     Series,
     Track,
     author_book,
+    author_genre,
     book_genre,
     book_narrator,
     book_series,
@@ -53,6 +54,11 @@ def _parse_release_date_for_db(iso_str: str | None) -> datetime | None:
         return None
 
 
+def _coalesce(new_value, existing_col):
+    """Returns new_value if not null, otherwise keeps the existing column value."""
+    return func.coalesce(new_value, existing_col)
+
+
 # ============================================================
 # GENRE WRITER
 # ============================================================
@@ -74,7 +80,11 @@ async def upsert_genre(session: AsyncSession, genre: dict) -> str | None:
         updated_at=_now(),
     ).on_conflict_do_update(
         index_elements=["asin"],
-        set_={"name": name, "type": genre_type, "updated_at": _now()},
+        set_={
+            "name": _coalesce(name, Genre.name),
+            "type": _coalesce(genre_type, Genre.type),
+            "updated_at": _now(),
+        },
     )
     await session.execute(stmt)
     return asin
@@ -110,19 +120,23 @@ async def upsert_series(session: AsyncSession, series: dict) -> str | None:
     if not asin or not name:
         return None
 
+    description = series.get("description")
+
     stmt = insert(Series).values(
         asin=asin,
         title=name,
-        description=series.get("description"),
+        description=description,
         region=series.get("region"),
-        fetched_description=bool(series.get("description")),
+        fetched_description=bool(description),
         created_at=_now(),
         updated_at=_now(),
     ).on_conflict_do_update(
         index_elements=["asin"],
         set_={
-            "title": name,
-            "region": series.get("region"),
+            "title": _coalesce(name, Series.title),
+            "description": _coalesce(description, Series.description),
+            "region": _coalesce(series.get("region"), Series.region),
+            "fetched_description": Series.fetched_description | bool(description),
             "updated_at": _now(),
         },
     )
@@ -147,7 +161,6 @@ async def upsert_author(session: AsyncSession, author: dict) -> int | None:
         return None
 
     if a_asin:
-        # Upsert on unique constraint when ASIN is present
         stmt = insert(Author).values(
             asin=a_asin,
             name=a_name,
@@ -160,12 +173,12 @@ async def upsert_author(session: AsyncSession, author: dict) -> int | None:
         ).on_conflict_do_update(
             constraint="authors_asin_region_name_unique",
             set_={
-                "image": author.get("image"),
+                "image": _coalesce(author.get("image"), Author.image),
+                "description": _coalesce(author.get("description"), Author.description),
                 "updated_at": _now(),
             },
         ).returning(Author.id)
     else:
-        # No ASIN — insert only if not already present by name/region
         existing = await session.execute(
             select(Author.id).where(
                 Author.name == a_name,
@@ -201,6 +214,7 @@ async def upsert_book(session: AsyncSession, data: dict) -> None:
     """
     Upserts a book and all its relationships to the relational DB.
     Called after every successful Audible fetch.
+    Existing non-null values are never overwritten with null.
     """
     asin = data.get("asin")
     if not asin:
@@ -209,8 +223,7 @@ async def upsert_book(session: AsyncSession, data: dict) -> None:
     try:
         release_date = _parse_release_date_for_db(data.get("releaseDate"))
 
-        # Upsert the book record
-        book_stmt = insert(Book).values(
+        stmt = insert(Book).values(
             asin=asin,
             title=data.get("title", ""),
             subtitle=data.get("subtitle"),
@@ -242,35 +255,35 @@ async def upsert_book(session: AsyncSession, data: dict) -> None:
         ).on_conflict_do_update(
             index_elements=["asin"],
             set_={
-                "title": data.get("title", ""),
-                "subtitle": data.get("subtitle"),
-                "region": data.get("region"),
-                "description": data.get("description"),
-                "summary": data.get("summary"),
-                "publisher": data.get("publisher"),
-                "copyright": data.get("copyright"),
-                "isbn": data.get("isbn"),
-                "language": data.get("language"),
-                "rating": data.get("rating"),
-                "release_date": release_date,
-                "length_minutes": data.get("lengthMinutes"),
+                "title": _coalesce(data.get("title"), Book.title),
+                "subtitle": _coalesce(data.get("subtitle"), Book.subtitle),
+                "region": _coalesce(data.get("region"), Book.region),
+                "description": _coalesce(data.get("description"), Book.description),
+                "summary": _coalesce(data.get("summary"), Book.summary),
+                "publisher": _coalesce(data.get("publisher"), Book.publisher),
+                "copyright": _coalesce(data.get("copyright"), Book.copyright),
+                "isbn": _coalesce(data.get("isbn"), Book.isbn),
+                "language": _coalesce(data.get("language"), Book.language),
+                "rating": _coalesce(data.get("rating"), Book.rating),
+                "release_date": _coalesce(release_date, Book.release_date),
+                "length_minutes": _coalesce(data.get("lengthMinutes"), Book.length_minutes),
                 "explicit": data.get("explicit", False),
                 "whisper_sync": data.get("whisperSync", False),
                 "has_pdf": data.get("hasPdf", False),
-                "image": data.get("imageUrl"),
-                "book_format": data.get("bookFormat"),
-                "content_type": data.get("contentType"),
-                "content_delivery_type": data.get("contentDeliveryType"),
-                "episode_number": data.get("episodeNumber"),
-                "episode_type": data.get("episodeType"),
-                "sku": data.get("sku"),
-                "sku_group": data.get("skuGroup"),
+                "image": _coalesce(data.get("imageUrl"), Book.image),
+                "book_format": _coalesce(data.get("bookFormat"), Book.book_format),
+                "content_type": _coalesce(data.get("contentType"), Book.content_type),
+                "content_delivery_type": _coalesce(data.get("contentDeliveryType"), Book.content_delivery_type),
+                "episode_number": _coalesce(data.get("episodeNumber"), Book.episode_number),
+                "episode_type": _coalesce(data.get("episodeType"), Book.episode_type),
+                "sku": _coalesce(data.get("sku"), Book.sku),
+                "sku_group": _coalesce(data.get("skuGroup"), Book.sku_group),
                 "is_listenable": data.get("isListenable", True),
                 "is_buyable": data.get("isBuyable", True),
                 "updated_at": _now(),
             },
         )
-        await session.execute(book_stmt)
+        await session.execute(stmt)
 
         # Genres
         genre_asins = []
@@ -313,7 +326,7 @@ async def upsert_book(session: AsyncSession, data: dict) -> None:
                         position=s.get("position"),
                     ).on_conflict_do_update(
                         index_elements=["book_asin", "series_asin"],
-                        set_={"position": s.get("position")},
+                        set_={"position": _coalesce(s.get("position"), book_series.c.position)},
                     )
                 )
 
@@ -327,6 +340,7 @@ async def upsert_book(session: AsyncSession, data: dict) -> None:
                 )
 
         await session.commit()
+        logger.info(f"DB write: book {asin}")
 
     except Exception as e:
         logger.warning(f"DB write failed for book {asin}: {e}")
@@ -351,6 +365,8 @@ async def upsert_track(session: AsyncSession, asin: str, chapters_data: dict) ->
         )
         await session.execute(stmt)
         await session.commit()
+        logger.info(f"DB write: track {asin}")
+
     except Exception as e:
         logger.warning(f"DB write failed for track {asin}: {e}")
         await session.rollback()
@@ -364,6 +380,7 @@ async def upsert_author_profile(session: AsyncSession, data: dict) -> None:
     """
     Upserts a full author profile fetched from the contributors endpoint.
     Updates description and image which aren't available from book data alone.
+    Also writes author genres to author_genre pivot.
     """
     asin = data.get("asin")
     name = data.get("name", "").strip()
@@ -386,14 +403,37 @@ async def upsert_author_profile(session: AsyncSession, data: dict) -> None:
             ).on_conflict_do_update(
                 constraint="authors_asin_region_name_unique",
                 set_={
-                    "description": data.get("description"),
-                    "image": data.get("image"),
+                    "description": _coalesce(data.get("description"), Author.description),
+                    "image": _coalesce(data.get("image"), Author.image),
                     "fetched_description": True,
                     "updated_at": _now(),
                 },
-            )
-            await session.execute(stmt)
+            ).returning(Author.id)
+            result = await session.execute(stmt)
+            row = result.fetchone()
+            author_id = row[0] if row else None
+
+            # Write author genres
+            if author_id and data.get("genres"):
+                genre_asins = []
+                for genre in data["genres"]:
+                    g_asin = await upsert_genre(session, genre)
+                    if g_asin:
+                        genre_asins.append(g_asin)
+
+                if genre_asins:
+                    await session.execute(
+                        delete(author_genre).where(author_genre.c.author_id == author_id)
+                    )
+                    for g_asin in genre_asins:
+                        await session.execute(
+                            insert(author_genre).values(author_id=author_id, genre_asin=g_asin)
+                            .on_conflict_do_nothing()
+                        )
+
         await session.commit()
+        logger.info(f"DB write: author {asin} ({name})")
+
     except Exception as e:
         logger.warning(f"DB write failed for author {asin}: {e}")
         await session.rollback()
@@ -413,27 +453,31 @@ async def upsert_series_profile(session: AsyncSession, data: dict) -> None:
     if not asin or not name:
         return
 
+    description = data.get("description")
+
     try:
         stmt = insert(Series).values(
             asin=asin,
             title=name,
-            description=data.get("description"),
+            description=description,
             region=data.get("region"),
-            fetched_description=bool(data.get("description")),
+            fetched_description=bool(description),
             created_at=_now(),
             updated_at=_now(),
         ).on_conflict_do_update(
             index_elements=["asin"],
             set_={
-                "title": name,
-                "description": data.get("description"),
-                "region": data.get("region"),
-                "fetched_description": bool(data.get("description")),
+                "title": _coalesce(name, Series.title),
+                "description": _coalesce(description, Series.description),
+                "region": _coalesce(data.get("region"), Series.region),
+                "fetched_description": Series.fetched_description | bool(description),
                 "updated_at": _now(),
             },
         )
         await session.execute(stmt)
         await session.commit()
+        logger.info(f"DB write: series {asin} ({name})")
+
     except Exception as e:
         logger.warning(f"DB write failed for series {asin}: {e}")
         await session.rollback()

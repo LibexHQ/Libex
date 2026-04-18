@@ -56,18 +56,22 @@ def valid_region(
 
 class LoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        print(f"DISPATCH {request.method} {request.url.path}", flush=True)  # temp
+        print(f"DISPATCH {request.method} {request.url.path}", flush=True)
         request_id = str(uuid.uuid4())
         start = time.monotonic()
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+            print(f"CALL_NEXT OK {response.status_code}", flush=True)
+        except Exception as e:
+            print(f"CALL_NEXT FAILED: {e}", flush=True)
+            raise
         took = round((time.monotonic() - start) * 1000, 2)
-
+        print("LOGGING NOW", flush=True)
         ip = (
             request.headers.get("CF-Connecting-IP")
             or request.headers.get("x-real-ip")
             or (request.client.host if request.client else None)
         )
-
         logger.info(
             "Request completed",
             extra={
@@ -80,7 +84,6 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                 "ip": ip,
             },
         )
-
         return response
 
 

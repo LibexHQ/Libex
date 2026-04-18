@@ -1,4 +1,5 @@
 # Standard library
+import datetime
 import logging
 import sys
 
@@ -6,15 +7,45 @@ import sys
 from app.core.config import get_settings
 
 # Third party - optional
-AxiomHandler = None
 Client = None
 AXIOM_AVAILABLE = False
 
 try:
-    from axiom_py import AxiomHandler, Client  # type: ignore
+    from axiom_py import Client  # type: ignore
     AXIOM_AVAILABLE = True
 except ImportError:
     pass
+
+
+class DirectAxiomHandler(logging.Handler):
+    def __init__(self, client, dataset):
+        super().__init__()
+        self.client = client
+        self.dataset = dataset
+
+    def emit(self, record):
+        try:
+            extra_fields = {
+                k: v for k, v in record.__dict__.items()
+                if k not in {
+                    'name', 'msg', 'args', 'levelname', 'levelno', 'pathname',
+                    'filename', 'module', 'exc_info', 'exc_text', 'stack_info',
+                    'lineno', 'funcName', 'created', 'msecs', 'relativeCreated',
+                    'thread', 'threadName', 'processName', 'process', 'message',
+                    'taskName'
+                }
+            }
+            event = {
+                "_time": datetime.datetime.utcnow().isoformat() + "Z",
+                "level": record.levelname,
+                "message": record.getMessage(),
+                "logger": record.name,
+                **extra_fields,
+            }
+            self.client.ingest_events(dataset=self.dataset, events=[event])
+        except Exception:
+            self.handleError(record)
+
 
 def setup_logging() -> logging.Logger:
     settings = get_settings()
@@ -33,13 +64,10 @@ def setup_logging() -> logging.Logger:
     stdout_handler.setFormatter(formatter)
     logger.addHandler(stdout_handler)
 
-    if AXIOM_AVAILABLE and Client and AxiomHandler and settings.axiom_token and settings.axiom_dataset:
+    if AXIOM_AVAILABLE and Client and settings.axiom_token and settings.axiom_dataset:
         try:
             client = Client(token=settings.axiom_token)
-            axiom_handler = AxiomHandler(
-                client=client,
-                dataset=settings.axiom_dataset,
-            )
+            axiom_handler = DirectAxiomHandler(client=client, dataset=settings.axiom_dataset)
             logger.addHandler(axiom_handler)
             logger.info("Axiom logging enabled")
         except Exception as e:

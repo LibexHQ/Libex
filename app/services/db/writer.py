@@ -142,7 +142,7 @@ async def upsert_series(session: AsyncSession, series: dict) -> str | None:
         set_={
             "title": _coalesce(name, Series.title),
             "description": _coalesce(description, Series.description),
-            "region": _coalesce(series.get("region"), Series.region),
+            "region": Series.region,
             "fetched_description": Series.fetched_description | bool(description),
             "updated_at": _now(),
         },
@@ -264,7 +264,7 @@ async def upsert_book(session: AsyncSession, data: dict) -> None:
             set_={
                 "title": _coalesce(data.get("title"), Book.title),
                 "subtitle": _coalesce(data.get("subtitle"), Book.subtitle),
-                "region": _coalesce(data.get("region"), Book.region),
+                "region": Book.region,
                 "description": _coalesce(data.get("description"), Book.description),
                 "summary": _coalesce(data.get("summary"), Book.summary),
                 "publisher": _coalesce(data.get("publisher"), Book.publisher),
@@ -476,7 +476,7 @@ async def upsert_series_profile(session: AsyncSession, data: dict) -> None:
             set_={
                 "title": _coalesce(name, Series.title),
                 "description": _coalesce(description, Series.description),
-                "region": _coalesce(data.get("region"), Series.region),
+                "region": Series.region,
                 "fetched_description": Series.fetched_description | bool(description),
                 "updated_at": _now(),
             },

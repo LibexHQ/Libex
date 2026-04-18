@@ -16,15 +16,6 @@ try:
 except ImportError:
     pass
 
-JsonFormatter = None
-
-try:
-    from pythonjsonlogger.json import JsonFormatter  # type: ignore
-    JSON_LOGGER_AVAILABLE = True
-except ImportError:
-    JSON_LOGGER_AVAILABLE = False
-
-
 def setup_logging() -> logging.Logger:
     settings = get_settings()
 
@@ -49,11 +40,6 @@ def setup_logging() -> logging.Logger:
                 client=client,
                 dataset=settings.axiom_dataset,
             )
-            if JSON_LOGGER_AVAILABLE and JsonFormatter:
-                json_formatter = JsonFormatter(
-                    "%(asctime)s %(name)s %(levelname)s %(message)s"
-                )
-                axiom_handler.setFormatter(json_formatter)
             logger.addHandler(axiom_handler)
             logger.info("Axiom logging enabled")
         except Exception as e:

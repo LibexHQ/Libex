@@ -89,7 +89,7 @@ async def upsert_genre(session: AsyncSession, genre: dict) -> str | None:
         index_elements=["asin"],
         set_={
             "name": _coalesce(name, Genre.name),
-            "type": _coalesce(genre_type, Genre.type),
+            "type": Genre.type,
             "updated_at": _now(),
         },
     )

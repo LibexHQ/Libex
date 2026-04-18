@@ -56,6 +56,7 @@ def valid_region(
 
 class LoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
+        print(f"DISPATCH {request.method} {request.url.path}", flush=True)  # temp
         request_id = str(uuid.uuid4())
         start = time.monotonic()
         response = await call_next(request)

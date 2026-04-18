@@ -84,6 +84,8 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                 "ip": ip,
             },
         )
+        for handler in logger.handlers:
+            handler.flush()
         return response
 
 

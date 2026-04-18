@@ -58,6 +58,13 @@ def _coalesce(new_value, existing_col):
     """Returns new_value if not null, otherwise keeps the existing column value."""
     return func.coalesce(new_value, existing_col)
 
+def _to_bool(value, default: bool = False) -> bool:
+    """Converts string or bool to bool safely."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.lower() == 'true'
+    return default
 
 # ============================================================
 # GENRE WRITER
@@ -237,9 +244,9 @@ async def upsert_book(session: AsyncSession, data: dict) -> None:
             rating=data.get("rating"),
             release_date=release_date,
             length_minutes=data.get("lengthMinutes"),
-            explicit=data.get("explicit", False),
-            whisper_sync=data.get("whisperSync", False),
-            has_pdf=data.get("hasPdf", False),
+            explicit=_to_bool(data.get("explicit")),
+            whisper_sync=_to_bool(data.get("whisperSync")),
+            has_pdf=_to_bool(data.get("hasPdf")),
             image=data.get("imageUrl"),
             book_format=data.get("bookFormat"),
             content_type=data.get("contentType"),
@@ -248,8 +255,8 @@ async def upsert_book(session: AsyncSession, data: dict) -> None:
             episode_type=data.get("episodeType"),
             sku=data.get("sku"),
             sku_group=data.get("skuGroup"),
-            is_listenable=data.get("isListenable", True),
-            is_buyable=data.get("isBuyable", True),
+            is_listenable=_to_bool(data.get("isListenable"), True),
+            is_buyable=_to_bool(data.get("isBuyable"), True),
             created_at=_now(),
             updated_at=_now(),
         ).on_conflict_do_update(
@@ -267,9 +274,9 @@ async def upsert_book(session: AsyncSession, data: dict) -> None:
                 "rating": _coalesce(data.get("rating"), Book.rating),
                 "release_date": _coalesce(release_date, Book.release_date),
                 "length_minutes": _coalesce(data.get("lengthMinutes"), Book.length_minutes),
-                "explicit": data.get("explicit", False),
-                "whisper_sync": data.get("whisperSync", False),
-                "has_pdf": data.get("hasPdf", False),
+                "explicit": _to_bool(data.get("explicit", False)),
+                "whisper_sync": _to_bool(data.get("whisperSync", False)),
+                "has_pdf": _to_bool(data.get("hasPdf", False)),
                 "image": _coalesce(data.get("imageUrl"), Book.image),
                 "book_format": _coalesce(data.get("bookFormat"), Book.book_format),
                 "content_type": _coalesce(data.get("contentType"), Book.content_type),
@@ -278,8 +285,8 @@ async def upsert_book(session: AsyncSession, data: dict) -> None:
                 "episode_type": _coalesce(data.get("episodeType"), Book.episode_type),
                 "sku": _coalesce(data.get("sku"), Book.sku),
                 "sku_group": _coalesce(data.get("skuGroup"), Book.sku_group),
-                "is_listenable": data.get("isListenable", True),
-                "is_buyable": data.get("isBuyable", True),
+                "is_listenable": _to_bool(data.get("isListenable", True)),
+                "is_buyable": _to_bool(data.get("isBuyable", True)),
                 "updated_at": _now(),
             },
         )

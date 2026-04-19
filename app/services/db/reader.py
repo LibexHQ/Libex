@@ -186,6 +186,100 @@ async def get_books_from_db(session: AsyncSession, asins: list[str]) -> list[dic
         logger.warning(f"DB read failed for books {asins}: {e}")
         return []
 
+async def search_books_from_db(
+    session: AsyncSession,
+    title: str | None = None,
+    subtitle: str | None = None,
+    region: str | None = None,
+    description: str | None = None,
+    summary: str | None = None,
+    publisher: str | None = None,
+    copyright: str | None = None,
+    isbn: str | None = None,
+    language: str | None = None,
+    rating_better_than: float | None = None,
+    rating_worse_than: float | None = None,
+    longer_than: int | None = None,
+    shorter_than: int | None = None,
+    explicit: bool | None = None,
+    whisper_sync: bool | None = None,
+    has_pdf: bool | None = None,
+    book_format: str | None = None,
+    content_type: str | None = None,
+    content_delivery_type: str | None = None,
+    is_listenable: bool | None = None,
+    is_buyable: bool | None = None,
+    limit: int = 20,
+    page: int = 1,
+) -> list[dict[str, Any]]:
+    """Searches books in the DB by filter parameters with pagination."""
+    try:
+        stmt = (
+            select(Book)
+            .options(
+                selectinload(Book.authors),
+                selectinload(Book.narrators),
+                selectinload(Book.genres),
+                selectinload(Book.series),
+            )
+        )
+
+        if title is not None:
+            stmt = stmt.where(Book.title.ilike(f"%{title}%"))
+        if subtitle is not None:
+            stmt = stmt.where(Book.subtitle.ilike(f"%{subtitle}%"))
+        if region is not None:
+            stmt = stmt.where(Book.region == region)
+        if description is not None:
+            stmt = stmt.where(Book.description.ilike(f"%{description}%"))
+        if summary is not None:
+            stmt = stmt.where(Book.summary.ilike(f"%{summary}%"))
+        if publisher is not None:
+            stmt = stmt.where(Book.publisher.ilike(f"%{publisher}%"))
+        if copyright is not None:
+            stmt = stmt.where(Book.copyright.ilike(f"%{copyright}%"))
+        if isbn is not None:
+            stmt = stmt.where(Book.isbn.ilike(f"%{isbn}%"))
+        if language is not None:
+            stmt = stmt.where(Book.language == language)
+        if rating_better_than is not None:
+            stmt = stmt.where(Book.rating >= rating_better_than)
+        if rating_worse_than is not None:
+            stmt = stmt.where(Book.rating <= rating_worse_than)
+        if longer_than is not None:
+            stmt = stmt.where(Book.length_minutes >= longer_than)
+        if shorter_than is not None:
+            stmt = stmt.where(Book.length_minutes <= shorter_than)
+        if explicit is not None:
+            stmt = stmt.where(Book.explicit == explicit)
+        if whisper_sync is not None:
+            stmt = stmt.where(Book.whisper_sync == whisper_sync)
+        if has_pdf is not None:
+            stmt = stmt.where(Book.has_pdf == has_pdf)
+        if book_format is not None:
+            stmt = stmt.where(Book.book_format == book_format)
+        if content_type is not None:
+            stmt = stmt.where(Book.content_type == content_type)
+        if content_delivery_type is not None:
+            stmt = stmt.where(Book.content_delivery_type == content_delivery_type)
+        if is_listenable is not None:
+            stmt = stmt.where(Book.is_listenable == is_listenable)
+        if is_buyable is not None:
+            stmt = stmt.where(Book.is_buyable == is_buyable)
+
+        stmt = stmt.limit(limit).offset((page - 1) * limit)
+
+        result = await session.execute(stmt)
+        books = result.scalars().all()
+
+        results = []
+        for book in books:
+            positions = await _get_series_positions(session, book.asin)
+            results.append(_book_to_dict(book, positions))
+        return results
+    except Exception as e:
+        logger.warning(f"DB search failed for books: {e}")
+        return []
 
 # ============================================================
 # AUTHOR READER

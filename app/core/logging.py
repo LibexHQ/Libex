@@ -36,7 +36,7 @@ class DirectAxiomHandler(logging.Handler):
                 }
             }
             event = {
-                "_time": datetime.datetime.utcnow().isoformat() + "Z",
+                "_time": datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z",
                 "level": record.levelname,
                 "message": record.getMessage(),
                 "logger": record.name,

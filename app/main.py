@@ -24,6 +24,7 @@ from app.api.routes.books import router as books_router
 from app.api.routes.authors import router as authors_router
 from app.api.routes.series import router as series_router
 from app.api.routes.search import router as search_router
+from app.api.routes.db import router as db_router
 
 # ============================================================
 # SETTINGS & LOGGING
@@ -102,7 +103,7 @@ app.include_router(books_router)
 app.include_router(authors_router)
 app.include_router(series_router)
 app.include_router(search_router)
-
+app.include_router(db_router)
 
 # ============================================================
 # HEALTH CHECK

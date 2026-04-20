@@ -299,6 +299,29 @@ async def search_books_from_db(
         logger.warning(f"DB search failed for books: {e}")
         return []
 
+async def get_books_by_sku_from_db(session: AsyncSession, sku_group: str) -> list[dict[str, Any]]:
+    """Fetches all books with a matching sku_group from the DB."""
+    try:
+        result = await session.execute(
+            select(Book)
+            .where(Book.sku_group == sku_group)
+            .options(
+                selectinload(Book.authors),
+                selectinload(Book.narrators),
+                selectinload(Book.genres),
+                selectinload(Book.series),
+            )
+        )
+        books = result.scalars().all()
+        results = []
+        for book in books:
+            positions = await _get_series_positions(session, book.asin)
+            results.append(_book_to_dict(book, positions))
+        return results
+    except Exception as e:
+        logger.warning(f"DB read failed for sku_group {sku_group}: {e}")
+        return []
+
 # ============================================================
 # AUTHOR READER
 # ============================================================

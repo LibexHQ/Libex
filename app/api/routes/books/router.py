@@ -5,7 +5,7 @@ Response formats match AudiMeta exactly for drop-in compatibility.
 """
 
 # Standard library
-from typing import Annotated
+from typing import Annotated, Any
 
 # Third party
 from fastapi import APIRouter, Query, Path, Depends
@@ -19,6 +19,7 @@ from app.api.routes.books.schemas import BookResponse, BulkBookResponse, Chapter
 
 # Services
 from app.services.audible.books import get_book_by_asin, get_books_by_asins, get_chapters
+from app.services.db.reader import get_books_by_sku_from_db
 
 # Core
 from app.core.exceptions import NotFoundException
@@ -29,6 +30,21 @@ router = APIRouter(prefix="/book", tags=["Books"])
 # ============================================================
 # ENDPOINTS
 # ============================================================
+
+@router.get("/sku/{sku}", response_model=list[BookResponse])
+async def get_books_by_sku(
+    sku: Annotated[str, Path(description="Audible SKU group")],
+    session: AsyncSession = Depends(get_session),
+) -> list[dict[str, Any]]:
+    """
+    Get all books by SKU group.
+    Queries the local database only — returns books that have been fetched and stored previously.
+    A SKU group typically contains region variants of the same title.
+    """
+    books = await get_books_by_sku_from_db(session, sku)
+    if not books:
+        raise NotFoundException(f"No books found for SKU: {sku}")
+    return books
 
 @router.get("/{asin}", response_model=BookResponse)
 async def get_book(

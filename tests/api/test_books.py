@@ -201,3 +201,41 @@ async def test_bulk_books_rejects_invalid_asin_in_list(async_client):
     response = await async_client.get("/book?asins=B08G9PRS1K,not-an-asin")
     assert response.status_code == 404
     assert "Invalid ASIN" in response.json()["error"]
+
+@pytest.mark.asyncio
+async def test_get_books_by_sku_returns_200(async_client):
+    """SKU endpoint returns 200 with valid SKU."""
+    with patch("app.api.routes.books.router.get_books_by_sku_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        response = await async_client.get("/book/sku/BK_ADBL_002663")
+        assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_get_books_by_sku_returns_list(async_client):
+    """SKU endpoint returns a list of BookResponse objects."""
+    with patch("app.api.routes.books.router.get_books_by_sku_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        response = await async_client.get("/book/sku/BK_ADBL_002663")
+        data = response.json()
+        assert isinstance(data, list)
+        assert data[0]["asin"] == "B08G9PRS1K"
+
+
+@pytest.mark.asyncio
+async def test_get_books_by_sku_not_found_returns_404(async_client):
+    """SKU endpoint returns 404 when no books found."""
+    with patch("app.api.routes.books.router.get_books_by_sku_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = []
+        response = await async_client.get("/book/sku/BK_FAKE_000000")
+        assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_books_by_sku_forwards_sku_to_reader(async_client):
+    """SKU endpoint passes sku value to get_books_by_sku_from_db."""
+    with patch("app.api.routes.books.router.get_books_by_sku_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        await async_client.get("/book/sku/BK_ADBL_002663")
+        args, _ = mock.call_args
+        assert args[1] == "BK_ADBL_002663"

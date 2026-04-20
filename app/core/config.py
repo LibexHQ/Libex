@@ -15,9 +15,9 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
-        extra="ignore",  # ignore extra env vars
+        extra="ignore",
     )
-    
+
     # Application
     app_name: str = "Libex"
     app_version: str = "1.0.0"
@@ -33,15 +33,19 @@ class Settings(BaseSettings):
 
     # Audible
     default_region: str = "us"
-    
+
     # Database
     database_url: str = "postgresql+asyncpg://libex:libex@localhost:5432/libex"
     database_echo: bool = False
     db_password: str = ""
-    
+
+    # Logging
+    log_retention_days: int = 7    # 0 = infinite, N = keep N days of rotated logs
+
     # Logging - Axiom (optional)
     axiom_token: str = ""
     axiom_dataset: str = "libex"
+
 
 @lru_cache()
 def get_settings() -> Settings:

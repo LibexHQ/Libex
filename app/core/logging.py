@@ -1,6 +1,8 @@
 # Standard library
 import datetime
 import logging
+import logging.handlers
+import os
 import sys
 
 # Local
@@ -60,10 +62,34 @@ def setup_logging() -> logging.Logger:
         "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )
 
+    # Stdout handler
     stdout_handler = logging.StreamHandler(sys.stdout)
     stdout_handler.setFormatter(formatter)
     logger.addHandler(stdout_handler)
 
+    # File handler — writes to /app/logs/libex.log
+    # Skipped gracefully if the directory cannot be created (e.g. CI, non-Docker environments).
+    log_dir = "/app/logs"
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+
+        log_file = os.path.join(log_dir, "libex.log")
+
+        if settings.log_retention_days == 0:
+            file_handler: logging.Handler = logging.FileHandler(log_file)
+        else:
+            file_handler = logging.handlers.TimedRotatingFileHandler(
+                log_file,
+                when="midnight",
+                backupCount=settings.log_retention_days,
+            )
+
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+    except OSError as e:
+        logger.warning(f"File logging unavailable, skipping: {e}")
+
+    # Axiom handler (optional)
     if AXIOM_AVAILABLE and Client and settings.axiom_token and settings.axiom_dataset:
         try:
             client = Client(token=settings.axiom_token)

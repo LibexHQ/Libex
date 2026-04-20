@@ -4,16 +4,17 @@ services:
     container_name: libex
     restart: unless-stopped
     ports:
-      - "3333:3333"
+      - "${PORT:-3333}:3333"
     environment:
-      - DATABASE_URL=postgresql+asyncpg://libex:${DB_PASSWORD}@postgres:5432/libex
-      - CACHE_ENABLED=true
-      - CACHE_TTL=86400
-      - DEFAULT_REGION=us
+      - DATABASE_URL=postgresql+asyncpg://${DB_USER:-libex}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-libex}
+      - CACHE_ENABLED=${CACHE_ENABLED:-true}
+      - CACHE_TTL=${CACHE_TTL:-86400}
+      - DEFAULT_REGION=${DEFAULT_REGION:-us}
+      - PORT=${PORT:-3333}
+      - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}
       - AXIOM_TOKEN=${AXIOM_TOKEN}
-      - AXIOM_DATASET=libex
+      - AXIOM_DATASET=${AXIOM_DATASET:-libex}
     volumes:
-      - ./data:/app/data
       - ./logs:/app/logs
     depends_on:
       postgres:
@@ -32,13 +33,13 @@ services:
     ports:
       - "5432:5432"
     environment:
-      POSTGRES_DB: libex
-      POSTGRES_USER: libex
+      POSTGRES_DB: ${DB_NAME:-libex}
+      POSTGRES_USER: ${DB_USER:-libex}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U libex"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-libex}"]
       interval: 10s
       timeout: 5s
       retries: 5

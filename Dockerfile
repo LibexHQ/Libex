@@ -17,8 +17,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-# Create non-root user
-RUN useradd -m -u 1000 libex && chown -R libex:libex /app
+# Create logs directory and non-root user — chown covers /app/logs
+RUN mkdir -p /app/logs \
+    && useradd -m -u 1000 libex \
+    && chown -R libex:libex /app
 USER libex
 
 # Expose port

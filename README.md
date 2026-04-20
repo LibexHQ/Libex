@@ -60,7 +60,7 @@ curl -O https://raw.githubusercontent.com/LibexHQ/Libex/main/docker-compose.yml
 
 # 3. Create your environment file
 cp .env.example .env
-# Edit .env and set DB_PASSWORD
+# Edit .env — DB_PASSWORD is required, all other values have sensible defaults
 
 # 4. Start Libex
 docker compose up -d
@@ -194,21 +194,21 @@ All parameters are optional but at least one filter must be provided. Supports p
 ## Configuration
 
 Copy `.env.example` to `.env` and configure:
-```bash
-# Database
-DB_PASSWORD=your_secure_password
-DATABASE_URL=postgresql+asyncpg://libex:your_secure_password@postgres:5432/libex
 
-# Cache TTL in seconds (default 24 hours)
-CACHE_TTL=86400
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DB_PASSWORD` | — | **Required.** PostgreSQL password |
+| `DB_NAME` | `libex` | PostgreSQL database name |
+| `DB_USER` | `libex` | PostgreSQL username |
+| `PORT` | `3333` | Host port the API is exposed on |
+| `DEFAULT_REGION` | `us` | Default Audible region |
+| `CACHE_ENABLED` | `true` | Enable or disable the cache |
+| `CACHE_TTL` | `86400` | Cache TTL in seconds (default 24 hours) |
+| `LOG_RETENTION_DAYS` | `7` | Days of rotated logs to keep. `0` = infinite, no rotation |
+| `AXIOM_TOKEN` | — | Axiom API token (optional — leave blank for stdout only) |
+| `AXIOM_DATASET` | `libex` | Axiom dataset name |
 
-# Default region
-DEFAULT_REGION=us
-
-# Axiom logging (optional - leave empty to use stdout only)
-AXIOM_TOKEN=
-AXIOM_DATASET=libex
-```
+`DATABASE_URL` is constructed automatically by docker-compose from `DB_NAME`, `DB_USER`, and `DB_PASSWORD`. Only set it manually if running outside of Docker.
 
 ---
 
@@ -228,8 +228,8 @@ Libex is API-compatible with AudiMeta. To migrate:
 - Every book, author, series, narrator, and genre ever requested is stored in a full relational schema and survives cache expiry indefinitely
 - The local library powers the `/db/book` and `/book/sku/{sku}` endpoints and serves as an automatic fallback when Audible is unavailable
 - Cache entries expire after `CACHE_TTL` seconds (default 24 hours); expired entries are purged automatically
-- Data directory: `./data` (relative to your compose file)
-- Logs directory: `./logs`
+- Logs directory: `./logs` (relative to your compose file) — Libex writes a rotating log file to `./logs/libex.log` on the host
+- Log rotation is daily. `LOG_RETENTION_DAYS=7` keeps 7 days of backups. Set to `0` for infinite retention with no rotation
 
 ---
 

@@ -69,6 +69,56 @@ docker compose up -d
 curl http://localhost:3333/health
 ```
 
+Or copy the compose file directly:
+
+```yaml
+services:
+  libex:
+    image: ghcr.io/libexhq/libex:latest
+    container_name: libex
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3333}:3333"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${DB_USER:-libex}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-libex}
+      - CACHE_ENABLED=${CACHE_ENABLED:-true}
+      - CACHE_TTL=${CACHE_TTL:-86400}
+      - DEFAULT_REGION=${DEFAULT_REGION:-us}
+      - PORT=${PORT:-3333}
+      - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}
+      - AXIOM_TOKEN=${AXIOM_TOKEN}
+      - AXIOM_DATASET=${AXIOM_DATASET:-libex}
+    volumes:
+      - ./logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3333/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: libex-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: ${DB_NAME:-libex}
+      POSTGRES_USER: ${DB_USER:-libex}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-libex}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+```
+
 ---
 
 ## Logging & Privacy

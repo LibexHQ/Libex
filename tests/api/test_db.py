@@ -227,6 +227,8 @@ async def test_pagination_defaults(async_client):
     ("publisher", "Macmillan", "publisher", "Macmillan"),
     ("copyright", "2021", "copyright", "2021"),
     ("isbn", "9780000000000", "isbn", "9780000000000"),
+    ("author_name", "Frank Herbert", "author_name", "Frank Herbert"),
+    ("series_name", "Dune", "series_name", "Dune"),
     ("language", "english", "language", "english"),
     ("book_format", "unabridged", "book_format", "unabridged"),
     ("content_type", "Book", "content_type", "Book"),
@@ -311,3 +313,20 @@ async def test_multiple_filters_all_forwarded(async_client):
         assert kwargs["region"] == "us"
         assert kwargs["rating_better_than"] == 4.0
         assert kwargs["longer_than"] == 300
+
+@pytest.mark.asyncio
+async def test_author_name_filter_returns_200(async_client):
+    """Returns 200 with author_name filter."""
+    with patch(READER_PATH, new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        response = await async_client.get("/db/book?author_name=Frank+Herbert")
+        assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_series_name_filter_returns_200(async_client):
+    """Returns 200 with series_name filter."""
+    with patch(READER_PATH, new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        response = await async_client.get("/db/book?series_name=Dune")
+        assert response.status_code == 200

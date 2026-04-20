@@ -30,6 +30,8 @@ async def search_db_books(
     publisher: Annotated[str | None, Query(description="ILIKE search on publisher")] = None,
     copyright: Annotated[str | None, Query(description="ILIKE search on copyright")] = None,
     isbn: Annotated[str | None, Query(description="ILIKE search on ISBN")] = None,
+    author_name: Annotated[str | None, Query(description="ILIKE search on author name")] = None,
+    series_name: Annotated[str | None, Query(description="ILIKE search on series name")] = None,    
     language: Annotated[str | None, Query(description="Exact match on language")] = None,
     rating_better_than: Annotated[float | None, Query(description="Rating >= value")] = None,
     rating_worse_than: Annotated[float | None, Query(description="Rating <= value")] = None,
@@ -49,7 +51,7 @@ async def search_db_books(
 ) -> list[dict[str, Any]]:
     filter_params = [
         title, subtitle, region, description, summary, publisher, copyright,
-        isbn, language, rating_better_than, rating_worse_than, longer_than,
+        isbn, author_name, series_name, language, rating_better_than, rating_worse_than, longer_than,
         shorter_than, explicit, whisper_sync, has_pdf, book_format,
         content_type, content_delivery_type, is_listenable, is_buyable,
     ]
@@ -66,6 +68,8 @@ async def search_db_books(
         publisher=publisher,
         copyright=copyright,
         isbn=isbn,
+        author_name=author_name,
+        series_name=series_name,
         language=language,
         rating_better_than=rating_better_than,
         rating_worse_than=rating_worse_than,

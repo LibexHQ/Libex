@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 # Database
-from app.db.models import Book, Author, Series, Track, book_series
+from app.db.models import Book, Author, Series, Track, author_book, book_series
 
 # Core
 from app.core.logging import get_logger
@@ -196,6 +196,8 @@ async def search_books_from_db(
     publisher: str | None = None,
     copyright: str | None = None,
     isbn: str | None = None,
+    author_name: str | None = None,
+    series_name: str | None = None,
     language: str | None = None,
     rating_better_than: float | None = None,
     rating_worse_than: float | None = None,
@@ -240,6 +242,22 @@ async def search_books_from_db(
             stmt = stmt.where(Book.copyright.ilike(f"%{copyright}%"))
         if isbn is not None:
             stmt = stmt.where(Book.isbn.ilike(f"%{isbn}%"))
+        if author_name is not None:
+            stmt = (
+                stmt
+                .join(author_book, author_book.c.book_asin == Book.asin)
+                .join(Author, Author.id == author_book.c.author_id)
+                .where(Author.name.ilike(f"%{author_name}%"))
+                .distinct()
+            )
+        if series_name is not None:
+            stmt = (
+                stmt
+                .join(book_series, book_series.c.book_asin == Book.asin)
+                .join(Series, Series.asin == book_series.c.series_asin)
+                .where(Series.title.ilike(f"%{series_name}%"))
+                .distinct()
+            )
         if language is not None:
             stmt = stmt.where(Book.language == language)
         if rating_better_than is not None:

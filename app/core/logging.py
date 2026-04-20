@@ -68,22 +68,26 @@ def setup_logging() -> logging.Logger:
     logger.addHandler(stdout_handler)
 
     # File handler — writes to /app/logs/libex.log
-    # os.makedirs is a defensive fallback; production relies on the Docker volume mount.
+    # Skipped gracefully if the directory cannot be created (e.g. CI, non-Docker environments).
     log_dir = "/app/logs"
-    os.makedirs(log_dir, exist_ok=True)
-    log_file = os.path.join(log_dir, "libex.log")
+    try:
+        os.makedirs(log_dir, exist_ok=True)
 
-    if settings.log_retention_days == 0:
-        file_handler: logging.Handler = logging.FileHandler(log_file)
-    else:
-        file_handler = logging.handlers.TimedRotatingFileHandler(
-            log_file,
-            when="midnight",
-            backupCount=settings.log_retention_days,
-        )
+        log_file = os.path.join(log_dir, "libex.log")
 
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
+        if settings.log_retention_days == 0:
+            file_handler: logging.Handler = logging.FileHandler(log_file)
+        else:
+            file_handler = logging.handlers.TimedRotatingFileHandler(
+                log_file,
+                when="midnight",
+                backupCount=settings.log_retention_days,
+            )
+
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+    except OSError as e:
+        logger.warning(f"File logging unavailable, skipping: {e}")
 
     # Axiom handler (optional)
     if AXIOM_AVAILABLE and Client and settings.axiom_token and settings.axiom_dataset:

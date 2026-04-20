@@ -17,7 +17,6 @@ Open, unrestricted Audible metadata API for the audiobook automation community.
 
 A free public instance of Libex is available at [Libex](https://libex.lostcartographer.xyz)
 
-
 This instance is maintained by the Libex project and is free for community use. No API key required. No rate limits beyond what Audible naturally enforces.
 
 If you rely on Libex for a project or tool, we recommend self-hosting your own instance for reliability and control.
@@ -33,7 +32,8 @@ Libex exists to be a permanent, community-owned alternative:
 - **MIT licensed** — no restrictions, fork it, build on it, use it however you want
 - **No usage restrictions** — works with any software, any workflow
 - **Drop-in replacement** — compatible with AudiMeta's API endpoints
-- **Audible-first** — always fetches fresh data, cache is a fallback not a crutch
+- **Audible-first** — always fetches fresh data, the local database is a fallback not a crutch
+- **Persistent local library** — every book, author, and series ever requested is stored and queryable
 - **All regions** — full support for all Audible markets without language restrictions
 - **Self-hostable** — one `docker compose up` and you're running
 
@@ -99,13 +99,15 @@ Logging is completely optional. Leave `AXIOM_TOKEN` empty and Libex logs to stdo
 
 ## API Behavior
 
-**HTML content:** `description` and `summary` fields on book responses, `description` on author responses, and `description` on series responses are returned as plain text with HTML stripped. 
+**HTML content:** `description` and `summary` fields on book responses, `description` on author responses, and `description` on series responses are returned as plain text with HTML stripped.
 
 **Image URLs:** Cover image URLs are returned with Audible size suffixes stripped, giving you the base high-resolution image URL.
 
 **ASIN validation:** All ASIN parameters are validated against Audible's 10-character alphanumeric format. Invalid ASINs return a 404 with a clear error message.
 
 **Region validation:** All region parameters are validated against supported Audible regions. Invalid regions return a 400 error.
+
+**Local database:** Every successful Audible response is written to a persistent relational database. This powers the DB query endpoints and serves as a fallback when Audible is unavailable.
 
 ---
 
@@ -116,7 +118,7 @@ Logging is completely optional. Leave `AXIOM_TOKEN` empty and Libex logs to stdo
 | GET | `/book/{asin}` | Get book by ASIN |
 | GET | `/book` | Get multiple books by ASIN (comma-separated, max 1000) |
 | GET | `/book/{asin}/chapters` | Get chapter information |
-| GET | `/book/sku/{sku}` | Get books by SKU group (501 - planned) |
+| GET | `/book/sku/{sku}` | Get all region variants of a book by SKU group |
 | GET | `/author/{asin}` | Get author profile |
 | GET | `/author/{asin}/books` | Get all books by author ASIN |
 | GET | `/author/books/{asin}` | Get all books by author ASIN (legacy) |
@@ -130,9 +132,44 @@ Logging is completely optional. Leave `AXIOM_TOKEN` empty and Libex logs to stdo
 | GET | `/quick-search` | Quick search via suggestions |
 | GET | `/{region}/search` | Regional search for Audiobookshelf compatibility |
 | GET | `/{region}/quick-search/search` | Regional quick search for Audiobookshelf compatibility |
+| GET | `/db/book` | Query the local indexed book library |
 | GET | `/health` | Health check |
 
 Full interactive documentation available at `/docs` when running.
+
+---
+
+## DB Query Endpoint
+
+`GET /db/book` queries books that have been fetched and stored locally without hitting Audible. Useful for searching your indexed library by metadata.
+
+All parameters are optional but at least one filter must be provided. Supports pagination via `limit` (default 20, max 100) and `page` (default 1).
+
+| Parameter | Type | Match |
+|-----------|------|-------|
+| `title` | string | ILIKE |
+| `subtitle` | string | ILIKE |
+| `author_name` | string | ILIKE (join) |
+| `series_name` | string | ILIKE (join) |
+| `description` | string | ILIKE |
+| `summary` | string | ILIKE |
+| `publisher` | string | ILIKE |
+| `copyright` | string | ILIKE |
+| `isbn` | string | ILIKE |
+| `region` | string | exact |
+| `language` | string | exact |
+| `book_format` | string | exact |
+| `content_type` | string | exact |
+| `content_delivery_type` | string | exact |
+| `rating_better_than` | float | >= |
+| `rating_worse_than` | float | <= |
+| `longer_than` | int | >= (minutes) |
+| `shorter_than` | int | <= (minutes) |
+| `explicit` | bool | exact |
+| `whisper_sync` | bool | exact |
+| `has_pdf` | bool | exact |
+| `is_listenable` | bool | exact |
+| `is_buyable` | bool | exact |
 
 ---
 
@@ -187,9 +224,10 @@ Libex is API-compatible with AudiMeta. To migrate:
 
 ## Self-Hosting Notes
 
-- Libex uses PostgreSQL for caching and persistent database — no Redis required
-- Cache entries expire after `CACHE_TTL` seconds (default 24 hours)
-- Expired entries are purged automatically
+- Libex uses PostgreSQL as both a persistent library and a cache — no Redis required
+- Every book, author, series, narrator, and genre ever requested is stored in a full relational schema and survives cache expiry indefinitely
+- The local library powers the `/db/book` and `/book/sku/{sku}` endpoints and serves as an automatic fallback when Audible is unavailable
+- Cache entries expire after `CACHE_TTL` seconds (default 24 hours); expired entries are purged automatically
 - Data directory: `./data` (relative to your compose file)
 - Logs directory: `./logs`
 
@@ -200,7 +238,6 @@ Libex is API-compatible with AudiMeta. To migrate:
 Contributions are welcome. Fork it, improve it, open a PR.
 
 Planned features:
-- Normalized book/author/series database for community dataset
 - Request analytics
 - Additional metadata sources
 
@@ -222,7 +259,7 @@ Libex is a metadata tool that fetches publicly available information from Audibl
 
 **[FastAPI](https://fastapi.tiangolo.com)** — The modern Python web framework powering Libex.
 
-**[SQLAlchemy](https://www.sqlalchemy.org)** — Database toolkit for Python used for cache persistence.
+**[SQLAlchemy](https://www.sqlalchemy.org)** — Async database toolkit for Python powering Libex's full relational schema across books, authors, series, narrators, genres, and their relationships.
 
 ---
 

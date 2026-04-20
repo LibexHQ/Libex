@@ -42,6 +42,7 @@ openapi_tags = [
     {"name": "Authors", "description": "Retrieve author metadata and their books"},
     {"name": "Series", "description": "Retrieve series metadata and their books"},
     {"name": "Search", "description": "Search Audible catalog by title, author, or keyword"},
+    {"name": "Database", "description": "Query the local indexed book library without hitting Audible"},
 ]
 
 @asynccontextmanager

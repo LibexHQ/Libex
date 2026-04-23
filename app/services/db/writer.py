@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 # Third party
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy import select, delete, func
+from sqlalchemy import select, delete, func, update
 
 # Database
 from app.db.models import (
@@ -158,7 +158,10 @@ async def upsert_series(session: AsyncSession, series: dict) -> str | None:
 async def upsert_author(session: AsyncSession, author: dict) -> int | None:
     """
     Upserts an author record. Returns the author's DB id if successful.
-    Authors are uniquely identified by (asin, region, name).
+
+    When asin is null: match on (name, region, asin IS NULL) to avoid duplicates.
+    When asin is not null: check for an existing null-asin row first and upgrade
+    it in place, since PostgreSQL does not treat NULL = NULL in unique indexes.
     """
     a_asin = author.get("asin")
     a_name = author.get("name", "").strip()
@@ -168,6 +171,33 @@ async def upsert_author(session: AsyncSession, author: dict) -> int | None:
         return None
 
     if a_asin:
+        # Check if a null-asin row already exists for this (name, region).
+        # If so, upgrade it with the now-known asin rather than inserting a
+        # second row — PostgreSQL won't fire a conflict on (asin=NULL) vs
+        # (asin='B123') because NULL != NULL in unique indexes.
+        null_result = await session.execute(
+            select(Author.id).where(
+                Author.name == a_name,
+                Author.region == a_region,
+                Author.asin.is_(None),
+            )
+        )
+        null_id = null_result.scalar_one_or_none()
+
+        if null_id:
+            await session.execute(
+                update(Author)
+                .where(Author.id == null_id)
+                .values(
+                    asin=a_asin,
+                    image=func.coalesce(author.get("image"), Author.image),
+                    description=func.coalesce(author.get("description"), Author.description),
+                    updated_at=_now(),
+                )
+            )
+            return null_id
+
+        # No null-asin row — standard upsert on the unique constraint.
         stmt = insert(Author).values(
             asin=a_asin,
             name=a_name,
@@ -185,6 +215,7 @@ async def upsert_author(session: AsyncSession, author: dict) -> int | None:
                 "updated_at": _now(),
             },
         ).returning(Author.id)
+
     else:
         existing = await session.execute(
             select(Author.id).where(

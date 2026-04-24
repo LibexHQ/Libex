@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 # Third party
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy import select, delete, func, update
+from sqlalchemy import select, func, update
 
 # Database
 from app.db.models import (

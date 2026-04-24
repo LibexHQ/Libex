@@ -171,10 +171,6 @@ async def upsert_author(session: AsyncSession, author: dict) -> int | None:
         return None
 
     if a_asin:
-        # Check if a null-asin row already exists for this (name, region).
-        # If so, upgrade it with the now-known asin rather than inserting a
-        # second row — PostgreSQL won't fire a conflict on (asin=NULL) vs
-        # (asin='B123') because NULL != NULL in unique indexes.
         null_result = await session.execute(
             select(Author.id).where(
                 Author.name == a_name,
@@ -191,7 +187,13 @@ async def upsert_author(session: AsyncSession, author: dict) -> int | None:
                 .values(
                     asin=a_asin,
                     image=func.coalesce(author.get("image"), Author.image),
-                    description=func.coalesce(author.get("description"), Author.description),
+                    description=func.case(
+                        (
+                            func.length(author.get("description")) > func.length(Author.description),
+                            author.get("description"),
+                        ),
+                        else_=Author.description,
+                    ),
                     updated_at=_now(),
                 )
             )
@@ -211,7 +213,13 @@ async def upsert_author(session: AsyncSession, author: dict) -> int | None:
             constraint="authors_asin_region_name_unique",
             set_={
                 "image": _coalesce(author.get("image"), Author.image),
-                "description": _coalesce(author.get("description"), Author.description),
+                "description": func.case(
+                    (
+                        func.length(author.get("description")) > func.length(Author.description),
+                        author.get("description"),
+                    ),
+                    else_=Author.description,
+                ),
                 "updated_at": _now(),
             },
         ).returning(Author.id)
@@ -242,7 +250,6 @@ async def upsert_author(session: AsyncSession, author: dict) -> int | None:
     result = await session.execute(stmt)
     row = result.fetchone()
     return row[0] if row else None
-
 
 # ============================================================
 # BOOK WRITER
@@ -441,7 +448,13 @@ async def upsert_author_profile(session: AsyncSession, data: dict) -> None:
             ).on_conflict_do_update(
                 constraint="authors_asin_region_name_unique",
                 set_={
-                    "description": _coalesce(data.get("description"), Author.description),
+                    "description": func.case(
+                        (
+                            func.length(data.get("description")) > func.length(Author.description),
+                            data.get("description"),
+                        ),
+                        else_=Author.description,
+                    ),
                     "image": _coalesce(data.get("image"), Author.image),
                     "fetched_description": True,
                     "updated_at": _now(),

@@ -58,6 +58,15 @@ def _coalesce(new_value, existing_col):
     """Returns new_value if not null, otherwise keeps the existing column value."""
     return func.coalesce(new_value, existing_col)
 
+
+def _longer_wins(new_value, existing_col):
+    """Returns new_value if it is longer than the existing value, otherwise keeps existing."""
+    return func.case(
+        (func.length(new_value) > func.length(existing_col), new_value),
+        else_=existing_col,
+    )
+
+
 def _to_bool(value, default: bool = False) -> bool:
     """Converts string or bool to bool safely."""
     if isinstance(value, bool):
@@ -65,6 +74,7 @@ def _to_bool(value, default: bool = False) -> bool:
     if isinstance(value, str):
         return value.lower() == 'true'
     return default
+
 
 # ============================================================
 # GENRE WRITER
@@ -141,7 +151,7 @@ async def upsert_series(session: AsyncSession, series: dict) -> str | None:
         index_elements=["asin"],
         set_={
             "title": _coalesce(name, Series.title),
-            "description": _coalesce(description, Series.description),
+            "description": _longer_wins(description, Series.description),
             "region": Series.region,
             "fetched_description": Series.fetched_description | bool(description),
             "updated_at": _now(),
@@ -186,14 +196,8 @@ async def upsert_author(session: AsyncSession, author: dict) -> int | None:
                 .where(Author.id == null_id)
                 .values(
                     asin=a_asin,
-                    image=func.coalesce(author.get("image"), Author.image),
-                    description=func.case(
-                        (
-                            func.length(author.get("description")) > func.length(Author.description),
-                            author.get("description"),
-                        ),
-                        else_=Author.description,
-                    ),
+                    image=_coalesce(author.get("image"), Author.image),
+                    description=_longer_wins(author.get("description"), Author.description),
                     updated_at=_now(),
                 )
             )
@@ -213,13 +217,7 @@ async def upsert_author(session: AsyncSession, author: dict) -> int | None:
             constraint="authors_asin_region_name_unique",
             set_={
                 "image": _coalesce(author.get("image"), Author.image),
-                "description": func.case(
-                    (
-                        func.length(author.get("description")) > func.length(Author.description),
-                        author.get("description"),
-                    ),
-                    else_=Author.description,
-                ),
+                "description": _longer_wins(author.get("description"), Author.description),
                 "updated_at": _now(),
             },
         ).returning(Author.id)
@@ -251,6 +249,7 @@ async def upsert_author(session: AsyncSession, author: dict) -> int | None:
     row = result.fetchone()
     return row[0] if row else None
 
+
 # ============================================================
 # BOOK WRITER
 # ============================================================
@@ -260,6 +259,8 @@ async def upsert_book(session: AsyncSession, data: dict) -> None:
     Upserts a book and all its relationships to the relational DB.
     Called after every successful Audible fetch.
     Existing non-null values are never overwritten with null.
+    Pivot relationships (genres, narrators, authors) are additive — never shrink.
+    Series position is kept current via upsert.
     """
     asin = data.get("asin")
     if not asin:
@@ -303,8 +304,8 @@ async def upsert_book(session: AsyncSession, data: dict) -> None:
                 "title": _coalesce(data.get("title"), Book.title),
                 "subtitle": _coalesce(data.get("subtitle"), Book.subtitle),
                 "region": Book.region,
-                "description": _coalesce(data.get("description"), Book.description),
-                "summary": _coalesce(data.get("summary"), Book.summary),
+                "description": _longer_wins(data.get("description"), Book.description),
+                "summary": _longer_wins(data.get("summary"), Book.summary),
                 "publisher": _coalesce(data.get("publisher"), Book.publisher),
                 "copyright": _coalesce(data.get("copyright"), Book.copyright),
                 "isbn": _coalesce(data.get("isbn"), Book.isbn),
@@ -330,37 +331,25 @@ async def upsert_book(session: AsyncSession, data: dict) -> None:
         )
         await session.execute(stmt)
 
-        # Genres
-        genre_asins = []
+        # Genres — additive, never delete
         for genre in data.get("genres", []):
             g_asin = await upsert_genre(session, genre)
             if g_asin:
-                genre_asins.append(g_asin)
-
-        if genre_asins:
-            await session.execute(delete(book_genre).where(book_genre.c.book_asin == asin))
-            for g_asin in genre_asins:
                 await session.execute(
                     insert(book_genre).values(book_asin=asin, genre_asin=g_asin)
                     .on_conflict_do_nothing()
                 )
 
-        # Narrators
-        narrator_names = []
+        # Narrators — additive, never delete
         for narrator in data.get("narrators", []):
             n_name = await upsert_narrator(session, narrator)
             if n_name:
-                narrator_names.append(n_name)
-
-        if narrator_names:
-            await session.execute(delete(book_narrator).where(book_narrator.c.book_asin == asin))
-            for n_name in narrator_names:
                 await session.execute(
                     insert(book_narrator).values(book_asin=asin, narrator_name=n_name)
                     .on_conflict_do_nothing()
                 )
 
-        # Series
+        # Series — position kept current via upsert
         for s in data.get("series", []):
             s_asin = await upsert_series(session, s)
             if s_asin:
@@ -375,7 +364,7 @@ async def upsert_book(session: AsyncSession, data: dict) -> None:
                     )
                 )
 
-        # Authors
+        # Authors — additive, never delete
         for author_data in data.get("authors", []):
             author_id = await upsert_author(session, author_data)
             if author_id:
@@ -426,6 +415,7 @@ async def upsert_author_profile(session: AsyncSession, data: dict) -> None:
     Upserts a full author profile fetched from the contributors endpoint.
     Updates description and image which aren't available from book data alone.
     Also writes author genres to author_genre pivot.
+    Author genres are additive — never delete.
     """
     asin = data.get("asin")
     name = data.get("name", "").strip()
@@ -448,13 +438,7 @@ async def upsert_author_profile(session: AsyncSession, data: dict) -> None:
             ).on_conflict_do_update(
                 constraint="authors_asin_region_name_unique",
                 set_={
-                    "description": func.case(
-                        (
-                            func.length(data.get("description")) > func.length(Author.description),
-                            data.get("description"),
-                        ),
-                        else_=Author.description,
-                    ),
+                    "description": _longer_wins(data.get("description"), Author.description),
                     "image": _coalesce(data.get("image"), Author.image),
                     "fetched_description": True,
                     "updated_at": _now(),
@@ -464,19 +448,11 @@ async def upsert_author_profile(session: AsyncSession, data: dict) -> None:
             row = result.fetchone()
             author_id = row[0] if row else None
 
-            # Write author genres
+            # Author genres — additive, never delete
             if author_id and data.get("genres"):
-                genre_asins = []
                 for genre in data["genres"]:
                     g_asin = await upsert_genre(session, genre)
                     if g_asin:
-                        genre_asins.append(g_asin)
-
-                if genre_asins:
-                    await session.execute(
-                        delete(author_genre).where(author_genre.c.author_id == author_id)
-                    )
-                    for g_asin in genre_asins:
                         await session.execute(
                             insert(author_genre).values(author_id=author_id, genre_asin=g_asin)
                             .on_conflict_do_nothing()
@@ -519,7 +495,7 @@ async def upsert_series_profile(session: AsyncSession, data: dict) -> None:
             index_elements=["asin"],
             set_={
                 "title": _coalesce(name, Series.title),
-                "description": _coalesce(description, Series.description),
+                "description": _longer_wins(description, Series.description),
                 "region": Series.region,
                 "fetched_description": Series.fetched_description | bool(description),
                 "updated_at": _now(),

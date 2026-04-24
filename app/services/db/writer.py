@@ -28,6 +28,7 @@ from app.db.models import (
     book_genre,
     book_narrator,
     book_series,
+    series_author,
 )
 
 # Core
@@ -365,6 +366,7 @@ async def upsert_book(session: AsyncSession, data: dict) -> None:
                 )
 
         # Authors — additive, never delete
+        author_ids = []
         for author_data in data.get("authors", []):
             author_id = await upsert_author(session, author_data)
             if author_id:
@@ -372,6 +374,18 @@ async def upsert_book(session: AsyncSession, data: dict) -> None:
                     insert(author_book).values(author_id=author_id, book_asin=asin)
                     .on_conflict_do_nothing()
                 )
+                author_ids.append(author_id)
+
+        # Derived series authors — any author of a book in a series is an
+        # author of that series. Additive, never delete.
+        for s in data.get("series", []):
+            s_asin = s.get("asin")
+            if s_asin:
+                for author_id in author_ids:
+                    await session.execute(
+                        insert(series_author).values(series_asin=s_asin, author_id=author_id)
+                        .on_conflict_do_nothing()
+                    )
 
         await session.commit()
         logger.info(f"DB write: book {asin}")

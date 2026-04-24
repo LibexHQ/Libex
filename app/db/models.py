@@ -16,6 +16,8 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    Table,
+    Column,
     UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -166,6 +168,10 @@ class Author(Base):
         "Genre", secondary="author_genre", back_populates="authors"
     )
 
+    series: Mapped[list["Series"]] = relationship(
+        "Series", secondary="series_author", back_populates="authors"
+    )
+
     __table_args__ = (
         UniqueConstraint("asin", "region", "name", name="authors_asin_region_name_unique"),
         Index("authors_asin_region_name_index", "asin", "region", "name"),
@@ -205,6 +211,10 @@ class Series(Base):
         "Book", secondary="book_series", back_populates="series"
     )
 
+    authors: Mapped[list["Author"]] = relationship(
+        "Author", secondary="series_author", back_populates="series"
+    )
+    
     __table_args__ = (
         Index("series_asin_index", "asin"),
     )
@@ -310,8 +320,6 @@ class Track(Base):
 # PIVOT TABLES
 # ============================================================
 
-from sqlalchemy import Table, Column  # noqa: E402
-
 author_book = Table(
     "author_book",
     Base.metadata,
@@ -353,4 +361,14 @@ author_genre = Table(
     Column("genre_asin", String(12), ForeignKey("genres.asin", ondelete="CASCADE"), nullable=False),
     Index("author_genre_index", "genre_asin", "author_id"),
     Index("genre_author_index", "author_id", "genre_asin"),
+)
+
+series_author = Table(
+    "series_author",
+    Base.metadata,
+    Column("series_asin", String(12), ForeignKey("series.asin", ondelete="CASCADE"), nullable=False),
+    Column("author_id", Integer, ForeignKey("authors.id", ondelete="CASCADE"), nullable=False),
+    UniqueConstraint("series_asin", "author_id", name="uq_series_author"),
+    Index("series_author_index", "series_asin", "author_id"),
+    Index("author_series_index", "author_id", "series_asin"),
 )

@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 # Third party
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy import select, func, update
+from sqlalchemy import select, func, update, case
 
 # Database
 from app.db.models import (
@@ -62,7 +62,7 @@ def _coalesce(new_value, existing_col):
 
 def _longer_wins(new_value, existing_col):
     """Returns new_value if it is longer than the existing value, otherwise keeps existing."""
-    return func.case(
+    return case(
         (func.length(new_value) > func.length(existing_col), new_value),
         else_=existing_col,
     )

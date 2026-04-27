@@ -50,7 +50,7 @@ MOCK_BOOK = {
     "episodeNumber": None,
     "episodeType": None,
     "sku": None,
-    "skuGroup": None,
+    "skuGroup": "BK_ADBL_002663",
     "isListenable": True,
     "isAvailable": True,
     "isBuyable": True,
@@ -77,6 +77,39 @@ MOCK_BOOK = {
         }
     ],
     "series": [],
+}
+
+MOCK_AUTHOR = {
+    "id": 1,
+    "asin": "B000APF21M",
+    "name": "Frank Herbert",
+    "description": "Frank Herbert was an American science fiction author.",
+    "image": "https://example.com/frank-herbert.jpg",
+    "region": "us",
+    "regions": ["us"],
+    "genres": [],
+    "updatedAt": "2024-01-01T00:00:00+00:00",
+}
+
+MOCK_SERIES = {
+    "asin": "B00SERIES1",
+    "name": "Dune Chronicles",
+    "description": "The Dune Chronicles is a science fiction series.",
+    "region": "us",
+    "position": None,
+    "updatedAt": None,
+}
+
+MOCK_CHAPTERS = {
+    "brandIntroDurationMs": 0,
+    "brandOutroDurationMs": 0,
+    "chapters": [
+        {"lengthMs": 1200000, "startOffsetMs": 0, "startOffsetSec": 0, "title": "Opening Credits"},
+        {"lengthMs": 3600000, "startOffsetMs": 1200000, "startOffsetSec": 1200, "title": "Chapter 1"},
+    ],
+    "isAccurate": True,
+    "runtimeLengthMs": 4800000,
+    "runtimeLengthSec": 4800,
 }
 
 READER_PATH = "app.api.routes.db.router.search_books_from_db"
@@ -330,3 +363,411 @@ async def test_series_name_filter_returns_200(async_client):
         mock.return_value = [MOCK_BOOK]
         response = await async_client.get("/db/book?series_name=Dune")
         assert response.status_code == 200
+
+
+# ============================================================
+# GET /db/book/{asin}
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_get_db_book_returns_200(async_client):
+    """Returns 200 with valid ASIN."""
+    with patch("app.api.routes.db.router.get_book_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = MOCK_BOOK
+        response = await async_client.get("/db/book/B08G9PRS1K")
+        assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_get_db_book_returns_correct_asin(async_client):
+    """Returns book with the requested ASIN."""
+    with patch("app.api.routes.db.router.get_book_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = MOCK_BOOK
+        response = await async_client.get("/db/book/B08G9PRS1K")
+        assert response.json()["asin"] == "B08G9PRS1K"
+
+
+@pytest.mark.asyncio
+async def test_get_db_book_not_found_returns_404(async_client):
+    """Returns 404 when book not in local DB."""
+    with patch("app.api.routes.db.router.get_book_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = None
+        response = await async_client.get("/db/book/B08G9PRS1K")
+        assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_db_book_rejects_invalid_asin(async_client):
+    """Returns 404 with error message for invalid ASIN."""
+    response = await async_client.get("/db/book/not-an-asin")
+    assert response.status_code == 404
+    assert "Invalid ASIN" in response.json()["error"]
+
+
+@pytest.mark.asyncio
+async def test_get_db_book_forwards_asin_to_reader(async_client):
+    """ASIN is forwarded to get_book_from_db."""
+    with patch("app.api.routes.db.router.get_book_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = MOCK_BOOK
+        await async_client.get("/db/book/B08G9PRS1K")
+        args, _ = mock.call_args
+        assert args[1] == "B08G9PRS1K"
+
+
+# ============================================================
+# GET /db/book/{asin}/chapters
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_get_db_book_chapters_returns_200(async_client):
+    """Returns 200 when chapter data exists."""
+    with patch("app.api.routes.db.router.get_track_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = MOCK_CHAPTERS
+        response = await async_client.get("/db/book/B08G9PRS1K/chapters")
+        assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_get_db_book_chapters_returns_chapter_data(async_client):
+    """Returns the raw chapter JSONB dict."""
+    with patch("app.api.routes.db.router.get_track_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = MOCK_CHAPTERS
+        response = await async_client.get("/db/book/B08G9PRS1K/chapters")
+        data = response.json()
+        assert "chapters" in data
+        assert isinstance(data["chapters"], list)
+
+
+@pytest.mark.asyncio
+async def test_get_db_book_chapters_not_found_returns_404(async_client):
+    """Returns 404 when no chapter data in local DB."""
+    with patch("app.api.routes.db.router.get_track_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = None
+        response = await async_client.get("/db/book/B08G9PRS1K/chapters")
+        assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_db_book_chapters_rejects_invalid_asin(async_client):
+    """Returns 404 with error message for invalid ASIN."""
+    response = await async_client.get("/db/book/not-an-asin/chapters")
+    assert response.status_code == 404
+    assert "Invalid ASIN" in response.json()["error"]
+
+
+# ============================================================
+# GET /db/book/sku/{sku}
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_get_db_books_by_sku_returns_200(async_client):
+    """Returns 200 with valid SKU."""
+    with patch("app.api.routes.db.router.get_books_by_sku_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        response = await async_client.get("/db/book/sku/BK_ADBL_002663")
+        assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_get_db_books_by_sku_returns_list(async_client):
+    """Returns a list of BookResponse objects."""
+    with patch("app.api.routes.db.router.get_books_by_sku_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        response = await async_client.get("/db/book/sku/BK_ADBL_002663")
+        data = response.json()
+        assert isinstance(data, list)
+        assert data[0]["asin"] == "B08G9PRS1K"
+
+
+@pytest.mark.asyncio
+async def test_get_db_books_by_sku_not_found_returns_404(async_client):
+    """Returns 404 when no books found for SKU."""
+    with patch("app.api.routes.db.router.get_books_by_sku_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = []
+        response = await async_client.get("/db/book/sku/BK_FAKE_000000")
+        assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_db_books_by_sku_forwards_sku_to_reader(async_client):
+    """SKU value is forwarded to get_books_by_sku_from_db."""
+    with patch("app.api.routes.db.router.get_books_by_sku_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        await async_client.get("/db/book/sku/BK_ADBL_002663")
+        args, _ = mock.call_args
+        assert args[1] == "BK_ADBL_002663"
+
+
+# ============================================================
+# GET /db/author/{asin}
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_get_db_author_returns_200(async_client):
+    """Returns 200 with valid ASIN."""
+    with patch("app.api.routes.db.router.get_author_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = MOCK_AUTHOR
+        response = await async_client.get("/db/author/B000APF21M")
+        assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_get_db_author_returns_correct_asin(async_client):
+    """Returns author with the requested ASIN."""
+    with patch("app.api.routes.db.router.get_author_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = MOCK_AUTHOR
+        response = await async_client.get("/db/author/B000APF21M")
+        assert response.json()["asin"] == "B000APF21M"
+
+
+@pytest.mark.asyncio
+async def test_get_db_author_returns_required_fields(async_client):
+    """Returns all required AuthorResponse fields."""
+    with patch("app.api.routes.db.router.get_author_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = MOCK_AUTHOR
+        response = await async_client.get("/db/author/B000APF21M")
+        data = response.json()
+        for field in ["asin", "name", "region", "regions", "genres"]:
+            assert field in data, f"Missing required field: {field}"
+
+
+@pytest.mark.asyncio
+async def test_get_db_author_not_found_returns_404(async_client):
+    """Returns 404 when author not in local DB."""
+    with patch("app.api.routes.db.router.get_author_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = None
+        response = await async_client.get("/db/author/B000APF21M")
+        assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_db_author_rejects_invalid_asin(async_client):
+    """Returns 404 with error message for invalid ASIN."""
+    response = await async_client.get("/db/author/not-an-asin")
+    assert response.status_code == 404
+    assert "Invalid ASIN" in response.json()["error"]
+
+
+@pytest.mark.asyncio
+async def test_get_db_author_default_region_is_us(async_client):
+    """Defaults to US region when not specified."""
+    with patch("app.api.routes.db.router.get_author_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = MOCK_AUTHOR
+        await async_client.get("/db/author/B000APF21M")
+        args, _ = mock.call_args
+        assert args[2] == "us"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("region", ["us", "uk", "ca", "au", "de", "fr", "it", "es", "jp", "in", "br"])
+async def test_get_db_author_all_regions(async_client, region):
+    """Works for all supported regions."""
+    with patch("app.api.routes.db.router.get_author_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = {**MOCK_AUTHOR, "region": region, "regions": [region]}
+        response = await async_client.get(f"/db/author/B000APF21M?region={region}")
+        assert response.status_code == 200, f"Failed for region: {region}"
+
+
+@pytest.mark.asyncio
+async def test_get_db_author_forwards_region_to_reader(async_client):
+    """Region parameter is forwarded to get_author_from_db."""
+    with patch("app.api.routes.db.router.get_author_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = {**MOCK_AUTHOR, "region": "uk", "regions": ["uk"]}
+        await async_client.get("/db/author/B000APF21M?region=uk")
+        args, _ = mock.call_args
+        assert args[2] == "uk"
+
+
+# ============================================================
+# GET /db/author/{asin}/books
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_get_db_author_books_returns_200(async_client):
+    """Returns 200 with valid ASIN."""
+    with patch("app.api.routes.db.router.get_author_books_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        response = await async_client.get("/db/author/B000APF21M/books")
+        assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_get_db_author_books_returns_list(async_client):
+    """Returns a list of BookResponse objects."""
+    with patch("app.api.routes.db.router.get_author_books_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        response = await async_client.get("/db/author/B000APF21M/books")
+        data = response.json()
+        assert isinstance(data, list)
+        assert data[0]["asin"] == "B08G9PRS1K"
+
+
+@pytest.mark.asyncio
+async def test_get_db_author_books_not_found_returns_404(async_client):
+    """Returns 404 when no books found for author."""
+    with patch("app.api.routes.db.router.get_author_books_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = []
+        response = await async_client.get("/db/author/B000APF21M/books")
+        assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_db_author_books_rejects_invalid_asin(async_client):
+    """Returns 404 with error message for invalid ASIN."""
+    response = await async_client.get("/db/author/not-an-asin/books")
+    assert response.status_code == 404
+    assert "Invalid ASIN" in response.json()["error"]
+
+
+@pytest.mark.asyncio
+async def test_get_db_author_books_default_region_is_us(async_client):
+    """Defaults to US region when not specified."""
+    with patch("app.api.routes.db.router.get_author_books_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        await async_client.get("/db/author/B000APF21M/books")
+        args, _ = mock.call_args
+        assert args[2] == "us"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("region", ["us", "uk", "ca", "au", "de", "fr", "it", "es", "jp", "in", "br"])
+async def test_get_db_author_books_all_regions(async_client, region):
+    """Works for all supported regions."""
+    with patch("app.api.routes.db.router.get_author_books_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        response = await async_client.get(f"/db/author/B000APF21M/books?region={region}")
+        assert response.status_code == 200, f"Failed for region: {region}"
+
+
+@pytest.mark.asyncio
+async def test_get_db_author_books_forwards_region_to_reader(async_client):
+    """Region parameter is forwarded to get_author_books_from_db."""
+    with patch("app.api.routes.db.router.get_author_books_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        await async_client.get("/db/author/B000APF21M/books?region=uk")
+        args, _ = mock.call_args
+        assert args[2] == "uk"
+
+
+# ============================================================
+# GET /db/series/{asin}
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_get_db_series_returns_200(async_client):
+    """Returns 200 with valid ASIN."""
+    with patch("app.api.routes.db.router.get_series_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = MOCK_SERIES
+        response = await async_client.get("/db/series/B00SERIES1")
+        assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_get_db_series_returns_correct_asin(async_client):
+    """Returns series with the requested ASIN."""
+    with patch("app.api.routes.db.router.get_series_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = MOCK_SERIES
+        response = await async_client.get("/db/series/B00SERIES1")
+        assert response.json()["asin"] == "B00SERIES1"
+
+
+@pytest.mark.asyncio
+async def test_get_db_series_returns_required_fields(async_client):
+    """Returns all required SeriesResponse fields."""
+    with patch("app.api.routes.db.router.get_series_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = MOCK_SERIES
+        response = await async_client.get("/db/series/B00SERIES1")
+        data = response.json()
+        for field in ["asin", "name", "region"]:
+            assert field in data, f"Missing required field: {field}"
+
+
+@pytest.mark.asyncio
+async def test_get_db_series_not_found_returns_404(async_client):
+    """Returns 404 when series not in local DB."""
+    with patch("app.api.routes.db.router.get_series_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = None
+        response = await async_client.get("/db/series/B00SERIES1")
+        assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_db_series_rejects_invalid_asin(async_client):
+    """Returns 404 with error message for invalid ASIN."""
+    response = await async_client.get("/db/series/not-an-asin")
+    assert response.status_code == 404
+    assert "Invalid ASIN" in response.json()["error"]
+
+
+@pytest.mark.asyncio
+async def test_get_db_series_forwards_asin_to_reader(async_client):
+    """ASIN is forwarded to get_series_from_db."""
+    with patch("app.api.routes.db.router.get_series_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = MOCK_SERIES
+        await async_client.get("/db/series/B00SERIES1")
+        args, _ = mock.call_args
+        assert args[1] == "B00SERIES1"
+
+
+# ============================================================
+# GET /db/series/{asin}/books
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_get_db_series_books_returns_200(async_client):
+    """Returns 200 with valid ASIN."""
+    with patch("app.api.routes.db.router.get_series_books_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        response = await async_client.get("/db/series/B00SERIES1/books")
+        assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_get_db_series_books_returns_list(async_client):
+    """Returns a list of BookResponse objects."""
+    with patch("app.api.routes.db.router.get_series_books_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        response = await async_client.get("/db/series/B00SERIES1/books")
+        data = response.json()
+        assert isinstance(data, list)
+        assert data[0]["asin"] == "B08G9PRS1K"
+
+
+@pytest.mark.asyncio
+async def test_get_db_series_books_not_found_returns_404(async_client):
+    """Returns 404 when no books found for series."""
+    with patch("app.api.routes.db.router.get_series_books_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = []
+        response = await async_client.get("/db/series/B00SERIES1/books")
+        assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_db_series_books_rejects_invalid_asin(async_client):
+    """Returns 404 with error message for invalid ASIN."""
+    response = await async_client.get("/db/series/not-an-asin/books")
+    assert response.status_code == 404
+    assert "Invalid ASIN" in response.json()["error"]
+
+
+@pytest.mark.asyncio
+async def test_get_db_series_books_forwards_asin_to_reader(async_client):
+    """ASIN is forwarded to get_series_books_from_db."""
+    with patch("app.api.routes.db.router.get_series_books_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        await async_client.get("/db/series/B00SERIES1/books")
+        args, _ = mock.call_args
+        assert args[1] == "B00SERIES1"
+
+
+@pytest.mark.asyncio
+async def test_get_db_series_books_returns_multiple(async_client):
+    """Returns multiple books when series has more than one."""
+    mock_book_2 = {**MOCK_BOOK, "asin": "B08G9PRS2K", "title": "Test Book 2"}
+    with patch("app.api.routes.db.router.get_series_books_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK, mock_book_2]
+        response = await async_client.get("/db/series/B00SERIES1/books")
+        data = response.json()
+        assert len(data) == 2
+        assert data[0]["asin"] == "B08G9PRS1K"
+        assert data[1]["asin"] == "B08G9PRS2K"

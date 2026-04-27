@@ -327,15 +327,27 @@ async def get_books_by_sku_from_db(session: AsyncSession, sku_group: str) -> lis
 # ============================================================
 
 async def get_author_from_db(session: AsyncSession, asin: str, region: str) -> dict[str, Any] | None:
-    """Fetches an author from the DB."""
+    """Fetches an author from the DB with genres."""
     try:
         result = await session.execute(
             select(Author)
             .where(Author.asin == asin, Author.region == region)
+            .options(selectinload(Author.genres))
         )
         author = result.scalar_one_or_none()
         if not author:
             return None
+
+        genres = [
+            {
+                "asin": g.asin,
+                "name": g.name,
+                "type": g.type,
+                "betterType": g.type.lower().rstrip("s"),
+                "updatedAt": g.updated_at.isoformat() if g.updated_at else None,
+            }
+            for g in (author.genres or [])
+        ]
 
         return {
             "id": author.id,
@@ -345,12 +357,41 @@ async def get_author_from_db(session: AsyncSession, asin: str, region: str) -> d
             "image": author.image,
             "region": author.region,
             "regions": [author.region],
-            "genres": [],
+            "genres": genres,
             "updatedAt": author.updated_at.isoformat() if author.updated_at else None,
         }
     except Exception as e:
         logger.warning(f"DB read failed for author {asin}: {e}")
         return None
+
+
+async def get_author_books_from_db(
+    session: AsyncSession, author_asin: str, region: str
+) -> list[dict[str, Any]]:
+    """Fetches all books for an author from the DB."""
+    try:
+        result = await session.execute(
+            select(Book)
+            .join(author_book, author_book.c.book_asin == Book.asin)
+            .join(Author, Author.id == author_book.c.author_id)
+            .where(Author.asin == author_asin, Author.region == region)
+            .options(
+                selectinload(Book.authors),
+                selectinload(Book.narrators),
+                selectinload(Book.genres),
+                selectinload(Book.series),
+            )
+            .distinct()
+        )
+        books = result.scalars().all()
+        results = []
+        for book in books:
+            positions = await _get_series_positions(session, book.asin)
+            results.append(_book_to_dict(book, positions))
+        return results
+    except Exception as e:
+        logger.warning(f"DB read failed for author books {author_asin}: {e}")
+        return []
 
 
 # ============================================================
@@ -402,6 +443,34 @@ async def search_series_from_db(session: AsyncSession, name: str) -> list[dict[s
         ]
     except Exception as e:
         logger.warning(f"DB search failed for series '{name}': {e}")
+        return []
+
+
+async def get_series_books_from_db(
+    session: AsyncSession, series_asin: str
+) -> list[dict[str, Any]]:
+    """Fetches all books in a series from the DB, sorted by position."""
+    try:
+        result = await session.execute(
+            select(Book)
+            .join(book_series, book_series.c.book_asin == Book.asin)
+            .where(book_series.c.series_asin == series_asin)
+            .options(
+                selectinload(Book.authors),
+                selectinload(Book.narrators),
+                selectinload(Book.genres),
+                selectinload(Book.series),
+            )
+            .order_by(book_series.c.position)
+        )
+        books = result.scalars().all()
+        results = []
+        for book in books:
+            positions = await _get_series_positions(session, book.asin)
+            results.append(_book_to_dict(book, positions))
+        return results
+    except Exception as e:
+        logger.warning(f"DB read failed for series books {series_asin}: {e}")
         return []
 
 

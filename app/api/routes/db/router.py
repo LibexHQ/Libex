@@ -8,14 +8,26 @@ Only returns books that have been fetched and stored previously.
 from typing import Annotated, Any
 
 # Third party
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Path, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Local
+from app.api.routes.authors.schemas import AuthorResponse
 from app.api.routes.books.schemas import BookResponse
+from app.api.routes.series.schemas import SeriesResponse
 from app.core.exceptions import NotFoundException
+from app.core.middleware import is_valid_asin, valid_region
 from app.db.session import get_session
-from app.services.db.reader import search_books_from_db
+from app.services.db.reader import (
+    get_author_books_from_db,
+    get_author_from_db,
+    get_book_from_db,
+    get_books_by_sku_from_db,
+    get_series_books_from_db,
+    get_series_from_db,
+    get_track_from_db,
+    search_books_from_db,
+)
 
 router = APIRouter(prefix="/db", tags=["Database"])
 
@@ -91,3 +103,101 @@ async def search_db_books(
         raise NotFoundException("No books found matching the given parameters")
 
     return books
+
+
+@router.get("/book/sku/{sku}", response_model=list[BookResponse])
+async def get_db_books_by_sku(
+    sku: Annotated[str, Path(description="SKU group identifier")],
+    session: AsyncSession = Depends(get_session),
+) -> list[dict[str, Any]]:
+    """Get all region variants for a SKU group from the local DB."""
+    books = await get_books_by_sku_from_db(session, sku)
+    if not books:
+        raise NotFoundException("No books found for SKU")
+    return books
+
+
+@router.get("/book/{asin}/chapters")
+async def get_db_book_chapters(
+    asin: Annotated[str, Path(description="Book ASIN")],
+    session: AsyncSession = Depends(get_session),
+) -> Any:
+    """Get chapter data for a book from the local DB."""
+    if not is_valid_asin(asin):
+        raise NotFoundException(f"Invalid ASIN format: {asin}")
+    chapters = await get_track_from_db(session, asin)
+    if chapters is None:
+        raise NotFoundException("No chapter data found for this book")
+    return chapters
+
+
+@router.get("/book/{asin}", response_model=BookResponse)
+async def get_db_book(
+    asin: Annotated[str, Path(description="Book ASIN")],
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Get a single book by ASIN from the local DB."""
+    if not is_valid_asin(asin):
+        raise NotFoundException(f"Invalid ASIN format: {asin}")
+    book = await get_book_from_db(session, asin)
+    if not book:
+        raise NotFoundException("Book not found in local database")
+    return book
+
+
+@router.get("/author/{asin}/books", response_model=list[BookResponse])
+async def get_db_author_books(
+    asin: Annotated[str, Path(description="Author ASIN")],
+    region: str = Depends(valid_region),
+    session: AsyncSession = Depends(get_session),
+) -> list[dict[str, Any]]:
+    """Get all books by an author from the local DB."""
+    if not is_valid_asin(asin):
+        raise NotFoundException(f"Invalid ASIN format: {asin}")
+    books = await get_author_books_from_db(session, asin, region)
+    if not books:
+        raise NotFoundException("No books found for author")
+    return books
+
+
+@router.get("/author/{asin}", response_model=AuthorResponse)
+async def get_db_author(
+    asin: Annotated[str, Path(description="Author ASIN")],
+    region: str = Depends(valid_region),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Get an author by ASIN from the local DB."""
+    if not is_valid_asin(asin):
+        raise NotFoundException(f"Invalid ASIN format: {asin}")
+    author = await get_author_from_db(session, asin, region)
+    if not author:
+        raise NotFoundException("Author not found in local database")
+    return author
+
+
+@router.get("/series/{asin}/books", response_model=list[BookResponse])
+async def get_db_series_books(
+    asin: Annotated[str, Path(description="Series ASIN")],
+    session: AsyncSession = Depends(get_session),
+) -> list[dict[str, Any]]:
+    """Get all books in a series from the local DB, sorted by position."""
+    if not is_valid_asin(asin):
+        raise NotFoundException(f"Invalid ASIN format: {asin}")
+    books = await get_series_books_from_db(session, asin)
+    if not books:
+        raise NotFoundException("No books found for series")
+    return books
+
+
+@router.get("/series/{asin}", response_model=SeriesResponse)
+async def get_db_series(
+    asin: Annotated[str, Path(description="Series ASIN")],
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Get a series by ASIN from the local DB."""
+    if not is_valid_asin(asin):
+        raise NotFoundException(f"Invalid ASIN format: {asin}")
+    series = await get_series_from_db(session, asin)
+    if not series:
+        raise NotFoundException("Series not found in local database")
+    return series

@@ -60,6 +60,11 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         start = time.monotonic()
         response = await call_next(request)
         took = round((time.monotonic() - start) * 1000, 2)
+
+        user_agent = request.headers.get("user-agent", "")
+        if "uptime-kuma" in user_agent.lower():
+            return response
+
         ip = (
             request.headers.get("CF-Connecting-IP")
             or request.headers.get("x-real-ip")
@@ -72,13 +77,12 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                 "method": request.method,
                 "url": request.url.path,
                 "status": response.status_code,
-                "userAgent": request.headers.get("user-agent"),
+                "userAgent": user_agent,
                 "took": took,
                 "ip": ip,
             },
         )
         return response
-
 
 # ============================================================
 # SETUP

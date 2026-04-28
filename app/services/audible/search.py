@@ -17,6 +17,7 @@ from app.core.logging import get_logger
 # Services
 from app.services.audible.client import audible_get
 from app.services.audible.books import get_books_by_asins
+from app.services.db.reader import search_books_from_db
 
 logger = get_logger()
 
@@ -104,7 +105,13 @@ async def quick_search(
     region: str,
     session: AsyncSession,
 ) -> list[dict[str, Any]]:
-    """Quick search using Audible search suggestions."""
+    """Quick search using Audible search suggestions.
+
+    Falls back to catalog search if the keywords look like a compound
+    ABS-style query (e.g. "Author - Series - Title") and suggestions
+    return nothing. Falls back to the local DB if catalog also returns
+    nothing.
+    """
     try:
         params = {
             "keywords": keywords,
@@ -128,14 +135,51 @@ async def quick_search(
                     asins.append(asin)
 
         logger.info("Requested Audible Quick Search", extra={
+            "keywords": keywords,
             "search_took": search_took,
             "region": region,
+            "suggestions_found": len(asins),
         })
 
-        if not asins:
-            return []
+        if asins:
+            return await get_books_by_asins(asins, region, session)
 
-        return await get_books_by_asins(asins, region, session)
+        # Suggestions returned nothing — check for compound ABS-style query
+        # Format: "Author - Series - Title" or "Author - Title"
+        if " - " in keywords:
+            segments = [s.strip() for s in keywords.split(" - ") if s.strip()]
+            if len(segments) >= 2:
+                parsed_author = segments[0]
+                parsed_title = segments[-1]
+
+                logger.info("Quick search compound fallback", extra={
+                    "keywords": keywords,
+                    "parsed_author": parsed_author,
+                    "parsed_title": parsed_title,
+                    "region": region,
+                })
+
+                catalog_results = await search(
+                    region=region,
+                    session=session,
+                    title=parsed_title,
+                    author=parsed_author,
+                    limit=10,
+                )
+                if catalog_results:
+                    return catalog_results
+
+                # Catalog also returned nothing — try local DB
+                db_results = await search_books_from_db(
+                    session=session,
+                    title=parsed_title,
+                    author_name=parsed_author,
+                    limit=10,
+                )
+                if db_results:
+                    return db_results
+
+        return []
 
     except Exception as e:
         logger.error(f"Quick search failed: {e}")

@@ -317,6 +317,7 @@ async def get_books_by_asins(
         raise
 
     except Exception:
+        await session.rollback()
         logger.warning(f"Audible unavailable, attempting DB fallback for {unique_asins}")
 
         # Try relational DB first

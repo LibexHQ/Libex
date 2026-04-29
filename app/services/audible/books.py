@@ -130,6 +130,13 @@ def _parse_genres(product: dict) -> list[dict]:
     return genres
 
 
+def _parse_plans(product: dict) -> str | None:
+    """Extracts plan_names from plans array as a comma-separated string."""
+    plans = product.get("plans", [])
+    names = [p.get("plan_name") for p in plans if p.get("plan_name")]
+    return ", ".join(names) if names else None
+
+
 def _parse_series(product: dict, region: str) -> list[dict]:
     """Extracts series objects matching AudiMeta's MinimalSeriesDto."""
     series_list = []
@@ -186,6 +193,7 @@ def _normalize_product(product: dict, region: str) -> dict[str, Any]:
         "isListenable": product.get("is_listenable", False),
         "isAvailable": product.get("is_buyable", False),
         "isBuyable": product.get("is_buyable", False),
+        "plans": _parse_plans(product),
         "updatedAt": None,
         "authors": _parse_authors(product, region),
         "narrators": _parse_narrators(product),

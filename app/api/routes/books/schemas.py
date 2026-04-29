@@ -78,6 +78,7 @@ class BookResponse(BaseModel):
     isListenable: bool = False
     isAvailable: bool = False
     isBuyable: bool = False
+    plans: str | None = None
     updatedAt: str | None = None
     authors: list[AuthorRefResponse] = Field(default_factory=list)
     narrators: list[NarratorResponse] = Field(default_factory=list)

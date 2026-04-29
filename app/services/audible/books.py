@@ -186,6 +186,7 @@ def _normalize_product(product: dict, region: str) -> dict[str, Any]:
         "isListenable": product.get("is_listenable", False),
         "isAvailable": product.get("is_buyable", False),
         "isBuyable": product.get("is_buyable", False),
+        "isVvab": product.get("is_vvab", False),
         "updatedAt": None,
         "authors": _parse_authors(product, region),
         "narrators": _parse_narrators(product),

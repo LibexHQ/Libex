@@ -11,6 +11,7 @@ The DB is used as a fallback when Audible is unavailable.
 from datetime import datetime, timezone
 
 # Third party
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy import select, func, update, case
@@ -173,6 +174,12 @@ async def upsert_author(session: AsyncSession, author: dict) -> int | None:
     When asin is null: match on (name, region, asin IS NULL) to avoid duplicates.
     When asin is not null: check for an existing null-asin row first and upgrade
     it in place, since PostgreSQL does not treat NULL = NULL in unique indexes.
+
+    Race condition: multiple concurrent requests for the same author may both
+    find the null-asin row and attempt the upgrade simultaneously. The second
+    concurrent UPDATE will hit a UniqueViolationError because the first already
+    set the asin. We catch IntegrityError and return the existing id — the data
+    is already correct at that point.
     """
     a_asin = author.get("asin")
     a_name = author.get("name", "").strip()
@@ -192,16 +199,22 @@ async def upsert_author(session: AsyncSession, author: dict) -> int | None:
         null_id = null_result.scalar_one_or_none()
 
         if null_id:
-            await session.execute(
-                update(Author)
-                .where(Author.id == null_id)
-                .values(
-                    asin=a_asin,
-                    image=_coalesce(author.get("image"), Author.image),
-                    description=_longer_wins(author.get("description"), Author.description),
-                    updated_at=_now(),
+            try:
+                await session.execute(
+                    update(Author)
+                    .where(Author.id == null_id)
+                    .values(
+                        asin=a_asin,
+                        image=_coalesce(author.get("image"), Author.image),
+                        description=_longer_wins(author.get("description"), Author.description),
+                        updated_at=_now(),
+                    )
                 )
-            )
+            except IntegrityError:
+                # Another concurrent request already upgraded this row.
+                # The data is correct — just roll back the failed statement
+                # and return the existing id.
+                await session.rollback()
             return null_id
 
         # No null-asin row — standard upsert on the unique constraint.

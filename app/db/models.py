@@ -99,6 +99,7 @@ class Book(Base):
     sku_group: Mapped[str | None] = mapped_column(String(20), nullable=True)
     is_listenable: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_buyable: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    is_vvab: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),

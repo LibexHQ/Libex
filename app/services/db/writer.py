@@ -310,6 +310,7 @@ async def upsert_book(session: AsyncSession, data: dict) -> None:
             sku_group=data.get("skuGroup"),
             is_listenable=_to_bool(data.get("isListenable"), True),
             is_buyable=_to_bool(data.get("isBuyable"), True),
+            is_vvab=_to_bool(data.get("isVvab")),
             created_at=_now(),
             updated_at=_now(),
         ).on_conflict_do_update(
@@ -340,6 +341,7 @@ async def upsert_book(session: AsyncSession, data: dict) -> None:
                 "sku_group": _coalesce(data.get("skuGroup"), Book.sku_group),
                 "is_listenable": _to_bool(data.get("isListenable", True)),
                 "is_buyable": _to_bool(data.get("isBuyable", True)),
+                "is_vvab": _to_bool(data.get("isVvab", False)),
                 "updated_at": _now(),
             },
         )

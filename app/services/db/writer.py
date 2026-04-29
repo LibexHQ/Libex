@@ -13,8 +13,8 @@ from datetime import datetime, timezone
 # Third party
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy import select, func, update, case
+from sqlalchemy.dialects.postgresql import insert, JSONB
+from sqlalchemy import select, func, update, case, cast
 
 # Database
 from app.db.models import (
@@ -310,6 +310,7 @@ async def upsert_book(session: AsyncSession, data: dict) -> None:
             sku_group=data.get("skuGroup"),
             is_listenable=_to_bool(data.get("isListenable"), True),
             is_buyable=_to_bool(data.get("isBuyable"), True),
+            plans=cast(data.get("plans"), JSONB),
             created_at=_now(),
             updated_at=_now(),
         ).on_conflict_do_update(
@@ -340,6 +341,7 @@ async def upsert_book(session: AsyncSession, data: dict) -> None:
                 "sku_group": _coalesce(data.get("skuGroup"), Book.sku_group),
                 "is_listenable": _to_bool(data.get("isListenable", True)),
                 "is_buyable": _to_bool(data.get("isBuyable", True)),
+                "plans": _coalesce(cast(data.get("plans"), JSONB), Book.plans),
                 "updated_at": _now(),
             },
         )

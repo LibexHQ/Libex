@@ -127,6 +127,7 @@ def _book_to_dict(book: Book, series_positions: dict[str, str | None]) -> dict[s
         "isListenable": book.is_listenable,
         "isAvailable": book.is_buyable,
         "isBuyable": book.is_buyable,
+        "plans": book.plans,
         "updatedAt": book.updated_at.isoformat() if book.updated_at else None,
         "authors": authors,
         "narrators": narrators,

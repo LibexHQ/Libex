@@ -61,8 +61,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         response = await call_next(request)
         took = round((time.monotonic() - start) * 1000, 2)
 
-        user_agent = request.headers.get("user-agent", "")
-        if "uptime-kuma" in user_agent.lower():
+        if request.url.path == "/health":
             return response
 
         ip = (
@@ -70,6 +69,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             or request.headers.get("x-real-ip")
             or (request.client.host if request.client else None)
         )
+        user_agent = request.headers.get("user-agent", "")
         logger.info(
             "Request completed",
             extra={

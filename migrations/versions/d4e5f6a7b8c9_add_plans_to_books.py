@@ -9,6 +9,7 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 
 
 revision: str = 'd4e5f6a7b8c9'
@@ -18,7 +19,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column('books', sa.Column('plans', sa.Text(), nullable=True))
+    op.add_column('books', sa.Column('plans', postgresql.JSONB(), nullable=True))
 
 
 def downgrade() -> None:

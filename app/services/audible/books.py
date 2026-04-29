@@ -130,11 +130,9 @@ def _parse_genres(product: dict) -> list[dict]:
     return genres
 
 
-def _parse_plans(product: dict) -> str | None:
-    """Extracts plan_names from plans array as a comma-separated string."""
-    plans = product.get("plans", [])
-    names = [p.get("plan_name") for p in plans if p.get("plan_name")]
-    return ", ".join(names) if names else None
+def _parse_plans(product: dict) -> list[str]:
+    """Extracts plan_names from the plans array."""
+    return [p["plan_name"] for p in product.get("plans", []) if p.get("plan_name")]
 
 
 def _parse_series(product: dict, region: str) -> list[dict]:

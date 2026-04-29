@@ -127,6 +127,7 @@ def _book_to_dict(book: Book, series_positions: dict[str, str | None]) -> dict[s
         "isListenable": book.is_listenable,
         "isAvailable": book.is_buyable,
         "isBuyable": book.is_buyable,
+        "isVvab": book.is_vvab,
         "updatedAt": book.updated_at.isoformat() if book.updated_at else None,
         "authors": authors,
         "narrators": narrators,
@@ -211,6 +212,7 @@ async def search_books_from_db(
     content_delivery_type: str | None = None,
     is_listenable: bool | None = None,
     is_buyable: bool | None = None,
+    is_vvab: bool | None = None,
     limit: int = 20,
     page: int = 1,
 ) -> list[dict[str, Any]]:
@@ -284,6 +286,8 @@ async def search_books_from_db(
             stmt = stmt.where(Book.is_listenable == is_listenable)
         if is_buyable is not None:
             stmt = stmt.where(Book.is_buyable == is_buyable)
+        if is_vvab is not None:
+            stmt = stmt.where(Book.is_vvab == is_vvab)
 
         stmt = stmt.limit(limit).offset((page - 1) * limit)
 

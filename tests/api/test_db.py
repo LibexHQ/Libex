@@ -519,6 +519,105 @@ async def test_get_db_books_by_sku_forwards_sku_to_reader(async_client):
 
 
 # ============================================================
+# GET /db/plans
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_get_db_plans_returns_200(async_client):
+    """Returns 200 when plans exist."""
+    with patch("app.api.routes.db.router.get_distinct_plans_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = ["AccessViaMusic", "US Minerva"]
+        response = await async_client.get("/db/plans")
+        assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_get_db_plans_returns_list_of_strings(async_client):
+    """Returns a list of plan name strings."""
+    with patch("app.api.routes.db.router.get_distinct_plans_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = ["AccessViaMusic", "US Minerva"]
+        response = await async_client.get("/db/plans")
+        data = response.json()
+        assert isinstance(data, list)
+        assert "US Minerva" in data
+        assert "AccessViaMusic" in data
+
+
+@pytest.mark.asyncio
+async def test_get_db_plans_not_found_returns_404(async_client):
+    """Returns 404 when no plans exist in local DB."""
+    with patch("app.api.routes.db.router.get_distinct_plans_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = []
+        response = await async_client.get("/db/plans")
+        assert response.status_code == 404
+
+
+# ============================================================
+# GET /db/plans/{plan_name}
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_get_db_books_by_plan_returns_200(async_client):
+    """Returns 200 with valid plan name."""
+    with patch("app.api.routes.db.router.get_books_by_plan_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        response = await async_client.get("/db/plans/US Minerva")
+        assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_get_db_books_by_plan_returns_list(async_client):
+    """Returns a list of BookResponse objects."""
+    with patch("app.api.routes.db.router.get_books_by_plan_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        response = await async_client.get("/db/plans/US Minerva")
+        data = response.json()
+        assert isinstance(data, list)
+        assert data[0]["asin"] == "B08G9PRS1K"
+
+
+@pytest.mark.asyncio
+async def test_get_db_books_by_plan_not_found_returns_404(async_client):
+    """Returns 404 when no books found for plan."""
+    with patch("app.api.routes.db.router.get_books_by_plan_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = []
+        response = await async_client.get("/db/plans/FakePlan")
+        assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_db_books_by_plan_forwards_plan_name_to_reader(async_client):
+    """Plan name is forwarded to get_books_by_plan_from_db."""
+    with patch("app.api.routes.db.router.get_books_by_plan_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        await async_client.get("/db/plans/AccessViaMusic")
+        args, _ = mock.call_args
+        assert args[1] == "AccessViaMusic"
+
+
+@pytest.mark.asyncio
+async def test_get_db_books_by_plan_pagination_defaults(async_client):
+    """Default limit is 20 and default page is 1."""
+    with patch("app.api.routes.db.router.get_books_by_plan_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        await async_client.get("/db/plans/US Minerva")
+        _, kwargs = mock.call_args
+        assert kwargs["limit"] == 20
+        assert kwargs["page"] == 1
+
+
+@pytest.mark.asyncio
+async def test_get_db_books_by_plan_pagination_forwarded(async_client):
+    """Pagination parameters are forwarded to reader."""
+    with patch("app.api.routes.db.router.get_books_by_plan_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        await async_client.get("/db/plans/US Minerva?limit=5&page=3")
+        _, kwargs = mock.call_args
+        assert kwargs["limit"] == 5
+        assert kwargs["page"] == 3
+
+
+# ============================================================
 # GET /db/author/{asin}
 # ============================================================
 

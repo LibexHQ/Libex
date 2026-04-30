@@ -17,7 +17,6 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy import select, func, update, case
 from asyncpg.exceptions import UniqueViolationError as AsyncpgUniqueViolation
 
-
 # Database
 from app.db.models import (
     Book,
@@ -174,14 +173,13 @@ async def upsert_author(session: AsyncSession, author: dict) -> int | None:
     Upserts an author record. Returns the author's DB id if successful.
 
     When asin is null: match on (name, region, asin IS NULL) to avoid duplicates.
-    When asin is not null: check for an existing null-asin row first and upgrade
-    it in place, since PostgreSQL does not treat NULL = NULL in unique indexes.
-
-    Race condition: multiple concurrent requests for the same author may both
-    find the null-asin row and attempt the upgrade simultaneously. The second
-    concurrent UPDATE will hit a UniqueViolationError because the first already
-    set the asin. We catch IntegrityError and return the existing id — the data
-    is already correct at that point.
+    When asin is not null:
+      1. Check if a fully-upgraded row (asin, region, name) already exists —
+         return its id immediately if so. This short-circuits concurrent requests
+         that would otherwise race to upgrade the same null-asin row.
+      2. If not, look for a null-asin row to upgrade in place, since PostgreSQL
+         does not treat NULL = NULL in unique indexes.
+      3. Fall through to standard INSERT ... ON CONFLICT if neither exists.
     """
     a_asin = author.get("asin")
     a_name = author.get("name", "").strip()
@@ -191,6 +189,20 @@ async def upsert_author(session: AsyncSession, author: dict) -> int | None:
         return None
 
     if a_asin:
+        # Step 1: check if the fully-upgraded row already exists.
+        # This is the common case after the first request upgrades the row.
+        existing_result = await session.execute(
+            select(Author.id).where(
+                Author.asin == a_asin,
+                Author.region == a_region,
+                Author.name == a_name,
+            )
+        )
+        existing_id = existing_result.scalar_one_or_none()
+        if existing_id:
+            return existing_id
+
+        # Step 2: look for a null-asin row to upgrade.
         null_result = await session.execute(
             select(Author.id).where(
                 Author.name == a_name,
@@ -213,9 +225,9 @@ async def upsert_author(session: AsyncSession, author: dict) -> int | None:
                     )
                 )
             except (IntegrityError, AsyncpgUniqueViolation):
-                # Another concurrent request already upgraded this row.
-                # The data is correct — just roll back the failed statement
-                # and return the existing id.
+                # A concurrent request upgraded between our SELECT and UPDATE.
+                # The data is correct — roll back the failed statement and
+                # return the existing id.
                 await session.rollback()
             return null_id
 
@@ -312,7 +324,6 @@ async def upsert_book(session: AsyncSession, data: dict) -> None:
             sku_group=data.get("skuGroup"),
             is_listenable=_to_bool(data.get("isListenable"), True),
             is_buyable=_to_bool(data.get("isBuyable"), True),
-            is_vvab=_to_bool(data.get("isVvab")),
             created_at=_now(),
             updated_at=_now(),
         ).on_conflict_do_update(
@@ -343,7 +354,6 @@ async def upsert_book(session: AsyncSession, data: dict) -> None:
                 "sku_group": _coalesce(data.get("skuGroup"), Book.sku_group),
                 "is_listenable": _to_bool(data.get("isListenable", True)),
                 "is_buyable": _to_bool(data.get("isBuyable", True)),
-                "is_vvab": _to_bool(data.get("isVvab", False)),
                 "updated_at": _now(),
             },
         )

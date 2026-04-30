@@ -15,6 +15,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy import select, func, update, case
+from asyncpg.exceptions import UniqueViolationError as AsyncpgUniqueViolation
+
 
 # Database
 from app.db.models import (
@@ -210,7 +212,7 @@ async def upsert_author(session: AsyncSession, author: dict) -> int | None:
                         updated_at=_now(),
                     )
                 )
-            except IntegrityError:
+            except (IntegrityError, AsyncpgUniqueViolation):
                 # Another concurrent request already upgraded this row.
                 # The data is correct — just roll back the failed statement
                 # and return the existing id.

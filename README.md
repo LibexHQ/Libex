@@ -159,6 +159,20 @@ Logging is completely optional. Leave `AXIOM_TOKEN` empty and Libex logs to stdo
 
 **Local database:** Every successful Audible response is written to a persistent relational database. This powers the DB query endpoints and serves as a fallback when Audible is unavailable.
 
+**Audible Plus fields:** Book responses include `isVvab` (boolean indicating Audible Plus availability) and `plans` (list of Audible plan names such as `"US Minerva"` or `"AccessViaMusic"`). These let clients determine subscription availability programmatically.
+
+---
+
+## Audiobookshelf Configuration
+
+Audiobookshelf's custom metadata provider calls `/{region}/search`, not `/search`. When configuring ABS, set your base URL to include the region:
+
+```
+http://YOUR-IP:3333/us
+```
+
+ABS will then call `/us/search?title=...&author=...` which returns the `{"matches": [...]}` format ABS expects. The flat `/search` endpoint returns a different format that ABS cannot parse.
+
 ---
 
 ## API Endpoints
@@ -183,6 +197,13 @@ Logging is completely optional. Leave `AXIOM_TOKEN` empty and Libex logs to stdo
 | GET | `/{region}/search` | Regional search for Audiobookshelf compatibility |
 | GET | `/{region}/quick-search/search` | Regional quick search for Audiobookshelf compatibility |
 | GET | `/db/book` | Query the local indexed book library |
+| GET | `/db/book/{asin}` | Get a single book from local DB |
+| GET | `/db/book/{asin}/chapters` | Get chapter data from local DB |
+| GET | `/db/book/sku/{sku}` | Get books by SKU group from local DB |
+| GET | `/db/author/{asin}` | Get author from local DB |
+| GET | `/db/author/{asin}/books` | Get author's books from local DB |
+| GET | `/db/series/{asin}` | Get series from local DB |
+| GET | `/db/series/{asin}/books` | Get series books from local DB |
 | GET | `/health` | Health check |
 
 Full interactive documentation available at `/docs` when running.
@@ -220,6 +241,8 @@ All parameters are optional but at least one filter must be provided. Supports p
 | `has_pdf` | bool | exact |
 | `is_listenable` | bool | exact |
 | `is_buyable` | bool | exact |
+| `is_vvab` | bool | exact |
+| `plan_name` | string | JSONB contains |
 
 ---
 
@@ -285,11 +308,7 @@ Libex is API-compatible with AudiMeta. To migrate:
 
 ## Contributing
 
-Contributions are welcome. Fork it, improve it, open a PR.
-
-Planned features:
-- Request analytics
-- Additional metadata sources
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for branch naming, commit conventions, and PR requirements.
 
 ---
 

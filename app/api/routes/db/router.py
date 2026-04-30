@@ -58,6 +58,7 @@ async def search_db_books(
     is_listenable: Annotated[bool | None, Query(description="Filter by listenable status")] = None,
     is_buyable: Annotated[bool | None, Query(description="Filter by buyable status")] = None,
     is_vvab: Annotated[bool | None, Query(description="Filter by VVAB (virtual voice audiobook) status")] = None,
+    plan_name: Annotated[str | None, Query(description="Filter by Audible plan name (e.g. US Minerva, AccessViaMusic)")] = None,
     limit: Annotated[int, Query(ge=1, le=100, description="Results per page (max 100)")] = 20,
     page: Annotated[int, Query(ge=1, description="Page number")] = 1,
     session: AsyncSession = Depends(get_session),
@@ -66,7 +67,7 @@ async def search_db_books(
         title, subtitle, region, description, summary, publisher, copyright,
         isbn, author_name, series_name, language, rating_better_than, rating_worse_than, longer_than,
         shorter_than, explicit, whisper_sync, has_pdf, book_format,
-        content_type, content_delivery_type, is_listenable, is_buyable, is_vvab,
+        content_type, content_delivery_type, is_listenable, is_buyable, is_vvab, plan_name,
     ]
     if not any(p is not None for p in filter_params):
         raise NotFoundException("No search parameters provided")
@@ -97,6 +98,7 @@ async def search_db_books(
         is_listenable=is_listenable,
         is_buyable=is_buyable,
         is_vvab=is_vvab,
+        plan_name=plan_name,
         limit=limit,
         page=page,
     )

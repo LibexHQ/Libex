@@ -10,6 +10,7 @@ This ensures data accuracy and freshness at all times.
 """
 
 # Standard library
+import random
 from typing import Any
 
 # Third party
@@ -60,19 +61,22 @@ VALID_REGIONS = set(REGION_MAP.keys())
 # ============================================================
 
 BASE_HEADERS: dict[str, str] = {
-    "User-Agent": "Audible/671 CFNetwork/1240.0.4 Darwin/20.6.0",
+    "User-Agent": "Audible/4.15.0 Android/14 Build/SM-S928U",
+    "Content-Type": "application/json",
     "Accept": "application/json",
     "Accept-Encoding": "gzip",
+    "Accept-Charset": "utf-8",
 }
 
 
 def get_region_headers(region: str) -> dict[str, str]:
-    """Returns region-specific headers including locale and language."""
+    """Returns region-specific headers including locale, language, and X-ADP-SW."""
     locale = LOCALE_MAP.get(region, "en-US")
     return {
         **BASE_HEADERS,
+        "ACCEPTED-LANGUAGE": locale,
         "Accept-Language": locale,
-        "Accept-Charset": "utf-8",
+        "X-ADP-SW": str(random.randint(10000000, 99999999)),
     }
 
 

@@ -266,6 +266,7 @@ async def test_pagination_defaults(async_client):
     ("book_format", "unabridged", "book_format", "unabridged"),
     ("content_type", "Book", "content_type", "Book"),
     ("content_delivery_type", "SinglePartBook", "content_delivery_type", "SinglePartBook"),
+    ("plan_name", "US Minerva", "plan_name", "US Minerva"),
 ])
 async def test_string_filter_forwarded_to_reader(async_client, param, value, kwarg, expected):
     """String filter parameters are forwarded correctly to search_books_from_db."""
@@ -363,6 +364,25 @@ async def test_series_name_filter_returns_200(async_client):
         mock.return_value = [MOCK_BOOK]
         response = await async_client.get("/db/book?series_name=Dune")
         assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_plan_name_filter_returns_200(async_client):
+    """Returns 200 with plan_name filter."""
+    with patch(READER_PATH, new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        response = await async_client.get("/db/book?plan_name=US+Minerva")
+        assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_plan_name_filter_forwarded_to_reader(async_client):
+    """plan_name parameter is forwarded to search_books_from_db."""
+    with patch(READER_PATH, new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        await async_client.get("/db/book?plan_name=AccessViaMusic")
+        _, kwargs = mock.call_args
+        assert kwargs["plan_name"] == "AccessViaMusic"
 
 
 # ============================================================

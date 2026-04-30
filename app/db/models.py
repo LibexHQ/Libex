@@ -100,6 +100,7 @@ class Book(Base):
     is_listenable: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_buyable: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_vvab: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    plans: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),

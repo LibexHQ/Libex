@@ -6,7 +6,7 @@ All DB interactions are mocked — we test our logic not SQLAlchemy.
 
 # Standard library
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 # Third party
 import pytest

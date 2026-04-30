@@ -10,7 +10,7 @@ Returns the same dict format as the Audible services.
 from typing import Any
 
 # Third party
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -328,6 +328,54 @@ async def get_books_by_sku_from_db(session: AsyncSession, sku_group: str) -> lis
         return results
     except Exception as e:
         logger.warning(f"DB read failed for sku_group {sku_group}: {e}")
+        return []
+
+
+async def get_distinct_plans_from_db(session: AsyncSession) -> list[str]:
+    """Returns a sorted list of all distinct plan names across stored books."""
+    try:
+        result = await session.execute(
+            select(
+                func.jsonb_array_elements_text(Book.plans).label("plan_name")
+            )
+            .where(Book.plans.isnot(None))
+            .distinct()
+        )
+        plans = sorted([row[0] for row in result.fetchall()])
+        return plans
+    except Exception as e:
+        logger.warning(f"DB read failed for distinct plans: {e}")
+        return []
+
+
+async def get_books_by_plan_from_db(
+    session: AsyncSession,
+    plan_name: str,
+    limit: int = 20,
+    page: int = 1,
+) -> list[dict[str, Any]]:
+    """Fetches all books containing a specific plan name."""
+    try:
+        result = await session.execute(
+            select(Book)
+            .where(Book.plans.contains([plan_name]))
+            .options(
+                selectinload(Book.authors),
+                selectinload(Book.narrators),
+                selectinload(Book.genres),
+                selectinload(Book.series),
+            )
+            .limit(limit)
+            .offset((page - 1) * limit)
+        )
+        books = result.scalars().all()
+        results = []
+        for book in books:
+            positions = await _get_series_positions(session, book.asin)
+            results.append(_book_to_dict(book, positions))
+        return results
+    except Exception as e:
+        logger.warning(f"DB read failed for plan '{plan_name}': {e}")
         return []
 
 # ============================================================

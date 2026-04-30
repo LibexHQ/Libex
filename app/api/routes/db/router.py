@@ -22,7 +22,9 @@ from app.services.db.reader import (
     get_author_books_from_db,
     get_author_from_db,
     get_book_from_db,
+    get_books_by_plan_from_db,
     get_books_by_sku_from_db,
+    get_distinct_plans_from_db,
     get_series_books_from_db,
     get_series_from_db,
     get_track_from_db,
@@ -106,6 +108,31 @@ async def search_db_books(
     if not books:
         raise NotFoundException("No books found matching the given parameters")
 
+    return books
+
+
+@router.get("/plans", response_model=list[str])
+async def get_db_plans(
+    session: AsyncSession = Depends(get_session),
+) -> list[str]:
+    """Get all distinct Audible plan names from the local DB."""
+    plans = await get_distinct_plans_from_db(session)
+    if not plans:
+        raise NotFoundException("No plans found in local database")
+    return plans
+
+
+@router.get("/plans/{plan_name}", response_model=list[BookResponse])
+async def get_db_books_by_plan(
+    plan_name: Annotated[str, Path(description="Audible plan name (e.g. US Minerva, AccessViaMusic)")],
+    limit: Annotated[int, Query(ge=1, le=100, description="Results per page (max 100)")] = 20,
+    page: Annotated[int, Query(ge=1, description="Page number")] = 1,
+    session: AsyncSession = Depends(get_session),
+) -> list[dict[str, Any]]:
+    """Get all books available under a specific Audible plan from the local DB."""
+    books = await get_books_by_plan_from_db(session, plan_name, limit=limit, page=page)
+    if not books:
+        raise NotFoundException(f"No books found for plan: {plan_name}")
     return books
 
 

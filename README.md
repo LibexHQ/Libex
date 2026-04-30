@@ -200,6 +200,8 @@ ABS will then call `/us/search?title=...&author=...` which returns the `{"matche
 | GET | `/db/book/{asin}` | Get a single book from local DB |
 | GET | `/db/book/{asin}/chapters` | Get chapter data from local DB |
 | GET | `/db/book/sku/{sku}` | Get books by SKU group from local DB |
+| GET | `/db/plans` | Get all distinct Audible plan names from local DB |
+| GET | `/db/plans/{plan_name}` | Get all books under a specific plan from local DB |
 | GET | `/db/author/{asin}` | Get author from local DB |
 | GET | `/db/author/{asin}/books` | Get author's books from local DB |
 | GET | `/db/series/{asin}` | Get series from local DB |

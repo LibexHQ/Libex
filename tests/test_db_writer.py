@@ -5,7 +5,7 @@ All DB interactions are mocked — we test our logic not SQLAlchemy.
 """
 
 # Standard library
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock
 
 # Third party
 import pytest
@@ -19,35 +19,36 @@ from app.services.db.writer import upsert_author
 # HELPERS
 # ============================================================
 
-def _make_session(null_id=None, insert_id=None):
-    """
-    Builds a mock AsyncSession.
+def _scalar(value):
+    """Returns a mock result whose scalar_one_or_none returns value."""
+    r = MagicMock()
+    r.scalar_one_or_none.return_value = value
+    return r
 
-    null_id:   scalar returned by the null-asin SELECT (Author.id or None)
-    insert_id: scalar returned by the INSERT ... RETURNING id
-    """
-    session = AsyncMock()
 
-    null_result = MagicMock()
-    null_result.scalar_one_or_none.return_value = null_id
+def _fetchone(id_):
+    """Returns a mock result whose fetchone returns (id_,)."""
+    r = MagicMock()
+    r.fetchone.return_value = (id_,) if id_ is not None else None
+    return r
 
-    insert_result = MagicMock()
-    insert_result.fetchone.return_value = (insert_id,) if insert_id is not None else None
 
-    # First execute call → null-asin SELECT
-    # Second execute call → UPDATE or INSERT
-    session.execute = AsyncMock(side_effect=[null_result, insert_result])
-    return session
+def _session(*side_effects):
+    """Builds a mock AsyncSession with the given execute side_effects."""
+    s = AsyncMock()
+    s.execute = AsyncMock(side_effect=list(side_effects))
+    s.rollback = AsyncMock()
+    return s
 
 
 # ============================================================
-# NULL-ASIN UPGRADE — HAPPY PATH
+# EXISTING ASIN ROW — SHORT CIRCUIT (step 1)
 # ============================================================
 
 @pytest.mark.asyncio
-async def test_upsert_author_upgrades_null_asin_row():
-    """When a null-asin row exists, it is upgraded with the real ASIN."""
-    session = _make_session(null_id=42)
+async def test_upsert_author_returns_existing_id_when_asin_row_exists():
+    """When fully-upgraded row already exists, returns its id immediately."""
+    session = _session(_scalar(42))
     result = await upsert_author(session, {
         "asin": "B000APHM1K",
         "name": "Vince Flynn",
@@ -57,22 +58,61 @@ async def test_upsert_author_upgrades_null_asin_row():
 
 
 @pytest.mark.asyncio
-async def test_upsert_author_upgrade_calls_update_not_insert():
-    """Null-asin upgrade path issues an UPDATE not a second INSERT."""
-    session = _make_session(null_id=42)
+async def test_upsert_author_only_one_execute_when_asin_row_exists():
+    """Short-circuit path issues only one SELECT — no UPDATE or INSERT."""
+    session = _session(_scalar(42))
     await upsert_author(session, {
         "asin": "B000APHM1K",
         "name": "Vince Flynn",
         "region": "us",
     })
-    # Two execute calls: SELECT then UPDATE
-    assert session.execute.call_count == 2
+    assert session.execute.call_count == 1
 
 
 @pytest.mark.asyncio
-async def test_upsert_author_upgrade_returns_existing_id():
-    """Null-asin upgrade returns the existing row id, not a new one."""
-    session = _make_session(null_id=99)
+async def test_upsert_author_no_rollback_on_short_circuit():
+    """Short-circuit path never calls rollback."""
+    session = _session(_scalar(42))
+    await upsert_author(session, {
+        "asin": "B000APHM1K",
+        "name": "Vince Flynn",
+        "region": "us",
+    })
+    session.rollback.assert_not_called()
+
+
+# ============================================================
+# NULL-ASIN UPGRADE — HAPPY PATH (step 2)
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_upsert_author_upgrades_null_asin_row():
+    """When no upgraded row exists but a null-asin row does, it is upgraded."""
+    session = _session(_scalar(None), _scalar(42), MagicMock())
+    result = await upsert_author(session, {
+        "asin": "B000APHM1K",
+        "name": "Vince Flynn",
+        "region": "us",
+    })
+    assert result == 42
+
+
+@pytest.mark.asyncio
+async def test_upsert_author_upgrade_three_executes():
+    """Upgrade path issues three execute calls: existing SELECT, null SELECT, UPDATE."""
+    session = _session(_scalar(None), _scalar(42), MagicMock())
+    await upsert_author(session, {
+        "asin": "B000APHM1K",
+        "name": "Vince Flynn",
+        "region": "us",
+    })
+    assert session.execute.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_upsert_author_upgrade_returns_null_row_id():
+    """Upgrade returns the null-asin row's id, not a newly generated one."""
+    session = _session(_scalar(None), _scalar(99), MagicMock())
     result = await upsert_author(session, {
         "asin": "B000APHM1K",
         "name": "Vince Flynn",
@@ -89,20 +129,14 @@ async def test_upsert_author_upgrade_returns_existing_id():
 @pytest.mark.asyncio
 async def test_upsert_author_upgrade_race_condition_returns_id():
     """
-    When a concurrent request already upgraded the null-asin row,
-    IntegrityError is caught and the existing id is returned.
+    When a concurrent request upgraded between our SELECT and UPDATE,
+    IntegrityError is caught and the null row id is returned.
     """
-    session = AsyncMock()
-
-    null_result = MagicMock()
-    null_result.scalar_one_or_none.return_value = 42
-
-    session.execute = AsyncMock(side_effect=[
-        null_result,
+    session = _session(
+        _scalar(None),
+        _scalar(42),
         IntegrityError("duplicate", {}, Exception()),
-    ])
-    session.rollback = AsyncMock()
-
+    )
     result = await upsert_author(session, {
         "asin": "B000APHM1K",
         "name": "Vince Flynn",
@@ -114,17 +148,11 @@ async def test_upsert_author_upgrade_race_condition_returns_id():
 @pytest.mark.asyncio
 async def test_upsert_author_upgrade_race_condition_calls_rollback():
     """IntegrityError during upgrade triggers session rollback."""
-    session = AsyncMock()
-
-    null_result = MagicMock()
-    null_result.scalar_one_or_none.return_value = 42
-
-    session.execute = AsyncMock(side_effect=[
-        null_result,
+    session = _session(
+        _scalar(None),
+        _scalar(42),
         IntegrityError("duplicate", {}, Exception()),
-    ])
-    session.rollback = AsyncMock()
-
+    )
     await upsert_author(session, {
         "asin": "B000APHM1K",
         "name": "Vince Flynn",
@@ -136,18 +164,11 @@ async def test_upsert_author_upgrade_race_condition_calls_rollback():
 @pytest.mark.asyncio
 async def test_upsert_author_upgrade_race_condition_does_not_reraise():
     """IntegrityError during upgrade is swallowed — does not propagate."""
-    session = AsyncMock()
-
-    null_result = MagicMock()
-    null_result.scalar_one_or_none.return_value = 42
-
-    session.execute = AsyncMock(side_effect=[
-        null_result,
+    session = _session(
+        _scalar(None),
+        _scalar(42),
         IntegrityError("duplicate", {}, Exception()),
-    ])
-    session.rollback = AsyncMock()
-
-    # Should not raise
+    )
     result = await upsert_author(session, {
         "asin": "B000APHM1K",
         "name": "Vince Flynn",
@@ -157,13 +178,13 @@ async def test_upsert_author_upgrade_race_condition_does_not_reraise():
 
 
 # ============================================================
-# NO NULL-ASIN ROW — STANDARD UPSERT
+# NO EXISTING ROWS — STANDARD UPSERT (step 3)
 # ============================================================
 
 @pytest.mark.asyncio
-async def test_upsert_author_with_asin_no_null_row_inserts():
-    """When no null-asin row exists, standard INSERT ... RETURNING is used."""
-    session = _make_session(null_id=None, insert_id=7)
+async def test_upsert_author_with_asin_no_existing_rows_inserts():
+    """When neither upgraded nor null-asin row exists, INSERT is used."""
+    session = _session(_scalar(None), _scalar(None), _fetchone(7))
     result = await upsert_author(session, {
         "asin": "B000APHM1K",
         "name": "Vince Flynn",
@@ -173,15 +194,15 @@ async def test_upsert_author_with_asin_no_null_row_inserts():
 
 
 @pytest.mark.asyncio
-async def test_upsert_author_with_asin_no_null_row_two_executes():
-    """Standard path issues SELECT then INSERT — two execute calls."""
-    session = _make_session(null_id=None, insert_id=7)
+async def test_upsert_author_with_asin_no_existing_rows_three_executes():
+    """Standard insert path issues three execute calls: two SELECTs then INSERT."""
+    session = _session(_scalar(None), _scalar(None), _fetchone(7))
     await upsert_author(session, {
         "asin": "B000APHM1K",
         "name": "Vince Flynn",
         "region": "us",
     })
-    assert session.execute.call_count == 2
+    assert session.execute.call_count == 3
 
 
 # ============================================================
@@ -190,12 +211,8 @@ async def test_upsert_author_with_asin_no_null_row_two_executes():
 
 @pytest.mark.asyncio
 async def test_upsert_author_null_asin_existing_row_returns_id():
-    """When author has no ASIN and a matching null-asin row exists, returns existing id."""
-    session = AsyncMock()
-    existing_result = MagicMock()
-    existing_result.scalar_one_or_none.return_value = 55
-    session.execute = AsyncMock(return_value=existing_result)
-
+    """When author has no ASIN and a matching null-asin row exists, returns id."""
+    session = _session(_scalar(55))
     result = await upsert_author(session, {
         "asin": None,
         "name": "Vince Flynn",
@@ -205,35 +222,21 @@ async def test_upsert_author_null_asin_existing_row_returns_id():
 
 
 @pytest.mark.asyncio
-async def test_upsert_author_null_asin_existing_row_no_insert():
-    """When null-asin row already exists, no INSERT is issued."""
-    session = AsyncMock()
-    existing_result = MagicMock()
-    existing_result.scalar_one_or_none.return_value = 55
-    session.execute = AsyncMock(return_value=existing_result)
-
+async def test_upsert_author_null_asin_existing_row_one_execute():
+    """Existing null-asin path issues only one SELECT."""
+    session = _session(_scalar(55))
     await upsert_author(session, {
         "asin": None,
         "name": "Vince Flynn",
         "region": "us",
     })
-    # Only one execute: the SELECT
     assert session.execute.call_count == 1
 
 
 @pytest.mark.asyncio
 async def test_upsert_author_null_asin_new_row_inserts():
     """When no null-asin row exists and no ASIN, inserts new row."""
-    session = AsyncMock()
-
-    select_result = MagicMock()
-    select_result.scalar_one_or_none.return_value = None
-
-    insert_result = MagicMock()
-    insert_result.fetchone.return_value = (88,)
-
-    session.execute = AsyncMock(side_effect=[select_result, insert_result])
-
+    session = _session(_scalar(None), _fetchone(88))
     result = await upsert_author(session, {
         "asin": None,
         "name": "New Author",

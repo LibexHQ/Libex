@@ -26,7 +26,7 @@ from app.services.audible.client import audible_get, LOCALE_MAP
 from app.services.cache import manager as cache
 from app.services.cache.manager import author_key, author_books_key
 from app.services.db.writer import upsert_author_profile
-from app.services.db.reader import get_author_from_db
+from app.services.db.reader import get_author_from_db, get_author_books_from_db
 
 logger = get_logger()
 
@@ -41,8 +41,10 @@ def _generate_session_id() -> str:
     Format: 000-XXXXXXX-XXXXXXX
     """
     import random
+
     def random_digits() -> str:
         return str(random.randint(0, 9999999)).zfill(7)
+
     return f"000-{random_digits()}-{random_digits()}"
 
 
@@ -66,6 +68,7 @@ def _normalize_author(data: dict, asin: str, region: str) -> dict[str, Any]:
 # AUDIBLE REQUESTS
 # ============================================================
 
+
 async def _fetch_author_details(asin: str, region: str) -> dict[str, Any]:
     """
     Fetches author profile from Audible contributors endpoint.
@@ -78,36 +81,13 @@ async def _fetch_author_details(asin: str, region: str) -> dict[str, Any]:
     return await audible_get(region, path, params)
 
 
-async def _fetch_author_books_page(
-    asin: str,
-    region: str,
-    token: str | None = None,
-) -> dict[str, Any]:
-    """
-    Fetches a page of author books using the Audible Android app endpoint.
-    Uses continuation tokens for pagination rather than page numbers.
-    """
-    path = f"/1.0/screens/audible-android-author-detail/{asin}"
-    params: dict[str, Any] = {
-        "tabId": "titles",
-        "author_asin": asin,
-        "title_source": "all",
-        "session_id": _generate_session_id(),
-        "applicationType": "Android_App",
-        "local_time": datetime.utcnow().isoformat(),
-        "response_groups": "always-returned",
-        "surface": "Android",
-    }
-    if token:
-        params["pageSectionContinuationToken"] = token
-
-    return await audible_get(region, path, params)
-
 async def _fetch_author_books_by_name(name: str, region: str) -> tuple[list[str], int]:
-    """Returns (asins, pages_fetched)."""
+    """
+    Fetches book ASINs by author name using the standard catalog endpoint.
+    Returns (asins, pages_fetched).
+    """
     asins: list[str] = []
     page = 0
-
     while page <= 20:
         path = "/1.0/catalog/products"
         params = {
@@ -119,7 +99,6 @@ async def _fetch_author_books_by_name(name: str, region: str) -> tuple[list[str]
         }
         data = await audible_get(region, path, params)
         products = data.get("products", [])
-
         if not products:
             break
 
@@ -136,15 +115,45 @@ async def _fetch_author_books_by_name(name: str, region: str) -> tuple[list[str]
 
         if len(products) < 50:
             break
-
         page += 1
 
     return asins, page
 
 
+async def _resolve_author_name(
+    asin: str,
+    region: str,
+    session: AsyncSession,
+) -> str | None:
+    """
+    Resolves an author ASIN to their name.
+    Checks DB first, then fetches from Audible contributors endpoint.
+    """
+    # Check DB first
+    db_author = await get_author_from_db(session, asin, region)
+    if db_author and db_author.get("name"):
+        return db_author["name"]
+
+    # Fetch from Audible
+    try:
+        data = await _fetch_author_details(asin, region)
+        name = data.get("contributor", {}).get("name", "").replace("\t", "").strip()
+        if name:
+            # Persist the author profile while we have it
+            normalized = _normalize_author(data, asin, region)
+            await upsert_author_profile(session, normalized)
+            await cache.set(session, author_key(asin, region), normalized)
+            return name
+    except Exception:
+        pass
+
+    return None
+
+
 # ============================================================
 # PUBLIC API
 # ============================================================
+
 
 async def get_author(
     asin: str,
@@ -179,11 +188,11 @@ async def get_author(
             "author_took": author_took,
             "region": region,
         })
+
         return normalized
 
     except NotFoundException:
         raise
-
     except Exception:
         # Try DB first
         db_result = await get_author_from_db(session, asin, region)
@@ -205,8 +214,17 @@ async def get_author_books(
     use_cache: bool = False,
 ) -> list[str]:
     """
-    Fetches all book ASINs for an author using the Android endpoint.
-    Uses continuation token pagination.
+    Fetches all book ASINs for an author.
+
+    Resolves the author ASIN to a name via the contributors endpoint,
+    then searches the Audible catalog by author name.
+
+    The previous Android screen endpoint (/1.0/screens/audible-android-author-detail/)
+    was retired by Audible server-side as of April 2026. The endpoint string still
+    exists in the Audible APK but returns 404 for all regions, all ASINs, regardless
+    of headers. Confirmed via direct curl testing and APK decompilation.
+
+    Falls back to local DB if Audible is unavailable.
     """
     if use_cache:
         cached = await cache.get(session, author_books_key(asin, region))
@@ -215,47 +233,49 @@ async def get_author_books(
 
     try:
         start = time.monotonic()
-        asins: list[str] = []
-        pagination_token: str | None = None
-        first_run = True
-        page = 0
 
-        while (first_run or pagination_token) and page <= 10:
-            first_run = False
-            data = await _fetch_author_books_page(asin, region, pagination_token)
+        # Resolve author ASIN to name
+        author_name = await _resolve_author_name(asin, region, session)
+        if not author_name:
+            raise NotFoundException(f"Could not resolve author name for: {asin}")
 
-            for section in data.get("sections", []):
-                if section.get("model", {}).get("rows") and section.get("pagination") is not None:
-                    for item in section["model"]["rows"]:
-                        meta = item.get("product_metadata", {})
-                        if meta.get("asin"):
-                            asins.append(meta["asin"])
-                    pagination_token = section.get("pagination")
-                    break
-
-            page += 1
+        # Search catalog by author name
+        asins, pages_fetched = await _fetch_author_books_by_name(author_name, region)
 
         author_book_took = round((time.monotonic() - start) * 1000, 2)
 
         if not asins:
+            # Try DB fallback before giving up
+            db_books = await get_author_books_from_db(session, asin, region)
+            if db_books:
+                return [b["asin"] for b in db_books]
             raise NotFoundException(f"No books found for author: {asin}")
 
         await cache.set(session, author_books_key(asin, region), asins)
 
         logger.info("Requested Audible Author Books", extra={
+            "author_name": author_name,
             "author_book_num": len(asins),
+            "pages_fetched": pages_fetched,
             "author_book_took": author_book_took,
             "region": region,
         })
+
         return asins
 
     except NotFoundException:
         raise
-
     except Exception:
+        # Try DB fallback
+        db_books = await get_author_books_from_db(session, asin, region)
+        if db_books:
+            return [b["asin"] for b in db_books]
+
+        # Try cache
         cached = await cache.get(session, author_books_key(asin, region))
         if cached:
             return cached
+
         raise NotFoundException("Audible unavailable and no cached author books found")
 
 
@@ -280,8 +300,8 @@ async def get_author_books_by_name(
             "author_book_took": author_book_took,
             "region": region,
         })
-        return asins
 
+        return asins
 
     except NotFoundException:
         raise
@@ -309,8 +329,8 @@ async def search_authors(
 
         data = await audible_get(region, path, params)
         search_took = round((time.monotonic() - start) * 1000, 2)
-        asins: list[str] = []
 
+        asins: list[str] = []
         for item in data.get("model", {}).get("items", []):
             if item.get("view", {}).get("template") == "AuthorItemV2":
                 asin = item.get("model", {}).get("person_metadata", {}).get("asin")

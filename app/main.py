@@ -19,6 +19,10 @@ from app.core.middleware import setup_middleware
 # Database
 from app.db.session import engine
 
+# Services
+from app.services.seeder import run_seeder, SessionFactory
+from app.services.cache.manager import purge_expired
+
 # Routes
 from app.api.routes.books import router as books_router
 from app.api.routes.authors import router as authors_router
@@ -32,6 +36,23 @@ from app.api.routes.db import router as db_router
 
 settings = get_settings()
 logger = setup_logging()
+
+
+# ============================================================
+# BACKGROUND TASKS
+# ============================================================
+
+async def _cache_purge_loop():
+    """Purges expired cache entries every hour."""
+    while True:
+        await asyncio.sleep(3600)
+        try:
+            async with SessionFactory() as session:
+                count = await purge_expired(session)
+                if count:
+                    logger.info(f"Cache purge: removed {count} expired entries")
+        except Exception as e:
+            logger.warning(f"Cache purge failed: {e}")
 
 # ============================================================
 # APPLICATION
@@ -55,10 +76,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Database unavailable on startup: {e}")
     logger.info(f"Libex {settings.app_version} starting up")
+
+    # Start background tasks
+    seeder_task = asyncio.create_task(run_seeder())
+    purge_task = asyncio.create_task(_cache_purge_loop())
     
     yield
     
     # Shutdown
+    seeder_task.cancel()
+    purge_task.cancel()
     await engine.dispose()
     logger.info("Libex shutting down")
 

@@ -14,6 +14,10 @@ services:
       - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}
       - AXIOM_TOKEN=${AXIOM_TOKEN}
       - AXIOM_DATASET=${AXIOM_DATASET:-libex}
+      - SEEDER_ENABLED=${SEEDER_ENABLED:-false}
+      - SEEDER_INTERVAL_HOURS=${SEEDER_INTERVAL_HOURS:-24}
+      - SEEDER_REQUEST_DELAY=${SEEDER_REQUEST_DELAY:-1.0}
+      - SEEDER_REGIONS=${SEEDER_REGIONS:-us}
     volumes:
       - ./logs:/app/logs
     depends_on:

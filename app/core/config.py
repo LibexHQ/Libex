@@ -46,6 +46,12 @@ class Settings(BaseSettings):
     axiom_token: str = ""
     axiom_dataset: str = "libex"
 
+    # Seeder
+    seeder_enabled: bool = False
+    seeder_interval_hours: int = 24
+    seeder_request_delay: float = 1.0
+    seeder_regions: str = "us"
+
 
 @lru_cache()
 def get_settings() -> Settings:

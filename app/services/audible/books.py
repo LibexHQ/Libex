@@ -291,9 +291,26 @@ async def get_books_by_asins(
         if cached:
             return [cached]
 
+    # Batch cache: check each ASIN, only fetch misses from Audible
+    cached_results: list[dict[str, Any]] = []
+    fetch_asins = unique_asins
+    if use_cache and len(unique_asins) > 1:
+        cached_results = []
+        fetch_asins = []
+        for asin in unique_asins:
+            hit = await cache.get(session, book_key(asin, region))
+            if hit:
+                cached_results.append(hit)
+            else:
+                fetch_asins.append(asin)
+
+        # All ASINs found in cache
+        if not fetch_asins:
+            return cached_results
+
     try:
         start = time.monotonic()
-        chunks = [unique_asins[i:i + 50] for i in range(0, len(unique_asins), 50)]
+        chunks = [fetch_asins[i:i + 50] for i in range(0, len(fetch_asins), 50)]
         all_products = []
         for chunk in chunks:
             products = await _fetch_chunk(chunk, region)
@@ -301,7 +318,7 @@ async def get_books_by_asins(
 
         requested_took = round((time.monotonic() - start) * 1000, 2)
 
-        if not all_products:
+        if not all_products and not cached_results:
             return []
 
         normalized = [_normalize_product(p, region) for p in all_products]
@@ -313,33 +330,34 @@ async def get_books_by_asins(
                 await cache.set(session, book_key(book["asin"], region), book)
 
         logger.info("Requested books from Audible", extra={
-            "requested_num": len(unique_asins),
+            "requested_num": len(fetch_asins),
+            "cache_hits": len(cached_results),
             "requested_took": requested_took,
             "region": region,
         })
 
-        return normalized
+        return cached_results + normalized
 
     except NotFoundException:
         raise
 
     except Exception:
         await session.rollback()
-        logger.warning(f"Audible unavailable, attempting DB fallback for {unique_asins}")
+        logger.warning(f"Audible unavailable, attempting DB fallback for {fetch_asins}")
 
-        # Try relational DB first
-        db_results = await get_books_from_db(session, unique_asins)
+        # Try relational DB first for the misses
+        db_results = await get_books_from_db(session, fetch_asins)
         if db_results:
-            return db_results
+            return cached_results + db_results
 
-        # Fall back to cache
-        results = []
-        for asin in unique_asins:
-            cached = await cache.get(session, book_key(asin, region))
-            if cached:
-                results.append(cached)
-        if results:
-            return results
+        # Fall back to cache for the misses
+        fallback_results = []
+        for asin in fetch_asins:
+            hit = await cache.get(session, book_key(asin, region))
+            if hit:
+                fallback_results.append(hit)
+        if fallback_results or cached_results:
+            return cached_results + fallback_results
 
         raise NotFoundException("Audible unavailable and no cached data found")
 

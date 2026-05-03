@@ -547,3 +547,24 @@ async def get_track_from_db(session: AsyncSession, asin: str) -> dict[str, Any] 
     except Exception as e:
         logger.warning(f"DB read failed for track {asin}: {e}")
         return None
+
+
+# ============================================================
+# STATS READER
+# ============================================================
+
+async def get_db_stats(session: AsyncSession) -> dict[str, int]:
+    """Returns counts of books, authors, and series in the local DB."""
+    try:
+        books = await session.execute(select(func.count()).select_from(Book))
+        authors = await session.execute(select(func.count()).select_from(Author))
+        series = await session.execute(select(func.count()).select_from(Series))
+
+        return {
+            "books": books.scalar_one(),
+            "authors": authors.scalar_one(),
+            "series": series.scalar_one(),
+        }
+    except Exception as e:
+        logger.warning(f"DB read failed for stats: {e}")
+        return {"books": 0, "authors": 0, "series": 0}

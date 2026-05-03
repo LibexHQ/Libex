@@ -210,4 +210,5 @@ __marimo__/
 __pycache__
 *.pyc
 .pytest_cache
-.vscodeapk-work/
+.vscode
+apk-work/

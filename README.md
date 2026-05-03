@@ -159,7 +159,9 @@ Logging is completely optional. Leave `AXIOM_TOKEN` empty and Libex logs to stdo
 
 **Local database:** Every successful Audible response is written to a persistent relational database. This powers the DB query endpoints and serves as a fallback when Audible is unavailable.
 
-**Audible Plus fields:** Book responses include `isVvab` (boolean indicating Audible Plus availability) and `plans` (list of Audible plan names such as `"US Minerva"` or `"AccessViaMusic"`). These let clients determine subscription availability programmatically.
+**Virtual Voice Audiobooks:** Book responses include `isVvab` (boolean indicating whether the book is a Virtual Voice Audiobook — AI-narrated rather than human-narrated).
+
+**Audible plans:** Book responses include `plans` (list of Audible plan names such as `"US Minerva"` or `"AccessViaMusic"`), letting clients determine subscription availability programmatically.
 
 ---
 

@@ -24,6 +24,7 @@ from app.services.db.reader import (
     get_book_from_db,
     get_books_by_plan_from_db,
     get_books_by_sku_from_db,
+    get_db_stats,
     get_distinct_plans_from_db,
     get_series_books_from_db,
     get_series_from_db,
@@ -32,6 +33,14 @@ from app.services.db.reader import (
 )
 
 router = APIRouter(prefix="/db", tags=["Database"])
+
+
+@router.get("/stats")
+async def get_stats(
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, int]:
+    """Get counts of books, authors, and series in the local DB."""
+    return await get_db_stats(session)
 
 
 @router.get("/book", response_model=list[BookResponse])

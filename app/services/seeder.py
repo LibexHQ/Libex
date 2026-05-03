@@ -17,10 +17,9 @@ Rate-limited by a configurable delay between Audible requests.
 
 # Standard library
 import asyncio
-from typing import Any
 
 # Third party
-from sqlalchemy import select, func
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # Database
@@ -263,7 +262,7 @@ async def run_seeder() -> None:
     delay = settings.seeder_request_delay
 
     logger.info(
-        f"Seeder: starting",
+        "Seeder: starting",
         extra={
             "regions": regions,
             "interval_hours": settings.seeder_interval_hours,

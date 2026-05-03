@@ -13,8 +13,6 @@ Open, unrestricted Audible metadata API for the audiobook automation community.
 [![Authors](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibex.lostcartographer.xyz%2Fdb%2Fstats&query=%24.authors&label=Authors&color=teal)](https://libex.lostcartographer.xyz/db/stats)
 [![Series](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibex.lostcartographer.xyz%2Fdb%2Fstats&query=%24.series&label=Series&color=purple)](https://libex.lostcartographer.xyz/db/stats)
 
-
-
 </div>
 
 ---
@@ -94,6 +92,10 @@ services:
       - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}
       - AXIOM_TOKEN=${AXIOM_TOKEN}
       - AXIOM_DATASET=${AXIOM_DATASET:-libex}
+      - SEEDER_ENABLED=${SEEDER_ENABLED:-false}
+      - SEEDER_INTERVAL_HOURS=${SEEDER_INTERVAL_HOURS:-24}
+      - SEEDER_REQUEST_DELAY=${SEEDER_REQUEST_DELAY:-1.0}
+      - SEEDER_REGIONS=${SEEDER_REGIONS:-us}
     volumes:
       - ./logs:/app/logs
     depends_on:
@@ -291,6 +293,10 @@ Copy `.env.example` to `.env` and configure:
 | `LOG_RETENTION_DAYS` | `7` | Days of rotated logs to keep. `0` = infinite, no rotation |
 | `AXIOM_TOKEN` | — | Axiom API token (optional — leave blank for stdout only) |
 | `AXIOM_DATASET` | `libex` | Axiom dataset name |
+| `SEEDER_ENABLED` | `false` | Enable background DB seeder |
+| `SEEDER_INTERVAL_HOURS` | `24` | Hours between seeder cycles |
+| `SEEDER_REQUEST_DELAY` | `1.0` | Seconds between Audible requests during seeding |
+| `SEEDER_REGIONS` | `us` | Comma-separated regions to seed (e.g. `us,uk,de`) |
 
 `DATABASE_URL` is constructed automatically by docker-compose from `DB_NAME`, `DB_USER`, and `DB_PASSWORD`. Only set it manually if running outside of Docker.
 
@@ -314,6 +320,7 @@ Libex is API-compatible with AudiMeta. To migrate:
 - Cache entries expire after `CACHE_TTL` seconds (default 24 hours); expired entries are purged automatically
 - Logs directory: `./logs` (relative to your compose file) — Libex writes a rotating log file to `./logs/libex.log` on the host
 - Log rotation is daily. `LOG_RETENTION_DAYS=7` keeps 7 days of backups. Set to `0` for infinite retention with no rotation
+- **Database seeder:** Set `SEEDER_ENABLED=true` to activate the background seeder. It expands the local DB by walking author relationships (discovers books you haven't requested yet) and scanning for new Audible releases. Each cycle compounds — a single book fetch can seed hundreds of related books over time. The seeder runs every `SEEDER_INTERVAL_HOURS` (default 24) and rate-limits itself to one Audible request per `SEEDER_REQUEST_DELAY` seconds (default 1.0). Configure `SEEDER_REGIONS` to seed multiple markets (e.g. `us,uk,de`)
 
 ---
 

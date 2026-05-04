@@ -91,16 +91,22 @@ async def get_book_chapters_legacy(
 
 @router.get("", response_model=BulkBookResponse)
 async def get_books_bulk(
-    asins: Annotated[str, Query(description="Comma-separated ASINs, max 1000")],
+    asins: Annotated[list[str], Query(description="ASINs — comma-separated, repeated params, or both. Max 1000.")],
     region: str = Depends(valid_region),
     cache: Annotated[bool, Query(description="Return cached data if available")] = False,
     session: AsyncSession = Depends(get_session),
 ) -> BulkBookResponse:
     """
     Get multiple books by ASIN.
+    Accepts all three forms: ?asins=X,Y — ?asins=X&asins=Y — ?asins=X,Y&asins=Z
     Returns {"books": [...], "notFound": [...]} matching AudiMeta's bulk format.
     """
-    asin_list = [a.strip() for a in asins.split(",") if a.strip()]
+    asin_list = [
+        a.strip()
+        for entry in asins
+        for a in entry.split(",")
+        if a.strip()
+    ]
 
     invalid = [a for a in asin_list if not is_valid_asin(a)]
     if invalid:

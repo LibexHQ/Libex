@@ -29,6 +29,7 @@ from app.services.db.reader import (
     get_series_books_from_db,
     get_series_from_db,
     get_track_from_db,
+    get_vvab_books_from_db,
     search_books_from_db,
 )
 
@@ -142,6 +143,19 @@ async def get_db_books_by_plan(
     books = await get_books_by_plan_from_db(session, plan_name, limit=limit, page=page)
     if not books:
         raise NotFoundException(f"No books found for plan: {plan_name}")
+    return books
+
+
+@router.get("/vvab", response_model=list[BookResponse])
+async def get_db_vvab_books(
+    limit: Annotated[int, Query(ge=1, le=100, description="Results per page (max 100)")] = 20,
+    page: Annotated[int, Query(ge=1, description="Page number")] = 1,
+    session: AsyncSession = Depends(get_session),
+) -> list[dict[str, Any]]:
+    """Get all virtual voice audiobooks (AI-narrated) from the local DB."""
+    books = await get_vvab_books_from_db(session, limit=limit, page=page)
+    if not books:
+        raise NotFoundException("No virtual voice audiobooks found in local database")
     return books
 
 

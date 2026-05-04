@@ -656,6 +656,61 @@ async def test_get_db_books_by_plan_pagination_forwarded(async_client):
 
 
 # ============================================================
+# GET /db/vvab
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_get_db_vvab_returns_200(async_client):
+    """Returns 200 when VVAB books exist."""
+    with patch("app.api.routes.db.router.get_vvab_books_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        response = await async_client.get("/db/vvab")
+        assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_get_db_vvab_returns_list(async_client):
+    """Returns a list of BookResponse objects."""
+    with patch("app.api.routes.db.router.get_vvab_books_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        response = await async_client.get("/db/vvab")
+        data = response.json()
+        assert isinstance(data, list)
+        assert data[0]["asin"] == "B08G9PRS1K"
+
+
+@pytest.mark.asyncio
+async def test_get_db_vvab_not_found_returns_404(async_client):
+    """Returns 404 when no VVAB books in local DB."""
+    with patch("app.api.routes.db.router.get_vvab_books_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = []
+        response = await async_client.get("/db/vvab")
+        assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_db_vvab_pagination_defaults(async_client):
+    """Default limit is 20 and default page is 1."""
+    with patch("app.api.routes.db.router.get_vvab_books_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        await async_client.get("/db/vvab")
+        _, kwargs = mock.call_args
+        assert kwargs["limit"] == 20
+        assert kwargs["page"] == 1
+
+
+@pytest.mark.asyncio
+async def test_get_db_vvab_pagination_forwarded(async_client):
+    """Pagination parameters are forwarded to reader."""
+    with patch("app.api.routes.db.router.get_vvab_books_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        await async_client.get("/db/vvab?limit=10&page=2")
+        _, kwargs = mock.call_args
+        assert kwargs["limit"] == 10
+        assert kwargs["page"] == 2
+
+
+# ============================================================
 # GET /db/author/{asin}
 # ============================================================
 

@@ -378,6 +378,36 @@ async def get_books_by_plan_from_db(
         logger.warning(f"DB read failed for plan '{plan_name}': {e}")
         return []
 
+
+async def get_vvab_books_from_db(
+    session: AsyncSession,
+    limit: int = 20,
+    page: int = 1,
+) -> list[dict[str, Any]]:
+    """Fetches all virtual voice audiobooks (AI-narrated) from the local DB."""
+    try:
+        result = await session.execute(
+            select(Book)
+            .where(Book.is_vvab.is_(True))
+            .options(
+                selectinload(Book.authors),
+                selectinload(Book.narrators),
+                selectinload(Book.genres),
+                selectinload(Book.series),
+            )
+            .limit(limit)
+            .offset((page - 1) * limit)
+        )
+        books = result.scalars().all()
+        results = []
+        for book in books:
+            positions = await _get_series_positions(session, book.asin)
+            results.append(_book_to_dict(book, positions))
+        return results
+    except Exception as e:
+        logger.warning(f"DB read failed for VVAB books: {e}")
+        return []
+
 # ============================================================
 # AUTHOR READER
 # ============================================================

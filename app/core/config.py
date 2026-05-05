@@ -33,6 +33,7 @@ class Settings(BaseSettings):
 
     # Audible
     default_region: str = "us"
+    audible_proxy_url: str = ""
 
     # Database
     database_url: str = "postgresql+asyncpg://libex:libex@localhost:5432/libex"

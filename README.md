@@ -96,6 +96,7 @@ services:
       - SEEDER_INTERVAL_HOURS=${SEEDER_INTERVAL_HOURS:-24}
       - SEEDER_REQUEST_DELAY=${SEEDER_REQUEST_DELAY:-1.0}
       - SEEDER_REGIONS=${SEEDER_REGIONS:-us}
+      - AUDIBLE_PROXY_URL=${AUDIBLE_PROXY_URL}
     volumes:
       - ./logs:/app/logs
     depends_on:
@@ -298,6 +299,7 @@ Copy `.env.example` to `.env` and configure:
 | `SEEDER_INTERVAL_HOURS` | `24` | Hours between seeder cycles |
 | `SEEDER_REQUEST_DELAY` | `1.0` | Seconds between Audible requests during seeding |
 | `SEEDER_REGIONS` | `us` | Comma-separated regions to seed (e.g. `us,uk,de`) |
+| `AUDIBLE_PROXY_URL` | — | Proxy URL for outbound Audible requests only. Supports `http://`, `https://`, `socks5://`. API serving is unaffected |
 
 `DATABASE_URL` is constructed automatically by docker-compose from `DB_NAME`, `DB_USER`, and `DB_PASSWORD`. Only set it manually if running outside of Docker.
 
@@ -322,6 +324,7 @@ Libex is API-compatible with AudiMeta. To migrate:
 - Logs directory: `./logs` (relative to your compose file) — Libex writes a rotating log file to `./logs/libex.log` on the host
 - Log rotation is daily. `LOG_RETENTION_DAYS=7` keeps 7 days of backups. Set to `0` for infinite retention with no rotation
 - **Database seeder:** Set `SEEDER_ENABLED=true` to activate the background seeder. It expands the local DB by walking author relationships (discovers books you haven't requested yet) and scanning for new Audible releases. Each cycle compounds — a single book fetch can seed hundreds of related books over time. The seeder runs every `SEEDER_INTERVAL_HOURS` (default 24) and rate-limits itself to one Audible request per `SEEDER_REQUEST_DELAY` seconds (default 1.0). Configure `SEEDER_REGIONS` to seed multiple markets (e.g. `us,uk,de`)
+- **VPN proxy:** Set `AUDIBLE_PROXY_URL` to route outbound Audible API requests through a proxy. Only Audible requests are affected — API serving, database connections, and logging are completely unaffected. This is especially useful when running the seeder to avoid IP-based rate limiting. Any HTTP, HTTPS, or SOCKS5 proxy works. Set the URL to your VPN proxy container and create a shared Docker network between the two containers. Leave `AUDIBLE_PROXY_URL` blank to disable
 
 ---
 

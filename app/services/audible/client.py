@@ -112,7 +112,7 @@ async def audible_get(
     url = get_audible_url(region, path)
     headers = get_region_headers(region)
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(proxy=settings.audible_proxy_url or None) as client:
         try:
             response = await client.get(
                 url,

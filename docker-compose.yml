@@ -24,6 +24,9 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    networks:
+      - default
+      - libex-proxy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3333/health"]
       interval: 30s
@@ -48,3 +51,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+networks:
+  libex-proxy:
+    name: libex-proxy
+    driver: bridge

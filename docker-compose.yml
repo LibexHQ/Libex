@@ -18,6 +18,7 @@ services:
       - SEEDER_INTERVAL_HOURS=${SEEDER_INTERVAL_HOURS:-24}
       - SEEDER_REQUEST_DELAY=${SEEDER_REQUEST_DELAY:-1.0}
       - SEEDER_REGIONS=${SEEDER_REGIONS:-us}
+      - AUDIBLE_PROXY_URL=${AUDIBLE_PROXY_URL}
     volumes:
       - ./logs:/app/logs
     depends_on:

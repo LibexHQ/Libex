@@ -42,7 +42,7 @@ router = APIRouter(prefix="/db", tags=["Database"])
 async def get_stats(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, int]:
-    """Get counts of books, authors, and series in the local DB."""
+    """Get counts of books, authors, narrators, and series in the local DB."""
     return await get_db_stats(session)
 
 

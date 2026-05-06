@@ -124,20 +124,21 @@ READER_PATH = "app.api.routes.db.router.search_books_from_db"
 async def test_get_db_stats_returns_200(async_client):
     """Returns 200 with stats."""
     with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock:
-        mock.return_value = {"books": 150, "authors": 42, "series": 18}
+        mock.return_value = {"books": 150, "authors": 42, "narrators": 85, "series": 18}
         response = await async_client.get("/db/stats")
         assert response.status_code == 200
 
 
 @pytest.mark.asyncio
 async def test_get_db_stats_returns_all_fields(async_client):
-    """Returns books, authors, and series counts."""
+    """Returns books, authors, narrators, and series counts."""
     with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock:
-        mock.return_value = {"books": 150, "authors": 42, "series": 18}
+        mock.return_value = {"books": 150, "authors": 42, "narrators": 85, "series": 18}
         response = await async_client.get("/db/stats")
         data = response.json()
         assert data["books"] == 150
         assert data["authors"] == 42
+        assert data["narrators"] == 85
         assert data["series"] == 18
 
 
@@ -145,11 +146,12 @@ async def test_get_db_stats_returns_all_fields(async_client):
 async def test_get_db_stats_returns_zeros_on_empty_db(async_client):
     """Returns zero counts when DB is empty."""
     with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock:
-        mock.return_value = {"books": 0, "authors": 0, "series": 0}
+        mock.return_value = {"books": 0, "authors": 0, "narrators": 0, "series": 0}
         response = await async_client.get("/db/stats")
         data = response.json()
         assert data["books"] == 0
         assert data["authors"] == 0
+        assert data["narrators"] == 0
         assert data["series"] == 0
 
 

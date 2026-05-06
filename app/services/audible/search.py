@@ -16,7 +16,16 @@ from app.core.logging import get_logger
 
 # Services
 from app.services.audible.client import audible_get
-from app.services.audible.books import get_books_by_asins
+from app.services.audible.books import (
+    get_books_by_asins,
+    _normalize_product,
+    _filter_products,
+    BOOK_RESPONSE_GROUPS,
+    IMAGE_SIZES,
+)
+from app.services.cache import manager as cache
+from app.services.cache.manager import book_key
+from app.services.db.writer import upsert_book
 from app.services.db.reader import search_books_from_db
 
 logger = get_logger()
@@ -47,12 +56,17 @@ async def search(
 ) -> list[dict[str, Any]]:
     """
     Searches Audible catalog and returns full book metadata.
-    Passes all search params directly to Audible matching AudiMeta's behavior.
+
+    Includes response_groups in the search call so Audible returns full
+    product metadata directly. This avoids re-fetching each book
+    individually — one API call instead of N+1.
     """
     try:
         params: dict[str, Any] = {
             "num_results": min(limit, 50),
             "page": page,
+            "response_groups": BOOK_RESPONSE_GROUPS,
+            "image_sizes": IMAGE_SIZES,
         }
 
         if title:
@@ -68,30 +82,35 @@ async def search(
         if products_sort_by:
             params["products_sort_by"] = products_sort_by
 
-        search_params = {k: v for k, v in params.items()}
+        search_params = {k: v for k, v in params.items()
+                         if k not in ("response_groups", "image_sizes")}
 
         start = time.monotonic()
         data = await audible_get(region, "/1.0/catalog/products/", params)
         search_took = round((time.monotonic() - start) * 1000, 2)
 
-        search_took = round((time.monotonic() - start) * 1000, 2)
-
-        products = data.get("products", [])
+        products = _filter_products(data.get("products", []))
 
         logger.info("Requested Audible Search", extra={
             "search_params": search_params,
             "search_took": search_took,
             "region": region,
+            "results": len(products),
         })
 
         if not products:
             return []
 
-        asins = [p.get("asin") for p in products if p.get("asin")]
-        if not asins:
-            return []
+        # Normalize directly from search results — no re-fetch needed
+        normalized = [_normalize_product(p, region) for p in products]
 
-        return await get_books_by_asins(asins, region, session)
+        # Write to DB and cache as side effect
+        for book in normalized:
+            if book.get("asin"):
+                await upsert_book(session, book)
+                await cache.set(session, book_key(book["asin"], region), book)
+
+        return normalized
 
     except NotFoundException:
         return []

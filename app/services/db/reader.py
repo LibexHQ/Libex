@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 # Database
-from app.db.models import Book, Author, Series, Track, author_book, book_series
+from app.db.models import Book, Author, Narrator, Series, Track, author_book, book_narrator, book_series
 
 # Core
 from app.core.logging import get_logger
@@ -477,6 +477,69 @@ async def get_author_books_from_db(
         return results
     except Exception as e:
         logger.warning(f"DB read failed for author books {author_asin}: {e}")
+        return []
+
+
+# ============================================================
+# NARRATOR READER
+# ============================================================
+
+async def search_narrators_from_db(
+    session: AsyncSession,
+    name: str,
+    limit: int = 20,
+    page: int = 1,
+) -> list[dict[str, Any]]:
+    """Searches narrators by name (case-insensitive partial match)."""
+    try:
+        result = await session.execute(
+            select(Narrator)
+            .where(Narrator.name.ilike(f"%{name}%"))
+            .limit(limit)
+            .offset((page - 1) * limit)
+        )
+        narrators = result.scalars().all()
+        return [
+            {
+                "name": n.name,
+                "updatedAt": n.updated_at.isoformat() if n.updated_at else None,
+            }
+            for n in narrators
+        ]
+    except Exception as e:
+        logger.warning(f"DB read failed for narrator search '{name}': {e}")
+        return []
+
+
+async def get_narrator_books_from_db(
+    session: AsyncSession,
+    name: str,
+    limit: int = 20,
+    page: int = 1,
+) -> list[dict[str, Any]]:
+    """Fetches all books by a narrator name from the local DB."""
+    try:
+        result = await session.execute(
+            select(Book)
+            .join(book_narrator, Book.asin == book_narrator.c.book_asin)
+            .where(book_narrator.c.narrator_name == name)
+            .options(
+                selectinload(Book.authors),
+                selectinload(Book.narrators),
+                selectinload(Book.genres),
+                selectinload(Book.series),
+            )
+            .limit(limit)
+            .offset((page - 1) * limit)
+        )
+        books = result.scalars().all()
+        results = []
+        for book in books:
+            positions = await _get_series_positions(session, book.asin)
+            results.append(_book_to_dict(book, positions))
+        return results
+    except Exception as e:
+        logger.warning(f"DB read failed for narrator books '{name}': {e}")
         return []
 
 

@@ -26,6 +26,7 @@ from app.services.cache.manager import purge_expired
 # Routes
 from app.api.routes.books import router as books_router
 from app.api.routes.authors import router as authors_router
+from app.api.routes.narrators import router as narrators_router
 from app.api.routes.series import router as series_router
 from app.api.routes.search import router as search_router
 from app.api.routes.db import router as db_router
@@ -61,6 +62,7 @@ async def _cache_purge_loop():
 openapi_tags = [
     {"name": "Books", "description": "Retrieve book metadata by ASIN, ISBN, or bulk ASINs"},
     {"name": "Authors", "description": "Retrieve author metadata and their books"},
+    {"name": "Narrators", "description": "Retrieve books by narrator name"},
     {"name": "Series", "description": "Retrieve series metadata and their books"},
     {"name": "Search", "description": "Search Audible catalog by title, author, or keyword"},
     {"name": "Database", "description": "Query the local indexed book library without hitting Audible"},
@@ -80,9 +82,9 @@ async def lifespan(app: FastAPI):
     # Start background tasks
     seeder_task = asyncio.create_task(run_seeder())
     purge_task = asyncio.create_task(_cache_purge_loop())
-    
+
     yield
-    
+
     # Shutdown
     seeder_task.cancel()
     purge_task.cancel()
@@ -129,6 +131,7 @@ setup_middleware(app)
 
 app.include_router(books_router)
 app.include_router(authors_router)
+app.include_router(narrators_router)
 app.include_router(series_router)
 app.include_router(search_router)
 app.include_router(db_router)

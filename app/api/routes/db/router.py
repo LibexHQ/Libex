@@ -26,10 +26,12 @@ from app.services.db.reader import (
     get_books_by_sku_from_db,
     get_db_stats,
     get_distinct_plans_from_db,
+    get_narrator_books_from_db,
     get_series_books_from_db,
     get_series_from_db,
     get_track_from_db,
     get_vvab_books_from_db,
+    search_narrators_from_db,
     search_books_from_db,
 )
 
@@ -227,6 +229,34 @@ async def get_db_author(
     if not author:
         raise NotFoundException("Author not found in local database")
     return author
+
+
+@router.get("/narrator/books", response_model=list[BookResponse])
+async def get_db_narrator_books(
+    name: Annotated[str, Query(description="Narrator name (exact match)")],
+    limit: Annotated[int, Query(ge=1, le=100, description="Results per page (max 100)")] = 20,
+    page: Annotated[int, Query(ge=1, description="Page number")] = 1,
+    session: AsyncSession = Depends(get_session),
+) -> list[dict[str, Any]]:
+    """Get all books by a narrator from the local DB."""
+    books = await get_narrator_books_from_db(session, name, limit=limit, page=page)
+    if not books:
+        raise NotFoundException(f"No books found for narrator: {name}")
+    return books
+
+
+@router.get("/narrator", response_model=list[dict])
+async def search_db_narrators(
+    name: Annotated[str, Query(description="Narrator name to search for")],
+    limit: Annotated[int, Query(ge=1, le=100, description="Results per page (max 100)")] = 20,
+    page: Annotated[int, Query(ge=1, description="Page number")] = 1,
+    session: AsyncSession = Depends(get_session),
+) -> list[dict[str, Any]]:
+    """Search narrators by name from the local DB."""
+    narrators = await search_narrators_from_db(session, name, limit=limit, page=page)
+    if not narrators:
+        raise NotFoundException(f"No narrators found matching: {name}")
+    return narrators
 
 
 @router.get("/series/{asin}/books", response_model=list[BookResponse])

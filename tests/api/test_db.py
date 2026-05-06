@@ -711,6 +711,99 @@ async def test_get_db_vvab_pagination_forwarded(async_client):
 
 
 # ============================================================
+# GET /db/narrator/books
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_get_db_narrator_books_returns_200(async_client):
+    """Returns 200 when books exist for narrator."""
+    with patch("app.api.routes.db.router.get_narrator_books_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        response = await async_client.get("/db/narrator/books?name=Jim+Dale")
+        assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_get_db_narrator_books_returns_list(async_client):
+    """Returns a list of BookResponse objects."""
+    with patch("app.api.routes.db.router.get_narrator_books_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        response = await async_client.get("/db/narrator/books?name=Jim+Dale")
+        data = response.json()
+        assert isinstance(data, list)
+        assert data[0]["asin"] == "B08G9PRS1K"
+
+
+@pytest.mark.asyncio
+async def test_get_db_narrator_books_not_found_returns_404(async_client):
+    """Returns 404 when no books found for narrator."""
+    with patch("app.api.routes.db.router.get_narrator_books_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = []
+        response = await async_client.get("/db/narrator/books?name=Nobody")
+        assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_db_narrator_books_pagination_forwarded(async_client):
+    """Pagination parameters are forwarded to reader."""
+    with patch("app.api.routes.db.router.get_narrator_books_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        await async_client.get("/db/narrator/books?name=Jim+Dale&limit=5&page=3")
+        _, kwargs = mock.call_args
+        assert kwargs["limit"] == 5
+        assert kwargs["page"] == 3
+
+
+@pytest.mark.asyncio
+async def test_get_db_narrator_books_requires_name(async_client):
+    """Returns 422 when name param is missing."""
+    response = await async_client.get("/db/narrator/books")
+    assert response.status_code == 422
+
+
+# ============================================================
+# GET /db/narrator
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_search_db_narrators_returns_200(async_client):
+    """Returns 200 when narrators found."""
+    with patch("app.api.routes.db.router.search_narrators_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = [{"name": "Jim Dale", "updatedAt": None}]
+        response = await async_client.get("/db/narrator?name=Jim")
+        assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_search_db_narrators_returns_list(async_client):
+    """Returns a list of narrator objects."""
+    with patch("app.api.routes.db.router.search_narrators_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = [{"name": "Jim Dale", "updatedAt": None}]
+        response = await async_client.get("/db/narrator?name=Jim")
+        data = response.json()
+        assert isinstance(data, list)
+        assert data[0]["name"] == "Jim Dale"
+
+
+@pytest.mark.asyncio
+async def test_search_db_narrators_not_found_returns_404(async_client):
+    """Returns 404 when no narrators match."""
+    with patch("app.api.routes.db.router.search_narrators_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = []
+        response = await async_client.get("/db/narrator?name=Nobody")
+        assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_search_db_narrators_requires_name(async_client):
+    """Returns 422 when name param is missing."""
+    response = await async_client.get("/db/narrator")
+    assert response.status_code == 422
+
+
+# ============================================================
 # GET /db/author/{asin}
 # ============================================================
 

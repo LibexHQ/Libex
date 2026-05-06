@@ -211,6 +211,7 @@ ABS will then call `/us/search?title=...&author=...` which returns the `{"matche
 | GET | `/series/{asin}/books` | Get all books in a series |
 | GET | `/series/books/{asin}` | Get all books in a series (legacy) |
 | GET | `/series` | Search series by name |
+| GET | `/narrator/books` | Get books by narrator name |
 | GET | `/search` | Search Audible catalog |
 | GET | `/quick-search` | Quick search via suggestions |
 | GET | `/{region}/search` | Regional search for Audiobookshelf compatibility |
@@ -225,6 +226,8 @@ ABS will then call `/us/search?title=...&author=...` which returns the `{"matche
 | GET | `/db/stats` | Get counts of books, authors, and series in local DB |
 | GET | `/db/author/{asin}` | Get author from local DB |
 | GET | `/db/author/{asin}/books` | Get author's books from local DB |
+| GET | `/db/narrator` | Search narrators by name from local DB |
+| GET | `/db/narrator/books` | Get books by narrator name from local DB |
 | GET | `/db/series/{asin}` | Get series from local DB |
 | GET | `/db/series/{asin}/books` | Get series books from local DB |
 | GET | `/health` | Health check |

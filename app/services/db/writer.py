@@ -42,6 +42,10 @@ logger = get_logger()
 
 _BackgroundSession = async_sessionmaker(engine, expire_on_commit=False)
 
+# Limits concurrent background writes so the seeder doesn't starve the
+# API's DB connection pool. At most 2 background persist tasks write at once.
+_bg_write_semaphore = asyncio.Semaphore(2)
+
 
 # ============================================================
 # HELPERS
@@ -588,13 +592,14 @@ def persist_book_background(book: dict, region: str) -> None:
     from app.services.cache.manager import book_key
 
     async def _persist():
-        try:
-            async with _BackgroundSession() as session:
-                await upsert_book(session, book)
-                if book.get("asin"):
-                    await cache.set(session, book_key(book["asin"], region), book)
-        except Exception as e:
-            logger.warning(f"Background persist failed for book {book.get('asin')}: {e}")
+        async with _bg_write_semaphore:
+            try:
+                async with _BackgroundSession() as session:
+                    await upsert_book(session, book)
+                    if book.get("asin"):
+                        await cache.set(session, book_key(book["asin"], region), book)
+            except Exception as e:
+                logger.warning(f"Background persist failed for book {book.get('asin')}: {e}")
 
     asyncio.create_task(_persist())
 
@@ -605,14 +610,15 @@ def persist_books_background(books: list[dict], region: str) -> None:
     from app.services.cache.manager import book_key
 
     async def _persist():
-        try:
-            async with _BackgroundSession() as session:
-                for book in books:
-                    if book.get("asin"):
-                        await upsert_book(session, book)
-                        await cache.set(session, book_key(book["asin"], region), book)
-        except Exception as e:
-            logger.warning(f"Background persist failed for book batch: {e}")
+        async with _bg_write_semaphore:
+            try:
+                async with _BackgroundSession() as session:
+                    for book in books:
+                        if book.get("asin"):
+                            await upsert_book(session, book)
+                            await cache.set(session, book_key(book["asin"], region), book)
+            except Exception as e:
+                logger.warning(f"Background persist failed for book batch: {e}")
 
     asyncio.create_task(_persist())
 
@@ -623,13 +629,14 @@ def persist_author_background(data: dict, region: str) -> None:
     from app.services.cache.manager import author_key
 
     async def _persist():
-        try:
-            async with _BackgroundSession() as session:
-                await upsert_author_profile(session, data)
-                if data.get("asin"):
-                    await cache.set(session, author_key(data["asin"], region), data)
-        except Exception as e:
-            logger.warning(f"Background persist failed for author {data.get('asin')}: {e}")
+        async with _bg_write_semaphore:
+            try:
+                async with _BackgroundSession() as session:
+                    await upsert_author_profile(session, data)
+                    if data.get("asin"):
+                        await cache.set(session, author_key(data["asin"], region), data)
+            except Exception as e:
+                logger.warning(f"Background persist failed for author {data.get('asin')}: {e}")
 
     asyncio.create_task(_persist())
 
@@ -640,13 +647,14 @@ def persist_series_background(data: dict, region: str) -> None:
     from app.services.cache.manager import series_key
 
     async def _persist():
-        try:
-            async with _BackgroundSession() as session:
-                await upsert_series_profile(session, data)
-                if data.get("asin"):
-                    await cache.set(session, series_key(data["asin"], region), data)
-        except Exception as e:
-            logger.warning(f"Background persist failed for series {data.get('asin')}: {e}")
+        async with _bg_write_semaphore:
+            try:
+                async with _BackgroundSession() as session:
+                    await upsert_series_profile(session, data)
+                    if data.get("asin"):
+                        await cache.set(session, series_key(data["asin"], region), data)
+            except Exception as e:
+                logger.warning(f"Background persist failed for series {data.get('asin')}: {e}")
 
     asyncio.create_task(_persist())
 
@@ -657,12 +665,13 @@ def persist_track_background(asin: str, chapters_data: dict, region: str) -> Non
     from app.services.cache.manager import chapters_key
 
     async def _persist():
-        try:
-            async with _BackgroundSession() as session:
-                await upsert_track(session, asin, chapters_data)
-                await cache.set(session, chapters_key(asin, region), chapters_data)
-        except Exception as e:
-            logger.warning(f"Background persist failed for track {asin}: {e}")
+        async with _bg_write_semaphore:
+            try:
+                async with _BackgroundSession() as session:
+                    await upsert_track(session, asin, chapters_data)
+                    await cache.set(session, chapters_key(asin, region), chapters_data)
+            except Exception as e:
+                logger.warning(f"Background persist failed for track {asin}: {e}")
 
     asyncio.create_task(_persist())
 
@@ -672,10 +681,11 @@ def persist_cache_background(key: str, value) -> None:
     from app.services.cache import manager as cache
 
     async def _persist():
-        try:
-            async with _BackgroundSession() as session:
-                await cache.set(session, key, value)
-        except Exception as e:
-            logger.warning(f"Background cache persist failed for {key}: {e}")
+        async with _bg_write_semaphore:
+            try:
+                async with _BackgroundSession() as session:
+                    await cache.set(session, key, value)
+            except Exception as e:
+                logger.warning(f"Background cache persist failed for {key}: {e}")
 
     asyncio.create_task(_persist())

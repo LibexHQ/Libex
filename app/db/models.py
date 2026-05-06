@@ -348,7 +348,7 @@ book_series = Table(
     Base.metadata,
     Column("book_asin", String(12), ForeignKey("books.asin", ondelete="CASCADE"), nullable=False),
     Column("series_asin", String(12), ForeignKey("series.asin", ondelete="CASCADE"), nullable=False),
-    Column("position", String(20), nullable=True),
+    Column("position", String(100), nullable=True),
     Index("book_series_index", "book_asin", "series_asin"),
 )
 

@@ -24,7 +24,7 @@ from app.core.utils import strip_html
 from app.services.audible.client import audible_get
 from app.services.cache import manager as cache
 from app.services.cache.manager import series_key, series_books_key
-from app.services.db.writer import upsert_series_profile
+from app.services.db.writer import persist_series_background, persist_cache_background
 from app.services.db.reader import get_series_from_db, search_series_from_db
 
 logger = get_logger()
@@ -90,9 +90,8 @@ async def get_series(
 
         normalized = _normalize_series(product, region)
 
-        # Write to DB and cache
-        await upsert_series_profile(session, normalized)
-        await cache.set(session, series_key(asin, region), normalized)
+        # Persist to DB and cache in the background
+        persist_series_background(normalized, region)
 
         logger.info("Requested Audible Series", extra={
             "series_took": series_took,
@@ -155,7 +154,7 @@ async def get_series_books(
         if not asins:
             raise NotFoundException(f"No books found for series: {asin}")
 
-        await cache.set(session, series_books_key(asin, region), asins)
+        persist_cache_background(series_books_key(asin, region), asins)
 
         logger.info("Requested Audible Series Books", extra={
             "series_book_num": len(asins),

@@ -25,7 +25,7 @@ from app.core.utils import strip_html
 from app.services.audible.client import audible_get, LOCALE_MAP
 from app.services.cache import manager as cache
 from app.services.cache.manager import author_key, author_books_key
-from app.services.db.writer import upsert_author_profile
+from app.services.db.writer import persist_author_background, persist_cache_background
 from app.services.db.reader import get_author_from_db, get_author_books_from_db
 
 logger = get_logger()
@@ -139,10 +139,9 @@ async def _resolve_author_name(
         data = await _fetch_author_details(asin, region)
         name = data.get("contributor", {}).get("name", "").replace("\t", "").strip()
         if name:
-            # Persist the author profile while we have it
+            # Persist the author profile in the background
             normalized = _normalize_author(data, asin, region)
-            await upsert_author_profile(session, normalized)
-            await cache.set(session, author_key(asin, region), normalized)
+            persist_author_background(normalized, region)
             return name
     except Exception:
         pass
@@ -180,9 +179,8 @@ async def get_author(
 
         normalized = _normalize_author(data, asin, region)
 
-        # Write to DB and cache
-        await upsert_author_profile(session, normalized)
-        await cache.set(session, author_key(asin, region), normalized)
+        # Persist to DB and cache in the background
+        persist_author_background(normalized, region)
 
         logger.info("Requested Audible Author", extra={
             "author_took": author_took,
@@ -251,7 +249,7 @@ async def get_author_books(
                 return [b["asin"] for b in db_books]
             raise NotFoundException(f"No books found for author: {asin}")
 
-        await cache.set(session, author_books_key(asin, region), asins)
+        persist_cache_background(author_books_key(asin, region), asins)
 
         logger.info("Requested Audible Author Books", extra={
             "author_name": author_name,

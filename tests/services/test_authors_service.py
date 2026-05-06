@@ -199,8 +199,7 @@ async def test_get_author_writes_to_db_on_success():
     }
 
     with patch("app.services.audible.authors.audible_get", return_value=mock_response), \
-         patch("app.services.audible.authors.upsert_author_profile", new_callable=AsyncMock) as mock_upsert, \
-         patch("app.services.audible.authors.cache.get", return_value=None), \
-         patch("app.services.audible.authors.cache.set", new_callable=AsyncMock):
+         patch("app.services.audible.authors.persist_author_background") as mock_persist, \
+         patch("app.services.audible.authors.cache.get", return_value=None):
         await get_author("B000APF21M", "us", mock_session)
-        mock_upsert.assert_called_once()
+        mock_persist.assert_called_once()

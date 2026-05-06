@@ -443,11 +443,10 @@ async def test_get_books_writes_to_db_on_success():
     }
 
     with patch("app.services.audible.books.audible_get", return_value={"product": mock_product}), \
-         patch("app.services.audible.books.upsert_book", new_callable=AsyncMock) as mock_upsert, \
-         patch("app.services.audible.books.cache.get", return_value=None), \
-         patch("app.services.audible.books.cache.set", new_callable=AsyncMock):
+         patch("app.services.audible.books.persist_books_background") as mock_persist, \
+         patch("app.services.audible.books.cache.get", return_value=None):
         await get_books_by_asins(["B08G9PRS1K"], "us", mock_session)
-        mock_upsert.assert_called_once()
+        mock_persist.assert_called_once()
 
 
 @pytest.mark.asyncio

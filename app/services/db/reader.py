@@ -502,6 +502,10 @@ async def search_narrators_from_db(
         return [
             {
                 "name": n.name,
+                "description": n.description,
+                "image": n.image,
+                "website": n.website,
+                "wikipediaUrl": n.wikipedia_url,
                 "updatedAt": n.updated_at.isoformat() if n.updated_at else None,
             }
             for n in narrators

@@ -23,9 +23,7 @@ from app.services.audible.books import (
     BOOK_RESPONSE_GROUPS,
     IMAGE_SIZES,
 )
-from app.services.cache import manager as cache
-from app.services.cache.manager import book_key
-from app.services.db.writer import upsert_book
+from app.services.db.writer import persist_books_background
 from app.services.db.reader import search_books_from_db
 
 logger = get_logger()
@@ -104,11 +102,8 @@ async def search(
         # Normalize directly from search results — no re-fetch needed
         normalized = [_normalize_product(p, region) for p in products]
 
-        # Write to DB and cache as side effect
-        for book in normalized:
-            if book.get("asin"):
-                await upsert_book(session, book)
-                await cache.set(session, book_key(book["asin"], region), book)
+        # Persist to DB and cache in the background
+        persist_books_background(normalized, region)
 
         return normalized
 

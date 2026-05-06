@@ -8,11 +8,12 @@ The DB is used as a fallback when Audible is unavailable.
 """
 
 # Standard library
+import asyncio
 from datetime import datetime, timezone
 
 # Third party
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from asyncpg.exceptions import UniqueViolationError as AsyncpgUniqueViolation
 from sqlalchemy.dialects.postgresql import insert, JSONB
 from sqlalchemy import select, func, update, case, cast
@@ -32,11 +33,14 @@ from app.db.models import (
     book_series,
     series_author,
 )
+from app.db.session import engine
 
 # Core
 from app.core.logging import get_logger
 
 logger = get_logger()
+
+_BackgroundSession = async_sessionmaker(engine, expire_on_commit=False)
 
 
 # ============================================================
@@ -361,25 +365,43 @@ async def upsert_book(session: AsyncSession, data: dict) -> None:
         )
         await session.execute(stmt)
 
-        # Genres — additive, never delete
+        # Genres — batch upsert entities, then batch insert pivots
+        genre_asins = []
         for genre in data.get("genres", []):
-            g_asin = await upsert_genre(session, genre)
-            if g_asin:
-                await session.execute(
-                    insert(book_genre).values(book_asin=asin, genre_asin=g_asin)
-                    .on_conflict_do_nothing()
-                )
+            g_asin = genre.get("asin")
+            g_name = genre.get("name")
+            if g_asin and g_name:
+                genre_asins.append(g_asin)
+        if genre_asins:
+            genre_values = [
+                {"asin": g["asin"], "name": g["name"], "type": g.get("type", "Tags"), "created_at": _now(), "updated_at": _now()}
+                for g in data["genres"] if g.get("asin") and g.get("name")
+            ]
+            await session.execute(
+                insert(Genre).values(genre_values).on_conflict_do_nothing()
+            )
+            await session.execute(
+                insert(book_genre).values([
+                    {"book_asin": asin, "genre_asin": ga} for ga in genre_asins
+                ]).on_conflict_do_nothing()
+            )
 
-        # Narrators — additive, never delete
-        for narrator in data.get("narrators", []):
-            n_name = await upsert_narrator(session, narrator)
-            if n_name:
-                await session.execute(
-                    insert(book_narrator).values(book_asin=asin, narrator_name=n_name)
-                    .on_conflict_do_nothing()
-                )
+        # Narrators — batch upsert entities, then batch insert pivots
+        narrator_names = [n.get("name", "").strip() for n in data.get("narrators", []) if n.get("name", "").strip()]
+        if narrator_names:
+            await session.execute(
+                insert(Narrator).values([
+                    {"name": name, "created_at": _now(), "updated_at": _now()}
+                    for name in narrator_names
+                ]).on_conflict_do_nothing()
+            )
+            await session.execute(
+                insert(book_narrator).values([
+                    {"book_asin": asin, "narrator_name": name} for name in narrator_names
+                ]).on_conflict_do_nothing()
+            )
 
-        # Series — position kept current via upsert
+        # Series — position kept current via upsert (usually 1-2, kept individual)
         for s in data.get("series", []):
             s_asin = await upsert_series(session, s)
             if s_asin:
@@ -394,27 +416,30 @@ async def upsert_book(session: AsyncSession, data: dict) -> None:
                     )
                 )
 
-        # Authors — additive, never delete
+        # Authors — kept individual (complex null-asin upgrade logic)
         author_ids = []
         for author_data in data.get("authors", []):
             author_id = await upsert_author(session, author_data)
             if author_id:
-                await session.execute(
-                    insert(author_book).values(author_id=author_id, book_asin=asin)
-                    .on_conflict_do_nothing()
-                )
                 author_ids.append(author_id)
+        if author_ids:
+            await session.execute(
+                insert(author_book).values([
+                    {"author_id": aid, "book_asin": asin} for aid in author_ids
+                ]).on_conflict_do_nothing()
+            )
 
-        # Derived series authors — any author of a book in a series is an
-        # author of that series. Additive, never delete.
+        # Derived series authors — batch the cross product
+        series_author_values = []
         for s in data.get("series", []):
             s_asin = s.get("asin")
             if s_asin:
                 for author_id in author_ids:
-                    await session.execute(
-                        insert(series_author).values(series_asin=s_asin, author_id=author_id)
-                        .on_conflict_do_nothing()
-                    )
+                    series_author_values.append({"series_asin": s_asin, "author_id": author_id})
+        if series_author_values:
+            await session.execute(
+                insert(series_author).values(series_author_values).on_conflict_do_nothing()
+            )
 
         await session.commit()
         logger.info(f"DB write: book {asin}")
@@ -551,3 +576,106 @@ async def upsert_series_profile(session: AsyncSession, data: dict) -> None:
     except Exception as e:
         logger.warning(f"DB write failed for series {asin}: {e}")
         await session.rollback()
+
+
+# ============================================================
+# BACKGROUND PERSISTENCE
+# ============================================================
+
+def persist_book_background(book: dict, region: str) -> None:
+    """Fires a background task to write a book to DB and cache."""
+    from app.services.cache import manager as cache
+    from app.services.cache.manager import book_key
+
+    async def _persist():
+        try:
+            async with _BackgroundSession() as session:
+                await upsert_book(session, book)
+                if book.get("asin"):
+                    await cache.set(session, book_key(book["asin"], region), book)
+        except Exception as e:
+            logger.warning(f"Background persist failed for book {book.get('asin')}: {e}")
+
+    asyncio.create_task(_persist())
+
+
+def persist_books_background(books: list[dict], region: str) -> None:
+    """Fires a single background task to write multiple books to DB and cache."""
+    from app.services.cache import manager as cache
+    from app.services.cache.manager import book_key
+
+    async def _persist():
+        try:
+            async with _BackgroundSession() as session:
+                for book in books:
+                    if book.get("asin"):
+                        await upsert_book(session, book)
+                        await cache.set(session, book_key(book["asin"], region), book)
+        except Exception as e:
+            logger.warning(f"Background persist failed for book batch: {e}")
+
+    asyncio.create_task(_persist())
+
+
+def persist_author_background(data: dict, region: str) -> None:
+    """Fires a background task to write an author profile to DB and cache."""
+    from app.services.cache import manager as cache
+    from app.services.cache.manager import author_key
+
+    async def _persist():
+        try:
+            async with _BackgroundSession() as session:
+                await upsert_author_profile(session, data)
+                if data.get("asin"):
+                    await cache.set(session, author_key(data["asin"], region), data)
+        except Exception as e:
+            logger.warning(f"Background persist failed for author {data.get('asin')}: {e}")
+
+    asyncio.create_task(_persist())
+
+
+def persist_series_background(data: dict, region: str) -> None:
+    """Fires a background task to write a series profile to DB and cache."""
+    from app.services.cache import manager as cache
+    from app.services.cache.manager import series_key
+
+    async def _persist():
+        try:
+            async with _BackgroundSession() as session:
+                await upsert_series_profile(session, data)
+                if data.get("asin"):
+                    await cache.set(session, series_key(data["asin"], region), data)
+        except Exception as e:
+            logger.warning(f"Background persist failed for series {data.get('asin')}: {e}")
+
+    asyncio.create_task(_persist())
+
+
+def persist_track_background(asin: str, chapters_data: dict, region: str) -> None:
+    """Fires a background task to write chapter data to DB and cache."""
+    from app.services.cache import manager as cache
+    from app.services.cache.manager import chapters_key
+
+    async def _persist():
+        try:
+            async with _BackgroundSession() as session:
+                await upsert_track(session, asin, chapters_data)
+                await cache.set(session, chapters_key(asin, region), chapters_data)
+        except Exception as e:
+            logger.warning(f"Background persist failed for track {asin}: {e}")
+
+    asyncio.create_task(_persist())
+
+
+def persist_cache_background(key: str, value) -> None:
+    """Fires a background task to write a single cache entry."""
+    from app.services.cache import manager as cache
+
+    async def _persist():
+        try:
+            async with _BackgroundSession() as session:
+                await cache.set(session, key, value)
+        except Exception as e:
+            logger.warning(f"Background cache persist failed for {key}: {e}")
+
+    asyncio.create_task(_persist())

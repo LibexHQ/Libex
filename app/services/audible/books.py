@@ -25,7 +25,7 @@ from app.core.utils import strip_html, strip_image_size_suffix
 from app.services.audible.client import audible_get, REGION_MAP
 from app.services.cache import manager as cache
 from app.services.cache.manager import book_key, chapters_key
-from app.services.db.writer import upsert_book, upsert_track
+from app.services.db.writer import persist_books_background, persist_track_background
 from app.services.db.reader import get_books_from_db, get_track_from_db
 
 logger = get_logger()
@@ -323,11 +323,8 @@ async def get_books_by_asins(
 
         normalized = [_normalize_product(p, region) for p in all_products]
 
-        # Write to DB and cache
-        for book in normalized:
-            if book.get("asin"):
-                await upsert_book(session, book)
-                await cache.set(session, book_key(book["asin"], region), book)
+        # Persist to DB and cache in the background
+        persist_books_background(normalized, region)
 
         logger.info("Requested books from Audible", extra={
             "requested_num": len(fetch_asins),
@@ -400,9 +397,8 @@ async def get_chapters(
 
         result = _normalize_chapters(data, asin)
 
-        # Write to DB and cache
-        await upsert_track(session, asin, result)
-        await cache.set(session, chapters_key(asin, region), result)
+        # Persist to DB and cache in the background
+        persist_track_background(asin, result, region)
 
         logger.info("Requested chapters from Audible", extra={
             "chapters_took": chapters_took,

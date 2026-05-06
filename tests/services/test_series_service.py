@@ -157,11 +157,10 @@ async def test_get_series_writes_to_db_on_success():
     }
 
     with patch("app.services.audible.series.audible_get", return_value=mock_response), \
-         patch("app.services.audible.series.upsert_series_profile", new_callable=AsyncMock) as mock_upsert, \
-         patch("app.services.audible.series.cache.get", return_value=None), \
-         patch("app.services.audible.series.cache.set", new_callable=AsyncMock):
+         patch("app.services.audible.series.persist_series_background") as mock_persist, \
+         patch("app.services.audible.series.cache.get", return_value=None):
         await get_series("B000SERIES1", "us", mock_session)
-        mock_upsert.assert_called_once()
+        mock_persist.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -193,9 +192,8 @@ async def test_search_series_includes_db_results():
 
     with patch("app.services.audible.series.audible_get", side_effect=[audible_product_response, series_detail_response]), \
          patch("app.services.audible.series.search_series_from_db", new_callable=AsyncMock, return_value=[db_series]), \
-         patch("app.services.audible.series.upsert_series_profile", new_callable=AsyncMock), \
-         patch("app.services.audible.series.cache.get", return_value=None), \
-         patch("app.services.audible.series.cache.set", new_callable=AsyncMock):
+         patch("app.services.audible.series.persist_series_background"), \
+         patch("app.services.audible.series.cache.get", return_value=None):
         results = await search_series("Dune", "us", mock_session)
         asins = [r["asin"] for r in results]
         assert "B000SERIES1" in asins
@@ -230,9 +228,8 @@ async def test_search_series_deduplicates_audible_and_db_results():
 
     with patch("app.services.audible.series.audible_get", side_effect=[audible_product_response, series_detail_response]), \
          patch("app.services.audible.series.search_series_from_db", new_callable=AsyncMock, return_value=[same_series]), \
-         patch("app.services.audible.series.upsert_series_profile", new_callable=AsyncMock), \
-         patch("app.services.audible.series.cache.get", return_value=None), \
-         patch("app.services.audible.series.cache.set", new_callable=AsyncMock):
+         patch("app.services.audible.series.persist_series_background"), \
+         patch("app.services.audible.series.cache.get", return_value=None):
         results = await search_series("Dune", "us", mock_session)
         asins = [r["asin"] for r in results]
         assert asins.count("B000SERIES1") == 1

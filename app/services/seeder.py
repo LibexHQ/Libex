@@ -96,6 +96,7 @@ async def _fetch_author_book_asins(name: str, region: str) -> list[str]:
         if len(products) < 50:
             break
         page += 1
+        await asyncio.sleep(0)  # yield to event loop — let API requests through
 
     return asins
 
@@ -151,6 +152,7 @@ async def _expand_authors(region: str, delay: float) -> dict[str, int]:
                     except Exception:
                         pass
                     await asyncio.sleep(delay)
+                    await asyncio.sleep(0)  # yield to event loop
 
                 stats["books_discovered"] += len(missing)
                 logger.info(
@@ -208,6 +210,7 @@ async def _scan_new_releases(region: str, delay: float) -> dict[str, int]:
                 break
             page += 1
             await asyncio.sleep(delay)
+            await asyncio.sleep(0)  # yield to event loop
 
         if not all_asins:
             return stats
@@ -225,6 +228,7 @@ async def _scan_new_releases(region: str, delay: float) -> dict[str, int]:
                 except Exception:
                     stats["errors"] += 1
                 await asyncio.sleep(delay)
+                await asyncio.sleep(0)  # yield to event loop
 
             stats["books_discovered"] = len(missing)
 

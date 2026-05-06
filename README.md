@@ -9,6 +9,7 @@
 
 [![Books](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibex.lostcartographer.xyz%2Fdb%2Fstats&query=%24.books&label=Books&color=orange)](https://libex.lostcartographer.xyz/db/stats)
 [![Authors](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibex.lostcartographer.xyz%2Fdb%2Fstats&query=%24.authors&label=Authors&color=teal)](https://libex.lostcartographer.xyz/db/stats)
+[![Narrators](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibex.lostcartographer.xyz%2Fdb%2Fstats&query=%24.narrators&label=Narrators&color=blue)](https://libex.lostcartographer.xyz/db/stats)
 [![Series](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibex.lostcartographer.xyz%2Fdb%2Fstats&query=%24.series&label=Series&color=purple)](https://libex.lostcartographer.xyz/db/stats)
 
 Open, unrestricted Audible metadata API for the audiobook automation community.
@@ -223,7 +224,7 @@ ABS will then call `/us/search?title=...&author=...` which returns the `{"matche
 | GET | `/db/plans` | Get all distinct Audible plan names from local DB |
 | GET | `/db/plans/{plan_name}` | Get all books under a specific plan from local DB |
 | GET | `/db/vvab` | Get all virtual voice audiobooks (AI-narrated) from local DB |
-| GET | `/db/stats` | Get counts of books, authors, and series in local DB |
+| GET | `/db/stats` | Get counts of books, authors, narrators, and series in local DB |
 | GET | `/db/author/{asin}` | Get author from local DB |
 | GET | `/db/author/{asin}/books` | Get author's books from local DB |
 | GET | `/db/narrator` | Search narrators by name from local DB |

@@ -233,6 +233,11 @@ class Narrator(Base):
     __tablename__ = "narrators"
 
     name: Mapped[str] = mapped_column(Text, primary_key=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    image: Mapped[str | None] = mapped_column(Text, nullable=True)
+    website: Mapped[str | None] = mapped_column(Text, nullable=True)
+    wikipedia_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetched_description: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),

@@ -771,7 +771,7 @@ async def test_get_db_narrator_books_requires_name(async_client):
 async def test_search_db_narrators_returns_200(async_client):
     """Returns 200 when narrators found."""
     with patch("app.api.routes.db.router.search_narrators_from_db", new_callable=AsyncMock) as mock:
-        mock.return_value = [{"name": "Jim Dale", "updatedAt": None}]
+        mock.return_value = [{"name": "Jim Dale", "description": None, "image": None, "website": None, "wikipediaUrl": None, "updatedAt": None}]
         response = await async_client.get("/db/narrator?name=Jim")
         assert response.status_code == 200
 
@@ -780,7 +780,7 @@ async def test_search_db_narrators_returns_200(async_client):
 async def test_search_db_narrators_returns_list(async_client):
     """Returns a list of narrator objects."""
     with patch("app.api.routes.db.router.search_narrators_from_db", new_callable=AsyncMock) as mock:
-        mock.return_value = [{"name": "Jim Dale", "updatedAt": None}]
+        mock.return_value = [{"name": "Jim Dale", "description": None, "image": None, "website": None, "wikipediaUrl": None, "updatedAt": None}]
         response = await async_client.get("/db/narrator?name=Jim")
         data = response.json()
         assert isinstance(data, list)

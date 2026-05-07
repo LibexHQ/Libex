@@ -2,19 +2,6 @@
 Health endpoint tests.
 """
 
-# Third party
-import pytest
-from fastapi.testclient import TestClient
-
-# Local
-from app.main import app
-
-
-@pytest.fixture
-def client():
-    with TestClient(app) as c:
-        yield c
-
 
 def test_health_returns_ok(client):
     """Health endpoint returns 200 with correct structure."""

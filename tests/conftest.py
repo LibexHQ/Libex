@@ -3,7 +3,7 @@ Test configuration and fixtures.
 """
 
 # Standard library
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 # Third party
 import pytest
@@ -12,6 +12,16 @@ from httpx import AsyncClient, ASGITransport
 
 # Local
 from app.main import app
+
+
+@pytest.fixture(scope="session", autouse=True)
+def mock_alembic_upgrade():
+    """Skip real migrations during tests. Lifespan startup runs alembic upgrade
+    against the configured DATABASE_URL; CI has no Postgres, and unit tests
+    shouldn't depend on one. Patching at the import location in app.main
+    keeps lifespan itself exercised."""
+    with patch("app.main.command.upgrade"):
+        yield
 
 
 @pytest.fixture

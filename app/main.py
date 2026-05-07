@@ -76,7 +76,8 @@ async def lifespan(app: FastAPI):
         await asyncio.to_thread(command.upgrade, alembic_cfg, "head")
         logger.info("Database migrations applied")
     except Exception as e:
-        logger.warning(f"Database unavailable on startup: {e}")
+        logger.critical(f"Database migration failed on startup: {e}", exc_info=True)
+        raise
     logger.info(f"Libex {settings.app_version} starting up")
 
     # Start background tasks

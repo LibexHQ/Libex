@@ -131,7 +131,8 @@ async def _expand_authors(region: str, delay: float) -> dict[str, int]:
         )
         authors = result.fetchall()
 
-    logger.info(f"Seeder: expanding {len(authors)} authors in {region}")
+    total = len(authors)
+    logger.info(f"Seeder: expanding {total} authors in {region}")
 
     for author_asin, author_name in authors:
         try:
@@ -141,6 +142,8 @@ async def _expand_authors(region: str, delay: float) -> dict[str, int]:
 
             if not book_asins:
                 stats["authors_processed"] += 1
+                if stats["authors_processed"] % 100 == 0:
+                    logger.info(f"Seeder: author progress {stats['authors_processed']}/{total}, {stats['books_discovered']} new books so far")
                 continue
 
             # Check which books we're missing
@@ -166,6 +169,9 @@ async def _expand_authors(region: str, delay: float) -> dict[str, int]:
                 )
 
             stats["authors_processed"] += 1
+
+            if stats["authors_processed"] % 100 == 0:
+                logger.info(f"Seeder: author progress {stats['authors_processed']}/{total}, {stats['books_discovered']} new books so far")
 
         except Exception as e:
             stats["errors"] += 1
@@ -198,7 +204,8 @@ async def _expand_series(region: str, delay: float) -> dict[str, int]:
         )
         series_asins = [row[0] for row in result.fetchall()]
 
-    logger.info(f"Seeder: expanding {len(series_asins)} series in {region}")
+    total = len(series_asins)
+    logger.info(f"Seeder: expanding {total} series in {region}")
 
     for series_asin in series_asins:
         try:
@@ -223,6 +230,8 @@ async def _expand_series(region: str, delay: float) -> dict[str, int]:
 
             if not book_asins:
                 stats["series_processed"] += 1
+                if stats["series_processed"] % 100 == 0:
+                    logger.info(f"Seeder: series progress {stats['series_processed']}/{total}, {stats['books_discovered']} new books so far")
                 continue
 
             # Check which books we're missing
@@ -246,6 +255,9 @@ async def _expand_series(region: str, delay: float) -> dict[str, int]:
                 )
 
             stats["series_processed"] += 1
+
+            if stats["series_processed"] % 100 == 0:
+                logger.info(f"Seeder: series progress {stats['series_processed']}/{total}, {stats['books_discovered']} new books so far")
 
         except Exception as e:
             stats["errors"] += 1
@@ -278,7 +290,8 @@ async def _expand_narrators(region: str, delay: float) -> dict[str, int]:
         )
         narrator_names = [row[0] for row in result.fetchall()]
 
-    logger.info(f"Seeder: expanding {len(narrator_names)} narrators in {region}")
+    total = len(narrator_names)
+    logger.info(f"Seeder: expanding {total} narrators in {region}")
 
     for narrator_name in narrator_names:
         try:
@@ -296,6 +309,8 @@ async def _expand_narrators(region: str, delay: float) -> dict[str, int]:
             products = data.get("products", [])
             if not products:
                 stats["narrators_processed"] += 1
+                if stats["narrators_processed"] % 100 == 0:
+                    logger.info(f"Seeder: narrator progress {stats['narrators_processed']}/{total}, {stats['books_discovered']} new books so far")
                 continue
 
             book_asins = [
@@ -308,6 +323,8 @@ async def _expand_narrators(region: str, delay: float) -> dict[str, int]:
 
             if not book_asins:
                 stats["narrators_processed"] += 1
+                if stats["narrators_processed"] % 100 == 0:
+                    logger.info(f"Seeder: narrator progress {stats['narrators_processed']}/{total}, {stats['books_discovered']} new books so far")
                 continue
 
             # Check which books we're missing
@@ -331,6 +348,9 @@ async def _expand_narrators(region: str, delay: float) -> dict[str, int]:
                 )
 
             stats["narrators_processed"] += 1
+
+            if stats["narrators_processed"] % 100 == 0:
+                logger.info(f"Seeder: narrator progress {stats['narrators_processed']}/{total}, {stats['books_discovered']} new books so far")
 
         except Exception as e:
             stats["errors"] += 1

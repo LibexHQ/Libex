@@ -1,6 +1,6 @@
 """add plans column to books
 
-Revision ID: d4e5f6a7b8c9
+Revision ID: e5f6a7b8c9d0
 Revises: c3d4e5f6a7b8
 Create Date: 2026-04-29
 

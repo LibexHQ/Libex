@@ -63,7 +63,7 @@ def test_strip_html_handles_complex_html():
 
 def test_strip_html_cleans_escaped_quotes():
     """Escaped quotes are unescaped."""
-    assert strip_html('He said \\"hello\\"') == 'He said "hello"'
+    assert strip_html(r'He said \"hello\"') == 'He said "hello"'
 
 
 def test_strip_html_cleans_literal_newlines():

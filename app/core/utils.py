@@ -22,8 +22,10 @@ def strip_html(text: str | None) -> str | None:
     cleaned = cleaned.replace('\r\n', '\n').replace('\r', '\n')
     # Clean up escaped quotes
     cleaned = cleaned.replace('\\"', '"')
-    # Strip leading/trailing quotes left by Audible's bio wrapping
-    cleaned = cleaned.strip().strip('"').strip()
+    # Strip wrapping quotes only if the entire string is quoted
+    cleaned = cleaned.strip()
+    if len(cleaned) >= 2 and cleaned[0] == '"' and cleaned[-1] == '"':
+        cleaned = cleaned[1:-1].strip()
     # Collapse multiple newlines into double (paragraph breaks)
     cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
     # Collapse multiple spaces into one

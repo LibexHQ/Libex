@@ -58,6 +58,54 @@ def test_strip_html_handles_complex_html():
 
 
 # ============================================================
+# STRIP HTML — ESCAPE SEQUENCE CLEANING
+# ============================================================
+
+def test_strip_html_cleans_escaped_quotes():
+    """Escaped quotes are unescaped."""
+    assert strip_html(r'He said \"hello\"') == 'He said "hello"'
+
+
+def test_strip_html_cleans_literal_newlines():
+    """Literal \\r\\n sequences become actual newlines."""
+    result = strip_html('First paragraph.\\r\\n\\r\\nSecond paragraph.')
+    assert '\n' in result
+    assert '\\r' not in result
+    assert '\\n' not in result
+
+
+def test_strip_html_strips_wrapping_quotes():
+    """Leading and trailing quotes from Audible bio wrapping are removed."""
+    assert strip_html('"A great author."') == "A great author."
+
+
+def test_strip_html_collapses_excessive_newlines():
+    """Three or more consecutive newlines collapse to two."""
+    result = strip_html('First.\n\n\n\n\nSecond.')
+    assert result is not None
+    assert '\n\n\n' not in result
+    assert 'First.' in result
+    assert 'Second.' in result
+
+
+def test_strip_html_collapses_multiple_spaces():
+    """Multiple consecutive spaces collapse to one."""
+    assert strip_html('Hello    world') == 'Hello world'
+
+
+def test_strip_html_handles_audible_bio_mess():
+    """Handles the full Audible contributor bio format."""
+    bio = '\\"Ted Dekker is a true master.\\r\\n\\r\\nHe has sold millions.\\"'
+    result = strip_html(bio)
+    assert result is not None
+    assert '\\"' not in result
+    assert '\\r' not in result
+    assert '\\n' not in result
+    assert 'Ted Dekker' in result
+    assert 'He has sold millions.' in result
+
+
+# ============================================================
 # STRIP IMAGE SIZE SUFFIX TESTS
 # ============================================================
 

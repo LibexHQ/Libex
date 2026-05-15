@@ -30,6 +30,7 @@ from app.api.routes.narrators import router as narrators_router
 from app.api.routes.series import router as series_router
 from app.api.routes.search import router as search_router
 from app.api.routes.db import router as db_router
+from app.api.routes.internal import router as internal_router
 
 # ============================================================
 # SETTINGS & LOGGING
@@ -76,8 +77,7 @@ async def lifespan(app: FastAPI):
         await asyncio.to_thread(command.upgrade, alembic_cfg, "head")
         logger.info("Database migrations applied")
     except Exception as e:
-        logger.critical(f"Database migration failed on startup: {e}", exc_info=True)
-        raise
+        logger.warning(f"Database unavailable on startup: {e}")
     logger.info(f"Libex {settings.app_version} starting up")
 
     # Start background tasks
@@ -136,6 +136,7 @@ app.include_router(narrators_router)
 app.include_router(series_router)
 app.include_router(search_router)
 app.include_router(db_router)
+app.include_router(internal_router)
 
 # ============================================================
 # HEALTH CHECK

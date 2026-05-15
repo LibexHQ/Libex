@@ -484,6 +484,28 @@ async def get_author_books_from_db(
 # NARRATOR READER
 # ============================================================
 
+def _narrator_to_dict(n) -> dict[str, Any]:
+    """Converts a Narrator model to a response dict with attribution."""
+    result = {
+        "name": n.name,
+        "description": n.description,
+        "image": n.image,
+        "website": n.website,
+        "wikipediaUrl": n.wikipedia_url,
+        "languages": n.languages,
+        "accents": n.accents,
+        "gender": n.gender,
+        "source": n.source,
+        "sourceUrl": n.source_url,
+        "sourceUpdatedAt": n.source_updated_at.isoformat() if n.source_updated_at else None,
+        "attribution": None,
+        "updatedAt": n.updated_at.isoformat() if n.updated_at else None,
+    }
+    if n.source and n.source_updated_at:
+        date_str = n.source_updated_at.strftime("%B %Y")
+        result["attribution"] = f"Profile data provided by {n.source}, retrieved {date_str}"
+    return result
+
 async def search_narrators_from_db(
     session: AsyncSession,
     name: str,
@@ -499,17 +521,7 @@ async def search_narrators_from_db(
             .offset((page - 1) * limit)
         )
         narrators = result.scalars().all()
-        return [
-            {
-                "name": n.name,
-                "description": n.description,
-                "image": n.image,
-                "website": n.website,
-                "wikipediaUrl": n.wikipedia_url,
-                "updatedAt": n.updated_at.isoformat() if n.updated_at else None,
-            }
-            for n in narrators
-        ]
+        return [_narrator_to_dict(n) for n in narrators]
     except Exception as e:
         logger.warning(f"DB read failed for narrator search '{name}': {e}")
         return []

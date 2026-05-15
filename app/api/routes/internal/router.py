@@ -152,6 +152,16 @@ async def seed_narrators(
             values["accents"] = entry["accents"]
         if entry.get("gender"):
             values["gender"] = entry["gender"]
+        if entry.get("genres"):
+            values["genres_narrated"] = entry["genres"]
+        if entry.get("audiobooksProduced"):
+            values["audiobooks_produced"] = entry["audiobooksProduced"]
+        if entry.get("culturalHeritage"):
+            values["cultural_heritage"] = entry["culturalHeritage"]
+        if entry.get("publishers"):
+            values["publishers"] = entry["publishers"]
+        if entry.get("socialLinks"):
+            values["social_links"] = entry["socialLinks"]
         if entry.get("source"):
             values["source"] = entry["source"]
         if entry.get("sourceUrl"):
@@ -188,15 +198,15 @@ if __name__ == "__main__":
     print()
     print("=== Libex Seed Secret Generator ===")
     print()
-    print("  Your token (use in Authorization header — save this, it cannot be recovered):")
+    print(f"  Your token (use in Authorization header — save this, it cannot be recovered):")
     print(f"  {token}")
     print()
-    print("  SEED_SECRET (set this in Portainer/env):")
+    print(f"  SEED_SECRET (set this in Portainer/env):")
     print(f"  {hashed}")
     print()
     print("  Usage:")
-    print('  curl -X POST https://libex.lostcartographer.xyz/internal/seed/narrators \\')
+    print(f'  curl -X POST https://libex.lostcartographer.xyz/internal/seed/narrators \\')
     print(f'    -H "Authorization: Bearer {token}" \\')
-    print('    -H "Content-Type: application/json" \\')
-    print('    -d @scrapers/narratorlist/output/narrators.json')
+    print(f'    -H "Content-Type: application/json" \\')
+    print(f'    -d @scrapers/narratorlist/output/narrators.json')
     print()

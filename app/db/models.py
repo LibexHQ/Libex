@@ -150,6 +150,7 @@ class Author(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     image: Mapped[str | None] = mapped_column(Text, nullable=True)
     fetched_description: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    last_seeded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -196,6 +197,7 @@ class Series(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     region: Mapped[str | None] = mapped_column(REGION_ENUM, nullable=True)
     fetched_description: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    last_seeded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -238,6 +240,7 @@ class Narrator(Base):
     website: Mapped[str | None] = mapped_column(Text, nullable=True)
     wikipedia_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     fetched_description: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    last_seeded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),

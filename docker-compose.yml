@@ -19,6 +19,7 @@ services:
       - SEEDER_REQUEST_DELAY=${SEEDER_REQUEST_DELAY:-1.0}
       - SEEDER_REGIONS=${SEEDER_REGIONS:-us}
       - AUDIBLE_PROXY_URL=${AUDIBLE_PROXY_URL}
+      - SEED_SECRET=${SEED_SECRET}
     volumes:
       - ./logs:/app/logs
     depends_on:

@@ -239,6 +239,12 @@ class Narrator(Base):
     image: Mapped[str | None] = mapped_column(Text, nullable=True)
     website: Mapped[str | None] = mapped_column(Text, nullable=True)
     wikipedia_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    languages: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    accents: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    gender: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    source: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     fetched_description: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     last_seeded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(

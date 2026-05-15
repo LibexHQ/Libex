@@ -27,9 +27,7 @@ class Settings(BaseSettings):
 
     # Cache
     cache_enabled: bool = True
-    cache_backend: str = "memory"  # memory or redis
     cache_ttl: int = 86400         # 24 hours default
-    redis_url: str = "redis://localhost:6379"
 
     # Audible
     default_region: str = "us"
@@ -52,6 +50,9 @@ class Settings(BaseSettings):
     seeder_interval_hours: int = 24
     seeder_request_delay: float = 1.0
     seeder_regions: str = "us"
+
+    # Internal seed endpoint
+    seed_secret: str = ""  # Empty = endpoint disabled. Set in env only.
 
 
 @lru_cache()

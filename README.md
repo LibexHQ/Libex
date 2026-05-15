@@ -181,6 +181,8 @@ Logging is completely optional. Leave `AXIOM_TOKEN` empty and Libex logs to stdo
 
 **Audible plans:** Book responses include `plans` (list of Audible plan names such as `"US Minerva"` or `"AccessViaMusic"`), letting clients determine subscription availability programmatically.
 
+**Narrator profiles:** Narrator responses from `/db/narrator` include enrichment data sourced from [NarratorList.com](https://narratorlist.com) and [AussieNarrator.com](https://aussienarrator.com) where available. When profile data is present, the response includes `source`, `sourceUrl` (link to the narrator's full profile), `sourceUpdatedAt`, and an `attribution` string (e.g. `"Profile data provided by NarratorList.com, retrieved May 2026"`). Consumers displaying narrator data should include this attribution where practical.
+
 ---
 
 ## Audiobookshelf Configuration
@@ -312,6 +314,7 @@ Copy `.env.example` to `.env` and configure:
 | `SEEDER_REQUEST_DELAY` | `1.0` | Seconds between Audible requests during seeding |
 | `SEEDER_REGIONS` | `us` | Comma-separated regions to seed (e.g. `us,uk,de`) |
 | `AUDIBLE_PROXY_URL` | — | Proxy URL for outbound Audible requests only. Supports `http://`, `https://`, `socks5://`. API serving is unaffected |
+| `SEED_SECRET` | — | PBKDF2 hash for the internal seed endpoint. Empty = endpoint disabled. Generate with `python -m app.api.routes.internal.router` |
 
 `DATABASE_URL` is constructed automatically by docker-compose from `DB_NAME`, `DB_USER`, and `DB_PASSWORD`. Only set it manually if running outside of Docker.
 
@@ -355,6 +358,10 @@ Libex is a metadata tool that fetches publicly available information from Audibl
 ## Acknowledgements
 
 **Audible** — All metadata is sourced from Audible's public API. Libex is an independent project and is not affiliated with, endorsed by, or sponsored by Audible or Amazon.
+
+**[NarratorList.com](https://narratorlist.com)** — Narrator profile data including biographies, images, languages, and accent ratings is sourced from NarratorList.com. NarratorList is a community-built database where audiobook narrators curate their own profiles. Maintained by Amy Soakes.
+
+**[AussieNarrator.com](https://aussienarrator.com)** — Additional narrator profile data for Australian and New Zealand narrators. A sister site to NarratorList.com, also maintained by Amy Soakes.
 
 **[Axiom](https://axiom.co)** — Structured logging for the public instance. Axiom provides the observability layer that helps us monitor and improve Libex.
 

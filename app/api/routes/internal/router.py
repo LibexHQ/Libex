@@ -152,6 +152,16 @@ async def seed_narrators(
             values["accents"] = entry["accents"]
         if entry.get("gender"):
             values["gender"] = entry["gender"]
+        if entry.get("genres"):
+            values["genres_narrated"] = entry["genres"]
+        if entry.get("audiobooksProduced"):
+            values["audiobooks_produced"] = entry["audiobooksProduced"]
+        if entry.get("culturalHeritage"):
+            values["cultural_heritage"] = entry["culturalHeritage"]
+        if entry.get("publishers"):
+            values["publishers"] = entry["publishers"]
+        if entry.get("socialLinks"):
+            values["social_links"] = entry["socialLinks"]
         if entry.get("source"):
             values["source"] = entry["source"]
         if entry.get("sourceUrl"):

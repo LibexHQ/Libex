@@ -500,6 +500,7 @@ def _narrator_to_dict(n) -> dict[str, Any]:
         "culturalHeritage": n.cultural_heritage,
         "publishers": n.publishers,
         "socialLinks": n.social_links,
+        "audioSamples": n.audio_samples,
         "source": n.source,
         "sourceUrl": n.source_url,
         "sourceUpdatedAt": n.source_updated_at.isoformat() if n.source_updated_at else None,

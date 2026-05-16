@@ -162,6 +162,8 @@ async def seed_narrators(
             values["publishers"] = entry["publishers"]
         if entry.get("socialLinks"):
             values["social_links"] = entry["socialLinks"]
+        if entry.get("audioSamples"):
+            values["audio_samples"] = entry["audioSamples"]
         if entry.get("source"):
             values["source"] = entry["source"]
         if entry.get("sourceUrl"):

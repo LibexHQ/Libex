@@ -247,6 +247,7 @@ class Narrator(Base):
     cultural_heritage: Mapped[str | None] = mapped_column(Text, nullable=True)
     publishers: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     social_links: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    audio_samples: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     source: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

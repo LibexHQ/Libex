@@ -6,6 +6,13 @@ Narrators route schemas.
 from pydantic import BaseModel
 
 
+class AudioSampleResponse(BaseModel):
+    url: str
+    title: str | None = None
+    genre: str | None = None
+    source: str | None = None
+
+
 class NarratorProfileResponse(BaseModel):
     name: str
     description: str | None = None
@@ -20,6 +27,7 @@ class NarratorProfileResponse(BaseModel):
     culturalHeritage: str | None = None
     publishers: list[str] | None = None
     socialLinks: dict[str, str] | None = None
+    audioSamples: list[AudioSampleResponse] | None = None
     source: str | None = None
     sourceUrl: str | None = None
     sourceUpdatedAt: str | None = None

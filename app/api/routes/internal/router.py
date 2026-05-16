@@ -119,7 +119,7 @@ async def seed_narrators(
         result = await session.execute(
             select(Narrator).where(func.lower(Narrator.name) == name.lower())
         )
-        narrator = result.scalar_one_or_none()
+        narrator = result.scalars().first()
 
         # Normalized match: strip periods, collapse spaces
         if not narrator:
@@ -129,7 +129,7 @@ async def seed_narrators(
                     func.lower(func.replace(func.replace(Narrator.name, '.', ''), '  ', ' ')) == normalized
                 )
             )
-            narrator = result.scalar_one_or_none()
+            narrator = result.scalars().first()
 
         if not narrator:
             stats["skipped"] += 1

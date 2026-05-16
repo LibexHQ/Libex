@@ -119,7 +119,7 @@ async def seed_narrators(
         result = await session.execute(
             select(Narrator).where(func.lower(Narrator.name) == name.lower())
         )
-        narrator = result.scalar_one_or_none()
+        narrator = result.scalars().first()
 
         # Normalized match: strip periods, collapse spaces
         if not narrator:
@@ -129,7 +129,7 @@ async def seed_narrators(
                     func.lower(func.replace(func.replace(Narrator.name, '.', ''), '  ', ' ')) == normalized
                 )
             )
-            narrator = result.scalar_one_or_none()
+            narrator = result.scalars().first()
 
         if not narrator:
             stats["skipped"] += 1
@@ -198,15 +198,15 @@ if __name__ == "__main__":
     print()
     print("=== Libex Seed Secret Generator ===")
     print()
-    print("  Your token (use in Authorization header — save this, it cannot be recovered):")
+    print(f"  Your token (use in Authorization header — save this, it cannot be recovered):")
     print(f"  {token}")
     print()
-    print("  SEED_SECRET (set this in Portainer/env):")
+    print(f"  SEED_SECRET (set this in Portainer/env):")
     print(f"  {hashed}")
     print()
     print("  Usage:")
-    print('  curl -X POST https://libex.lostcartographer.xyz/internal/seed/narrators \\')
+    print(f'  curl -X POST https://libex.lostcartographer.xyz/internal/seed/narrators \\')
     print(f'    -H "Authorization: Bearer {token}" \\')
-    print('    -H "Content-Type: application/json" \\')
-    print('    -d @scrapers/narratorlist/output/narrators.json')
+    print(f'    -H "Content-Type: application/json" \\')
+    print(f'    -d @scrapers/narratorlist/output/narrators.json')
     print()

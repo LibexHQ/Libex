@@ -9,11 +9,13 @@ from typing import Annotated, Any
 
 # Third party
 from fastapi import APIRouter, Depends, Path, Query
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Local
 from app.api.routes.authors.schemas import AuthorResponse
-from app.api.routes.books.schemas import BookResponse
+from app.api.routes.books.schemas import BookResponse, ChapterResponse
+from app.api.routes.narrators.schemas import NarratorProfileResponse
 from app.api.routes.series.schemas import SeriesResponse
 from app.core.exceptions import NotFoundException
 from app.core.middleware import is_valid_asin, valid_region
@@ -38,7 +40,14 @@ from app.services.db.reader import (
 router = APIRouter(prefix="/db", tags=["Database"])
 
 
-@router.get("/stats")
+class StatsResponse(BaseModel):
+    books: int = 0
+    authors: int = 0
+    narrators: int = 0
+    series: int = 0
+
+
+@router.get("/stats", response_model=StatsResponse)
 async def get_stats(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, int]:
@@ -173,7 +182,7 @@ async def get_db_books_by_sku(
     return books
 
 
-@router.get("/book/{asin}/chapters")
+@router.get("/book/{asin}/chapters", response_model=ChapterResponse)
 async def get_db_book_chapters(
     asin: Annotated[str, Path(description="Book ASIN")],
     session: AsyncSession = Depends(get_session),
@@ -245,7 +254,7 @@ async def get_db_narrator_books(
     return books
 
 
-@router.get("/narrator", response_model=list[dict])
+@router.get("/narrator", response_model=list[NarratorProfileResponse])
 async def search_db_narrators(
     name: Annotated[str, Query(description="Narrator name to search for")],
     limit: Annotated[int, Query(ge=1, le=100, description="Results per page (max 100)")] = 20,

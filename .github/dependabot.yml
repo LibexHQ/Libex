@@ -4,30 +4,20 @@ updates:
     directory: "/"
     schedule:
       interval: "daily"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 0
     labels:
       - "dependencies"
       - "security"
     commit-message:
       prefix: "security"
-    groups:
-      pip-security:
-        applies-to: security-updates
-        patterns:
-          - "*"
 
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "daily"
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 0
     labels:
       - "dependencies"
       - "security"
     commit-message:
       prefix: "security"
-    groups:
-      actions-security:
-        applies-to: security-updates
-        patterns:
-          - "*"

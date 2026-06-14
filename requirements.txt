@@ -10,5 +10,5 @@ asyncpg==0.31.0
 psycopg2-binary==2.9.12
 axiom-py==0.10.0
 python-json-logger==4.1.0
-pytest==9.0.3
+pytest==9.1.0
 pytest-asyncio==1.3.0

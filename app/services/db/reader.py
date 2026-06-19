@@ -10,7 +10,7 @@ Returns the same dict format as the Audible services.
 from typing import Any
 
 # Third party
-from sqlalchemy import func, select
+from sqlalchemy import Float, case, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -620,7 +620,13 @@ async def search_series_from_db(session: AsyncSession, name: str) -> list[dict[s
 async def get_series_books_from_db(
     session: AsyncSession, series_asin: str
 ) -> list[dict[str, Any]]:
-    """Fetches all books in a series from the DB, sorted by position."""
+    """Fetches all books in a series from the DB, sorted by position.
+
+    Position is a String column but commonly holds numeric values ("1", "2",
+    "10", "1.5"). Plain string ordering sorts "10" before "2", so numeric
+    positions are cast to Float for ordering. Non-numeric positions ("1-3",
+    "Book 1", null) fall to the end in stable string order.
+    """
     try:
         result = await session.execute(
             select(Book)
@@ -632,7 +638,16 @@ async def get_series_books_from_db(
                 selectinload(Book.genres),
                 selectinload(Book.series),
             )
-            .order_by(book_series.c.position)
+            .order_by(
+                case(
+                    (
+                        book_series.c.position.op("~")(r"^\d+(\.\d+)?$"),
+                        cast(book_series.c.position, Float),
+                    ),
+                    else_=None,
+                ).asc().nulls_last(),
+                book_series.c.position.asc(),
+            )
         )
         books = result.scalars().all()
         results = []

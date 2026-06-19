@@ -1,0 +1,4 @@
+-r requirements.txt
+-c constraints.txt
+
+testcontainers[postgres]==4.14.2

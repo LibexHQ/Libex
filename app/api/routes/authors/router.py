@@ -16,6 +16,7 @@ from app.db.session import get_session
 # Routes
 from app.api.routes.authors.schemas import AuthorResponse
 from app.api.routes.books.schemas import BookResponse
+from app.api.routes.sort_params import BookSortField, SortOrder
 
 # Services
 from app.services.audible.authors import (
@@ -25,6 +26,7 @@ from app.services.audible.authors import (
     search_authors,
 )
 from app.services.audible.books import get_books_by_asins
+from app.services.sorting import sort_dicts, BOOK_SORT_FIELDS
 
 # Core
 from app.core.middleware import is_valid_asin, valid_region
@@ -53,6 +55,8 @@ async def search(
 async def get_books_by_author_name(
     name: Annotated[str, Query(description="Author name")],
     region: str = Depends(valid_region),
+    sort: Annotated[BookSortField | None, Query(description="Field to sort the returned books by")] = None,
+    order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
     session: AsyncSession = Depends(get_session),
 ) -> list[BookResponse]:
     """
@@ -64,6 +68,7 @@ async def get_books_by_author_name(
     if not asins:
         raise NotFoundException("No books found for author")
     books = await get_books_by_asins(asins, region, session)
+    books = sort_dicts(books, sort.value if sort is not None else None, order.value, BOOK_SORT_FIELDS)
     return [BookResponse(**b) for b in books]
 
 
@@ -72,6 +77,8 @@ async def get_books_by_author(
     asin: Annotated[str, Path(description="Author ASIN")],
     region: str = Depends(valid_region),
     cache: Annotated[bool, Query(description="Return cached data if available")] = False,
+    sort: Annotated[BookSortField | None, Query(description="Field to sort the returned books by")] = None,
+    order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
     session: AsyncSession = Depends(get_session),
 ) -> list[BookResponse]:
     """
@@ -84,6 +91,7 @@ async def get_books_by_author(
     if not asins:
         raise NotFoundException("No books found for author")
     books = await get_books_by_asins(asins, region, session)
+    books = sort_dicts(books, sort.value if sort is not None else None, order.value, BOOK_SORT_FIELDS)
     return [BookResponse(**b) for b in books]
 
 
@@ -92,6 +100,8 @@ async def get_books_by_author_primary(
     asin: Annotated[str, Path(description="Author ASIN")],
     region: str = Depends(valid_region),
     cache: Annotated[bool, Query(description="Return cached data if available")] = False,
+    sort: Annotated[BookSortField | None, Query(description="Field to sort the returned books by")] = None,
+    order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
     session: AsyncSession = Depends(get_session),
 ) -> list[BookResponse]:
     """Legacy endpoint. Use /author/books/{asin} instead."""
@@ -101,6 +111,7 @@ async def get_books_by_author_primary(
     if not asins:
         raise NotFoundException("No books found for author")
     books = await get_books_by_asins(asins, region, session)
+    books = sort_dicts(books, sort.value if sort is not None else None, order.value, BOOK_SORT_FIELDS)
     return [BookResponse(**b) for b in books]
 
 

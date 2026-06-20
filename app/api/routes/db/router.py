@@ -5,7 +5,6 @@ Only returns books that have been fetched and stored previously.
 """
 
 # Standard library
-from enum import Enum
 from typing import Annotated, Any
 
 # Third party
@@ -24,9 +23,12 @@ from app.db.session import get_session
 from app.api.routes.db.filters import (
     book_filters,
     NarratorFilters,
+)
+from app.api.routes.sort_params import (
+    BookSortField,
+    NarratorSortField,
     SortOrder,
 )
-from app.services.db.sorting import BOOK_SORT_FIELDS, NARRATOR_SORT_FIELDS
 from app.services.db.reader import (
     get_author_books_from_db,
     get_author_from_db,
@@ -46,22 +48,6 @@ from app.services.db.reader import (
 )
 
 router = APIRouter(prefix="/db", tags=["Database"])
-
-
-# Sortable fields, derived from the sort allow-lists so the OpenAPI docs
-# show exactly what clients can sort on.
-BookSortField = Enum(
-    "BookSortField",
-    {field: field for field in BOOK_SORT_FIELDS},
-    type=str,
-)
-
-
-NarratorSortField = Enum(
-    "NarratorSortField",
-    {field: field for field in NARRATOR_SORT_FIELDS},
-    type=str,
-)
 
 
 class StatsResponse(BaseModel):

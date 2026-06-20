@@ -21,11 +21,6 @@ from typing import Annotated
 from fastapi import Query
 
 
-class SortOrder(str, Enum):
-    asc = "asc"
-    desc = "desc"
-
-
 class AudiobooksProduced(str, Enum):
     one_to_ten = "1 to 10"
     eleven_to_twenty = "11 to 20"

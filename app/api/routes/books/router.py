@@ -16,10 +16,12 @@ from app.db.session import get_session
 
 # Routes
 from app.api.routes.books.schemas import BookResponse, BulkBookResponse, ChapterResponse
+from app.api.routes.sort_params import BookSortField, SortOrder
 
 # Services
 from app.services.audible.books import get_book_by_asin, get_books_by_asins, get_chapters
 from app.services.db.reader import get_books_by_sku_from_db
+from app.services.sorting import sort_dicts, BOOK_SORT_FIELDS
 
 # Core
 from app.core.exceptions import NotFoundException
@@ -94,6 +96,8 @@ async def get_books_bulk(
     asins: Annotated[list[str], Query(description="ASINs — comma-separated, repeated params, or both. Max 1000.")],
     region: str = Depends(valid_region),
     cache: Annotated[bool, Query(description="Return cached data if available")] = False,
+    sort: Annotated[BookSortField | None, Query(description="Field to sort the returned books by")] = None,
+    order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
     session: AsyncSession = Depends(get_session),
 ) -> BulkBookResponse:
     """
@@ -122,6 +126,8 @@ async def get_books_bulk(
 
     found_asins = {book["asin"] for book in data}
     not_found = [a for a in asin_list if a not in found_asins]
+
+    data = sort_dicts(data, sort.value if sort is not None else None, order.value, BOOK_SORT_FIELDS)
 
     return BulkBookResponse(
         books=[BookResponse(**book) for book in data],

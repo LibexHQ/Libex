@@ -17,11 +17,13 @@ from app.db.session import get_session
 from app.api.routes.series.schemas import SeriesResponse
 from app.api.routes.books.schemas import BookResponse
 from app.api.routes.sort_params import BookSortField, SortOrder
+from app.api.routes.filter_params import LiveBookFilters
 
 # Services
 from app.services.audible.series import get_series, get_series_books, search_series
 from app.services.audible.books import get_books_by_asins
 from app.services.sorting import sort_dicts, BOOK_SORT_FIELDS
+from app.services.filtering import filter_dicts
 
 # Core
 from app.core.middleware import is_valid_asin, valid_region
@@ -64,6 +66,7 @@ async def get_books_by_series(
     asin: Annotated[str, Path(description="Series ASIN")],
     region: str = Depends(valid_region),
     cache: Annotated[bool, Query(description="Return cached data if available")] = False,
+    filters: LiveBookFilters = Depends(),
     sort: Annotated[BookSortField | None, Query(description="Field to sort by (overrides default series position order)")] = None,
     order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
     session: AsyncSession = Depends(get_session),
@@ -80,6 +83,7 @@ async def get_books_by_series(
     if not asins:
         raise NotFoundException("No books found for series")
     books = await get_books_by_asins(asins, region, session)
+    books = filter_dicts(books, filters.as_kwargs())
     books = sort_dicts(books, sort.value if sort is not None else None, order.value, BOOK_SORT_FIELDS)
     return [BookResponse(**b) for b in books]
 
@@ -89,6 +93,7 @@ async def get_books_by_series_primary(
     asin: Annotated[str, Path(description="Series ASIN")],
     region: str = Depends(valid_region),
     cache: Annotated[bool, Query(description="Return cached data if available")] = False,
+    filters: LiveBookFilters = Depends(),
     sort: Annotated[BookSortField | None, Query(description="Field to sort by (overrides default series position order)")] = None,
     order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
     session: AsyncSession = Depends(get_session),
@@ -100,6 +105,7 @@ async def get_books_by_series_primary(
     if not asins:
         raise NotFoundException("No books found for series")
     books = await get_books_by_asins(asins, region, session)
+    books = filter_dicts(books, filters.as_kwargs())
     books = sort_dicts(books, sort.value if sort is not None else None, order.value, BOOK_SORT_FIELDS)
     return [BookResponse(**b) for b in books]
 

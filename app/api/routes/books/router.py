@@ -17,11 +17,13 @@ from app.db.session import get_session
 # Routes
 from app.api.routes.books.schemas import BookResponse, BulkBookResponse, ChapterResponse
 from app.api.routes.sort_params import BookSortField, SortOrder
+from app.api.routes.filter_params import LiveBookFilters
 
 # Services
 from app.services.audible.books import get_book_by_asin, get_books_by_asins, get_chapters
 from app.services.db.reader import get_books_by_sku_from_db
 from app.services.sorting import sort_dicts, BOOK_SORT_FIELDS
+from app.services.filtering import filter_dicts
 
 # Core
 from app.core.exceptions import NotFoundException
@@ -96,6 +98,7 @@ async def get_books_bulk(
     asins: Annotated[list[str], Query(description="ASINs — comma-separated, repeated params, or both. Max 1000.")],
     region: str = Depends(valid_region),
     cache: Annotated[bool, Query(description="Return cached data if available")] = False,
+    filters: LiveBookFilters = Depends(),
     sort: Annotated[BookSortField | None, Query(description="Field to sort the returned books by")] = None,
     order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
     session: AsyncSession = Depends(get_session),
@@ -124,9 +127,12 @@ async def get_books_bulk(
 
     data = await get_books_by_asins(asin_list, region, session, cache)
 
+    # notFound reflects what Audible didn't have — computed before filtering, so
+    # a book that was found but filtered out is not reported as missing.
     found_asins = {book["asin"] for book in data}
     not_found = [a for a in asin_list if a not in found_asins]
 
+    data = filter_dicts(data, filters.as_kwargs())
     data = sort_dicts(data, sort.value if sort is not None else None, order.value, BOOK_SORT_FIELDS)
 
     return BulkBookResponse(

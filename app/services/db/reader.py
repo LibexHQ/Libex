@@ -19,7 +19,7 @@ from app.db.models import Book, Author, Narrator, Series, Track, author_book, bo
 
 # Services
 from app.services.audible.client import REGION_MAP
-from app.services.db.sorting import apply_sort, BOOK_SORT_FIELDS
+from app.services.db.sorting import apply_sort, BOOK_SORT_FIELDS, NARRATOR_SORT_FIELDS
 
 # Core
 from app.core.logging import get_logger
@@ -358,12 +358,14 @@ async def get_distinct_plans_from_db(session: AsyncSession) -> list[str]:
 async def get_books_by_plan_from_db(
     session: AsyncSession,
     plan_name: str,
+    sort: str | None = None,
+    order: str | None = None,
     limit: int = 20,
     page: int = 1,
 ) -> list[dict[str, Any]]:
     """Fetches all books containing a specific plan name."""
     try:
-        result = await session.execute(
+        stmt = (
             select(Book)
             .where(Book.plans.contains([plan_name]))
             .options(
@@ -372,9 +374,10 @@ async def get_books_by_plan_from_db(
                 selectinload(Book.genres),
                 selectinload(Book.series),
             )
-            .limit(limit)
-            .offset((page - 1) * limit)
         )
+        stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
+        stmt = stmt.limit(limit).offset((page - 1) * limit)
+        result = await session.execute(stmt)
         books = result.scalars().all()
         results = []
         for book in books:
@@ -388,12 +391,14 @@ async def get_books_by_plan_from_db(
 
 async def get_vvab_books_from_db(
     session: AsyncSession,
+    sort: str | None = None,
+    order: str | None = None,
     limit: int = 20,
     page: int = 1,
 ) -> list[dict[str, Any]]:
     """Fetches all virtual voice audiobooks (AI-narrated) from the local DB."""
     try:
-        result = await session.execute(
+        stmt = (
             select(Book)
             .where(Book.is_vvab.is_(True))
             .options(
@@ -402,9 +407,10 @@ async def get_vvab_books_from_db(
                 selectinload(Book.genres),
                 selectinload(Book.series),
             )
-            .limit(limit)
-            .offset((page - 1) * limit)
         )
+        stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
+        stmt = stmt.limit(limit).offset((page - 1) * limit)
+        result = await session.execute(stmt)
         books = result.scalars().all()
         results = []
         for book in books:
@@ -459,11 +465,15 @@ async def get_author_from_db(session: AsyncSession, asin: str, region: str) -> d
 
 
 async def get_author_books_from_db(
-    session: AsyncSession, author_asin: str, region: str
+    session: AsyncSession,
+    author_asin: str,
+    region: str,
+    sort: str | None = None,
+    order: str | None = None,
 ) -> list[dict[str, Any]]:
     """Fetches all books for an author from the DB."""
     try:
-        result = await session.execute(
+        stmt = (
             select(Book)
             .join(author_book, author_book.c.book_asin == Book.asin)
             .join(Author, Author.id == author_book.c.author_id)
@@ -476,6 +486,8 @@ async def get_author_books_from_db(
             )
             .distinct()
         )
+        stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
+        result = await session.execute(stmt)
         books = result.scalars().all()
         results = []
         for book in books:
@@ -522,17 +534,17 @@ def _narrator_to_dict(n) -> dict[str, Any]:
 async def search_narrators_from_db(
     session: AsyncSession,
     name: str,
+    sort: str | None = None,
+    order: str | None = None,
     limit: int = 20,
     page: int = 1,
 ) -> list[dict[str, Any]]:
     """Searches narrators by name (case-insensitive partial match)."""
     try:
-        result = await session.execute(
-            select(Narrator)
-            .where(Narrator.name.ilike(f"%{name}%"))
-            .limit(limit)
-            .offset((page - 1) * limit)
-        )
+        stmt = select(Narrator).where(Narrator.name.ilike(f"%{name}%"))
+        stmt = apply_sort(stmt, sort, order, NARRATOR_SORT_FIELDS)
+        stmt = stmt.limit(limit).offset((page - 1) * limit)
+        result = await session.execute(stmt)
         narrators = result.scalars().all()
         return [_narrator_to_dict(n) for n in narrators]
     except Exception as e:
@@ -543,12 +555,14 @@ async def search_narrators_from_db(
 async def get_narrator_books_from_db(
     session: AsyncSession,
     name: str,
+    sort: str | None = None,
+    order: str | None = None,
     limit: int = 20,
     page: int = 1,
 ) -> list[dict[str, Any]]:
     """Fetches all books by a narrator name from the local DB."""
     try:
-        result = await session.execute(
+        stmt = (
             select(Book)
             .join(book_narrator, Book.asin == book_narrator.c.book_asin)
             .where(book_narrator.c.narrator_name == name)
@@ -558,9 +572,10 @@ async def get_narrator_books_from_db(
                 selectinload(Book.genres),
                 selectinload(Book.series),
             )
-            .limit(limit)
-            .offset((page - 1) * limit)
         )
+        stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
+        stmt = stmt.limit(limit).offset((page - 1) * limit)
+        result = await session.execute(stmt)
         books = result.scalars().all()
         results = []
         for book in books:
@@ -625,17 +640,23 @@ async def search_series_from_db(session: AsyncSession, name: str) -> list[dict[s
 
 
 async def get_series_books_from_db(
-    session: AsyncSession, series_asin: str
+    session: AsyncSession,
+    series_asin: str,
+    sort: str | None = None,
+    order: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Fetches all books in a series from the DB, sorted by position.
+    """Fetches all books in a series from the DB.
 
-    Position is a String column but commonly holds numeric values ("1", "2",
-    "10", "1.5"). Plain string ordering sorts "10" before "2", so numeric
-    positions are cast to Float for ordering. Non-numeric positions ("1-3",
-    "Book 1", null) fall to the end in stable string order.
+    Defaults to series position order. Position is a String column but commonly
+    holds numeric values ("1", "2", "10", "1.5"). Plain string ordering sorts
+    "10" before "2", so numeric positions are cast to Float for ordering.
+    Non-numeric positions ("1-3", "Book 1", null) fall to the end in stable
+    string order.
+
+    Passing an explicit sort field overrides the position ordering.
     """
     try:
-        result = await session.execute(
+        stmt = (
             select(Book)
             .join(book_series, book_series.c.book_asin == Book.asin)
             .where(book_series.c.series_asin == series_asin)
@@ -645,7 +666,11 @@ async def get_series_books_from_db(
                 selectinload(Book.genres),
                 selectinload(Book.series),
             )
-            .order_by(
+        )
+        if sort:
+            stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
+        else:
+            stmt = stmt.order_by(
                 case(
                     (
                         book_series.c.position.op("~")(r"^\d+(\.\d+)?$"),
@@ -655,7 +680,7 @@ async def get_series_books_from_db(
                 ).asc().nulls_last(),
                 book_series.c.position.asc(),
             )
-        )
+        result = await session.execute(stmt)
         books = result.scalars().all()
         results = []
         for book in books:

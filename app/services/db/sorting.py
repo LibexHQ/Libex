@@ -14,7 +14,7 @@ make sense, and the field names match what the API returns.
 from sqlalchemy import Select
 
 # Database
-from app.db.models import Book
+from app.db.models import Book, Narrator
 
 # Allow-list for Book sorting: API field name -> sortable column.
 # Text-heavy fields (description, summary) are intentionally excluded.
@@ -26,6 +26,16 @@ BOOK_SORT_FIELDS = {
     "language": Book.language,
     "publisher": Book.publisher,
     "updatedAt": Book.updated_at,
+}
+
+# Allow-list for Narrator sorting. Only scalar fields that sort sensibly.
+# audiobooksProduced is excluded — it holds categorical buckets ("1 to 10",
+# "More than 100"), so it belongs in filtering, not sorting.
+NARRATOR_SORT_FIELDS = {
+    "name": Narrator.name,
+    "source": Narrator.source,
+    "sourceUpdatedAt": Narrator.source_updated_at,
+    "updatedAt": Narrator.updated_at,
 }
 
 

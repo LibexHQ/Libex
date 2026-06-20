@@ -54,6 +54,7 @@ _ASYNC_URL = _raw_url.replace("postgresql+psycopg2://", "postgresql+asyncpg://")
 os.environ["DATABASE_URL"] = _ASYNC_URL
 
 # Now it is safe to import app modules — they will read the container URL.
+from sqlalchemy import text  # noqa: E402
 from sqlalchemy.ext.asyncio import (  # noqa: E402
     AsyncSession,
     async_sessionmaker,
@@ -84,9 +85,33 @@ def pytest_unconfigure(config):
 
 @pytest_asyncio.fixture
 async def db_session() -> AsyncGenerator[AsyncSession, None]:
-    """Provides a real AsyncSession bound to the migrated container DB."""
+    """
+    Provides a real AsyncSession bound to the migrated container DB.
+
+    After each test every table (except alembic_version) is truncated, so
+    tests stay isolated from each other — the container persists for the whole
+    session, so committed rows would otherwise leak between tests. Truncating
+    dynamically means new tables are covered automatically.
+    """
     engine = create_async_engine(_ASYNC_URL, pool_pre_ping=True)
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with factory() as session:
-        yield session
+        try:
+            yield session
+        finally:
+            await session.rollback()
+            result = await session.execute(
+                text(
+                    "SELECT tablename FROM pg_tables "
+                    "WHERE schemaname = 'public' "
+                    "AND tablename != 'alembic_version'"
+                )
+            )
+            tables = [row[0] for row in result.fetchall()]
+            if tables:
+                joined = ", ".join(f'"{t}"' for t in tables)
+                await session.execute(
+                    text(f"TRUNCATE {joined} RESTART IDENTITY CASCADE")
+                )
+                await session.commit()
     await engine.dispose()

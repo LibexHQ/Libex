@@ -17,9 +17,12 @@ from sqlalchemy.orm import selectinload
 # Database
 from app.db.models import Book, Author, Narrator, Series, Track, author_book, book_narrator, book_series
 
+# Services
+from app.services.audible.client import REGION_MAP
+from app.services.db.sorting import apply_sort, BOOK_SORT_FIELDS
+
 # Core
 from app.core.logging import get_logger
-from app.services.audible.client import REGION_MAP
 
 logger = get_logger()
 
@@ -215,6 +218,8 @@ async def search_books_from_db(
     is_buyable: bool | None = None,
     is_vvab: bool | None = None,
     plan_name: str | None = None,
+    sort: str | None = None,
+    order: str | None = None,
     limit: int = 20,
     page: int = 1,
 ) -> list[dict[str, Any]]:
@@ -292,6 +297,8 @@ async def search_books_from_db(
             stmt = stmt.where(Book.is_vvab == is_vvab)
         if plan_name is not None:
             stmt = stmt.where(Book.plans.contains([plan_name]))
+
+        stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
 
         stmt = stmt.limit(limit).offset((page - 1) * limit)
 

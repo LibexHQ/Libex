@@ -358,7 +358,7 @@ async def _scan_new_releases(region: str, delay: float) -> dict[str, int]:
 
         all_asins: list[str] = []
         page = 0
-        while page < 5:
+        while page < 20:
             path = "/1.0/catalog/products"
             params = {
                 "num_results": 50,
@@ -447,6 +447,10 @@ async def run_seeder() -> None:
             }
 
             for region in regions:
+                release_stats = await _scan_new_releases(region, delay)
+                cycle_stats["new_releases"] += release_stats["books_discovered"]
+                cycle_stats["errors"] += release_stats["errors"]
+
                 author_stats = await _expand_authors(region, delay)
                 cycle_stats["authors_processed"] += author_stats["authors_processed"]
                 cycle_stats["books_discovered"] += author_stats["books_discovered"]
@@ -461,10 +465,6 @@ async def run_seeder() -> None:
                 cycle_stats["narrators_processed"] += narrator_stats["narrators_processed"]
                 cycle_stats["books_discovered"] += narrator_stats["books_discovered"]
                 cycle_stats["errors"] += narrator_stats["errors"]
-
-                release_stats = await _scan_new_releases(region, delay)
-                cycle_stats["new_releases"] += release_stats["books_discovered"]
-                cycle_stats["errors"] += release_stats["errors"]
 
             logger.info("Seeder: cycle complete", extra=cycle_stats)
 

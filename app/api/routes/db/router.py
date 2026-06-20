@@ -21,7 +21,7 @@ from app.api.routes.series.schemas import SeriesResponse
 from app.core.exceptions import NotFoundException
 from app.core.middleware import is_valid_asin, valid_region
 from app.db.session import get_session
-from app.services.db.sorting import BOOK_SORT_FIELDS
+from app.services.db.sorting import BOOK_SORT_FIELDS, NARRATOR_SORT_FIELDS
 from app.services.db.reader import (
     get_author_books_from_db,
     get_author_from_db,
@@ -47,6 +47,13 @@ router = APIRouter(prefix="/db", tags=["Database"])
 BookSortField = Enum(
     "BookSortField",
     {field: field for field in BOOK_SORT_FIELDS},
+    type=str,
+)
+
+
+NarratorSortField = Enum(
+    "NarratorSortField",
+    {field: field for field in NARRATOR_SORT_FIELDS},
     type=str,
 )
 
@@ -166,12 +173,21 @@ async def get_db_plans(
 @router.get("/plans/{plan_name}", response_model=list[BookResponse])
 async def get_db_books_by_plan(
     plan_name: Annotated[str, Path(description="Audible plan name (e.g. US Minerva, AccessViaMusic)")],
+    sort: Annotated[BookSortField | None, Query(description="Field to sort by")] = None,
+    order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
     limit: Annotated[int, Query(ge=1, le=100, description="Results per page (max 100)")] = 20,
     page: Annotated[int, Query(ge=1, description="Page number")] = 1,
     session: AsyncSession = Depends(get_session),
 ) -> list[dict[str, Any]]:
     """Get all books available under a specific Audible plan from the local DB."""
-    books = await get_books_by_plan_from_db(session, plan_name, limit=limit, page=page)
+    books = await get_books_by_plan_from_db(
+        session,
+        plan_name,
+        sort=sort.value if sort is not None else None,
+        order=order.value,
+        limit=limit,
+        page=page,
+    )
     if not books:
         raise NotFoundException(f"No books found for plan: {plan_name}")
     return books
@@ -179,12 +195,20 @@ async def get_db_books_by_plan(
 
 @router.get("/vvab", response_model=list[BookResponse])
 async def get_db_vvab_books(
+    sort: Annotated[BookSortField | None, Query(description="Field to sort by")] = None,
+    order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
     limit: Annotated[int, Query(ge=1, le=100, description="Results per page (max 100)")] = 20,
     page: Annotated[int, Query(ge=1, description="Page number")] = 1,
     session: AsyncSession = Depends(get_session),
 ) -> list[dict[str, Any]]:
     """Get all virtual voice audiobooks (AI-narrated) from the local DB."""
-    books = await get_vvab_books_from_db(session, limit=limit, page=page)
+    books = await get_vvab_books_from_db(
+        session,
+        sort=sort.value if sort is not None else None,
+        order=order.value,
+        limit=limit,
+        page=page,
+    )
     if not books:
         raise NotFoundException("No virtual voice audiobooks found in local database")
     return books
@@ -234,12 +258,20 @@ async def get_db_book(
 async def get_db_author_books(
     asin: Annotated[str, Path(description="Author ASIN")],
     region: str = Depends(valid_region),
+    sort: Annotated[BookSortField | None, Query(description="Field to sort by")] = None,
+    order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
     session: AsyncSession = Depends(get_session),
 ) -> list[dict[str, Any]]:
     """Get all books by an author from the local DB."""
     if not is_valid_asin(asin):
         raise NotFoundException(f"Invalid ASIN format: {asin}")
-    books = await get_author_books_from_db(session, asin, region)
+    books = await get_author_books_from_db(
+        session,
+        asin,
+        region,
+        sort=sort.value if sort is not None else None,
+        order=order.value,
+    )
     if not books:
         raise NotFoundException("No books found for author")
     return books
@@ -263,12 +295,21 @@ async def get_db_author(
 @router.get("/narrator/books", response_model=list[BookResponse])
 async def get_db_narrator_books(
     name: Annotated[str, Query(description="Narrator name (exact match)")],
+    sort: Annotated[BookSortField | None, Query(description="Field to sort by")] = None,
+    order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
     limit: Annotated[int, Query(ge=1, le=100, description="Results per page (max 100)")] = 20,
     page: Annotated[int, Query(ge=1, description="Page number")] = 1,
     session: AsyncSession = Depends(get_session),
 ) -> list[dict[str, Any]]:
     """Get all books by a narrator from the local DB."""
-    books = await get_narrator_books_from_db(session, name, limit=limit, page=page)
+    books = await get_narrator_books_from_db(
+        session,
+        name,
+        sort=sort.value if sort is not None else None,
+        order=order.value,
+        limit=limit,
+        page=page,
+    )
     if not books:
         raise NotFoundException(f"No books found for narrator: {name}")
     return books
@@ -277,12 +318,21 @@ async def get_db_narrator_books(
 @router.get("/narrator", response_model=list[NarratorProfileResponse])
 async def search_db_narrators(
     name: Annotated[str, Query(description="Narrator name to search for")],
+    sort: Annotated[NarratorSortField | None, Query(description="Field to sort by")] = None,
+    order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
     limit: Annotated[int, Query(ge=1, le=100, description="Results per page (max 100)")] = 20,
     page: Annotated[int, Query(ge=1, description="Page number")] = 1,
     session: AsyncSession = Depends(get_session),
 ) -> list[dict[str, Any]]:
     """Search narrators by name from the local DB."""
-    narrators = await search_narrators_from_db(session, name, limit=limit, page=page)
+    narrators = await search_narrators_from_db(
+        session,
+        name,
+        sort=sort.value if sort is not None else None,
+        order=order.value,
+        limit=limit,
+        page=page,
+    )
     if not narrators:
         raise NotFoundException(f"No narrators found matching: {name}")
     return narrators
@@ -291,12 +341,22 @@ async def search_db_narrators(
 @router.get("/series/{asin}/books", response_model=list[BookResponse])
 async def get_db_series_books(
     asin: Annotated[str, Path(description="Series ASIN")],
+    sort: Annotated[BookSortField | None, Query(description="Field to sort by (overrides default position order)")] = None,
+    order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
     session: AsyncSession = Depends(get_session),
 ) -> list[dict[str, Any]]:
-    """Get all books in a series from the local DB, sorted by position."""
+    """Get all books in a series from the local DB.
+
+    Defaults to series position order; passing a sort field overrides it.
+    """
     if not is_valid_asin(asin):
         raise NotFoundException(f"Invalid ASIN format: {asin}")
-    books = await get_series_books_from_db(session, asin)
+    books = await get_series_books_from_db(
+        session,
+        asin,
+        sort=sort.value if sort is not None else None,
+        order=order.value,
+    )
     if not books:
         raise NotFoundException("No books found for series")
     return books

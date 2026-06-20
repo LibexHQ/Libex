@@ -19,7 +19,7 @@ from app.db.models import Book, Author, Narrator, Series, Track, Genre, author_b
 
 # Services
 from app.services.audible.client import REGION_MAP
-from app.services.db.sorting import apply_sort, BOOK_SORT_FIELDS, NARRATOR_SORT_FIELDS
+from app.services.sorting import apply_sort, BOOK_SORT_FIELDS, NARRATOR_SORT_FIELDS
 from app.services.db.filtering import apply_book_filters, apply_narrator_filters
 
 # Core

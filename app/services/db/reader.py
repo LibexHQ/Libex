@@ -20,7 +20,7 @@ from app.db.models import Book, Author, Narrator, Series, Track, Genre, author_b
 # Services
 from app.services.audible.client import REGION_MAP
 from app.services.db.sorting import apply_sort, BOOK_SORT_FIELDS, NARRATOR_SORT_FIELDS
-from app.services.db.filtering import apply_genre_filter
+from app.services.db.filtering import apply_book_filters, apply_narrator_filters
 
 # Core
 from app.core.logging import get_logger
@@ -237,70 +237,35 @@ async def search_books_from_db(
             )
         )
 
-        if title is not None:
-            stmt = stmt.where(Book.title.ilike(f"%{title}%"))
-        if subtitle is not None:
-            stmt = stmt.where(Book.subtitle.ilike(f"%{subtitle}%"))
-        if region is not None:
-            stmt = stmt.where(Book.region == region)
-        if description is not None:
-            stmt = stmt.where(Book.description.ilike(f"%{description}%"))
-        if summary is not None:
-            stmt = stmt.where(Book.summary.ilike(f"%{summary}%"))
-        if publisher is not None:
-            stmt = stmt.where(Book.publisher.ilike(f"%{publisher}%"))
-        if copyright is not None:
-            stmt = stmt.where(Book.copyright.ilike(f"%{copyright}%"))
-        if isbn is not None:
-            stmt = stmt.where(Book.isbn.ilike(f"%{isbn}%"))
-        if author_name is not None:
-            stmt = (
-                stmt
-                .join(author_book, author_book.c.book_asin == Book.asin)
-                .join(Author, Author.id == author_book.c.author_id)
-                .where(Author.name.ilike(f"%{author_name}%"))
-                .distinct()
-            )
-        if series_name is not None:
-            stmt = (
-                stmt
-                .join(book_series, book_series.c.book_asin == Book.asin)
-                .join(Series, Series.asin == book_series.c.series_asin)
-                .where(Series.title.ilike(f"%{series_name}%"))
-                .distinct()
-            )
-        if language is not None:
-            stmt = stmt.where(Book.language == language)
-        if rating_better_than is not None:
-            stmt = stmt.where(Book.rating >= rating_better_than)
-        if rating_worse_than is not None:
-            stmt = stmt.where(Book.rating <= rating_worse_than)
-        if longer_than is not None:
-            stmt = stmt.where(Book.length_minutes >= longer_than)
-        if shorter_than is not None:
-            stmt = stmt.where(Book.length_minutes <= shorter_than)
-        if explicit is not None:
-            stmt = stmt.where(Book.explicit == explicit)
-        if whisper_sync is not None:
-            stmt = stmt.where(Book.whisper_sync == whisper_sync)
-        if has_pdf is not None:
-            stmt = stmt.where(Book.has_pdf == has_pdf)
-        if book_format is not None:
-            stmt = stmt.where(Book.book_format == book_format)
-        if content_type is not None:
-            stmt = stmt.where(Book.content_type == content_type)
-        if content_delivery_type is not None:
-            stmt = stmt.where(Book.content_delivery_type == content_delivery_type)
-        if is_listenable is not None:
-            stmt = stmt.where(Book.is_listenable == is_listenable)
-        if is_buyable is not None:
-            stmt = stmt.where(Book.is_buyable == is_buyable)
-        if is_vvab is not None:
-            stmt = stmt.where(Book.is_vvab == is_vvab)
-        if plan_name is not None:
-            stmt = stmt.where(Book.plans.contains([plan_name]))
-
-        stmt = apply_genre_filter(stmt, genre)
+        stmt = apply_book_filters(
+            stmt,
+            title=title,
+            subtitle=subtitle,
+            region=region,
+            description=description,
+            summary=summary,
+            publisher=publisher,
+            copyright=copyright,
+            isbn=isbn,
+            author_name=author_name,
+            series_name=series_name,
+            language=language,
+            rating_better_than=rating_better_than,
+            rating_worse_than=rating_worse_than,
+            longer_than=longer_than,
+            shorter_than=shorter_than,
+            explicit=explicit,
+            whisper_sync=whisper_sync,
+            has_pdf=has_pdf,
+            book_format=book_format,
+            content_type=content_type,
+            content_delivery_type=content_delivery_type,
+            is_listenable=is_listenable,
+            is_buyable=is_buyable,
+            is_vvab=is_vvab,
+            plan_name=plan_name,
+            genre=genre,
+        )
 
         stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
 
@@ -383,6 +348,30 @@ async def get_distinct_genres_from_db(
 async def get_books_by_plan_from_db(
     session: AsyncSession,
     plan_name: str,
+    title: str | None = None,
+    subtitle: str | None = None,
+    region: str | None = None,
+    description: str | None = None,
+    summary: str | None = None,
+    publisher: str | None = None,
+    copyright: str | None = None,
+    isbn: str | None = None,
+    author_name: str | None = None,
+    series_name: str | None = None,
+    language: str | None = None,
+    rating_better_than: float | None = None,
+    rating_worse_than: float | None = None,
+    longer_than: int | None = None,
+    shorter_than: int | None = None,
+    explicit: bool | None = None,
+    whisper_sync: bool | None = None,
+    has_pdf: bool | None = None,
+    book_format: str | None = None,
+    content_type: str | None = None,
+    content_delivery_type: str | None = None,
+    is_listenable: bool | None = None,
+    is_buyable: bool | None = None,
+    is_vvab: bool | None = None,
     genre: str | None = None,
     sort: str | None = None,
     order: str | None = None,
@@ -401,7 +390,34 @@ async def get_books_by_plan_from_db(
                 selectinload(Book.series),
             )
         )
-        stmt = apply_genre_filter(stmt, genre)
+        stmt = apply_book_filters(
+            stmt,
+            title=title,
+            subtitle=subtitle,
+            region=region,
+            description=description,
+            summary=summary,
+            publisher=publisher,
+            copyright=copyright,
+            isbn=isbn,
+            author_name=author_name,
+            series_name=series_name,
+            language=language,
+            rating_better_than=rating_better_than,
+            rating_worse_than=rating_worse_than,
+            longer_than=longer_than,
+            shorter_than=shorter_than,
+            explicit=explicit,
+            whisper_sync=whisper_sync,
+            has_pdf=has_pdf,
+            book_format=book_format,
+            content_type=content_type,
+            content_delivery_type=content_delivery_type,
+            is_listenable=is_listenable,
+            is_buyable=is_buyable,
+            is_vvab=is_vvab,
+            genre=genre,
+        )
         stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
         stmt = stmt.limit(limit).offset((page - 1) * limit)
         result = await session.execute(stmt)
@@ -418,6 +434,30 @@ async def get_books_by_plan_from_db(
 
 async def get_vvab_books_from_db(
     session: AsyncSession,
+    title: str | None = None,
+    subtitle: str | None = None,
+    region: str | None = None,
+    description: str | None = None,
+    summary: str | None = None,
+    publisher: str | None = None,
+    copyright: str | None = None,
+    isbn: str | None = None,
+    author_name: str | None = None,
+    series_name: str | None = None,
+    language: str | None = None,
+    rating_better_than: float | None = None,
+    rating_worse_than: float | None = None,
+    longer_than: int | None = None,
+    shorter_than: int | None = None,
+    explicit: bool | None = None,
+    whisper_sync: bool | None = None,
+    has_pdf: bool | None = None,
+    book_format: str | None = None,
+    content_type: str | None = None,
+    content_delivery_type: str | None = None,
+    is_listenable: bool | None = None,
+    is_buyable: bool | None = None,
+    plan_name: str | None = None,
     genre: str | None = None,
     sort: str | None = None,
     order: str | None = None,
@@ -436,7 +476,34 @@ async def get_vvab_books_from_db(
                 selectinload(Book.series),
             )
         )
-        stmt = apply_genre_filter(stmt, genre)
+        stmt = apply_book_filters(
+            stmt,
+            title=title,
+            subtitle=subtitle,
+            region=region,
+            description=description,
+            summary=summary,
+            publisher=publisher,
+            copyright=copyright,
+            isbn=isbn,
+            author_name=author_name,
+            series_name=series_name,
+            language=language,
+            rating_better_than=rating_better_than,
+            rating_worse_than=rating_worse_than,
+            longer_than=longer_than,
+            shorter_than=shorter_than,
+            explicit=explicit,
+            whisper_sync=whisper_sync,
+            has_pdf=has_pdf,
+            book_format=book_format,
+            content_type=content_type,
+            content_delivery_type=content_delivery_type,
+            is_listenable=is_listenable,
+            is_buyable=is_buyable,
+            plan_name=plan_name,
+            genre=genre,
+        )
         stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
         stmt = stmt.limit(limit).offset((page - 1) * limit)
         result = await session.execute(stmt)
@@ -497,6 +564,30 @@ async def get_author_books_from_db(
     session: AsyncSession,
     author_asin: str,
     region: str,
+    title: str | None = None,
+    subtitle: str | None = None,
+    book_region: str | None = None,
+    description: str | None = None,
+    summary: str | None = None,
+    publisher: str | None = None,
+    copyright: str | None = None,
+    isbn: str | None = None,
+    series_name: str | None = None,
+    language: str | None = None,
+    rating_better_than: float | None = None,
+    rating_worse_than: float | None = None,
+    longer_than: int | None = None,
+    shorter_than: int | None = None,
+    explicit: bool | None = None,
+    whisper_sync: bool | None = None,
+    has_pdf: bool | None = None,
+    book_format: str | None = None,
+    content_type: str | None = None,
+    content_delivery_type: str | None = None,
+    is_listenable: bool | None = None,
+    is_buyable: bool | None = None,
+    is_vvab: bool | None = None,
+    plan_name: str | None = None,
     genre: str | None = None,
     sort: str | None = None,
     order: str | None = None,
@@ -516,7 +607,34 @@ async def get_author_books_from_db(
             )
             .distinct()
         )
-        stmt = apply_genre_filter(stmt, genre)
+        stmt = apply_book_filters(
+            stmt,
+            title=title,
+            subtitle=subtitle,
+            region=book_region,
+            description=description,
+            summary=summary,
+            publisher=publisher,
+            copyright=copyright,
+            isbn=isbn,
+            series_name=series_name,
+            language=language,
+            rating_better_than=rating_better_than,
+            rating_worse_than=rating_worse_than,
+            longer_than=longer_than,
+            shorter_than=shorter_than,
+            explicit=explicit,
+            whisper_sync=whisper_sync,
+            has_pdf=has_pdf,
+            book_format=book_format,
+            content_type=content_type,
+            content_delivery_type=content_delivery_type,
+            is_listenable=is_listenable,
+            is_buyable=is_buyable,
+            is_vvab=is_vvab,
+            plan_name=plan_name,
+            genre=genre,
+        )
         stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
         result = await session.execute(stmt)
         books = result.scalars().all()
@@ -565,6 +683,11 @@ def _narrator_to_dict(n) -> dict[str, Any]:
 async def search_narrators_from_db(
     session: AsyncSession,
     name: str,
+    gender: str | None = None,
+    language: str | None = None,
+    audiobooks_produced: str | None = None,
+    source: str | None = None,
+    cultural_heritage: str | None = None,
     sort: str | None = None,
     order: str | None = None,
     limit: int = 20,
@@ -573,6 +696,14 @@ async def search_narrators_from_db(
     """Searches narrators by name (case-insensitive partial match)."""
     try:
         stmt = select(Narrator).where(Narrator.name.ilike(f"%{name}%"))
+        stmt = apply_narrator_filters(
+            stmt,
+            gender=gender,
+            language=language,
+            audiobooks_produced=audiobooks_produced,
+            source=source,
+            cultural_heritage=cultural_heritage,
+        )
         stmt = apply_sort(stmt, sort, order, NARRATOR_SORT_FIELDS)
         stmt = stmt.limit(limit).offset((page - 1) * limit)
         result = await session.execute(stmt)
@@ -586,6 +717,31 @@ async def search_narrators_from_db(
 async def get_narrator_books_from_db(
     session: AsyncSession,
     name: str,
+    title: str | None = None,
+    subtitle: str | None = None,
+    region: str | None = None,
+    description: str | None = None,
+    summary: str | None = None,
+    publisher: str | None = None,
+    copyright: str | None = None,
+    isbn: str | None = None,
+    author_name: str | None = None,
+    series_name: str | None = None,
+    language: str | None = None,
+    rating_better_than: float | None = None,
+    rating_worse_than: float | None = None,
+    longer_than: int | None = None,
+    shorter_than: int | None = None,
+    explicit: bool | None = None,
+    whisper_sync: bool | None = None,
+    has_pdf: bool | None = None,
+    book_format: str | None = None,
+    content_type: str | None = None,
+    content_delivery_type: str | None = None,
+    is_listenable: bool | None = None,
+    is_buyable: bool | None = None,
+    is_vvab: bool | None = None,
+    plan_name: str | None = None,
     genre: str | None = None,
     sort: str | None = None,
     order: str | None = None,
@@ -605,7 +761,35 @@ async def get_narrator_books_from_db(
                 selectinload(Book.series),
             )
         )
-        stmt = apply_genre_filter(stmt, genre)
+        stmt = apply_book_filters(
+            stmt,
+            title=title,
+            subtitle=subtitle,
+            region=region,
+            description=description,
+            summary=summary,
+            publisher=publisher,
+            copyright=copyright,
+            isbn=isbn,
+            author_name=author_name,
+            series_name=series_name,
+            language=language,
+            rating_better_than=rating_better_than,
+            rating_worse_than=rating_worse_than,
+            longer_than=longer_than,
+            shorter_than=shorter_than,
+            explicit=explicit,
+            whisper_sync=whisper_sync,
+            has_pdf=has_pdf,
+            book_format=book_format,
+            content_type=content_type,
+            content_delivery_type=content_delivery_type,
+            is_listenable=is_listenable,
+            is_buyable=is_buyable,
+            is_vvab=is_vvab,
+            plan_name=plan_name,
+            genre=genre,
+        )
         stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
         stmt = stmt.limit(limit).offset((page - 1) * limit)
         result = await session.execute(stmt)
@@ -675,6 +859,30 @@ async def search_series_from_db(session: AsyncSession, name: str) -> list[dict[s
 async def get_series_books_from_db(
     session: AsyncSession,
     series_asin: str,
+    title: str | None = None,
+    subtitle: str | None = None,
+    region: str | None = None,
+    description: str | None = None,
+    summary: str | None = None,
+    publisher: str | None = None,
+    copyright: str | None = None,
+    isbn: str | None = None,
+    author_name: str | None = None,
+    language: str | None = None,
+    rating_better_than: float | None = None,
+    rating_worse_than: float | None = None,
+    longer_than: int | None = None,
+    shorter_than: int | None = None,
+    explicit: bool | None = None,
+    whisper_sync: bool | None = None,
+    has_pdf: bool | None = None,
+    book_format: str | None = None,
+    content_type: str | None = None,
+    content_delivery_type: str | None = None,
+    is_listenable: bool | None = None,
+    is_buyable: bool | None = None,
+    is_vvab: bool | None = None,
+    plan_name: str | None = None,
     genre: str | None = None,
     sort: str | None = None,
     order: str | None = None,
@@ -701,7 +909,34 @@ async def get_series_books_from_db(
                 selectinload(Book.series),
             )
         )
-        stmt = apply_genre_filter(stmt, genre)
+        stmt = apply_book_filters(
+            stmt,
+            title=title,
+            subtitle=subtitle,
+            region=region,
+            description=description,
+            summary=summary,
+            publisher=publisher,
+            copyright=copyright,
+            isbn=isbn,
+            author_name=author_name,
+            language=language,
+            rating_better_than=rating_better_than,
+            rating_worse_than=rating_worse_than,
+            longer_than=longer_than,
+            shorter_than=shorter_than,
+            explicit=explicit,
+            whisper_sync=whisper_sync,
+            has_pdf=has_pdf,
+            book_format=book_format,
+            content_type=content_type,
+            content_delivery_type=content_delivery_type,
+            is_listenable=is_listenable,
+            is_buyable=is_buyable,
+            is_vvab=is_vvab,
+            plan_name=plan_name,
+            genre=genre,
+        )
         if sort:
             stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
         else:

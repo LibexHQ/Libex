@@ -29,6 +29,7 @@ from app.services.db.reader import (
     get_books_by_plan_from_db,
     get_books_by_sku_from_db,
     get_db_stats,
+    get_distinct_genres_from_db,
     get_distinct_plans_from_db,
     get_narrator_books_from_db,
     get_series_books_from_db,
@@ -105,6 +106,7 @@ async def search_db_books(
     is_buyable: Annotated[bool | None, Query(description="Filter by buyable status")] = None,
     is_vvab: Annotated[bool | None, Query(description="Filter by VVAB (virtual voice audiobook) status")] = None,
     plan_name: Annotated[str | None, Query(description="Filter by Audible plan name (e.g. US Minerva, AccessViaMusic)")] = None,
+    genre: Annotated[str | None, Query(description="Filter by genre or tag name (partial match, e.g. 'fantasy')")] = None,
     sort: Annotated[BookSortField | None, Query(description="Field to sort by")] = None,
     order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
     limit: Annotated[int, Query(ge=1, le=100, description="Results per page (max 100)")] = 20,
@@ -115,7 +117,7 @@ async def search_db_books(
         title, subtitle, region, description, summary, publisher, copyright,
         isbn, author_name, series_name, language, rating_better_than, rating_worse_than, longer_than,
         shorter_than, explicit, whisper_sync, has_pdf, book_format,
-        content_type, content_delivery_type, is_listenable, is_buyable, is_vvab, plan_name,
+        content_type, content_delivery_type, is_listenable, is_buyable, is_vvab, plan_name, genre,
     ]
     if not any(p is not None for p in filter_params) and sort is None:
         raise NotFoundException("No search parameters provided")
@@ -147,6 +149,7 @@ async def search_db_books(
         is_buyable=is_buyable,
         is_vvab=is_vvab,
         plan_name=plan_name,
+        genre=genre,
         sort=sort.value if sort is not None else None,
         order=order.value,
         limit=limit,
@@ -170,9 +173,26 @@ async def get_db_plans(
     return plans
 
 
+@router.get("/genres", response_model=list[str])
+async def get_db_genres(
+    search: Annotated[str | None, Query(description="Filter genre names by partial match")] = None,
+    session: AsyncSession = Depends(get_session),
+) -> list[str]:
+    """Get all distinct genre and tag names from the local DB.
+
+    Use the optional search param to find specific categories before filtering
+    other endpoints with the genre param.
+    """
+    genres = await get_distinct_genres_from_db(session, search=search)
+    if not genres:
+        raise NotFoundException("No genres found in local database")
+    return genres
+
+
 @router.get("/plans/{plan_name}", response_model=list[BookResponse])
 async def get_db_books_by_plan(
     plan_name: Annotated[str, Path(description="Audible plan name (e.g. US Minerva, AccessViaMusic)")],
+    genre: Annotated[str | None, Query(description="Filter by genre or tag name (partial match)")] = None,
     sort: Annotated[BookSortField | None, Query(description="Field to sort by")] = None,
     order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
     limit: Annotated[int, Query(ge=1, le=100, description="Results per page (max 100)")] = 20,
@@ -183,6 +203,7 @@ async def get_db_books_by_plan(
     books = await get_books_by_plan_from_db(
         session,
         plan_name,
+        genre=genre,
         sort=sort.value if sort is not None else None,
         order=order.value,
         limit=limit,
@@ -195,6 +216,7 @@ async def get_db_books_by_plan(
 
 @router.get("/vvab", response_model=list[BookResponse])
 async def get_db_vvab_books(
+    genre: Annotated[str | None, Query(description="Filter by genre or tag name (partial match)")] = None,
     sort: Annotated[BookSortField | None, Query(description="Field to sort by")] = None,
     order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
     limit: Annotated[int, Query(ge=1, le=100, description="Results per page (max 100)")] = 20,
@@ -204,6 +226,7 @@ async def get_db_vvab_books(
     """Get all virtual voice audiobooks (AI-narrated) from the local DB."""
     books = await get_vvab_books_from_db(
         session,
+        genre=genre,
         sort=sort.value if sort is not None else None,
         order=order.value,
         limit=limit,
@@ -258,6 +281,7 @@ async def get_db_book(
 async def get_db_author_books(
     asin: Annotated[str, Path(description="Author ASIN")],
     region: str = Depends(valid_region),
+    genre: Annotated[str | None, Query(description="Filter by genre or tag name (partial match)")] = None,
     sort: Annotated[BookSortField | None, Query(description="Field to sort by")] = None,
     order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
     session: AsyncSession = Depends(get_session),
@@ -269,6 +293,7 @@ async def get_db_author_books(
         session,
         asin,
         region,
+        genre=genre,
         sort=sort.value if sort is not None else None,
         order=order.value,
     )
@@ -295,6 +320,7 @@ async def get_db_author(
 @router.get("/narrator/books", response_model=list[BookResponse])
 async def get_db_narrator_books(
     name: Annotated[str, Query(description="Narrator name (exact match)")],
+    genre: Annotated[str | None, Query(description="Filter by genre or tag name (partial match)")] = None,
     sort: Annotated[BookSortField | None, Query(description="Field to sort by")] = None,
     order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
     limit: Annotated[int, Query(ge=1, le=100, description="Results per page (max 100)")] = 20,
@@ -305,6 +331,7 @@ async def get_db_narrator_books(
     books = await get_narrator_books_from_db(
         session,
         name,
+        genre=genre,
         sort=sort.value if sort is not None else None,
         order=order.value,
         limit=limit,
@@ -341,6 +368,7 @@ async def search_db_narrators(
 @router.get("/series/{asin}/books", response_model=list[BookResponse])
 async def get_db_series_books(
     asin: Annotated[str, Path(description="Series ASIN")],
+    genre: Annotated[str | None, Query(description="Filter by genre or tag name (partial match)")] = None,
     sort: Annotated[BookSortField | None, Query(description="Field to sort by (overrides default position order)")] = None,
     order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
     session: AsyncSession = Depends(get_session),
@@ -354,6 +382,7 @@ async def get_db_series_books(
     books = await get_series_books_from_db(
         session,
         asin,
+        genre=genre,
         sort=sort.value if sort is not None else None,
         order=order.value,
     )

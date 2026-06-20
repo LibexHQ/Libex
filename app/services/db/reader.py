@@ -15,11 +15,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 # Database
-from app.db.models import Book, Author, Narrator, Series, Track, author_book, book_narrator, book_series
+from app.db.models import Book, Author, Narrator, Series, Track, Genre, author_book, book_narrator, book_series
 
 # Services
 from app.services.audible.client import REGION_MAP
 from app.services.db.sorting import apply_sort, BOOK_SORT_FIELDS, NARRATOR_SORT_FIELDS
+from app.services.db.filtering import apply_genre_filter
 
 # Core
 from app.core.logging import get_logger
@@ -218,6 +219,7 @@ async def search_books_from_db(
     is_buyable: bool | None = None,
     is_vvab: bool | None = None,
     plan_name: str | None = None,
+    genre: str | None = None,
     sort: str | None = None,
     order: str | None = None,
     limit: int = 20,
@@ -298,6 +300,8 @@ async def search_books_from_db(
         if plan_name is not None:
             stmt = stmt.where(Book.plans.contains([plan_name]))
 
+        stmt = apply_genre_filter(stmt, genre)
+
         stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
 
         stmt = stmt.limit(limit).offset((page - 1) * limit)
@@ -355,9 +359,31 @@ async def get_distinct_plans_from_db(session: AsyncSession) -> list[str]:
         return []
 
 
+async def get_distinct_genres_from_db(
+    session: AsyncSession,
+    search: str | None = None,
+) -> list[str]:
+    """Returns a sorted list of all distinct genre and tag names.
+
+    Optional `search` filters the list by partial, case-insensitive match —
+    useful for finding the exact category name to feed the genre filter.
+    """
+    try:
+        stmt = select(Genre.name).distinct()
+        if search:
+            stmt = stmt.where(Genre.name.ilike(f"%{search}%"))
+        result = await session.execute(stmt)
+        names = sorted({row[0] for row in result.fetchall()})
+        return names
+    except Exception as e:
+        logger.warning(f"DB read failed for distinct genres: {e}")
+        return []
+
+
 async def get_books_by_plan_from_db(
     session: AsyncSession,
     plan_name: str,
+    genre: str | None = None,
     sort: str | None = None,
     order: str | None = None,
     limit: int = 20,
@@ -375,6 +401,7 @@ async def get_books_by_plan_from_db(
                 selectinload(Book.series),
             )
         )
+        stmt = apply_genre_filter(stmt, genre)
         stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
         stmt = stmt.limit(limit).offset((page - 1) * limit)
         result = await session.execute(stmt)
@@ -391,6 +418,7 @@ async def get_books_by_plan_from_db(
 
 async def get_vvab_books_from_db(
     session: AsyncSession,
+    genre: str | None = None,
     sort: str | None = None,
     order: str | None = None,
     limit: int = 20,
@@ -408,6 +436,7 @@ async def get_vvab_books_from_db(
                 selectinload(Book.series),
             )
         )
+        stmt = apply_genre_filter(stmt, genre)
         stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
         stmt = stmt.limit(limit).offset((page - 1) * limit)
         result = await session.execute(stmt)
@@ -468,6 +497,7 @@ async def get_author_books_from_db(
     session: AsyncSession,
     author_asin: str,
     region: str,
+    genre: str | None = None,
     sort: str | None = None,
     order: str | None = None,
 ) -> list[dict[str, Any]]:
@@ -486,6 +516,7 @@ async def get_author_books_from_db(
             )
             .distinct()
         )
+        stmt = apply_genre_filter(stmt, genre)
         stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
         result = await session.execute(stmt)
         books = result.scalars().all()
@@ -555,6 +586,7 @@ async def search_narrators_from_db(
 async def get_narrator_books_from_db(
     session: AsyncSession,
     name: str,
+    genre: str | None = None,
     sort: str | None = None,
     order: str | None = None,
     limit: int = 20,
@@ -573,6 +605,7 @@ async def get_narrator_books_from_db(
                 selectinload(Book.series),
             )
         )
+        stmt = apply_genre_filter(stmt, genre)
         stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
         stmt = stmt.limit(limit).offset((page - 1) * limit)
         result = await session.execute(stmt)
@@ -642,6 +675,7 @@ async def search_series_from_db(session: AsyncSession, name: str) -> list[dict[s
 async def get_series_books_from_db(
     session: AsyncSession,
     series_asin: str,
+    genre: str | None = None,
     sort: str | None = None,
     order: str | None = None,
 ) -> list[dict[str, Any]]:
@@ -667,6 +701,7 @@ async def get_series_books_from_db(
                 selectinload(Book.series),
             )
         )
+        stmt = apply_genre_filter(stmt, genre)
         if sort:
             stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
         else:

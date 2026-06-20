@@ -5,6 +5,7 @@ Only returns books that have been fetched and stored previously.
 """
 
 # Standard library
+from enum import Enum
 from typing import Annotated, Any
 
 # Third party
@@ -20,6 +21,7 @@ from app.api.routes.series.schemas import SeriesResponse
 from app.core.exceptions import NotFoundException
 from app.core.middleware import is_valid_asin, valid_region
 from app.db.session import get_session
+from app.services.db.sorting import BOOK_SORT_FIELDS
 from app.services.db.reader import (
     get_author_books_from_db,
     get_author_from_db,
@@ -38,6 +40,20 @@ from app.services.db.reader import (
 )
 
 router = APIRouter(prefix="/db", tags=["Database"])
+
+
+# Sortable fields for /db/book, derived from the sort allow-list so the
+# OpenAPI docs show exactly what clients can sort on.
+BookSortField = Enum(
+    "BookSortField",
+    {field: field for field in BOOK_SORT_FIELDS},
+    type=str,
+)
+
+
+class SortOrder(str, Enum):
+    asc = "asc"
+    desc = "desc"
 
 
 class StatsResponse(BaseModel):
@@ -82,6 +98,8 @@ async def search_db_books(
     is_buyable: Annotated[bool | None, Query(description="Filter by buyable status")] = None,
     is_vvab: Annotated[bool | None, Query(description="Filter by VVAB (virtual voice audiobook) status")] = None,
     plan_name: Annotated[str | None, Query(description="Filter by Audible plan name (e.g. US Minerva, AccessViaMusic)")] = None,
+    sort: Annotated[BookSortField | None, Query(description="Field to sort by")] = None,
+    order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
     limit: Annotated[int, Query(ge=1, le=100, description="Results per page (max 100)")] = 20,
     page: Annotated[int, Query(ge=1, description="Page number")] = 1,
     session: AsyncSession = Depends(get_session),
@@ -92,7 +110,7 @@ async def search_db_books(
         shorter_than, explicit, whisper_sync, has_pdf, book_format,
         content_type, content_delivery_type, is_listenable, is_buyable, is_vvab, plan_name,
     ]
-    if not any(p is not None for p in filter_params):
+    if not any(p is not None for p in filter_params) and sort is None:
         raise NotFoundException("No search parameters provided")
 
     books = await search_books_from_db(
@@ -122,6 +140,8 @@ async def search_db_books(
         is_buyable=is_buyable,
         is_vvab=is_vvab,
         plan_name=plan_name,
+        sort=sort.value if sort is not None else None,
+        order=order.value,
         limit=limit,
         page=page,
     )

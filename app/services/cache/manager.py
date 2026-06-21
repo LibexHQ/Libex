@@ -66,6 +66,14 @@ def chapters_key(asin: str, region: str) -> str:
     return f"chapters:{region}:{asin}"
 
 
+def new_releases_key(region: str, days: int) -> str:
+    return f"new_releases:{region}:{days}"
+
+
+def coming_soon_key(region: str, days: int) -> str:
+    return f"coming_soon:{region}:{days}"
+
+
 # ============================================================
 # CACHE OPERATIONS
 # ============================================================

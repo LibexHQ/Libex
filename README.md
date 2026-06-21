@@ -219,6 +219,8 @@ ABS will then call `/us/search?title=...&author=...` which returns the `{"matche
 | GET | `/narrator/books` | Get books by narrator name |
 | GET | `/search` | Search Audible catalog |
 | GET | `/quick-search` | Quick search via suggestions |
+| GET | `/new-releases` | Recently released books, scanned live from Audible, newest first |
+| GET | `/coming-soon` | Upcoming books, scanned live from Audible, soonest first |
 | GET | `/{region}/search` | Regional search for Audiobookshelf compatibility |
 | GET | `/{region}/quick-search/search` | Regional quick search for Audiobookshelf compatibility |
 | GET | `/db/book` | Query the local indexed book library |
@@ -230,6 +232,7 @@ ABS will then call `/us/search?title=...&author=...` which returns the `{"matche
 | GET | `/db/genres` | Get all distinct genre/tag names from local DB |
 | GET | `/db/vvab` | Get all virtual voice audiobooks (AI-narrated) from local DB |
 | GET | `/db/new-releases` | Get recently released books from local DB, newest first |
+| GET | `/db/coming-soon` | Get upcoming books from local DB, soonest first |
 | GET | `/db/stats` | Get counts of books, authors, narrators, and series in local DB |
 | GET | `/db/author/{asin}` | Get author from local DB |
 | GET | `/db/author/{asin}/books` | Get author's books from local DB |
@@ -288,9 +291,21 @@ The DB list endpoints and the live book-list endpoints (`/author/{asin}/books`, 
 
 Those same live book-list endpoints also accept a subset of the filters — rating range, length range, `language`, `book_format`, the booleans, `plan_name`, and `genre` — applied to the returned set. The heavier free-text filters stay on `/db/book`, which has the indexes for them.
 
-### New releases
+### Release windows (new releases & coming soon)
 
-`GET /db/new-releases` returns books released within a look-back window (`days` — one of 30, 60, 90, 120, 240, 365; default 30), newest first. Already-released only — far-future pre-orders are excluded. Takes the full book filter set, so you can scope it (e.g. recent fantasy releases over a certain length).
+There are two pairs of endpoints for browsing by release date — a local DB pair and a live Audible pair. All four take a `days` window (one of 30, 60, 90, 120, 240, 365; default 30) and the full live filter set, plus `sort`/`order`.
+
+**Local DB** (instant, no Audible call):
+- `GET /db/new-releases` — books released in the last `days`, newest first. Already-released only.
+- `GET /db/coming-soon` — books releasing in the next `days`, soonest first. Future releases only; Audible's "no date yet" placeholder is excluded.
+
+**Live** (scanned fresh from Audible):
+- `GET /new-releases` — same look-back, newest first.
+- `GET /coming-soon` — same look-ahead, soonest first.
+
+The live pair walks Audible's catalog sorted by release date and stops based on the dates it sees, so you get every book in the window. Because the answer is date-based and can't change until the date rolls over, the live results are cached until the next UTC midnight and refresh on the first request of the new day — so you always get the freshest possible list without re-scanning Audible on every request.
+
+Use the **DB** versions for instant results from the indexed library (kept current by the seeder), and the **live** versions when you want the freshest data straight from Audible, including brand-new pre-orders the seeder may not have picked up yet.
 
 ### Narrator filters
 

@@ -20,7 +20,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "Libex"
-    app_version: str = "1.1.0"
+    app_version: str = "1.2.0"
     debug: bool = False
     host: str = "0.0.0.0"
     port: int = 3333
@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     seeder_regions: str = "us"
     seeder_new_releases_interval_hours: int = 24    # How often the new-releases worker runs
     seeder_new_releases_pages: int = 20             # Pages (50 books each) the new-releases scan walks per region
+    seeder_refresh_enabled: bool = False             # Re-fetch upcoming pre-orders as their release date approaches
 
     # Internal seed endpoint
     seed_secret: str = ""  # Empty = endpoint disabled. Set in env only.

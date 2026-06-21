@@ -29,6 +29,7 @@ from app.api.routes.authors import router as authors_router
 from app.api.routes.narrators import router as narrators_router
 from app.api.routes.series import router as series_router
 from app.api.routes.search import router as search_router
+from app.api.routes.releases import router as releases_router
 from app.api.routes.db import router as db_router
 from app.api.routes.internal import router as internal_router
 
@@ -66,6 +67,7 @@ openapi_tags = [
     {"name": "Narrators", "description": "Retrieve books by narrator name"},
     {"name": "Series", "description": "Retrieve series metadata and their books"},
     {"name": "Search", "description": "Search Audible catalog by title, author, or keyword"},
+    {"name": "Releases", "description": "New releases and upcoming books, scanned live from Audible"},
     {"name": "Database", "description": "Query the local indexed book library without hitting Audible"},
 ]
 
@@ -137,6 +139,7 @@ app.include_router(authors_router)
 app.include_router(narrators_router)
 app.include_router(series_router)
 app.include_router(search_router)
+app.include_router(releases_router)
 app.include_router(db_router)
 app.include_router(internal_router)
 

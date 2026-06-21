@@ -5,7 +5,6 @@ Only returns books that have been fetched and stored previously.
 """
 
 # Standard library
-from enum import IntEnum
 from typing import Annotated, Any
 
 # Third party
@@ -30,6 +29,7 @@ from app.api.routes.sort_params import (
     NarratorSortField,
     SortOrder,
 )
+from app.api.routes.release_params import ReleaseWindow
 from app.services.db.reader import (
     get_author_books_from_db,
     get_author_from_db,
@@ -51,16 +51,6 @@ from app.services.db.reader import (
 )
 
 router = APIRouter(prefix="/db", tags=["Database"])
-
-
-class ReleaseWindow(IntEnum):
-    """Allowed look-back / look-ahead windows (in days) for the release endpoints."""
-    days_30 = 30
-    days_60 = 60
-    days_90 = 90
-    days_120 = 120
-    days_240 = 240
-    days_365 = 365
 
 
 class StatsResponse(BaseModel):

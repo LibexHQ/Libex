@@ -622,6 +622,112 @@ async def get_new_releases_from_db(
         logger.warning(f"DB read failed for new releases: {e}")
         return []
 
+
+async def get_coming_soon_from_db(
+    session: AsyncSession,
+    days: int = 30,
+    title: str | None = None,
+    subtitle: str | None = None,
+    region: str | None = None,
+    description: str | None = None,
+    summary: str | None = None,
+    publisher: str | None = None,
+    copyright: str | None = None,
+    isbn: str | None = None,
+    author_name: str | None = None,
+    series_name: str | None = None,
+    language: str | None = None,
+    rating_better_than: float | None = None,
+    rating_worse_than: float | None = None,
+    longer_than: int | None = None,
+    shorter_than: int | None = None,
+    explicit: bool | None = None,
+    whisper_sync: bool | None = None,
+    has_pdf: bool | None = None,
+    book_format: str | None = None,
+    content_type: str | None = None,
+    content_delivery_type: str | None = None,
+    is_listenable: bool | None = None,
+    is_buyable: bool | None = None,
+    is_vvab: bool | None = None,
+    plan_name: str | None = None,
+    genre: str | None = None,
+    sort: str | None = None,
+    order: str | None = None,
+    limit: int = 20,
+    page: int = 1,
+) -> list[dict[str, Any]]:
+    """
+    Fetches upcoming books releasing within the next `days`, soonest first.
+
+    The window is release_date between now and (now + days) — future releases
+    only. The upper bound also excludes Audible's "no date yet" placeholder
+    (year 2200) and other far-future junk, since nothing that distant falls
+    inside a real window. Defaults to releaseDate ascending; passing an
+    explicit sort field overrides that.
+    """
+    try:
+        now = datetime.now(timezone.utc)
+        window_end = now + timedelta(days=days)
+        stmt = (
+            select(Book)
+            .where(
+                Book.release_date.isnot(None),
+                Book.release_date > now,
+                Book.release_date <= window_end,
+            )
+            .options(
+                selectinload(Book.authors),
+                selectinload(Book.narrators),
+                selectinload(Book.genres),
+                selectinload(Book.series),
+            )
+        )
+        stmt = apply_book_filters(
+            stmt,
+            title=title,
+            subtitle=subtitle,
+            region=region,
+            description=description,
+            summary=summary,
+            publisher=publisher,
+            copyright=copyright,
+            isbn=isbn,
+            author_name=author_name,
+            series_name=series_name,
+            language=language,
+            rating_better_than=rating_better_than,
+            rating_worse_than=rating_worse_than,
+            longer_than=longer_than,
+            shorter_than=shorter_than,
+            explicit=explicit,
+            whisper_sync=whisper_sync,
+            has_pdf=has_pdf,
+            book_format=book_format,
+            content_type=content_type,
+            content_delivery_type=content_delivery_type,
+            is_listenable=is_listenable,
+            is_buyable=is_buyable,
+            is_vvab=is_vvab,
+            plan_name=plan_name,
+            genre=genre,
+        )
+        if sort:
+            stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
+        else:
+            stmt = stmt.order_by(Book.release_date.asc().nulls_last())
+        stmt = stmt.limit(limit).offset((page - 1) * limit)
+        result = await session.execute(stmt)
+        books = result.scalars().all()
+        results = []
+        for book in books:
+            positions = await _get_series_positions(session, book.asin)
+            results.append(_book_to_dict(book, positions))
+        return results
+    except Exception as e:
+        logger.warning(f"DB read failed for coming soon: {e}")
+        return []
+
 # ============================================================
 # AUTHOR READER
 # ============================================================

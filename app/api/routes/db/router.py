@@ -37,6 +37,7 @@ from app.services.db.reader import (
     get_books_by_plan_from_db,
     get_books_by_sku_from_db,
     get_db_stats,
+    get_coming_soon_from_db,
     get_distinct_genres_from_db,
     get_distinct_plans_from_db,
     get_narrator_books_from_db,
@@ -52,8 +53,8 @@ from app.services.db.reader import (
 router = APIRouter(prefix="/db", tags=["Database"])
 
 
-class NewReleaseWindow(IntEnum):
-    """Allowed look-back windows (in days) for the new-releases endpoint."""
+class ReleaseWindow(IntEnum):
+    """Allowed look-back / look-ahead windows (in days) for the release endpoints."""
     days_30 = 30
     days_60 = 60
     days_90 = 90
@@ -182,7 +183,7 @@ async def get_db_vvab_books(
 
 @router.get("/new-releases", response_model=list[BookResponse])
 async def get_db_new_releases(
-    days: Annotated[NewReleaseWindow, Query(description="Look-back window in days")] = NewReleaseWindow.days_30,
+    days: Annotated[ReleaseWindow, Query(description="Look-back window in days")] = ReleaseWindow.days_30,
     filters=Depends(book_filters()),
     sort: Annotated[BookSortField | None, Query(description="Field to sort by (defaults to newest first)")] = None,
     order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.desc,
@@ -207,6 +208,37 @@ async def get_db_new_releases(
     )
     if not books:
         raise NotFoundException("No new releases found in local database")
+    return books
+
+
+@router.get("/coming-soon", response_model=list[BookResponse])
+async def get_db_coming_soon(
+    days: Annotated[ReleaseWindow, Query(description="Look-ahead window in days")] = ReleaseWindow.days_30,
+    filters=Depends(book_filters()),
+    sort: Annotated[BookSortField | None, Query(description="Field to sort by (defaults to soonest first)")] = None,
+    order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
+    limit: Annotated[int, Query(ge=1, le=100, description="Results per page (max 100)")] = 20,
+    page: Annotated[int, Query(ge=1, description="Page number")] = 1,
+    session: AsyncSession = Depends(get_session),
+) -> list[dict[str, Any]]:
+    """
+    Get upcoming books releasing within the look-ahead window, soonest first.
+
+    Future releases only. The window also excludes Audible's "no date yet"
+    placeholder, so only books with a real upcoming date show up. Defaults to
+    releaseDate ascending; pass a sort field to override.
+    """
+    books = await get_coming_soon_from_db(
+        session,
+        days=days.value,
+        **filters.as_kwargs(),
+        sort=sort.value if sort is not None else None,
+        order=order.value,
+        limit=limit,
+        page=page,
+    )
+    if not books:
+        raise NotFoundException("No upcoming releases found in local database")
     return books
 
 

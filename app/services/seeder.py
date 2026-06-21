@@ -50,6 +50,23 @@ SessionFactory = async_sessionmaker(engine, expire_on_commit=False)
 
 SEED_STALE_DAYS = 7
 
+# Refresh cadence for upcoming (not-yet-released) books. As a book's release
+# date approaches, its details (date, cover, narrator, runtime) firm up, so we
+# re-fetch more often the closer it gets. Each tier is
+# (max_days_until_release, refresh_if_not_updated_in_days): a book is refreshed
+# when it falls within the day range and hasn't been updated within the tier's
+# staleness threshold. Books already released are never refreshed — they're
+# settled. Ordered nearest-release first; the first matching tier wins.
+REFRESH_TIERS = [
+    (14, 1),     # within 2 weeks  -> refresh if older than 1 day
+    (30, 3),     # within a month  -> 3 days
+    (60, 7),     # within 2 months -> 7 days
+    (90, 14),    # within 3 months -> 14 days
+    (180, 30),   # within 6 months -> 30 days
+    (365, 60),   # within a year   -> 60 days
+    (None, 90),  # beyond a year   -> 90 days (slow cadence)
+]
+
 
 # ============================================================
 # HELPERS
@@ -411,6 +428,81 @@ async def _scan_new_releases(region: str, delay: float) -> dict[str, int]:
 
 
 # ============================================================
+# PHASE 5: REFRESH UPCOMING
+# ============================================================
+
+async def _select_refresh_asins(
+    session: AsyncSession, region: str, now: datetime
+) -> list[str]:
+    """
+    Returns ASINs of upcoming books due for a refresh, tiered by REFRESH_TIERS
+    and ordered oldest-first (by updated_at). Pure selection — no fetching — so
+    the tier and staleness logic can be tested against a real database.
+    """
+    tier_conditions = []
+    prev_max = 0
+    for max_days, stale_days in REFRESH_TIERS:
+        stale_cutoff = now - timedelta(days=stale_days)
+        lower = now + timedelta(days=prev_max)
+        if max_days is None:
+            window = Book.release_date > lower
+        else:
+            upper = now + timedelta(days=max_days)
+            window = (Book.release_date > lower) & (Book.release_date <= upper)
+            prev_max = max_days
+        tier_conditions.append(window & (Book.updated_at < stale_cutoff))
+
+    result = await session.execute(
+        select(Book.asin)
+        .where(
+            Book.region == region,
+            Book.release_date.isnot(None),
+            Book.release_date > now,
+            or_(*tier_conditions),
+        )
+        .order_by(Book.updated_at.asc())
+    )
+    return [row[0] for row in result.fetchall()]
+
+
+async def _refresh_upcoming(region: str, delay: float) -> dict[str, int]:
+    """
+    Re-fetches upcoming (not-yet-released) books whose details may have changed
+    as their release date approaches. Selection is tiered by REFRESH_TIERS:
+    the closer a book is to release, the shorter the staleness threshold before
+    it's refreshed. Already-released books are left alone.
+
+    Books are processed oldest-first (by updated_at) so the most stale get
+    priority, and refreshing a book updates its updated_at — which drops it out
+    of the next cycle's selection until it ages back past its tier threshold.
+    """
+    stats = {"books_refreshed": 0, "errors": 0}
+
+    try:
+        now = _now()
+
+        async with SessionFactory() as session:
+            asins = await _select_refresh_asins(session, region, now)
+
+        if not asins:
+            return stats
+
+        await _fetch_and_persist(asins, region, delay)
+        stats["books_refreshed"] = len(asins)
+
+        logger.info(
+            f"Seeder: refreshed upcoming books for {region}",
+            extra={"books_refreshed": len(asins)},
+        )
+
+    except Exception as e:
+        stats["errors"] += 1
+        logger.warning(f"Seeder: refresh upcoming failed for {region}: {e}")
+
+    return stats
+
+
+# ============================================================
 # MAIN LOOP
 # ============================================================
 
@@ -492,6 +584,7 @@ async def run_new_releases_seeder() -> None:
             "regions": regions,
             "interval_hours": settings.seeder_new_releases_interval_hours,
             "pages": settings.seeder_new_releases_pages,
+            "refresh_enabled": settings.seeder_refresh_enabled,
             "delay_seconds": delay,
         },
     )
@@ -501,12 +594,17 @@ async def run_new_releases_seeder() -> None:
     while True:
         try:
             logger.info("Seeder: starting new releases cycle")
-            cycle_stats = {"new_releases": 0, "errors": 0}
+            cycle_stats = {"new_releases": 0, "books_refreshed": 0, "errors": 0}
 
             for region in regions:
                 release_stats = await _scan_new_releases(region, delay)
                 cycle_stats["new_releases"] += release_stats["books_discovered"]
                 cycle_stats["errors"] += release_stats["errors"]
+
+                if settings.seeder_refresh_enabled:
+                    refresh_stats = await _refresh_upcoming(region, delay)
+                    cycle_stats["books_refreshed"] += refresh_stats["books_refreshed"]
+                    cycle_stats["errors"] += refresh_stats["errors"]
 
             logger.info("Seeder: new releases cycle complete", extra=cycle_stats)
 

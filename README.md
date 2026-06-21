@@ -163,7 +163,7 @@ Logging helps us understand how Libex is being used, identify broken endpoints, 
 Only the instance maintainer has access to the Axiom dataset. Logs are retained for 30 days and then automatically deleted by Axiom. No logs are shared with third parties.
 
 **If you self-host:**
-Logging is completely optional. Leave `AXIOM_TOKEN` empty and Libex logs to stdout only. Nothing leaves your server.
+Logging is completely optional. Leave `AXIOM_TOKEN` empty and Libex logs to stdout and a rotating file only — nothing leaves your server. Logs print at `LOG_LEVEL` (default `INFO`); set it to `DEBUG` for more detail when troubleshooting. Warnings and errors go to stderr, everything else to stdout, and structured context (counts, IDs) is appended to each line so you can see what a task actually did.
 
 ---
 
@@ -344,6 +344,7 @@ Copy `.env.example` to `.env` and configure:
 | `DEFAULT_REGION` | `us` | Default Audible region |
 | `CACHE_ENABLED` | `true` | Enable or disable the cache |
 | `CACHE_TTL` | `86400` | Cache TTL in seconds (default 24 hours) |
+| `LOG_LEVEL` | `INFO` | Log verbosity — `DEBUG`, `INFO`, `WARNING`, or `ERROR` |
 | `LOG_RETENTION_DAYS` | `7` | Days of rotated logs to keep. `0` = infinite, no rotation |
 | `AXIOM_TOKEN` | — | Axiom API token (optional — leave blank for stdout only) |
 | `AXIOM_DATASET` | `libex` | Axiom dataset name |

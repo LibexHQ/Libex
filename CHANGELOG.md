@@ -10,6 +10,21 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.3.0]
+
+### Added
+
+- **`LOG_LEVEL`** environment variable (default `INFO`) for granular log
+  verbosity — `DEBUG`, `INFO`, `WARNING`, or `ERROR`.
+
+### Changed
+
+- Log lines now render their structured context inline (e.g. a seeder scan
+  shows `... — 1000 found, 0 new, 20 pages scanned`), so what a task did is
+  visible in stdout and file logs instead of only in Axiom.
+- Warnings and errors now go to stderr; informational logs stay on stdout, so
+  the two can be filtered separately.
+
 ## [1.2.0]
 
 ### Added
@@ -62,6 +77,7 @@ Initial stable release — anonymous, public, drop-in AudiMeta-compatible
 Audible metadata API. Book, author, series, narrator, and search endpoints;
 local DB query surface; Postgres-backed cache; background seeder.
 
+[1.3.0]: https://github.com/LibexHQ/Libex/releases/tag/v1.3.0
 [1.2.0]: https://github.com/LibexHQ/Libex/releases/tag/v1.2.0
 [1.1.0]: https://github.com/LibexHQ/Libex/releases/tag/v1.1.0
 [1.0.0]: https://github.com/LibexHQ/Libex/releases/tag/v1.0.0

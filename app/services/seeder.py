@@ -411,11 +411,14 @@ async def _scan_new_releases(region: str, delay: float) -> dict[str, int]:
             await _fetch_and_persist(missing, region, delay)
             stats["books_discovered"] = len(missing)
 
+        total_found = len(all_asins)
+        new_books = len(missing) if missing else 0
         logger.info(
-            f"Seeder: new releases scan complete for {region}",
+            f"Seeder: new releases scan complete for {region} — "
+            f"{total_found} found, {new_books} new, {stats['pages_scanned']} pages scanned",
             extra={
-                "total_found": len(all_asins),
-                "new_books": len(missing) if missing else 0,
+                "total_found": total_found,
+                "new_books": new_books,
                 "pages_scanned": stats["pages_scanned"],
             },
         )
@@ -491,7 +494,7 @@ async def _refresh_upcoming(region: str, delay: float) -> dict[str, int]:
         stats["books_refreshed"] = len(asins)
 
         logger.info(
-            f"Seeder: refreshed upcoming books for {region}",
+            f"Seeder: refreshed {len(asins)} upcoming books for {region}",
             extra={"books_refreshed": len(asins)},
         )
 

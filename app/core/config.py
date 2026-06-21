@@ -50,6 +50,8 @@ class Settings(BaseSettings):
     seeder_interval_hours: int = 24
     seeder_request_delay: float = 1.0
     seeder_regions: str = "us"
+    seeder_new_releases_interval_hours: int = 24    # How often the new-releases worker runs
+    seeder_new_releases_pages: int = 20             # Pages (50 books each) the new-releases scan walks per region
 
     # Internal seed endpoint
     seed_secret: str = ""  # Empty = endpoint disabled. Set in env only.

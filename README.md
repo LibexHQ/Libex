@@ -97,6 +97,8 @@ services:
       - SEEDER_INTERVAL_HOURS=${SEEDER_INTERVAL_HOURS:-24}
       - SEEDER_REQUEST_DELAY=${SEEDER_REQUEST_DELAY:-1.0}
       - SEEDER_REGIONS=${SEEDER_REGIONS:-us}
+      - SEEDER_NEW_RELEASES_INTERVAL_HOURS=${SEEDER_NEW_RELEASES_INTERVAL_HOURS:-24}
+      - SEEDER_NEW_RELEASES_PAGES=${SEEDER_NEW_RELEASES_PAGES:-20}
       - AUDIBLE_PROXY_URL=${AUDIBLE_PROXY_URL}
     volumes:
       - ./logs:/app/logs
@@ -313,6 +315,8 @@ Copy `.env.example` to `.env` and configure:
 | `SEEDER_INTERVAL_HOURS` | `24` | Hours between seeder cycles |
 | `SEEDER_REQUEST_DELAY` | `1.0` | Seconds between Audible requests during seeding |
 | `SEEDER_REGIONS` | `us` | Comma-separated regions to seed (e.g. `us,uk,de`) |
+| `SEEDER_NEW_RELEASES_INTERVAL_HOURS` | `24` | Hours between new-releases worker runs |
+| `SEEDER_NEW_RELEASES_PAGES` | `20` | Pages (50 books each) the new-releases scan walks per region |
 | `AUDIBLE_PROXY_URL` | — | Proxy URL for outbound Audible requests only. Supports `http://`, `https://`, `socks5://`. API serving is unaffected |
 | `SEED_SECRET` | — | PBKDF2 hash for the internal seed endpoint. Empty = endpoint disabled. Generate with `python -m app.api.routes.internal.router` |
 

@@ -20,7 +20,7 @@ from app.core.middleware import setup_middleware
 from app.db.session import engine
 
 # Services
-from app.services.seeder import run_seeder, SessionFactory
+from app.services.seeder import run_seeder, run_new_releases_seeder, SessionFactory
 from app.services.cache.manager import purge_expired
 
 # Routes
@@ -82,12 +82,14 @@ async def lifespan(app: FastAPI):
 
     # Start background tasks
     seeder_task = asyncio.create_task(run_seeder())
+    new_releases_task = asyncio.create_task(run_new_releases_seeder())
     purge_task = asyncio.create_task(_cache_purge_loop())
 
     yield
 
     # Shutdown
     seeder_task.cancel()
+    new_releases_task.cancel()
     purge_task.cancel()
     await engine.dispose()
     logger.info("Libex shutting down")

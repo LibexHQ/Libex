@@ -358,7 +358,8 @@ async def _scan_new_releases(region: str, delay: float) -> dict[str, int]:
 
         all_asins: list[str] = []
         page = 0
-        while page < 20:
+        max_pages = settings.seeder_new_releases_pages
+        while page < max_pages:
             path = "/1.0/catalog/products"
             params = {
                 "num_results": 50,
@@ -442,15 +443,10 @@ async def run_seeder() -> None:
                 "series_processed": 0,
                 "narrators_processed": 0,
                 "books_discovered": 0,
-                "new_releases": 0,
                 "errors": 0,
             }
 
             for region in regions:
-                release_stats = await _scan_new_releases(region, delay)
-                cycle_stats["new_releases"] += release_stats["books_discovered"]
-                cycle_stats["errors"] += release_stats["errors"]
-
                 author_stats = await _expand_authors(region, delay)
                 cycle_stats["authors_processed"] += author_stats["authors_processed"]
                 cycle_stats["books_discovered"] += author_stats["books_discovered"]
@@ -470,5 +466,51 @@ async def run_seeder() -> None:
 
         except Exception as e:
             logger.error(f"Seeder: cycle failed: {e}")
+
+        await asyncio.sleep(interval)
+
+
+async def run_new_releases_seeder() -> None:
+    """
+    Independent worker that scans new releases on its own interval.
+
+    Runs separately from the main expansion cycle (run_seeder) so new content
+    can be picked up more often than the heavier author/series/narrator walks.
+    Shares the same enable flag, regions, and request delay; only the interval
+    is its own. The two workers run independently and may occasionally overlap.
+    """
+    if not settings.seeder_enabled:
+        return
+
+    regions = [r.strip() for r in settings.seeder_regions.split(",") if r.strip()]
+    interval = settings.seeder_new_releases_interval_hours * 3600
+    delay = settings.seeder_request_delay
+
+    logger.info(
+        "Seeder: new releases worker starting",
+        extra={
+            "regions": regions,
+            "interval_hours": settings.seeder_new_releases_interval_hours,
+            "pages": settings.seeder_new_releases_pages,
+            "delay_seconds": delay,
+        },
+    )
+
+    await asyncio.sleep(30)
+
+    while True:
+        try:
+            logger.info("Seeder: starting new releases cycle")
+            cycle_stats = {"new_releases": 0, "errors": 0}
+
+            for region in regions:
+                release_stats = await _scan_new_releases(region, delay)
+                cycle_stats["new_releases"] += release_stats["books_discovered"]
+                cycle_stats["errors"] += release_stats["errors"]
+
+            logger.info("Seeder: new releases cycle complete", extra=cycle_stats)
+
+        except Exception as e:
+            logger.error(f"Seeder: new releases cycle failed: {e}")
 
         await asyncio.sleep(interval)

@@ -4,6 +4,7 @@ Shared utility functions.
 
 # Standard library
 import re
+from datetime import datetime, time, timedelta, timezone
 
 
 def strip_html(text: str | None) -> str | None:
@@ -42,3 +43,19 @@ def strip_image_size_suffix(url: str | None) -> str | None:
     if not url:
         return None
     return re.sub(r'\._\w+_', '', url)
+
+
+def seconds_until_utc_midnight(now: datetime | None = None) -> int:
+    """
+    Returns the number of seconds until the next UTC midnight.
+
+    Used as a cache TTL for date-windowed endpoints (new releases, coming
+    soon) whose answer can't change until the calendar date rolls over.
+    Caching until the next UTC midnight means the cached response is never
+    stale within the day and refreshes lazily on the first request after
+    the rollover. Always returns at least 1 second.
+    """
+    now = now or datetime.now(timezone.utc)
+    tomorrow = (now + timedelta(days=1)).date()
+    next_midnight = datetime.combine(tomorrow, time.min, tzinfo=timezone.utc)
+    return max(1, int((next_midnight - now).total_seconds()))

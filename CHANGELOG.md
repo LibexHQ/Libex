@@ -10,6 +10,17 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.2.0]
+
+### Added
+
+- **Upcoming-refresh seeder phase** (`SEEDER_REFRESH_ENABLED`, default off) — the
+  new-releases worker can now re-fetch pre-orders already in the DB as their
+  release date approaches, so evolving details (release date, cover, narrator,
+  runtime) stay current. Refresh frequency is tiered by proximity to release —
+  far-future titles are checked rarely, titles within two weeks are checked
+  daily — and already-released books are left alone.
+
 ## [1.1.0]
 
 Additive across the board — no existing endpoint, field, or response shape
@@ -51,5 +62,6 @@ Initial stable release — anonymous, public, drop-in AudiMeta-compatible
 Audible metadata API. Book, author, series, narrator, and search endpoints;
 local DB query surface; Postgres-backed cache; background seeder.
 
+[1.2.0]: https://github.com/LibexHQ/Libex/releases/tag/v1.2.0
 [1.1.0]: https://github.com/LibexHQ/Libex/releases/tag/v1.1.0
 [1.0.0]: https://github.com/LibexHQ/Libex/releases/tag/v1.0.0

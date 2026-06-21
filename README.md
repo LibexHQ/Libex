@@ -227,7 +227,9 @@ ABS will then call `/us/search?title=...&author=...` which returns the `{"matche
 | GET | `/db/book/sku/{sku}` | Get books by SKU group from local DB |
 | GET | `/db/plans` | Get all distinct Audible plan names from local DB |
 | GET | `/db/plans/{plan_name}` | Get all books under a specific plan from local DB |
+| GET | `/db/genres` | Get all distinct genre/tag names from local DB |
 | GET | `/db/vvab` | Get all virtual voice audiobooks (AI-narrated) from local DB |
+| GET | `/db/new-releases` | Get recently released books from local DB, newest first |
 | GET | `/db/stats` | Get counts of books, authors, narrators, and series in local DB |
 | GET | `/db/author/{asin}` | Get author from local DB |
 | GET | `/db/author/{asin}/books` | Get author's books from local DB |
@@ -241,11 +243,13 @@ Full interactive documentation available at `/docs` when running.
 
 ---
 
-## DB Query Endpoint
+## DB Query Endpoints
 
 `GET /db/book` queries books that have been fetched and stored locally without hitting Audible. Useful for searching your indexed library by metadata.
 
-All parameters are optional but at least one filter must be provided. Supports pagination via `limit` (default 20, max 100) and `page` (default 1).
+All parameters are optional but at least one filter (or a `sort`) must be provided. Supports pagination via `limit` (default 20, max 100) and `page` (default 1).
+
+The same filter set is available on the other book-list DB endpoints too — `/db/vvab`, `/db/plans/{plan_name}`, `/db/author/{asin}/books`, `/db/series/{asin}/books`, and `/db/narrator/books` — minus whichever field is already the endpoint's scope (e.g. `/db/vvab` doesn't take `is_vvab`).
 
 | Parameter | Type | Match |
 |-----------|------|-------|
@@ -274,6 +278,23 @@ All parameters are optional but at least one filter must be provided. Supports p
 | `is_buyable` | bool | exact |
 | `is_vvab` | bool | exact |
 | `plan_name` | string | JSONB contains |
+| `genre` | string | ILIKE against genre/tag names (e.g. `fantasy` matches "Science Fiction & Fantasy") |
+
+Use `/db/genres` to discover the genre/tag names available to filter on (optionally with `?search=`).
+
+### Sorting
+
+The DB list endpoints and the live book-list endpoints (`/author/{asin}/books`, `/series/{asin}/books`, `/author/books`, bulk `/book`) accept `sort` and `order` (`asc`/`desc`). Sortable fields: `title`, `releaseDate`, `rating`, `lengthMinutes`, `language`, `publisher`, `updatedAt`. Series book endpoints default to series position order unless a sort field is given. The live endpoints sort the returned set; sorting isn't offered on relevance-ranked search.
+
+Those same live book-list endpoints also accept a subset of the filters — rating range, length range, `language`, `book_format`, the booleans, `plan_name`, and `genre` — applied to the returned set. The heavier free-text filters stay on `/db/book`, which has the indexes for them.
+
+### New releases
+
+`GET /db/new-releases` returns books released within a look-back window (`days` — one of 30, 60, 90, 120, 240, 365; default 30), newest first. Already-released only — far-future pre-orders are excluded. Takes the full book filter set, so you can scope it (e.g. recent fantasy releases over a certain length).
+
+### Narrator filters
+
+`GET /db/narrator` searches narrators by name and also filters on `gender`, `language` (matches a language the narrator works in), `audiobooks_produced` (one of the count buckets), `source`, and `cultural_heritage`.
 
 ---
 
@@ -342,7 +363,11 @@ Libex is API-compatible with AudiMeta. To migrate:
 - Cache entries expire after `CACHE_TTL` seconds (default 24 hours); expired entries are purged automatically
 - Logs directory: `./logs` (relative to your compose file) — Libex writes a rotating log file to `./logs/libex.log` on the host
 - Log rotation is daily. `LOG_RETENTION_DAYS=7` keeps 7 days of backups. Set to `0` for infinite retention with no rotation
-- **Database seeder:** Set `SEEDER_ENABLED=true` to activate the background seeder. It expands the local DB by walking author relationships (discovers books you haven't requested yet) and scanning for new Audible releases. Each cycle compounds — a single book fetch can seed hundreds of related books over time. The seeder runs every `SEEDER_INTERVAL_HOURS` (default 24) and rate-limits itself to one Audible request per `SEEDER_REQUEST_DELAY` seconds (default 1.0). Configure `SEEDER_REGIONS` to seed multiple markets (e.g. `us,uk,de`)
+- **Database seeder:** Set `SEEDER_ENABLED=true` to activate the background seeder. It expands the local DB so the `/db/*` endpoints have more to return, and runs as two independent workers:
+  - **Expansion** walks author, series, and narrator relationships to discover books you haven't requested yet. Each cycle compounds — a single book fetch can seed hundreds of related books over time. Runs every `SEEDER_INTERVAL_HOURS` (default 24).
+  - **New releases** scans Audible's recent catalog by release date so fresh titles get picked up automatically. It runs on its own worker and its own interval (`SEEDER_NEW_RELEASES_INTERVAL_HOURS`, default 24), so you can have it run more often than the heavier expansion work without waiting behind it. `SEEDER_NEW_RELEASES_PAGES` (default 20) controls how deep the scan goes — each page is 50 books per region.
+
+  Both workers share the same enable flag, regions, and rate limit. They run independently and rate-limit themselves to one Audible request per `SEEDER_REQUEST_DELAY` seconds (default 1.0). Configure `SEEDER_REGIONS` to seed multiple markets (e.g. `us,uk,de`)
 - **VPN proxy:** Set `AUDIBLE_PROXY_URL` to route outbound Audible API requests through a proxy. Only Audible requests are affected — API serving, database connections, and logging are completely unaffected. This is especially useful when running the seeder to avoid IP-based rate limiting. Any HTTP, HTTPS, or SOCKS5 proxy works. The compose file creates a `libex-proxy` Docker network automatically — connect your VPN proxy container to it, then set `AUDIBLE_PROXY_URL` to point at the proxy. Leave `AUDIBLE_PROXY_URL` blank to disable
 
 ---

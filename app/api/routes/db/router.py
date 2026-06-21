@@ -5,6 +5,7 @@ Only returns books that have been fetched and stored previously.
 """
 
 # Standard library
+from enum import IntEnum
 from typing import Annotated, Any
 
 # Third party
@@ -39,6 +40,7 @@ from app.services.db.reader import (
     get_distinct_genres_from_db,
     get_distinct_plans_from_db,
     get_narrator_books_from_db,
+    get_new_releases_from_db,
     get_series_books_from_db,
     get_series_from_db,
     get_track_from_db,
@@ -48,6 +50,16 @@ from app.services.db.reader import (
 )
 
 router = APIRouter(prefix="/db", tags=["Database"])
+
+
+class NewReleaseWindow(IntEnum):
+    """Allowed look-back windows (in days) for the new-releases endpoint."""
+    days_30 = 30
+    days_60 = 60
+    days_90 = 90
+    days_120 = 120
+    days_240 = 240
+    days_365 = 365
 
 
 class StatsResponse(BaseModel):
@@ -165,6 +177,36 @@ async def get_db_vvab_books(
     )
     if not books:
         raise NotFoundException("No virtual voice audiobooks found in local database")
+    return books
+
+
+@router.get("/new-releases", response_model=list[BookResponse])
+async def get_db_new_releases(
+    days: Annotated[NewReleaseWindow, Query(description="Look-back window in days")] = NewReleaseWindow.days_30,
+    filters=Depends(book_filters()),
+    sort: Annotated[BookSortField | None, Query(description="Field to sort by (defaults to newest first)")] = None,
+    order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.desc,
+    limit: Annotated[int, Query(ge=1, le=100, description="Results per page (max 100)")] = 20,
+    page: Annotated[int, Query(ge=1, description="Page number")] = 1,
+    session: AsyncSession = Depends(get_session),
+) -> list[dict[str, Any]]:
+    """
+    Get books released within the look-back window, newest first.
+
+    Already-released books only — far-future pre-orders are excluded. Defaults
+    to releaseDate descending; pass a sort field to override.
+    """
+    books = await get_new_releases_from_db(
+        session,
+        days=days.value,
+        **filters.as_kwargs(),
+        sort=sort.value if sort is not None else None,
+        order=order.value,
+        limit=limit,
+        page=page,
+    )
+    if not books:
+        raise NotFoundException("No new releases found in local database")
     return books
 
 

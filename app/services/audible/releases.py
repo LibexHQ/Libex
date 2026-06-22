@@ -17,8 +17,8 @@ per day.
 
 The scan itself walks Audible's catalog sorted by -ReleaseDate (descending) and
 stops based on the dates it sees rather than a fixed page count, so it returns
-every book in the requested window. A hard page cap guards against runaway
-paging if the data ever misbehaves.
+every book in the requested window. It terminates when the descending scan
+passes the window's far edge or the catalog runs out of pages.
 """
 
 # Standard library
@@ -48,10 +48,6 @@ from app.services.cache import manager as cache
 settings = get_settings()
 logger = get_logger()
 
-# Safety cap on how many catalog pages a single scan will walk. The date-based
-# stop condition normally fires well before this; it's here so a data anomaly
-# can't loop forever.
-_MAX_PAGES = 50
 _PAGE_SIZE = 50
 
 
@@ -77,18 +73,17 @@ async def _scan_by_release_date(
     decides when the descending scan has passed the window's near edge.
 
     Books with no parseable date are skipped. Paging stops at the first book
-    that satisfies should_stop, when a page comes back short, or at the page
-    cap — whichever comes first.
+    that satisfies should_stop, or when a page comes back short.
     """
     collected: list[dict[str, Any]] = []
     page = 0
-    while page < _MAX_PAGES:
+    while True:
         params: dict[str, Any] = {
             "num_results": _PAGE_SIZE,
             "page": page,
             "response_groups": BOOK_RESPONSE_GROUPS,
             "image_sizes": IMAGE_SIZES,
-            "sort_by": "-ReleaseDate",
+            "products_sort_by": "-ReleaseDate",
         }
         data = await audible_get(region, "/1.0/catalog/products/", params)
         products = _filter_products(data.get("products", []))

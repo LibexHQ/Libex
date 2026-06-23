@@ -10,8 +10,9 @@ STRATEGY:
    book list from Audible and fill in missing books.
 3. Narrator expansion — for narrators not recently checked, search the
    Audible catalog by narrator name and fetch missing books.
-4. New releases — search for recently released books across configured
-   regions. Catches new content automatically.
+4. New releases — walk every genre's catalog by release date and collect
+   all reachable books across configured regions (future and recent alike).
+   Catches new content automatically.
 
 Each phase compounds the next — new books bring in new series, authors,
 and narrators that get expanded in subsequent cycles.
@@ -42,8 +43,6 @@ from app.core.logging import get_logger
 
 # Services
 from app.services.audible.books import get_books_by_asins
-from app.services.db.reader import get_seeder_covered_through
-from app.services.db.writer import upsert_seeder_covered_through
 
 logger = get_logger()
 settings = get_settings()
@@ -80,25 +79,6 @@ def _now() -> datetime:
 
 def _stale_cutoff() -> datetime:
     return _now() - timedelta(days=SEED_STALE_DAYS)
-
-
-# Unreleased pre-orders carry this sentinel publication_datetime.
-_UNRELEASED_PLACEHOLDER = "2200-01-01T00:00:00Z"
-
-
-def _product_release_dt(product: dict) -> datetime | None:
-    """
-    Parses a raw catalog product's release_date (YYYY-MM-DD) into a UTC
-    datetime, or None if absent/unparseable. The seeder's own copy — it only
-    needs the date to gate the walk; full normalization happens on persist.
-    """
-    raw = product.get("release_date")
-    if not raw:
-        return None
-    try:
-        return datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    except (ValueError, TypeError):
-        return None
 
 
 async def _get_missing_asins(session: AsyncSession, asins: list[str]) -> list[str]:
@@ -388,128 +368,110 @@ async def _expand_narrators(region: str, delay: float) -> dict[str, int]:
 # PHASE 4: NEW RELEASES
 # ============================================================
 
+async def _fetch_catalog_genres(region: str) -> list[dict[str, str]]:
+    """
+    Fetches the genre taxonomy from Audible and flattens it to the LEAF set —
+    every sub-genre across all parents, deduped by id. The seeder's own copy: it
+    shares nothing with the live release endpoints and never touches the
+    catalog_genres table.
+
+    The response is two levels — a top-level `categories` list of parents, each
+    with a `children` list of leaves (both carry `id` + `name`). We keep leaves
+    only: every catalog/products query caps at ~535 results, so a parent query
+    under-returns its children's union — the leaves reach the full catalog.
+    """
+    from app.services.audible.client import audible_get
+
+    data = await audible_get(region, "/1.0/catalog/categories", {"root": "Genres"})
+    seen: set[str] = set()
+    leaves: list[dict[str, str]] = []
+    for parent in data.get("categories", []):
+        for child in parent.get("children", []):
+            gid = child.get("id")
+            name = child.get("name")
+            if gid and name and gid not in seen:
+                seen.add(gid)
+                leaves.append({"genre_id": gid, "name": name})
+    return leaves
+
+
 async def _scan_new_releases(region: str, delay: float) -> dict[str, int]:
     """
-    Walks the catalog by -ReleaseDate (newest first), skipping future
-    pre-orders, collecting released books within the configured day window,
-    and persisting the ones we don't already have.
+    Walks every leaf genre's catalog by -ReleaseDate, collecting ALL reachable
+    ASINs — future pre-orders and recent releases alike, no date gate — and
+    persisting the ones we don't already have. This is how both new-releases and
+    coming-soon data lands in the DB; the tiered refresh (_refresh_upcoming) then
+    keeps near-release pre-orders current.
 
-    Stops on whichever comes first:
-      - date edge: a release date older than (now - days) — the window is fully
-        covered (the correctness backstop; always terminates the walk)
-      - caught up: two consecutive pages whose in-window books are all already
-        in the DB — but ONLY when not expanding the window
-      - short page: the catalog returned fewer than a full page (no more
-        products — also full coverage)
-
-    covered_through (days back, per region) is read to decide whether the window
-    is expanding. It's written ONLY on a clean, complete walk (date edge or
-    short page), so a failed/partial run never records false coverage and the
-    next run re-walks instead of stopping early on knowns.
+    Audible caps every catalog/products query at ~535 results and a parent query
+    is not a superset of its children, so we walk the leaf genres and union the
+    results. Each leaf walk stops when a page repeats the previous one (the ~535
+    wall) or a page comes back short/empty. Paced by SEEDER_REQUEST_DELAY.
     """
     stats = {"books_discovered": 0, "pages_scanned": 0, "errors": 0}
 
     try:
         from app.services.audible.client import audible_get
 
-        days = settings.seeder_new_releases_days
-        now = _now()
-        window_start = now - timedelta(days=days)
+        genres = await _fetch_catalog_genres(region)
 
         all_asins: list[str] = []
-        missing: list[str] = []
-        expanding = True
+        seen: set[str] = set()
 
-        async with SessionFactory() as session:
-            covered = await get_seeder_covered_through(session, region)
-            expanding = covered is None or days > covered
-
+        for genre in genres:
             page = 0
-            consecutive_known = 0
-            reached_edge = False
-            ran_out = False
-
+            prev_asins: list[str] | None = None
             while True:
                 params = {
+                    "category_id": genre["genre_id"],
                     "num_results": 50,
                     "page": page,
                     "response_groups": "product_desc,contributors,series,product_attrs,media",
                     "products_sort_by": "-ReleaseDate",
                 }
                 data = await audible_get(region, "/1.0/catalog/products", params)
+                await asyncio.sleep(delay)
+
                 products = data.get("products", [])
                 if not products:
-                    ran_out = True
                     break
 
-                # In-window, released ASINs on this page.
-                page_asins: list[str] = []
+                # Duplicate-page wall: Audible repeats the last page at the cap.
+                page_asins = [p.get("asin") for p in products]
+                if page_asins == prev_asins:
+                    break
+                prev_asins = page_asins
+
                 for product in products:
                     if not product.get("title"):
                         continue
-                    if product.get("publication_datetime") == _UNRELEASED_PLACEHOLDER:
-                        continue
                     asin = product.get("asin")
-                    if not asin:
-                        continue
-                    dt = _product_release_dt(product)
-                    if dt is None:
-                        continue
-                    if dt > now:
-                        continue  # skip future pre-orders
-                    if dt < window_start:
-                        reached_edge = True
-                        break
-                    page_asins.append(asin)
-
-                for asin in page_asins:
-                    if asin not in all_asins:
+                    if asin and asin not in seen:
+                        seen.add(asin)
                         all_asins.append(asin)
 
                 stats["pages_scanned"] += 1
 
-                # Per-page caught-up check (only acted on when not expanding).
-                if page_asins:
-                    missing_here = await _get_missing_asins(session, page_asins)
-                    if not missing_here:
-                        consecutive_known += 1
-                    else:
-                        consecutive_known = 0
-
-                if reached_edge:
-                    break
                 if len(products) < 50:
-                    ran_out = True
                     break
-                if consecutive_known >= 2 and not expanding:
-                    break
-
                 page += 1
-                await asyncio.sleep(delay)
-                await asyncio.sleep(0)
 
-            # Persist the books we don't already have.
+        # Persist the books we don't already have.
+        async with SessionFactory() as session:
             missing = await _get_missing_asins(session, all_asins) if all_asins else []
-            if missing:
-                await _fetch_and_persist(missing, region, delay)
-                stats["books_discovered"] = len(missing)
+        if missing:
+            await _fetch_and_persist(missing, region, delay)
+            stats["books_discovered"] = len(missing)
 
-            # Clean completion stamps coverage; partial/failed runs do not.
-            if reached_edge or ran_out:
-                await upsert_seeder_covered_through(session, region, days)
-                await session.commit()
-
-        total_found = len(all_asins)
-        new_books = len(missing) if missing else 0
         logger.info(
             f"Seeder: new releases scan complete for {region} — "
-            f"{total_found} found, {new_books} new, {stats['pages_scanned']} pages scanned",
+            f"{len(all_asins)} found, {stats['books_discovered']} new, "
+            f"{stats['pages_scanned']} pages scanned",
             extra={
-                "total_found": total_found,
-                "new_books": new_books,
+                "total_found": len(all_asins),
+                "new_books": stats["books_discovered"],
                 "pages_scanned": stats["pages_scanned"],
-                "window_days": days,
-                "expanding": expanding,
+                "genres": len(genres),
             },
         )
 
@@ -676,7 +638,6 @@ async def run_new_releases_seeder() -> None:
         extra={
             "regions": regions,
             "interval_hours": settings.seeder_new_releases_interval_hours,
-            "window_days": settings.seeder_new_releases_days,
             "refresh_enabled": settings.seeder_refresh_enabled,
             "delay_seconds": delay,
         },

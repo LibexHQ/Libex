@@ -219,8 +219,9 @@ ABS will then call `/us/search?title=...&author=...` which returns the `{"matche
 | GET | `/narrator/books` | Get books by narrator name |
 | GET | `/search` | Search Audible catalog |
 | GET | `/quick-search` | Quick search via suggestions |
-| GET | `/new-releases` | Recently released books, scanned live from Audible, newest first |
-| GET | `/coming-soon` | Upcoming books, scanned live from Audible, soonest first |
+| GET | `/new-releases` | Recently released books, scanned live from Audible, newest first. Scope to one `category` (from `/categories`); without it, returns a live sample |
+| GET | `/coming-soon` | Upcoming books, scanned live from Audible, soonest first. Scope to one `category` (from `/categories`); without it, returns a live sample |
+| GET | `/categories` | List Audible's genre categories for a region (parents with leaf children) — the ids for the `category` param |
 | GET | `/{region}/search` | Regional search for Audiobookshelf compatibility |
 | GET | `/{region}/quick-search/search` | Regional quick search for Audiobookshelf compatibility |
 | GET | `/db/book` | Query the local indexed book library |
@@ -293,7 +294,7 @@ Those same live book-list endpoints also accept a subset of the filters — rati
 
 ### Release windows (new releases & coming soon)
 
-There are two pairs of endpoints for browsing by release date — a local DB pair and a live Audible pair. All four take a `days` window (one of 30, 60, 90, 120, 240, 365; default 30) and the full live filter set, plus `sort`/`order`.
+There are two pairs of endpoints for browsing by release date — a local DB pair and a live Audible pair. All four take a `days` window (one of 30, 60, 90, 120, 240, 365; default 30) and the full live filter set, plus `sort`/`order`. The live pair also takes an optional `category` (see below).
 
 **Local DB** (instant, no Audible call):
 - `GET /db/new-releases` — books released in the last `days`, newest first. Already-released only.
@@ -303,9 +304,11 @@ There are two pairs of endpoints for browsing by release date — a local DB pai
 - `GET /new-releases` — same look-back, newest first.
 - `GET /coming-soon` — same look-ahead, soonest first.
 
-The live pair walks Audible's catalog sorted by release date and stops based on the dates it sees, so you get every book in the window. Because the answer is date-based and can't change until the date rolls over, the live results are cached until the next UTC midnight and refresh on the first request of the new day — so you always get the freshest possible list without re-scanning Audible on every request.
+Audible exposes no direct new-releases or coming-soon feed, and any single catalog query is capped at a few hundred results, so the live pair reconstructs each list by scanning the catalog. To stay fast, the live endpoints scan **one category at a time**: pass a `category` id (from `GET /categories`) to get the full window for that category. Without a `category`, the scan walks Audible's un-categoried catalog — which is capped — so the bare call returns a **live sample**, not the whole catalog. The results are date-based and can't change until the date rolls over, so they're cached until the next UTC midnight and refresh on the first request of the new day.
 
-Use the **DB** versions for instant results from the indexed library (kept current by the seeder), and the **live** versions when you want the freshest data straight from Audible, including brand-new pre-orders the seeder may not have picked up yet.
+For the **complete** list across all categories, use the **DB** endpoints (`/db/new-releases`, `/db/coming-soon`) — the seeder walks every category in the background and keeps them current — or aggregate per-category `/new-releases` calls client-side. Use the **live** endpoints when you want the freshest data for a specific category straight from Audible, including brand-new pre-orders the seeder may not have picked up yet.
+
+`GET /categories` returns the category ids (and names) you can pass as `category`, as a nested tree of parents with their leaf children. Note this is Audible's *category* taxonomy, which is different from `/db/genres` (the genre/tag *names* attached to stored books).
 
 ### Narrator filters
 

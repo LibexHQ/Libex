@@ -77,35 +77,44 @@ def _release_dt(book: dict[str, Any]) -> datetime | None:
 
 async def _fetch_catalog_genres(region: str) -> list[dict[str, str]]:
     """
-    Fetches the genre taxonomy from Audible and flattens it to the LEAF set —
-    every sub-genre across all parent categories, deduped by id.
+    Fetches the genre taxonomy from Audible and flattens it to every node —
+    parents AND their leaves, each tagged with its parent_id.
 
     The response is two levels: a top-level `categories` list of parents, each
-    with a `children` list of leaves (both carry `id` + `name`). We keep the
-    leaves only: a parent query is capped at the same ~535 results as any other,
-    so it under-returns its children's union — the leaves are what reach the full
-    catalog. Some leaf ids appear under two parents, so we dedupe.
+    with a `children` list of leaves (both carry `id` + `name`). We keep BOTH:
+    a parent query is capped at the same ~535 results as any other and is not a
+    superset of its children (it surfaces titles no leaf does), so the full set
+    is parents plus leaves. Parents get parent_id="" (top level); leaves get
+    their parent's id. A leaf appearing under two parents yields one node per
+    parent. Deduped by (genre_id, parent_id). This populates the /categories
+    discovery surface; the live scan itself walks a single category by id.
     """
     data = await audible_get(region, "/1.0/catalog/categories", {"root": "Genres"})
-    seen: set[str] = set()
-    leaves: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    nodes: list[dict[str, str]] = []
     for parent in data.get("categories", []):
+        pid = parent.get("id")
+        pname = parent.get("name")
+        if pid and pname and (pid, "") not in seen:
+            seen.add((pid, ""))
+            nodes.append({"genre_id": pid, "name": pname, "parent_id": ""})
         for child in parent.get("children", []):
             gid = child.get("id")
             name = child.get("name")
-            if gid and name and gid not in seen:
-                seen.add(gid)
-                leaves.append({"genre_id": gid, "name": name})
-    return leaves
+            if gid and name and pid and (gid, pid) not in seen:
+                seen.add((gid, pid))
+                nodes.append({"genre_id": gid, "name": name, "parent_id": pid})
+    return nodes
 
 
 async def _ensure_genres(session: AsyncSession, region: str) -> list[dict[str, str]]:
     """
-    Returns the leaf genre list for a region, refreshing it from Audible at most
-    once a day. Reads the stored set; if it's empty or older than the refresh
-    interval, re-fetches the taxonomy and stores it. On a fetch failure, falls
-    back to whatever's already stored so a transient Audible hiccup doesn't empty
-    the walk.
+    Returns the catalog genre nodes (parents and leaves, each with parent_id) for
+    a region, refreshing them from Audible at most once a day. Reads the stored
+    set; if it's empty or older than the refresh interval, re-fetches the taxonomy
+    and stores it. On a fetch failure, falls back to whatever's already stored so
+    a transient Audible hiccup doesn't empty the list. Consumed by the /categories
+    discovery endpoint.
     """
     stored, oldest_checked = await get_stored_genres(session, region)
 
@@ -118,11 +127,11 @@ async def _ensure_genres(session: AsyncSession, region: str) -> list[dict[str, s
         return stored
 
     try:
-        leaves = await _fetch_catalog_genres(region)
-        if leaves:
-            await upsert_genres(session, region, leaves)
+        nodes = await _fetch_catalog_genres(region)
+        if nodes:
+            await upsert_genres(session, region, nodes)
             await session.commit()
-            return leaves
+            return nodes
     except Exception as e:
         logger.warning(f"Genre taxonomy refresh failed for {region}: {e}")
 
@@ -130,67 +139,68 @@ async def _ensure_genres(session: AsyncSession, region: str) -> list[dict[str, s
     return stored
 
 
-async def _scan_genres_by_release_date(
+async def _walk_one_catalog(
     region: str,
-    genres: list[dict[str, str]],
+    category_id: str | None,
     collect,
     should_stop,
 ) -> list[dict[str, Any]]:
     """
-    Walks each leaf genre's catalog sorted by -ReleaseDate (descending) and
-    unions the results, deduped by ASIN. `collect(dt)` decides whether a book is
-    in-window; `should_stop(dt)` decides when the descending walk has passed the
-    window's near edge.
+    Walks a single catalog query sorted by -ReleaseDate (descending), deduped by
+    ASIN. When category_id is given, the walk is scoped to that one category;
+    when it's None, the walk is the un-categoried catalog (the bare-call
+    "sample" — Audible caps it at ~535, so it's a slice, not the full set).
 
-    Each genre walk stops at the first book satisfying should_stop, when a page
-    repeats the previous one (Audible's ~535-result wall — proven to be a
-    consecutive repeat), or when a page comes back short/empty. Books with no
-    parseable date are skipped. No inter-request delay — this is the live path.
+    `collect(dt)` decides whether a book is in-window; `should_stop(dt)` decides
+    when the descending walk has passed the window's near edge. The walk stops at
+    the first book satisfying should_stop, when a page repeats the previous one
+    (Audible's ~535-result wall — a consecutive repeat), or when a page comes
+    back short/empty. Books with no parseable date are skipped. No inter-request
+    delay — this is the live path, and a single category returns in time.
     """
     collected: dict[str, dict[str, Any]] = {}
+    page = 0
+    prev_asins: list[str] | None = None
+    while True:
+        params: dict[str, Any] = {
+            "num_results": _PAGE_SIZE,
+            "page": page,
+            "response_groups": BOOK_RESPONSE_GROUPS,
+            "image_sizes": IMAGE_SIZES,
+            "products_sort_by": "-ReleaseDate",
+        }
+        if category_id:
+            params["category_id"] = category_id
+        data = await audible_get(region, "/1.0/catalog/products/", params)
+        products = _filter_products(data.get("products", []))
+        if not products:
+            break
 
-    for genre in genres:
-        page = 0
-        prev_asins: list[str] | None = None
-        while True:
-            params: dict[str, Any] = {
-                "category_id": genre["genre_id"],
-                "num_results": _PAGE_SIZE,
-                "page": page,
-                "response_groups": BOOK_RESPONSE_GROUPS,
-                "image_sizes": IMAGE_SIZES,
-                "products_sort_by": "-ReleaseDate",
-            }
-            data = await audible_get(region, "/1.0/catalog/products/", params)
-            products = _filter_products(data.get("products", []))
-            if not products:
-                break
+        # Duplicate-page wall: Audible repeats the last page once it runs out.
+        page_asins = [p.get("asin") for p in products]
+        if page_asins == prev_asins:
+            break
+        prev_asins = page_asins
 
-            # Duplicate-page wall: Audible repeats the last page once it runs out.
-            page_asins = [p.get("asin") for p in products]
-            if page_asins == prev_asins:
+        stop = False
+        for product in products:
+            book = _normalize_product(product, region)
+            dt = _release_dt(book)
+            if dt is None:
+                continue
+            if should_stop(dt):
+                stop = True
                 break
-            prev_asins = page_asins
+            if collect(dt):
+                asin = book.get("asin")
+                if asin:
+                    collected[asin] = book
 
-            stop = False
-            for product in products:
-                book = _normalize_product(product, region)
-                dt = _release_dt(book)
-                if dt is None:
-                    continue
-                if should_stop(dt):
-                    stop = True
-                    break
-                if collect(dt):
-                    asin = book.get("asin")
-                    if asin:
-                        collected[asin] = book
-
-            if stop:
-                break
-            if len(products) < _PAGE_SIZE:
-                break
-            page += 1
+        if stop:
+            break
+        if len(products) < _PAGE_SIZE:
+            break
+        page += 1
 
     return list(collected.values())
 
@@ -199,13 +209,20 @@ async def get_new_releases(
     region: str,
     session: AsyncSession,
     days: int = 30,
+    category: str | None = None,
 ) -> list[dict[str, Any]]:
     """
     Returns books released in the last `days`, newest first, scanned live from
     Audible. Cache-first with a TTL to the next UTC midnight (see module
     docstring). Already-released only — future pre-orders are skipped.
+
+    With a `category` id (from /categories), the scan is scoped to that one
+    category and returns the full window for it. Without one, the scan is the
+    un-categoried catalog — Audible caps that at a few hundred results, so the
+    bare call returns a live sample, not the full catalog (use a category, or
+    the DB endpoints, for completeness).
     """
-    key = cache.new_releases_key(region, days)
+    key = cache.new_releases_key(region, days, category)
     cached = await cache.get(session, key)
     if cached is not None:
         return cached
@@ -223,9 +240,7 @@ async def get_new_releases(
 
     try:
         start = time.monotonic()
-        genres = await _ensure_genres(session, region)
-        books = await _scan_genres_by_release_date(region, genres, collect, should_stop)
-        # Union of many genre walks — sort newest-first for the response.
+        books = await _walk_one_catalog(region, category, collect, should_stop)
         books.sort(
             key=lambda b: _release_dt(b) or datetime.min.replace(tzinfo=timezone.utc),
             reverse=True,
@@ -234,7 +249,7 @@ async def get_new_releases(
         logger.info("Requested Audible new releases", extra={
             "region": region,
             "days": days,
-            "genres": len(genres),
+            "category": category,
             "results": len(books),
             "took": took,
         })
@@ -253,13 +268,20 @@ async def get_coming_soon(
     region: str,
     session: AsyncSession,
     days: int = 30,
+    category: str | None = None,
 ) -> list[dict[str, Any]]:
     """
     Returns upcoming books releasing in the next `days`, soonest first, scanned
     live from Audible. Cache-first with a TTL to the next UTC midnight (see
     module docstring). Future releases only.
+
+    With a `category` id (from /categories), the scan is scoped to that one
+    category and returns the full window for it. Without one, the scan is the
+    un-categoried catalog — Audible caps that at a few hundred results, so the
+    bare call returns a live sample, not the full catalog (use a category, or
+    the DB endpoints, for completeness).
     """
-    key = cache.coming_soon_key(region, days)
+    key = cache.coming_soon_key(region, days, category)
     cached = await cache.get(session, key)
     if cached is not None:
         return cached
@@ -277,15 +299,13 @@ async def get_coming_soon(
 
     try:
         start = time.monotonic()
-        genres = await _ensure_genres(session, region)
-        books = await _scan_genres_by_release_date(region, genres, collect, should_stop)
-        # Union of many genre walks; coming soon wants soonest-first.
+        books = await _walk_one_catalog(region, category, collect, should_stop)
         books.sort(key=lambda b: _release_dt(b) or datetime.max.replace(tzinfo=timezone.utc))
         took = round((time.monotonic() - start) * 1000, 2)
         logger.info("Requested Audible coming soon", extra={
             "region": region,
             "days": days,
-            "genres": len(genres),
+            "category": category,
             "results": len(books),
             "took": took,
         })

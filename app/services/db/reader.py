@@ -1221,19 +1221,26 @@ async def get_stored_genres(
     """
     Returns stored catalog genres for a region and the oldest last_checked
     timestamp among them, so callers can decide whether the stored set is stale
-    and needs refreshing. Returns ([], None) when no genres are stored yet.
+    and needs refreshing. Each entry carries parent_id ("" for a top-level
+    parent, the parent's id for a leaf). Returns ([], None) when no genres are
+    stored yet.
     """
     try:
         result = await session.execute(
-            select(CatalogGenre.genre_id, CatalogGenre.name, CatalogGenre.last_checked)
+            select(
+                CatalogGenre.genre_id,
+                CatalogGenre.parent_id,
+                CatalogGenre.name,
+                CatalogGenre.last_checked,
+            )
             .where(CatalogGenre.region == region)
             .order_by(CatalogGenre.name.asc())
         )
         rows = result.fetchall()
         if not rows:
             return [], None
-        genres = [{"genre_id": r[0], "name": r[1]} for r in rows]
-        oldest_checked = min(r[2] for r in rows)
+        genres = [{"genre_id": r[0], "parent_id": r[1], "name": r[2]} for r in rows]
+        oldest_checked = min(r[3] for r in rows)
         return genres, oldest_checked
     except Exception as e:
         logger.warning(f"DB read failed for catalog_genres '{region}': {e}")

@@ -120,10 +120,18 @@ async def audible_get(
                 params=params,
                 timeout=30.0,
             )
-        except httpx.TimeoutException:
-            raise AudibleAPIException(f"Audible API timed out: {url}")
+        except httpx.TimeoutException as e:
+            raise AudibleAPIException(
+                f"Audible API timed out: {type(e).__name__} for {url}"
+            )
         except httpx.RequestError as e:
-            raise AudibleAPIException(f"Audible API request failed: {e}")
+            # Many httpx.RequestError subclasses (ConnectError, ReadError, etc.)
+            # have an empty str(), so include the type and URL or the message is
+            # blank and the failure is undiagnosable.
+            detail = str(e) or type(e).__name__
+            raise AudibleAPIException(
+                f"Audible API request failed: {detail} for {url}"
+            )
 
     if response.status_code == 404:
         from app.core.exceptions import NotFoundException

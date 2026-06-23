@@ -10,6 +10,48 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.5.0]
+
+### Fixed
+
+- **`/new-releases` and `/coming-soon` no longer time out.** The 1.4.0 live scan
+  walked every genre on each request to assemble the full catalog, which on a
+  real catalog takes minutes — long enough that the request timed out at the
+  gateway before returning. The live endpoints now scan a single catalog query
+  per request (see Changed), so they return promptly.
+- **The new-releases seeder no longer aborts on a single Audible hiccup.** One
+  failed catalog request used to stop the entire scan and discard everything it
+  had collected (reported as `0 new`). Each category is now walked
+  independently — a failed one is logged and skipped, and the rest of the scan
+  (and the books already found) is kept.
+- **The seeder was undercounting.** It walked only leaf categories, but a parent
+  category surfaces titles that none of its children do, so parent-only releases
+  were being missed. The seeder now walks parents and leaves and unions the
+  results, covering the full set.
+- **Audible request failures are now diagnosable.** Some failures logged a blank
+  reason (`Audible API request failed:` with nothing after it); the message now
+  includes the error type and the URL.
+
+### Added
+
+- **`GET /categories`** — lists Audible's genre categories for a region as a
+  nested tree of parents and their leaves. These are the ids you pass to the new
+  `category` parameter. This is the Audible *category* taxonomy, distinct from
+  `/db/genres` (the genre/tag *names* attached to stored books).
+- **`category` parameter on `/new-releases` and `/coming-soon`** — scope the live
+  scan to a single category (an id from `/categories`) and get the full window
+  for it.
+
+### Changed
+
+- **The live `/new-releases` and `/coming-soon` are now single-scan.** With a
+  `category`, the scan covers that one category in full. Without one, it walks
+  Audible's un-categoried catalog, which Audible caps at a few hundred results —
+  so the bare call returns a live *sample*, not the whole catalog. For the
+  complete set, query a category, use the DB endpoints `/db/new-releases` and
+  `/db/coming-soon` (kept current by the seeder), or aggregate per-category calls
+  client-side.
+
 ## [1.4.0]
 
 ### Fixed
@@ -123,6 +165,7 @@ Initial stable release — anonymous, public, drop-in AudiMeta-compatible
 Audible metadata API. Book, author, series, narrator, and search endpoints;
 local DB query surface; Postgres-backed cache; background seeder.
 
+[1.5.0]: https://github.com/LibexHQ/Libex/releases/tag/v1.5.0
 [1.4.0]: https://github.com/LibexHQ/Libex/releases/tag/v1.4.0
 [1.3.0]: https://github.com/LibexHQ/Libex/releases/tag/v1.3.0
 [1.2.0]: https://github.com/LibexHQ/Libex/releases/tag/v1.2.0

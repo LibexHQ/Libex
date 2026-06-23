@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 # Database
-from app.db.models import Book, Author, Narrator, Series, Track, Genre, author_book, book_narrator, book_series
+from app.db.models import Book, Author, Narrator, Series, Track, Genre, CatalogGenre, author_book, book_narrator, book_series
 
 # Services
 from app.services.audible.client import REGION_MAP
@@ -1213,3 +1213,28 @@ async def get_db_stats(session: AsyncSession) -> dict[str, int]:
     except Exception as e:
         logger.warning(f"DB read failed for stats: {e}")
         return {"books": 0, "authors": 0, "narrators": 0, "series": 0}
+
+
+async def get_stored_genres(
+    session: AsyncSession, region: str
+) -> tuple[list[dict[str, str]], datetime | None]:
+    """
+    Returns stored catalog genres for a region and the oldest last_checked
+    timestamp among them, so callers can decide whether the stored set is stale
+    and needs refreshing. Returns ([], None) when no genres are stored yet.
+    """
+    try:
+        result = await session.execute(
+            select(CatalogGenre.genre_id, CatalogGenre.name, CatalogGenre.last_checked)
+            .where(CatalogGenre.region == region)
+            .order_by(CatalogGenre.name.asc())
+        )
+        rows = result.fetchall()
+        if not rows:
+            return [], None
+        genres = [{"genre_id": r[0], "name": r[1]} for r in rows]
+        oldest_checked = min(r[2] for r in rows)
+        return genres, oldest_checked
+    except Exception as e:
+        logger.warning(f"DB read failed for catalog_genres '{region}': {e}")
+        return [], None

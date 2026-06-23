@@ -339,6 +339,26 @@ class Track(Base):
 
 
 # ============================================================
+# CATALOG GENRES
+# ============================================================
+
+class CatalogGenre(Base):
+    __tablename__ = "catalog_genres"
+
+    region: Mapped[str] = mapped_column(String(2), primary_key=True)
+    genre_id: Mapped[str] = mapped_column(String(20), primary_key=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    last_checked: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    def __repr__(self) -> str:
+        return f"<CatalogGenre region={self.region} genre_id={self.genre_id} name={self.name}>"
+
+
+# ============================================================
 # PIVOT TABLES
 # ============================================================
 

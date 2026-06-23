@@ -20,7 +20,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "Libex"
-    app_version: str = "1.3.0"
+    app_version: str = "1.4.0"
     debug: bool = False
     host: str = "0.0.0.0"
     port: int = 3333
@@ -52,7 +52,6 @@ class Settings(BaseSettings):
     seeder_request_delay: float = 1.0
     seeder_regions: str = "us"
     seeder_new_releases_interval_hours: int = 24    # How often the new-releases worker runs
-    seeder_new_releases_pages: int = 20             # Pages (50 books each) the new-releases scan walks per region
     seeder_refresh_enabled: bool = False             # Re-fetch upcoming pre-orders as their release date approaches
 
     # Internal seed endpoint
@@ -62,3 +61,37 @@ class Settings(BaseSettings):
 @lru_cache()
 def get_settings() -> Settings:
     return Settings()
+
+
+# Environment variables Libex no longer uses. If one is still set, the app warns
+# at startup so the operator can remove it — it never crashes. Add to this map
+# whenever a setting is retired.
+RETIRED_ENV_VARS: dict[str, str] = {
+    "SEEDER_NEW_RELEASES_PAGES": (
+        "Retired in 1.4.0 — the new-releases seeder now scans by genre and walks "
+        "each genre to its catalog limit instead of a fixed page count. Safe to remove."
+    ),
+    "SEEDER_NEW_RELEASES_DAYS": (
+        "Retired in 1.4.0 — the new-releases seeder now collects all reachable "
+        "releases per genre rather than a fixed day window. Safe to remove."
+    ),
+}
+
+
+def check_retired_env_vars() -> None:
+    """
+    Warns (never crashes) if any retired env vars are still set. Checks the raw
+    environment rather than Settings, since retired vars are no longer Settings
+    fields and pydantic would silently ignore them.
+    """
+    # Standard library
+    import os
+
+    # Core — deferred to avoid a config <- logging circular import (logging
+    # imports config at module load, so config can't import logging at top).
+    from app.core.logging import get_logger
+
+    logger = get_logger()
+    for var, message in RETIRED_ENV_VARS.items():
+        if os.environ.get(var) is not None:
+            logger.warning(f"Retired env var {var} is set. {message}")

@@ -15,10 +15,17 @@ request of the new day. This serves the freshest possible answer while turning
 an otherwise per-request catalog scan into at most one scan per window/region
 per day.
 
-The scan itself walks Audible's catalog sorted by -ReleaseDate (descending) and
-stops based on the dates it sees rather than a fixed page count, so it returns
-every book in the requested window. A hard page cap guards against runaway
-paging if the data ever misbehaves.
+THE SCAN — why it's a per-genre fan-out, not a single walk. Audible exposes no
+direct new-releases or coming-soon endpoint, so we reconstruct the list from the
+catalog. Every /catalog/products query is hard-capped at ~535 results regardless
+of how it's filtered, and a parent-category query is NOT a superset of its
+children — it's the same capped sample (measured: one parent returned ~550 while
+its children unioned to ~6,300). So we walk the LEAF genres: fetch the taxonomy
+(/catalog/categories?root=Genres), flatten to every sub-genre, and walk each one
+sorted by -ReleaseDate, applying the window's date gate plus a duplicate-page
+wall stop. The per-genre results are unioned and deduped by ASIN, then sorted for
+the response. The leaf list is stored in catalog_genres and refreshed at most
+once a day (inline, on a cache miss) — no background task.
 """
 
 # Standard library
@@ -42,17 +49,19 @@ from app.services.audible.books import (
     BOOK_RESPONSE_GROUPS,
     IMAGE_SIZES,
 )
-from app.services.db.writer import persist_books_background
+from app.services.db.reader import get_stored_genres
+from app.services.db.writer import persist_books_background, upsert_genres
 from app.services.cache import manager as cache
 
 settings = get_settings()
 logger = get_logger()
 
-# Safety cap on how many catalog pages a single scan will walk. The date-based
-# stop condition normally fires well before this; it's here so a data anomaly
-# can't loop forever.
-_MAX_PAGES = 50
 _PAGE_SIZE = 50
+
+# The leaf genre list is re-fetched from Audible at most this often. The taxonomy
+# changes rarely, so a daily refresh is plenty; the check is inline (on a cache
+# miss), not a background task.
+_GENRE_REFRESH_INTERVAL = timedelta(hours=24)
 
 
 def _release_dt(book: dict[str, Any]) -> datetime | None:
@@ -66,54 +75,124 @@ def _release_dt(book: dict[str, Any]) -> datetime | None:
         return None
 
 
-async def _scan_by_release_date(
+async def _fetch_catalog_genres(region: str) -> list[dict[str, str]]:
+    """
+    Fetches the genre taxonomy from Audible and flattens it to the LEAF set —
+    every sub-genre across all parent categories, deduped by id.
+
+    The response is two levels: a top-level `categories` list of parents, each
+    with a `children` list of leaves (both carry `id` + `name`). We keep the
+    leaves only: a parent query is capped at the same ~535 results as any other,
+    so it under-returns its children's union — the leaves are what reach the full
+    catalog. Some leaf ids appear under two parents, so we dedupe.
+    """
+    data = await audible_get(region, "/1.0/catalog/categories", {"root": "Genres"})
+    seen: set[str] = set()
+    leaves: list[dict[str, str]] = []
+    for parent in data.get("categories", []):
+        for child in parent.get("children", []):
+            gid = child.get("id")
+            name = child.get("name")
+            if gid and name and gid not in seen:
+                seen.add(gid)
+                leaves.append({"genre_id": gid, "name": name})
+    return leaves
+
+
+async def _ensure_genres(session: AsyncSession, region: str) -> list[dict[str, str]]:
+    """
+    Returns the leaf genre list for a region, refreshing it from Audible at most
+    once a day. Reads the stored set; if it's empty or older than the refresh
+    interval, re-fetches the taxonomy and stores it. On a fetch failure, falls
+    back to whatever's already stored so a transient Audible hiccup doesn't empty
+    the walk.
+    """
+    stored, oldest_checked = await get_stored_genres(session, region)
+
+    fresh_enough = (
+        stored
+        and oldest_checked is not None
+        and (datetime.now(timezone.utc) - oldest_checked) < _GENRE_REFRESH_INTERVAL
+    )
+    if fresh_enough:
+        return stored
+
+    try:
+        leaves = await _fetch_catalog_genres(region)
+        if leaves:
+            await upsert_genres(session, region, leaves)
+            await session.commit()
+            return leaves
+    except Exception as e:
+        logger.warning(f"Genre taxonomy refresh failed for {region}: {e}")
+
+    # Fetch failed or returned nothing — use whatever we have stored.
+    return stored
+
+
+async def _scan_genres_by_release_date(
     region: str,
+    genres: list[dict[str, str]],
     collect,
     should_stop,
 ) -> list[dict[str, Any]]:
     """
-    Walks the catalog sorted by -ReleaseDate (descending), normalizing each
-    page. `collect(dt)` decides whether a book is in-window; `should_stop(dt)`
-    decides when the descending scan has passed the window's near edge.
+    Walks each leaf genre's catalog sorted by -ReleaseDate (descending) and
+    unions the results, deduped by ASIN. `collect(dt)` decides whether a book is
+    in-window; `should_stop(dt)` decides when the descending walk has passed the
+    window's near edge.
 
-    Books with no parseable date are skipped. Paging stops at the first book
-    that satisfies should_stop, when a page comes back short, or at the page
-    cap — whichever comes first.
+    Each genre walk stops at the first book satisfying should_stop, when a page
+    repeats the previous one (Audible's ~535-result wall — proven to be a
+    consecutive repeat), or when a page comes back short/empty. Books with no
+    parseable date are skipped. No inter-request delay — this is the live path.
     """
-    collected: list[dict[str, Any]] = []
-    page = 0
-    while page < _MAX_PAGES:
-        params: dict[str, Any] = {
-            "num_results": _PAGE_SIZE,
-            "page": page,
-            "response_groups": BOOK_RESPONSE_GROUPS,
-            "image_sizes": IMAGE_SIZES,
-            "sort_by": "-ReleaseDate",
-        }
-        data = await audible_get(region, "/1.0/catalog/products/", params)
-        products = _filter_products(data.get("products", []))
-        if not products:
-            break
+    collected: dict[str, dict[str, Any]] = {}
 
-        stop = False
-        for product in products:
-            book = _normalize_product(product, region)
-            dt = _release_dt(book)
-            if dt is None:
-                continue
-            if should_stop(dt):
-                stop = True
+    for genre in genres:
+        page = 0
+        prev_asins: list[str] | None = None
+        while True:
+            params: dict[str, Any] = {
+                "category_id": genre["genre_id"],
+                "num_results": _PAGE_SIZE,
+                "page": page,
+                "response_groups": BOOK_RESPONSE_GROUPS,
+                "image_sizes": IMAGE_SIZES,
+                "products_sort_by": "-ReleaseDate",
+            }
+            data = await audible_get(region, "/1.0/catalog/products/", params)
+            products = _filter_products(data.get("products", []))
+            if not products:
                 break
-            if collect(dt):
-                collected.append(book)
 
-        if stop:
-            break
-        if len(products) < _PAGE_SIZE:
-            break
-        page += 1
+            # Duplicate-page wall: Audible repeats the last page once it runs out.
+            page_asins = [p.get("asin") for p in products]
+            if page_asins == prev_asins:
+                break
+            prev_asins = page_asins
 
-    return collected
+            stop = False
+            for product in products:
+                book = _normalize_product(product, region)
+                dt = _release_dt(book)
+                if dt is None:
+                    continue
+                if should_stop(dt):
+                    stop = True
+                    break
+                if collect(dt):
+                    asin = book.get("asin")
+                    if asin:
+                        collected[asin] = book
+
+            if stop:
+                break
+            if len(products) < _PAGE_SIZE:
+                break
+            page += 1
+
+    return list(collected.values())
 
 
 async def get_new_releases(
@@ -144,11 +223,18 @@ async def get_new_releases(
 
     try:
         start = time.monotonic()
-        books = await _scan_by_release_date(region, collect, should_stop)
+        genres = await _ensure_genres(session, region)
+        books = await _scan_genres_by_release_date(region, genres, collect, should_stop)
+        # Union of many genre walks — sort newest-first for the response.
+        books.sort(
+            key=lambda b: _release_dt(b) or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )
         took = round((time.monotonic() - start) * 1000, 2)
         logger.info("Requested Audible new releases", extra={
             "region": region,
             "days": days,
+            "genres": len(genres),
             "results": len(books),
             "took": took,
         })
@@ -191,13 +277,15 @@ async def get_coming_soon(
 
     try:
         start = time.monotonic()
-        books = await _scan_by_release_date(region, collect, should_stop)
-        # Scan came in newest-first (descending); coming soon wants soonest-first.
+        genres = await _ensure_genres(session, region)
+        books = await _scan_genres_by_release_date(region, genres, collect, should_stop)
+        # Union of many genre walks; coming soon wants soonest-first.
         books.sort(key=lambda b: _release_dt(b) or datetime.max.replace(tzinfo=timezone.utc))
         took = round((time.monotonic() - start) * 1000, 2)
         logger.info("Requested Audible coming soon", extra={
             "region": region,
             "days": days,
+            "genres": len(genres),
             "results": len(books),
             "took": took,
         })

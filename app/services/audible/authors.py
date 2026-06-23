@@ -95,7 +95,7 @@ async def _fetch_author_books_by_name(name: str, region: str) -> tuple[list[str]
             "num_results": 50,
             "page": page,
             "response_groups": "product_desc,contributors,series,product_attrs,media",
-            "sort_by": "-ReleaseDate",
+            "products_sort_by": "-ReleaseDate",
         }
         data = await audible_get(region, path, params)
         products = data.get("products", [])

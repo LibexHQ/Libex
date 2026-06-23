@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 
 
 # Core
-from app.core.config import get_settings
+from app.core.config import get_settings, check_retired_env_vars
 from app.core.logging import setup_logging
 from app.core.exceptions import LibexException
 from app.core.middleware import setup_middleware
@@ -81,6 +81,9 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Database unavailable on startup: {e}")
     logger.info(f"Libex {settings.app_version} starting up")
+
+    # Warn about any retired env vars still set (never crashes)
+    check_retired_env_vars()
 
     # Start background tasks
     seeder_task = asyncio.create_task(run_seeder())

@@ -10,8 +10,9 @@ STRATEGY:
    book list from Audible and fill in missing books.
 3. Narrator expansion — for narrators not recently checked, search the
    Audible catalog by narrator name and fetch missing books.
-4. New releases — search for recently released books across configured
-   regions. Catches new content automatically.
+4. New releases — walk every genre's catalog by release date and collect
+   all reachable books across configured regions (future and recent alike).
+   Catches new content automatically.
 
 Each phase compounds the next — new books bring in new series, authors,
 and narrators that get expanded in subsequent cycles.
@@ -126,7 +127,7 @@ async def _fetch_author_book_asins(name: str, region: str) -> list[str]:
             "num_results": 50,
             "page": page,
             "response_groups": "product_desc,contributors,series,product_attrs,media",
-            "sort_by": "-ReleaseDate",
+            "products_sort_by": "-ReleaseDate",
         }
         data = await audible_get(region, path, params)
         products = data.get("products", [])
@@ -367,59 +368,110 @@ async def _expand_narrators(region: str, delay: float) -> dict[str, int]:
 # PHASE 4: NEW RELEASES
 # ============================================================
 
+async def _fetch_catalog_genres(region: str) -> list[dict[str, str]]:
+    """
+    Fetches the genre taxonomy from Audible and flattens it to the LEAF set —
+    every sub-genre across all parents, deduped by id. The seeder's own copy: it
+    shares nothing with the live release endpoints and never touches the
+    catalog_genres table.
+
+    The response is two levels — a top-level `categories` list of parents, each
+    with a `children` list of leaves (both carry `id` + `name`). We keep leaves
+    only: every catalog/products query caps at ~535 results, so a parent query
+    under-returns its children's union — the leaves reach the full catalog.
+    """
+    from app.services.audible.client import audible_get
+
+    data = await audible_get(region, "/1.0/catalog/categories", {"root": "Genres"})
+    seen: set[str] = set()
+    leaves: list[dict[str, str]] = []
+    for parent in data.get("categories", []):
+        for child in parent.get("children", []):
+            gid = child.get("id")
+            name = child.get("name")
+            if gid and name and gid not in seen:
+                seen.add(gid)
+                leaves.append({"genre_id": gid, "name": name})
+    return leaves
+
+
 async def _scan_new_releases(region: str, delay: float) -> dict[str, int]:
+    """
+    Walks every leaf genre's catalog by -ReleaseDate, collecting ALL reachable
+    ASINs — future pre-orders and recent releases alike, no date gate — and
+    persisting the ones we don't already have. This is how both new-releases and
+    coming-soon data lands in the DB; the tiered refresh (_refresh_upcoming) then
+    keeps near-release pre-orders current.
+
+    Audible caps every catalog/products query at ~535 results and a parent query
+    is not a superset of its children, so we walk the leaf genres and union the
+    results. Each leaf walk stops when a page repeats the previous one (the ~535
+    wall) or a page comes back short/empty. Paced by SEEDER_REQUEST_DELAY.
+    """
     stats = {"books_discovered": 0, "pages_scanned": 0, "errors": 0}
 
     try:
         from app.services.audible.client import audible_get
 
+        genres = await _fetch_catalog_genres(region)
+
         all_asins: list[str] = []
-        page = 0
-        max_pages = settings.seeder_new_releases_pages
-        while page < max_pages:
-            path = "/1.0/catalog/products"
-            params = {
-                "num_results": 50,
-                "page": page,
-                "response_groups": "product_desc,contributors,series,product_attrs,media",
-                "sort_by": "-ReleaseDate",
-            }
-            data = await audible_get(region, path, params)
-            products = data.get("products", [])
-            if not products:
-                break
+        seen: set[str] = set()
 
-            for product in products:
-                asin = product.get("asin")
-                if asin and asin not in all_asins:
-                    all_asins.append(asin)
+        for genre in genres:
+            page = 0
+            prev_asins: list[str] | None = None
+            while True:
+                params = {
+                    "category_id": genre["genre_id"],
+                    "num_results": 50,
+                    "page": page,
+                    "response_groups": "product_desc,contributors,series,product_attrs,media",
+                    "products_sort_by": "-ReleaseDate",
+                }
+                data = await audible_get(region, "/1.0/catalog/products", params)
+                await asyncio.sleep(delay)
 
-            stats["pages_scanned"] += 1
-            if len(products) < 50:
-                break
-            page += 1
-            await asyncio.sleep(delay)
-            await asyncio.sleep(0)
+                products = data.get("products", [])
+                if not products:
+                    break
 
-        if not all_asins:
-            return stats
+                # Duplicate-page wall: Audible repeats the last page at the cap.
+                page_asins = [p.get("asin") for p in products]
+                if page_asins == prev_asins:
+                    break
+                prev_asins = page_asins
 
+                for product in products:
+                    if not product.get("title"):
+                        continue
+                    asin = product.get("asin")
+                    if asin and asin not in seen:
+                        seen.add(asin)
+                        all_asins.append(asin)
+
+                stats["pages_scanned"] += 1
+
+                if len(products) < 50:
+                    break
+                page += 1
+
+        # Persist the books we don't already have.
         async with SessionFactory() as session:
-            missing = await _get_missing_asins(session, all_asins)
-
+            missing = await _get_missing_asins(session, all_asins) if all_asins else []
         if missing:
             await _fetch_and_persist(missing, region, delay)
             stats["books_discovered"] = len(missing)
 
-        total_found = len(all_asins)
-        new_books = len(missing) if missing else 0
         logger.info(
             f"Seeder: new releases scan complete for {region} — "
-            f"{total_found} found, {new_books} new, {stats['pages_scanned']} pages scanned",
+            f"{len(all_asins)} found, {stats['books_discovered']} new, "
+            f"{stats['pages_scanned']} pages scanned",
             extra={
-                "total_found": total_found,
-                "new_books": new_books,
+                "total_found": len(all_asins),
+                "new_books": stats["books_discovered"],
                 "pages_scanned": stats["pages_scanned"],
+                "genres": len(genres),
             },
         )
 
@@ -586,7 +638,6 @@ async def run_new_releases_seeder() -> None:
         extra={
             "regions": regions,
             "interval_hours": settings.seeder_new_releases_interval_hours,
-            "pages": settings.seeder_new_releases_pages,
             "refresh_enabled": settings.seeder_refresh_enabled,
             "delay_seconds": delay,
         },

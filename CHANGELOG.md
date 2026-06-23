@@ -10,6 +10,52 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.4.0]
+
+### Fixed
+
+- **`/new-releases` and `/coming-soon` now return the full list.** Audible
+  exposes no direct new-releases or coming-soon feed, and any single catalog
+  query — even filtered to one category — caps out around 535 results, so the
+  old scan could only ever surface a fraction of the window (in practice, just a
+  handful of titles). Both live endpoints, and the new-releases seeder, now fan
+  out across every genre's sub-categories, walk each by release date, and union
+  the results — reconstructing the same set Audible's own new-releases and
+  coming-soon pages show. The `days` window, the midnight caching, and the
+  response shape are all unchanged. Note for self-hosters running the seeder:
+  the wider scan makes more Audible requests per cycle and grows the local DB
+  noticeably faster than before.
+- **Date-sorted catalog reads were silently unsorted.** The catalog search used
+  the wrong sort parameter, so requests meant to come back newest-first were
+  returned in Audible's default order. This affected the release-window scans
+  and `GET /author/books?name=` (books by author name). Now correctly sorted by
+  release date.
+
+### Changed
+
+- **The new-releases seeder worker now collects everything it can reach.**
+  Instead of a fixed-depth, recent-window scan, it walks every genre's
+  sub-categories and ingests all reachable titles — upcoming pre-orders and
+  recent releases alike — so both `/db/new-releases` and `/db/coming-soon` fill
+  out from the same pass. It stays paced by `SEEDER_REQUEST_DELAY` and runs on
+  its own `SEEDER_NEW_RELEASES_INTERVAL_HOURS` interval; the optional
+  upcoming-refresh phase (`SEEDER_REFRESH_ENABLED`) is unchanged.
+
+### Added
+
+- **`catalog_genres` table.** A small table holding Audible's per-region genre
+  list, used by the live release endpoints to avoid re-fetching the taxonomy on
+  every scan and refreshed automatically about once a day. Created for you by
+  the startup migration — no action needed.
+
+### Removed
+
+- **`SEEDER_NEW_RELEASES_PAGES`** and **`SEEDER_NEW_RELEASES_DAYS`** are retired.
+  The new-releases scan now walks each genre to its catalog limit rather than a
+  fixed page depth or day window, so neither knob applies. If either is still
+  set, Libex logs a one-time warning at startup and ignores it — safe to remove
+  from your environment.
+
 ## [1.3.0]
 
 ### Added
@@ -77,6 +123,7 @@ Initial stable release — anonymous, public, drop-in AudiMeta-compatible
 Audible metadata API. Book, author, series, narrator, and search endpoints;
 local DB query surface; Postgres-backed cache; background seeder.
 
+[1.4.0]: https://github.com/LibexHQ/Libex/releases/tag/v1.4.0
 [1.3.0]: https://github.com/LibexHQ/Libex/releases/tag/v1.3.0
 [1.2.0]: https://github.com/LibexHQ/Libex/releases/tag/v1.2.0
 [1.1.0]: https://github.com/LibexHQ/Libex/releases/tag/v1.1.0

@@ -26,6 +26,7 @@ from app.db.models import (
     Narrator,
     Series,
     Track,
+    CatalogGenre,
     author_book,
     author_genre,
     book_genre,
@@ -689,3 +690,28 @@ def persist_cache_background(key: str, value) -> None:
                 logger.warning(f"Background cache persist failed for {key}: {e}")
 
     asyncio.create_task(_persist())
+
+
+async def upsert_genres(
+    session: AsyncSession, region: str, genres: list[dict[str, str]]
+) -> None:
+    """
+    Stores the catalog genre list for a region, stamping last_checked=now on
+    every row so the stored set's freshness can be tracked. Upserts by
+    (region, genre_id): new genres are inserted, existing ones get their name
+    and last_checked refreshed. No-ops on an empty list.
+    """
+    if not genres:
+        return
+    now = _now()
+    for genre in genres:
+        stmt = insert(CatalogGenre).values(
+            region=region,
+            genre_id=genre["genre_id"],
+            name=genre["name"],
+            last_checked=now,
+        ).on_conflict_do_update(
+            index_elements=["region", "genre_id"],
+            set_={"name": genre["name"], "last_checked": now},
+        )
+        await session.execute(stmt)

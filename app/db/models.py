@@ -347,6 +347,9 @@ class CatalogGenre(Base):
 
     region: Mapped[str] = mapped_column(String(2), primary_key=True)
     genre_id: Mapped[str] = mapped_column(String(20), primary_key=True)
+    # Parent category id, or "" for a top-level parent. Part of the PK so a leaf
+    # that appears under two parents is stored once per parent.
+    parent_id: Mapped[str] = mapped_column(String(20), primary_key=True, default="")
     name: Mapped[str] = mapped_column(Text, nullable=False)
     last_checked: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -355,7 +358,7 @@ class CatalogGenre(Base):
     )
 
     def __repr__(self) -> str:
-        return f"<CatalogGenre region={self.region} genre_id={self.genre_id} name={self.name}>"
+        return f"<CatalogGenre region={self.region} genre_id={self.genre_id} parent_id={self.parent_id} name={self.name}>"
 
 
 # ============================================================

@@ -698,20 +698,24 @@ async def upsert_genres(
     """
     Stores the catalog genre list for a region, stamping last_checked=now on
     every row so the stored set's freshness can be tracked. Upserts by
-    (region, genre_id): new genres are inserted, existing ones get their name
-    and last_checked refreshed. No-ops on an empty list.
+    (region, genre_id, parent_id): new nodes are inserted, existing ones get
+    their name and last_checked refreshed. Each node carries a parent_id ("" for
+    a top-level parent, the parent's id for a leaf), so a leaf that appears under
+    two parents is stored once per parent. No-ops on an empty list.
     """
     if not genres:
         return
     now = _now()
     for genre in genres:
+        parent_id = genre.get("parent_id", "")
         stmt = insert(CatalogGenre).values(
             region=region,
             genre_id=genre["genre_id"],
+            parent_id=parent_id,
             name=genre["name"],
             last_checked=now,
         ).on_conflict_do_update(
-            index_elements=["region", "genre_id"],
+            index_elements=["region", "genre_id", "parent_id"],
             set_={"name": genre["name"], "last_checked": now},
         )
         await session.execute(stmt)

@@ -270,3 +270,69 @@ async def test_one_failed_node_does_not_abort_scan():
         assert captured["asins"] == ["BLEAF"]  # leaf still collected
         assert mock_persist.await_count == 1   # and persisted
         assert stats["books_discovered"] == 1
+
+# ============================================================
+# _get_missing_asins — chunked IN query (param-cap regression)
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_get_missing_asins_chunks_large_lists():
+    """The IN query is chunked at 5000 so it never exceeds Postgres's 32767
+    bind-parameter cap — the genre-union scan can pass tens of thousands of ASINs.
+    Regression for the 'number of query arguments cannot exceed 32767' crash."""
+    from unittest.mock import MagicMock
+
+    # 12,001 ASINs -> ceil(12001 / 5000) = 3 chunks -> 3 execute calls.
+    asins = [f"B{i:09d}" for i in range(12001)]
+
+    def _execute(_stmt):
+        result = MagicMock()
+        result.fetchall.return_value = []
+        return result
+
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=_execute)
+
+    missing = await seeder._get_missing_asins(session, asins)
+
+    assert session.execute.await_count == 3          # chunked, not one giant query
+    assert len(missing) == 12001                      # all missing (nothing existed)
+
+
+@pytest.mark.asyncio
+async def test_get_missing_asins_filters_existing():
+    """Existing ASINs (returned by the DB) are removed; the existing set is
+    accumulated across chunks."""
+    from unittest.mock import MagicMock
+
+    asins = [f"B{i:09d}" for i in range(7000)]  # 2 chunks (5000 + 2000)
+    already = {"B000000003", "B000006500"}
+
+    def _execute(stmt):
+        result = MagicMock()
+        if not hasattr(_execute, "_called"):
+            _execute._called = True
+            result.fetchall.return_value = [(a,) for a in already]
+        else:
+            result.fetchall.return_value = []
+        return result
+
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=_execute)
+
+    missing = await seeder._get_missing_asins(session, asins)
+
+    assert session.execute.await_count == 2          # 7000 -> 2 chunks
+    assert "B000000003" not in missing
+    assert "B000006500" not in missing
+    assert len(missing) == 7000 - 2
+
+
+@pytest.mark.asyncio
+async def test_get_missing_asins_empty_short_circuits():
+    """An empty input returns [] without touching the DB."""
+    session = AsyncMock()
+    session.execute = AsyncMock()
+    result = await seeder._get_missing_asins(session, [])
+    assert result == []
+    session.execute.assert_not_awaited()

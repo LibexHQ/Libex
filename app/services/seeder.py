@@ -84,10 +84,15 @@ def _stale_cutoff() -> datetime:
 async def _get_missing_asins(session: AsyncSession, asins: list[str]) -> list[str]:
     if not asins:
         return []
-    result = await session.execute(
-        select(Book.asin).where(Book.asin.in_(asins))
-    )
-    existing = {row[0] for row in result.fetchall()}
+    # Postgres caps a single query at 32767 bind parameters, so the IN list is
+    # chunked — the genre-union scan can hand us tens of thousands of ASINs.
+    existing: set[str] = set()
+    for i in range(0, len(asins), 5000):
+        chunk = asins[i:i + 5000]
+        result = await session.execute(
+            select(Book.asin).where(Book.asin.in_(chunk))
+        )
+        existing.update(row[0] for row in result.fetchall())
     return [a for a in asins if a not in existing]
 
 

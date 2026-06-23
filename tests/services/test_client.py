@@ -165,3 +165,28 @@ def test_is_valid_asin_rejects_special_chars():
 def test_is_valid_asin_accepts_uppercase():
     """ASIN validation is case insensitive."""
     assert is_valid_asin("b08g9prs1k") is True
+
+# ============================================================
+# AUDIBLE_GET ERROR MESSAGE
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_request_error_with_empty_message_includes_type():
+    """An httpx.RequestError with an empty str() still produces a diagnosable
+    message (the exception type + URL), not a blank one."""
+    import httpx
+    from unittest.mock import patch, AsyncMock
+    from app.services.audible.client import audible_get
+    from app.core.exceptions import AudibleAPIException
+
+    # httpx.ConnectError("") stringifies to "" — the case that produced the
+    # blank "Audible API request failed: " in the wild.
+    failing = AsyncMock(side_effect=httpx.ConnectError(""))
+    with patch("httpx.AsyncClient.get", new=failing):
+        with pytest.raises(AudibleAPIException) as exc:
+            await audible_get("us", "/1.0/catalog/products", {"page": 0})
+
+    msg = str(exc.value)
+    assert "ConnectError" in msg          # the type is named
+    assert "request failed:" in msg
+    assert msg.strip() != "Audible API request failed:"  # not blank

@@ -46,6 +46,24 @@ def apply_genre_filter(stmt: Select, genre: str | None) -> Select:
     return stmt.where(Book.asin.in_(matching_books))
 
 
+def apply_category_filter(stmt: Select, category: str | None) -> Select:
+    """
+    Filters a Book query to books tagged with a category by its exact id.
+    Matches Genre.asin (the Audible category id from /categories), so
+    `category="18580628011"` returns only books in that exact category — unlike
+    the genre filter, which matches names broadly. Returns the statement
+    unchanged when category is None.
+    """
+    if not category:
+        return stmt
+    matching_books = (
+        select(book_genre.c.book_asin)
+        .join(Genre, Genre.asin == book_genre.c.genre_asin)
+        .where(Genre.asin == category)
+    )
+    return stmt.where(Book.asin.in_(matching_books))
+
+
 def apply_book_filters(
     stmt: Select,
     *,
@@ -75,6 +93,7 @@ def apply_book_filters(
     is_vvab: bool | None = None,
     plan_name: str | None = None,
     genre: str | None = None,
+    category: str | None = None,
 ) -> Select:
     """
     Applies the full set of Book filters to a select statement.
@@ -145,6 +164,7 @@ def apply_book_filters(
         stmt = stmt.where(Book.plans.contains([plan_name]))
 
     stmt = apply_genre_filter(stmt, genre)
+    stmt = apply_category_filter(stmt, category)
     return stmt
 
 

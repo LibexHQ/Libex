@@ -283,8 +283,9 @@ The same filter set is available on the other book-list DB endpoints too — `/d
 | `is_vvab` | bool | exact |
 | `plan_name` | string | JSONB contains |
 | `genre` | string | ILIKE against genre/tag names (e.g. `fantasy` matches "Science Fiction & Fantasy") |
+| `category` | string | Exact match on a category id from `/categories` (e.g. `18580628011`). Use `genre` for broad name matching |
 
-Use `/db/genres` to discover the genre/tag names available to filter on (optionally with `?search=`).
+Use `/db/genres` to discover the genre/tag names for `genre` (optionally with `?search=`), or `/categories` to discover the category ids for `category`.
 
 ### Sorting
 

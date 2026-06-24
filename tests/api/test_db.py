@@ -307,6 +307,7 @@ async def test_pagination_defaults(async_client):
     ("content_type", "Book", "content_type", "Book"),
     ("content_delivery_type", "SinglePartBook", "content_delivery_type", "SinglePartBook"),
     ("plan_name", "US Minerva", "plan_name", "US Minerva"),
+    ("category", "18580628011", "category", "18580628011"),
 ])
 async def test_string_filter_forwarded_to_reader(async_client, param, value, kwarg, expected):
     """String filter parameters are forwarded correctly to search_books_from_db."""

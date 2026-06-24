@@ -221,6 +221,7 @@ async def search_books_from_db(
     is_vvab: bool | None = None,
     plan_name: str | None = None,
     genre: str | None = None,
+    category: str | None = None,
     sort: str | None = None,
     order: str | None = None,
     limit: int = 20,
@@ -266,6 +267,7 @@ async def search_books_from_db(
             is_vvab=is_vvab,
             plan_name=plan_name,
             genre=genre,
+            category=category,
         )
 
         stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
@@ -374,6 +376,7 @@ async def get_books_by_plan_from_db(
     is_buyable: bool | None = None,
     is_vvab: bool | None = None,
     genre: str | None = None,
+    category: str | None = None,
     sort: str | None = None,
     order: str | None = None,
     limit: int = 20,
@@ -418,6 +421,7 @@ async def get_books_by_plan_from_db(
             is_buyable=is_buyable,
             is_vvab=is_vvab,
             genre=genre,
+            category=category,
         )
         stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
         stmt = stmt.limit(limit).offset((page - 1) * limit)
@@ -460,6 +464,7 @@ async def get_vvab_books_from_db(
     is_buyable: bool | None = None,
     plan_name: str | None = None,
     genre: str | None = None,
+    category: str | None = None,
     sort: str | None = None,
     order: str | None = None,
     limit: int = 20,
@@ -504,6 +509,7 @@ async def get_vvab_books_from_db(
             is_buyable=is_buyable,
             plan_name=plan_name,
             genre=genre,
+            category=category,
         )
         stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
         stmt = stmt.limit(limit).offset((page - 1) * limit)
@@ -548,6 +554,7 @@ async def get_new_releases_from_db(
     is_vvab: bool | None = None,
     plan_name: str | None = None,
     genre: str | None = None,
+    category: str | None = None,
     sort: str | None = None,
     order: str | None = None,
     limit: int = 20,
@@ -605,6 +612,7 @@ async def get_new_releases_from_db(
             is_vvab=is_vvab,
             plan_name=plan_name,
             genre=genre,
+            category=category,
         )
         if sort:
             stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
@@ -652,6 +660,7 @@ async def get_coming_soon_from_db(
     is_vvab: bool | None = None,
     plan_name: str | None = None,
     genre: str | None = None,
+    category: str | None = None,
     sort: str | None = None,
     order: str | None = None,
     limit: int = 20,
@@ -711,6 +720,7 @@ async def get_coming_soon_from_db(
             is_vvab=is_vvab,
             plan_name=plan_name,
             genre=genre,
+            category=category,
         )
         if sort:
             stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
@@ -800,6 +810,7 @@ async def get_author_books_from_db(
     is_vvab: bool | None = None,
     plan_name: str | None = None,
     genre: str | None = None,
+    category: str | None = None,
     sort: str | None = None,
     order: str | None = None,
 ) -> list[dict[str, Any]]:
@@ -845,6 +856,7 @@ async def get_author_books_from_db(
             is_vvab=is_vvab,
             plan_name=plan_name,
             genre=genre,
+            category=category,
         )
         stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
         result = await session.execute(stmt)
@@ -954,6 +966,7 @@ async def get_narrator_books_from_db(
     is_vvab: bool | None = None,
     plan_name: str | None = None,
     genre: str | None = None,
+    category: str | None = None,
     sort: str | None = None,
     order: str | None = None,
     limit: int = 20,
@@ -1000,6 +1013,7 @@ async def get_narrator_books_from_db(
             is_vvab=is_vvab,
             plan_name=plan_name,
             genre=genre,
+            category=category,
         )
         stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
         stmt = stmt.limit(limit).offset((page - 1) * limit)
@@ -1095,6 +1109,7 @@ async def get_series_books_from_db(
     is_vvab: bool | None = None,
     plan_name: str | None = None,
     genre: str | None = None,
+    category: str | None = None,
     sort: str | None = None,
     order: str | None = None,
 ) -> list[dict[str, Any]]:
@@ -1147,6 +1162,7 @@ async def get_series_books_from_db(
             is_vvab=is_vvab,
             plan_name=plan_name,
             genre=genre,
+            category=category,
         )
         if sort:
             stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)

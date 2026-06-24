@@ -10,6 +10,26 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.6.0]
+
+### Added
+
+- **`category` filter on the DB book endpoints.** `/db/book` (and the other
+  `/db/*` book-list endpoints) now accept `?category=<id>` — an exact match on
+  an Audible category id from `/categories`. This complements the existing
+  `genre` filter, which matches genre/tag *names* broadly: use `category` for an
+  exact id, `genre` for a partial name. The ids are the same taxonomy `/categories`
+  exposes and the live `/new-releases`/`/coming-soon` endpoints scope by.
+
+### Fixed
+
+- **The new-releases seeder now persists at scale.** The genre-union scan finds
+  tens of thousands of ASINs, and the missing-books check passed them all to a
+  single `IN` query — which exceeds PostgreSQL's 32,767 bind-parameter limit, so
+  the persist step failed and the scan wrote nothing (reported as `0 new` despite
+  finding ~89k). The query is now chunked, so the scan persists everything it
+  finds.
+
 ## [1.5.0]
 
 ### Fixed
@@ -165,6 +185,7 @@ Initial stable release — anonymous, public, drop-in AudiMeta-compatible
 Audible metadata API. Book, author, series, narrator, and search endpoints;
 local DB query surface; Postgres-backed cache; background seeder.
 
+[1.6.0]: https://github.com/LibexHQ/Libex/releases/tag/v1.6.0
 [1.5.0]: https://github.com/LibexHQ/Libex/releases/tag/v1.5.0
 [1.4.0]: https://github.com/LibexHQ/Libex/releases/tag/v1.4.0
 [1.3.0]: https://github.com/LibexHQ/Libex/releases/tag/v1.3.0

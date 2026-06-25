@@ -20,12 +20,13 @@ direct new-releases or coming-soon endpoint, so we reconstruct the list from the
 catalog. Every /catalog/products query is hard-capped at ~535 results regardless
 of how it's filtered, and a parent-category query is NOT a superset of its
 children — it's the same capped sample (measured: one parent returned ~550 while
-its children unioned to ~6,300). So we walk the LEAF genres: fetch the taxonomy
-(/catalog/categories?root=Genres), flatten to every sub-genre, and walk each one
-sorted by -ReleaseDate, applying the window's date gate plus a duplicate-page
-wall stop. The per-genre results are unioned and deduped by ASIN, then sorted for
-the response. The leaf list is stored in catalog_genres and refreshed at most
-once a day (inline, on a cache miss) — no background task.
+its children unioned to ~6,300, and each level deeper escapes the cap again). So
+we fetch the taxonomy (/catalog/categories?root=Genres) and flatten EVERY node at
+EVERY level — the tree runs up to five levels deep — then the live scan walks a
+single category by id sorted by -ReleaseDate, applying the window's date gate plus
+a duplicate-page wall stop. The per-genre results are unioned and deduped by ASIN,
+then sorted for the response. The full node list is stored in catalog_genres and
+refreshed at most once a day (inline, on a cache miss) — no background task.
 """
 
 # Standard library
@@ -58,7 +59,7 @@ logger = get_logger()
 
 _PAGE_SIZE = 50
 
-# The leaf genre list is re-fetched from Audible at most this often. The taxonomy
+# The genre node list is re-fetched from Audible at most this often. The taxonomy
 # changes rarely, so a daily refresh is plenty; the check is inline (on a cache
 # miss), not a background task.
 _GENRE_REFRESH_INTERVAL = timedelta(hours=24)
@@ -77,44 +78,47 @@ def _release_dt(book: dict[str, Any]) -> datetime | None:
 
 async def _fetch_catalog_genres(region: str) -> list[dict[str, str]]:
     """
-    Fetches the genre taxonomy from Audible and flattens it to every node —
-    parents AND their leaves, each tagged with its parent_id.
+    Fetches the genre taxonomy from Audible and flattens every node to a list,
+    each tagged with its parent_id.
 
-    The response is two levels: a top-level `categories` list of parents, each
-    with a `children` list of leaves (both carry `id` + `name`). We keep BOTH:
-    a parent query is capped at the same ~535 results as any other and is not a
-    superset of its children (it surfaces titles no leaf does), so the full set
-    is parents plus leaves. Parents get parent_id="" (top level); leaves get
-    their parent's id. A leaf appearing under two parents yields one node per
-    parent. Deduped by (genre_id, parent_id). This populates the /categories
-    discovery surface; the live scan itself walks a single category by id.
+    The taxonomy is a tree up to five levels deep and ragged — some branches stop
+    at two levels, some go five — so the flatten recurses to whatever depth
+    Audible returns (requested via categories_num_levels). A top-level parent gets
+    parent_id="" ; every other node gets its parent's id. A node that appears under
+    two parents yields one row per parent. Deduped by (genre_id, parent_id). This
+    populates the /categories discovery surface; the live scan walks a single
+    category by id.
     """
-    data = await audible_get(region, "/1.0/catalog/categories", {"root": "Genres"})
+    data = await audible_get(
+        region,
+        "/1.0/catalog/categories",
+        {"root": "Genres", "categories_num_levels": 5},
+    )
     seen: set[tuple[str, str]] = set()
     nodes: list[dict[str, str]] = []
-    for parent in data.get("categories", []):
-        pid = parent.get("id")
-        pname = parent.get("name")
-        if pid and pname and (pid, "") not in seen:
-            seen.add((pid, ""))
-            nodes.append({"genre_id": pid, "name": pname, "parent_id": ""})
-        for child in parent.get("children", []):
-            gid = child.get("id")
-            name = child.get("name")
-            if gid and name and pid and (gid, pid) not in seen:
-                seen.add((gid, pid))
-                nodes.append({"genre_id": gid, "name": name, "parent_id": pid})
+
+    def emit(node_list: list[dict], parent_id: str) -> None:
+        for n in node_list:
+            nid = n.get("id")
+            name = n.get("name")
+            if nid and name and (nid, parent_id) not in seen:
+                seen.add((nid, parent_id))
+                nodes.append({"genre_id": nid, "name": name, "parent_id": parent_id})
+            if nid:
+                emit(n.get("children", []), nid)
+
+    emit(data.get("categories", []), "")
     return nodes
 
 
 async def _ensure_genres(session: AsyncSession, region: str) -> list[dict[str, str]]:
     """
-    Returns the catalog genre nodes (parents and leaves, each with parent_id) for
-    a region, refreshing them from Audible at most once a day. Reads the stored
-    set; if it's empty or older than the refresh interval, re-fetches the taxonomy
-    and stores it. On a fetch failure, falls back to whatever's already stored so
-    a transient Audible hiccup doesn't empty the list. Consumed by the /categories
-    discovery endpoint.
+    Returns the catalog genre nodes (every node at every level, each with its
+    parent_id) for a region, refreshing them from Audible at most once a day.
+    Reads the stored set; if it's empty or older than the refresh interval,
+    re-fetches the taxonomy and stores it. On a fetch failure, falls back to
+    whatever's already stored so a transient Audible hiccup doesn't empty the
+    list. Consumed by the /categories discovery endpoint.
     """
     stored, oldest_checked = await get_stored_genres(session, region)
 

@@ -91,15 +91,7 @@ services:
       - DEFAULT_REGION=${DEFAULT_REGION:-us}
       - PORT=${PORT:-3333}
       - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}
-      - AXIOM_TOKEN=${AXIOM_TOKEN}
-      - AXIOM_DATASET=${AXIOM_DATASET:-libex}
-      - SEEDER_ENABLED=${SEEDER_ENABLED:-false}
-      - SEEDER_INTERVAL_HOURS=${SEEDER_INTERVAL_HOURS:-24}
-      - SEEDER_REQUEST_DELAY=${SEEDER_REQUEST_DELAY:-1.0}
-      - SEEDER_REGIONS=${SEEDER_REGIONS:-us}
-      - SEEDER_NEW_RELEASES_INTERVAL_HOURS=${SEEDER_NEW_RELEASES_INTERVAL_HOURS:-24}
-      - SEEDER_NEW_RELEASES_PAGES=${SEEDER_NEW_RELEASES_PAGES:-20}
-      - AUDIBLE_PROXY_URL=${AUDIBLE_PROXY_URL}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
       - ./logs:/app/logs
     depends_on:
@@ -221,7 +213,7 @@ ABS will then call `/us/search?title=...&author=...` which returns the `{"matche
 | GET | `/quick-search` | Quick search via suggestions |
 | GET | `/new-releases` | Recently released books, scanned live from Audible, newest first. Scope to one `category` (from `/categories`); without it, returns a live sample |
 | GET | `/coming-soon` | Upcoming books, scanned live from Audible, soonest first. Scope to one `category` (from `/categories`); without it, returns a live sample |
-| GET | `/categories` | List Audible's genre categories for a region (parents with leaf children) — the ids for the `category` param |
+| GET | `/categories` | List Audible's genre categories for a region as a nested tree (up to five levels deep) — the ids for the `category` param |
 | GET | `/{region}/search` | Regional search for Audiobookshelf compatibility |
 | GET | `/{region}/quick-search/search` | Regional quick search for Audiobookshelf compatibility |
 | GET | `/db/book` | Query the local indexed book library |
@@ -309,7 +301,7 @@ Audible exposes no direct new-releases or coming-soon feed, and any single catal
 
 For the **complete** list across all categories, use the **DB** endpoints (`/db/new-releases`, `/db/coming-soon`) — the seeder walks every category in the background and keeps them current — or aggregate per-category `/new-releases` calls client-side. Use the **live** endpoints when you want the freshest data for a specific category straight from Audible, including brand-new pre-orders the seeder may not have picked up yet.
 
-`GET /categories` returns the category ids (and names) you can pass as `category`, as a nested tree of parents with their leaf children. Note this is Audible's *category* taxonomy, which is different from `/db/genres` (the genre/tag *names* attached to stored books).
+`GET /categories` returns the category ids (and names) you can pass as `category`, as a nested tree that mirrors Audible's full taxonomy — up to five levels deep and ragged (some branches stop early, some go the full depth), each node carrying its own children. It's fetched fresh from Audible on each call and stored additively, so it always reflects the current taxonomy. Note this is Audible's *category* taxonomy, which is different from `/db/genres` (the genre/tag *names* attached to stored books).
 
 ### Narrator filters
 
@@ -357,7 +349,6 @@ Copy `.env.example` to `.env` and configure:
 | `SEEDER_REQUEST_DELAY` | `1.0` | Seconds between Audible requests during seeding |
 | `SEEDER_REGIONS` | `us` | Comma-separated regions to seed (e.g. `us,uk,de`) |
 | `SEEDER_NEW_RELEASES_INTERVAL_HOURS` | `24` | Hours between new-releases worker runs |
-| `SEEDER_NEW_RELEASES_PAGES` | `20` | Pages (50 books each) the new-releases scan walks per region |
 | `SEEDER_REFRESH_ENABLED` | `false` | Re-fetch upcoming pre-orders as their release date approaches |
 | `AUDIBLE_PROXY_URL` | — | Proxy URL for outbound Audible requests only. Supports `http://`, `https://`, `socks5://`. API serving is unaffected |
 | `SEED_SECRET` | — | PBKDF2 hash for the internal seed endpoint. Empty = endpoint disabled. Generate with `python -m app.api.routes.internal.router` |
@@ -386,7 +377,7 @@ Libex is API-compatible with AudiMeta. To migrate:
 - Log rotation is daily. `LOG_RETENTION_DAYS=7` keeps 7 days of backups. Set to `0` for infinite retention with no rotation
 - **Database seeder:** Set `SEEDER_ENABLED=true` to activate the background seeder. It expands the local DB so the `/db/*` endpoints have more to return, and runs as two independent workers:
   - **Expansion** walks author, series, and narrator relationships to discover books you haven't requested yet. Each cycle compounds — a single book fetch can seed hundreds of related books over time. Runs every `SEEDER_INTERVAL_HOURS` (default 24).
-  - **New releases** scans Audible's recent catalog by release date so fresh titles get picked up automatically. It runs on its own worker and its own interval (`SEEDER_NEW_RELEASES_INTERVAL_HOURS`, default 24), so you can have it run more often than the heavier expansion work without waiting behind it. `SEEDER_NEW_RELEASES_PAGES` (default 20) controls how deep the scan goes — each page is 50 books per region.
+  - **New releases** scans Audible's recent catalog by release date so fresh titles get picked up automatically. It runs on its own worker and its own interval (`SEEDER_NEW_RELEASES_INTERVAL_HOURS`, default 24), so you can have it run more often than the heavier expansion work without waiting behind it. It walks every category in Audible's taxonomy by release date, going as deep as the catalog allows per category.
   - **Upcoming refresh** (optional, `SEEDER_REFRESH_ENABLED`, default off) re-fetches pre-orders you already have as their release date nears, since details like the date, cover, narrator, and runtime firm up over time. It refreshes more often the closer a book gets — roughly yearly when far out, down to daily inside the last two weeks — and leaves already-released books alone. Runs as a second phase of the new-releases worker.
 
   Both workers share the same enable flag, regions, and rate limit. They run independently and rate-limit themselves to one Audible request per `SEEDER_REQUEST_DELAY` seconds (default 1.0). Configure `SEEDER_REGIONS` to seed multiple markets (e.g. `us,uk,de`)

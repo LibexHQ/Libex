@@ -10,6 +10,31 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.7.0]
+
+### Added
+- **`/categories` now returns the full taxonomy depth.** It previously stopped at
+  two levels (top-level parents and their immediate children); it now mirrors
+  Audible's full tree, which runs up to five levels deep and is ragged (some
+  branches stop early, some go the full depth). Each node carries its own
+  children, so deeply-nested categories — grandchildren and below — are now
+  addressable. The ids work anywhere a `category` is accepted: the `/db/*`
+  `?category=` filter and the live `/new-releases`/`/coming-soon` scope.
+- **The seeder walks every taxonomy level.** The new-releases seeder previously
+  walked only parents and leaves; it now walks every node at every level. Each
+  level deeper surfaces titles the level above misses (every catalog query caps
+  at ~535 results, so a shallower walk leaves most of a branch's books
+  unreached), so the deeper walk meaningfully improves catalog coverage. Cycles
+  take correspondingly longer.
+
+### Changed
+- **`/categories` is always fresh and additive.** It now fetches the taxonomy
+  from Audible on every call rather than serving a once-a-day cached copy, and
+  stores it additively — new nodes are added, existing ones refreshed, nothing
+  is ever removed. The response is the accumulated union, so it never shrinks
+  even if a fetch comes back partial, and an Audible hiccup falls back to the
+  stored set. This removes the need to clear the category table after an update.
+
 ## [1.6.0]
 
 ### Added

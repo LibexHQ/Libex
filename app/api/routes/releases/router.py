@@ -33,15 +33,10 @@ from app.core.exceptions import NotFoundException
 router = APIRouter(tags=["Releases"])
 
 
-class CategoryChild(BaseModel):
-    id: str
-    name: str
-
-
 class CategoryNode(BaseModel):
     id: str
     name: str
-    children: list[CategoryChild] = []
+    children: list["CategoryNode"] = []
 
 
 # ============================================================
@@ -115,33 +110,37 @@ async def categories(
 ) -> list[CategoryNode]:
     """
     Lists Audible's genre categories for a region — the valid `category` values
-    for the /new-releases and /coming-soon scans — as a nested tree of parents
-    with their leaf children.
+    for the /new-releases and /coming-soon scans — as a nested tree.
 
-    This is the Audible *category* taxonomy (the ids you pass as `category`), which
-    is distinct from /db/genres (the genre/tag *names* attached to stored books).
-    The list is read from the local cache of the taxonomy, refreshed from Audible
-    at most once a day. Returns 404 if the taxonomy can't be loaded.
+    The taxonomy runs up to five levels deep and is ragged: each node carries its
+    own `children`, and a branch ends wherever Audible stops nesting. These are
+    the ids you pass as `category`, distinct from /db/genres (the genre/tag *names*
+    attached to stored books). The list is read from the local cache of the
+    taxonomy, refreshed from Audible at most once a day. Returns 404 if the
+    taxonomy can't be loaded.
     """
     nodes = await _ensure_genres(session, region)
     if not nodes:
         raise NotFoundException("No categories available")
 
-    # Group leaves under their parent. Parents carry parent_id == "".
-    parents: dict[str, CategoryNode] = {}
-    children_by_parent: dict[str, list[CategoryChild]] = {}
+    # Group every node under its parent_id, then build the tree recursively from
+    # the top-level roots (parent_id == ""). A node can appear under more than one
+    # parent, so it's keyed by parent in the grouping, not globally.
+    by_parent: dict[str, list[dict]] = {}
     for node in nodes:
-        if node.get("parent_id"):
-            children_by_parent.setdefault(node["parent_id"], []).append(
-                CategoryChild(id=node["genre_id"], name=node["name"])
-            )
-        else:
-            parents[node["genre_id"]] = CategoryNode(
-                id=node["genre_id"], name=node["name"], children=[]
-            )
+        by_parent.setdefault(node.get("parent_id", ""), []).append(node)
 
-    for parent_id, kids in children_by_parent.items():
-        if parent_id in parents:
-            parents[parent_id].children = sorted(kids, key=lambda c: c.name)
+    def build(parent_id: str) -> list[CategoryNode]:
+        return sorted(
+            (
+                CategoryNode(
+                    id=n["genre_id"],
+                    name=n["name"],
+                    children=build(n["genre_id"]),
+                )
+                for n in by_parent.get(parent_id, [])
+            ),
+            key=lambda c: c.name,
+        )
 
-    return sorted(parents.values(), key=lambda p: p.name)
+    return build("")

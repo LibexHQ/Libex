@@ -9,9 +9,9 @@ exercise the windowing, the duplicate-page wall, the sorts, the cache-first
 short-circuit, the category scoping, and the cache-key-per-category behavior —
 without real HTTP or DB.
 
-The genre taxonomy helper (_fetch_catalog_genres) now keeps parents AND leaves
-with parent_id, feeding the /categories discovery endpoint; it's covered here at
-the unit level.
+The genre taxonomy helper (_fetch_catalog_genres) flattens every node at every
+level with its parent_id, feeding the /categories discovery endpoint; it's
+covered here at the unit level.
 """
 
 # Standard library
@@ -23,6 +23,7 @@ import pytest
 
 # Services
 from app.services.audible import releases
+
 
 NOW = datetime.now(timezone.utc)
 
@@ -42,21 +43,27 @@ def _page(*products):
     return {"products": list(products)}
 
 
+def _catnode(spec):
+    """
+    Builds one taxonomy node from a spec that is either (id, name) for a node
+    with no children, or (id, name, [child_specs]) for a node with children.
+    Recurses, so child specs can themselves carry children to any depth.
+    """
+    if len(spec) == 2:
+        nid, name = spec
+        kids = []
+    else:
+        nid, name, kids = spec
+    return {"id": nid, "name": name, "children": [_catnode(k) for k in kids]}
+
+
 def _categories(*parents):
     """
-    Builds a /catalog/categories taxonomy. Each parent is
-    (parent_id, parent_name, [(leaf_id, leaf_name), ...]).
+    Builds a /catalog/categories taxonomy. Each top-level parent is a spec
+    (id, name) or (id, name, [child_specs]); child specs nest to any depth, so
+    this can build the full multi-level tree Audible returns.
     """
-    return {
-        "categories": [
-            {
-                "id": pid,
-                "name": pname,
-                "children": [{"id": cid, "name": cname} for cid, cname in children],
-            }
-            for pid, pname, children in parents
-        ]
-    }
+    return {"categories": [_catnode(p) for p in parents]}
 
 
 def _audible(pages=None, categories=None, categories_error=False):
@@ -265,7 +272,7 @@ async def test_empty_scan_returns_empty_and_does_not_cache():
 
 
 # ============================================================
-# TAXONOMY (parents + leaves) — feeds /categories
+# TAXONOMY (all levels) — feeds /categories
 # ============================================================
 
 @pytest.mark.asyncio
@@ -277,7 +284,6 @@ async def test_fetch_catalog_genres_keeps_parents_and_leaves():
     )
     with patch.object(releases, "audible_get", new=_audible(categories=taxonomy)):
         nodes = await releases._fetch_catalog_genres("us")
-
     by_id = {(n["genre_id"], n["parent_id"]) for n in nodes}
     assert ("P1", "") in by_id
     assert ("P2", "") in by_id
@@ -296,6 +302,36 @@ async def test_fetch_catalog_genres_dual_parent_leaf_kept_per_parent():
     )
     with patch.object(releases, "audible_get", new=_audible(categories=taxonomy)):
         nodes = await releases._fetch_catalog_genres("us")
-
     lx = [n for n in nodes if n["genre_id"] == "LX"]
     assert {n["parent_id"] for n in lx} == {"P1", "P2"}
+
+
+@pytest.mark.asyncio
+async def test_fetch_catalog_genres_recurses_all_levels():
+    """
+    The taxonomy is up to five levels deep and ragged, so the flatten recurses to
+    whatever depth Audible returns. Every node is captured with its parent's id —
+    including a deep node whose parent is itself a grandchild — and a branch that
+    ends early (a childless node) is handled without forcing further levels.
+    """
+    taxonomy = _categories(
+        ("P1", "Arts", [
+            ("C1", "Performing", [
+                ("G1", "Film & TV", [
+                    ("GG1", "Direction"),   # depth 4
+                ]),
+            ]),
+            ("C2", "Architecture"),         # childless leaf (depth 2)
+        ]),
+        ("P2", "History"),                  # childless parent (depth 1)
+    )
+    with patch.object(releases, "audible_get", new=_audible(categories=taxonomy)):
+        nodes = await releases._fetch_catalog_genres("us")
+    by_id = {(n["genre_id"], n["parent_id"]) for n in nodes}
+    assert ("P1", "") in by_id          # parent
+    assert ("P2", "") in by_id          # childless parent
+    assert ("C1", "P1") in by_id        # child
+    assert ("C2", "P1") in by_id        # childless leaf
+    assert ("G1", "C1") in by_id        # grandchild
+    assert ("GG1", "G1") in by_id       # great-grandchild — recursion reached depth 4
+    assert len(nodes) == 6

@@ -40,18 +40,21 @@ def _page(*products):
     return {"products": list(products)}
 
 
+def _catnode(spec):
+    """Builds one taxonomy node from (id, name) or (id, name, [child_specs]).
+    Recurses, so children can carry their own children to any depth."""
+    if len(spec) == 2:
+        nid, name = spec
+        kids = []
+    else:
+        nid, name, kids = spec
+    return {"id": nid, "name": name, "children": [_catnode(k) for k in kids]}
+
+
 def _categories(*parents):
-    """Taxonomy: each parent is (parent_id, parent_name, [(leaf_id, leaf_name), ...])."""
-    return {
-        "categories": [
-            {
-                "id": pid,
-                "name": pname,
-                "children": [{"id": cid, "name": cname} for cid, cname in children],
-            }
-            for pid, pname, children in parents
-        ]
-    }
+    """Taxonomy: each parent is (id, name) or (id, name, [child_specs]); child
+    specs nest to any depth, so this builds the full multi-level tree."""
+    return {"categories": [_catnode(p) for p in parents]}
 
 
 def _audible(pages_by_node=None, categories=None, error_on=None):
@@ -130,6 +133,44 @@ async def test_walks_parent_and_leaf_and_unions():
         await seeder._scan_new_releases("us", delay=0)
         assert sorted(captured["asins"]) == ["BLEAF", "BPARENT", "BSHARED"]
         assert captured["asins"].count("BSHARED") == 1  # deduped across nodes
+
+
+@pytest.mark.asyncio
+async def test_walks_deep_taxonomy_nodes():
+    """
+    The taxonomy runs up to five levels deep, and each level surfaces titles the
+    level above misses, so the scan must walk every node at every level — not just
+    parents and leaves. A grandchild and a great-grandchild node are each served
+    their own page; the scan visits both and unions their ASINs in.
+    """
+    taxonomy = _categories(
+        ("P1", "Parent", [
+            ("C1", "Child", [
+                ("G1", "Grandchild", [
+                    ("GG1", "GreatGrand"),
+                ]),
+            ]),
+        ]),
+    )
+    pages = {
+        "P1": [_page(_product("BP", -1))],
+        "C1": [_page(_product("BC", -2))],
+        "G1": [_page(_product("BG", -3))],
+        "GG1": [_page(_product("BGG", -4))],
+    }
+    captured = {}
+
+    async def _missing(session, asins):
+        captured["asins"] = list(asins)
+        return list(asins)
+
+    with patch(_AUDIBLE_GET, new=_audible(pages, categories=taxonomy)), \
+         patch.object(seeder, "SessionFactory"), \
+         patch.object(seeder, "_get_missing_asins", new=AsyncMock(side_effect=_missing)), \
+         patch.object(seeder, "_fetch_and_persist", new=AsyncMock()):
+        await seeder._scan_new_releases("us", delay=0)
+        # every level was walked, including the great-grandchild (depth 4)
+        assert sorted(captured["asins"]) == ["BC", "BG", "BGG", "BP"]
 
 
 @pytest.mark.asyncio

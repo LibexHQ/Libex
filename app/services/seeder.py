@@ -375,37 +375,41 @@ async def _expand_narrators(region: str, delay: float) -> dict[str, int]:
 
 async def _fetch_catalog_genres(region: str) -> list[dict[str, str]]:
     """
-    Fetches the genre taxonomy from Audible and flattens it to every node —
-    parents AND their leaves, each tagged with its parent_id. The seeder's own
-    copy: it shares nothing with the live release endpoints and never touches
-    the catalog_genres table.
+    Fetches the genre taxonomy from Audible and flattens every node at every level
+    to a list, each tagged with its parent_id. The seeder's own copy: it shares
+    nothing with the live release endpoints and never touches the catalog_genres
+    table.
 
-    The response is two levels — a top-level `categories` list of parents, each
-    with a `children` list of leaves (both carry `id` + `name`). We keep BOTH:
-    every catalog/products query caps at ~535 results, and a parent query is not
-    a superset of its children (it surfaces titles no leaf does), so walking
-    parents plus leaves and unioning is what reaches the full catalog. Parents
-    get parent_id="" (top level); leaves get their parent's id. A leaf that
-    appears under two parents yields one node per parent. Deduped by
-    (genre_id, parent_id).
+    The taxonomy is a tree up to five levels deep and ragged — some branches stop
+    at two levels, some go five. Every catalog/products query caps at ~535 results
+    and a node is not a superset of its children (each level deeper surfaces titles
+    the level above misses), so walking every node at every level and unioning is
+    what reaches the full catalog. The flatten recurses to whatever depth Audible
+    returns (requested via categories_num_levels). A top-level parent gets
+    parent_id="" ; every other node gets its parent's id. A node that appears under
+    two parents yields one row per parent. Deduped by (genre_id, parent_id).
     """
     from app.services.audible.client import audible_get
 
-    data = await audible_get(region, "/1.0/catalog/categories", {"root": "Genres"})
+    data = await audible_get(
+        region,
+        "/1.0/catalog/categories",
+        {"root": "Genres", "categories_num_levels": 5},
+    )
     seen: set[tuple[str, str]] = set()
     nodes: list[dict[str, str]] = []
-    for parent in data.get("categories", []):
-        pid = parent.get("id")
-        pname = parent.get("name")
-        if pid and pname and (pid, "") not in seen:
-            seen.add((pid, ""))
-            nodes.append({"genre_id": pid, "name": pname, "parent_id": ""})
-        for child in parent.get("children", []):
-            gid = child.get("id")
-            name = child.get("name")
-            if gid and name and pid and (gid, pid) not in seen:
-                seen.add((gid, pid))
-                nodes.append({"genre_id": gid, "name": name, "parent_id": pid})
+
+    def emit(node_list: list[dict], parent_id: str) -> None:
+        for n in node_list:
+            nid = n.get("id")
+            name = n.get("name")
+            if nid and name and (nid, parent_id) not in seen:
+                seen.add((nid, parent_id))
+                nodes.append({"genre_id": nid, "name": name, "parent_id": parent_id})
+            if nid:
+                emit(n.get("children", []), nid)
+
+    emit(data.get("categories", []), "")
     return nodes
 
 

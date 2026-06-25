@@ -59,11 +59,6 @@ logger = get_logger()
 
 _PAGE_SIZE = 50
 
-# The genre node list is re-fetched from Audible at most this often. The taxonomy
-# changes rarely, so a daily refresh is plenty; the check is inline (on a cache
-# miss), not a background task.
-_GENRE_REFRESH_INTERVAL = timedelta(hours=24)
-
 
 def _release_dt(book: dict[str, Any]) -> datetime | None:
     """Parses a normalized book's releaseDate back into a datetime, or None."""
@@ -114,32 +109,28 @@ async def _fetch_catalog_genres(region: str) -> list[dict[str, str]]:
 async def _ensure_genres(session: AsyncSession, region: str) -> list[dict[str, str]]:
     """
     Returns the catalog genre nodes (every node at every level, each with its
-    parent_id) for a region, refreshing them from Audible at most once a day.
-    Reads the stored set; if it's empty or older than the refresh interval,
-    re-fetches the taxonomy and stores it. On a fetch failure, falls back to
-    whatever's already stored so a transient Audible hiccup doesn't empty the
-    list. Consumed by the /categories discovery endpoint.
+    parent_id) for a region, fetched fresh from Audible on every call.
+
+    The fetch is a single fast taxonomy request. Its result is upserted into the
+    store, which is additive only — upsert_genres inserts new nodes and refreshes
+    names but never deletes — so the stored set accumulates every category ever
+    seen and never shrinks. We then return the stored set (the union of the fresh
+    fetch and everything previously accumulated), so the response never shrinks
+    even if a given fetch comes back partial. On a fetch failure, the stored set
+    is served unchanged, so an Audible hiccup doesn't empty the response. Consumed
+    by the /categories discovery endpoint.
     """
-    stored, oldest_checked = await get_stored_genres(session, region)
-
-    fresh_enough = (
-        stored
-        and oldest_checked is not None
-        and (datetime.now(timezone.utc) - oldest_checked) < _GENRE_REFRESH_INTERVAL
-    )
-    if fresh_enough:
-        return stored
-
     try:
         nodes = await _fetch_catalog_genres(region)
         if nodes:
             await upsert_genres(session, region, nodes)
             await session.commit()
-            return nodes
     except Exception as e:
-        logger.warning(f"Genre taxonomy refresh failed for {region}: {e}")
+        logger.warning(f"Genre taxonomy fetch failed for {region}: {e}")
 
-    # Fetch failed or returned nothing — use whatever we have stored.
+    # Return the accumulated union — additive upserts mean this never shrinks,
+    # and a failed fetch above just serves whatever was already stored.
+    stored, _ = await get_stored_genres(session, region)
     return stored
 
 

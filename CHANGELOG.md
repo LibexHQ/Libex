@@ -35,6 +35,15 @@ capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
   even if a fetch comes back partial, and an Audible hiccup falls back to the
   stored set. This removes the need to clear the category table after an update.
 
+### Fixed
+- **Axiom log shipping no longer floods the log on failure.** When the Axiom
+  handler couldn't ship a line (a bad or expired token, a network blip), it
+  called the default handler error path, which prints a full traceback for every
+  log record — turning a misconfigured token into hundreds of tracebacks. It now
+  warns once and stays silent, and the other log handlers (stdout, file) are
+  unaffected. Axiom is optional and best-effort; a problem shipping to it never
+  disrupts the rest of logging.
+
 ## [1.6.0]
 
 ### Added

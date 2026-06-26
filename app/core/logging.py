@@ -75,6 +75,7 @@ class DirectAxiomHandler(logging.Handler):
         super().__init__()
         self.client = client
         self.dataset = dataset
+        self._ingest_failed = False
 
     def emit(self, record):
         try:
@@ -86,8 +87,19 @@ class DirectAxiomHandler(logging.Handler):
                 **_extra_fields(record),
             }
             self.client.ingest_events(dataset=self.dataset, events=[event])
-        except Exception:
-            self.handleError(record)
+        except Exception as e:
+            # Shipping logs to Axiom is best-effort. If it fails (a bad token, a
+            # network blip), we must not surface it on every record — the default
+            # Handler.handleError dumps a full traceback per call, which floods the
+            # log. Warn once, straight to stderr (never through the logger, which
+            # would recurse back into this handler), then stay silent.
+            if not self._ingest_failed:
+                self._ingest_failed = True
+                print(
+                    f"Axiom log shipping failed ({e}); suppressing further Axiom "
+                    "errors. Other log handlers are unaffected.",
+                    file=sys.stderr,
+                )
 
 
 def _resolve_level(settings) -> int:

@@ -59,7 +59,7 @@ BOOK_FILTER_FIELDS: dict[str, tuple[type, str]] = {
     "is_vvab": (bool, "Filter by VVAB (virtual voice audiobook) status"),
     "plan_name": (str, "Filter by Audible plan name"),
     "genre": (str, "Filter by genre or tag name, partial match (e.g. 'fantasy'). For an exact category id, use 'category'."),
-    "category": (str, "Filter by exact category id from /categories (e.g. '18580628011'). For broad name matching, use 'genre'."),
+    "category": (str, "Filter by exact category id from /categories (e.g. '18580628011'). Accepts a comma-separated list to match any of several (e.g. '18580628011,18573212011'). For broad name matching, use 'genre'."),
 }
 
 

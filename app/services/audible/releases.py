@@ -25,8 +25,9 @@ we fetch the taxonomy (/catalog/categories?root=Genres) and flatten EVERY node a
 EVERY level — the tree runs up to five levels deep — then the live scan walks a
 single category by id sorted by -ReleaseDate, applying the window's date gate plus
 a duplicate-page wall stop. The per-genre results are unioned and deduped by ASIN,
-then sorted for the response. The full node list is stored in catalog_genres and
-refreshed at most once a day (inline, on a cache miss) — no background task.
+then sorted for the response. The full node list is stored in catalog_genres,
+fetched fresh from Audible on each /categories call and reconciled to match (see
+_ensure_genres) — no background task.
 """
 
 # Standard library
@@ -51,13 +52,20 @@ from app.services.audible.books import (
     IMAGE_SIZES,
 )
 from app.services.db.reader import get_stored_genres
-from app.services.db.writer import persist_books_background, upsert_genres
+from app.services.db.writer import persist_books_background, upsert_genres, reconcile_genres
 from app.services.cache import manager as cache
 
 settings = get_settings()
 logger = get_logger()
 
 _PAGE_SIZE = 50
+
+# When a fresh taxonomy fetch comes back this fraction (or more) of what's
+# already stored, it's treated as complete enough to reconcile against — stale
+# nodes get pruned. A fetch smaller than this is treated as a partial/truncated
+# response: we still add what it returned, but we don't prune, so a transient
+# Audible glitch can't wipe real branches out of the stored tree.
+_GENRE_RECONCILE_MIN_FRACTION = 0.5
 
 
 def _release_dt(book: dict[str, Any]) -> datetime | None:
@@ -109,28 +117,37 @@ async def _fetch_catalog_genres(region: str) -> list[dict[str, str]]:
 async def _ensure_genres(session: AsyncSession, region: str) -> list[dict[str, str]]:
     """
     Returns the catalog genre nodes (every node at every level, each with its
-    parent_id) for a region, fetched fresh from Audible on every call.
+    parent_id) for a region, fetched fresh from Audible on every call and
+    reconciled into the store so the stored tree mirrors Audible's current one.
 
-    The fetch is a single fast taxonomy request. Its result is upserted into the
-    store, which is additive only — upsert_genres inserts new nodes and refreshes
-    names but never deletes — so the stored set accumulates every category ever
-    seen and never shrinks. We then return the stored set (the union of the fresh
-    fetch and everything previously accumulated), so the response never shrinks
-    even if a given fetch comes back partial. On a fetch failure, the stored set
-    is served unchanged, so an Audible hiccup doesn't empty the response. Consumed
-    by the /categories discovery endpoint.
+    The fetch is a single fast taxonomy request that returns the whole tree at
+    once. When it comes back and looks complete (at least
+    _GENRE_RECONCILE_MIN_FRACTION of what's already stored), it's reconciled:
+    new nodes are added, existing ones refreshed, and stale placements are pruned
+    — so when Audible restructures (e.g. moves a category to a new parent), the
+    old placement doesn't linger as a ghost. A fetch that comes back suspiciously
+    small (below that fraction) is treated as partial and only added, never
+    pruned, so a transient glitch can't wipe real branches. On a fetch failure,
+    nothing is written and the stored set is served unchanged, so an Audible
+    hiccup doesn't empty the response. Either way the stored set is returned,
+    which is what the /categories discovery endpoint serves.
     """
+    stored, _ = await get_stored_genres(session, region)
     try:
         nodes = await _fetch_catalog_genres(region)
         if nodes:
-            await upsert_genres(session, region, nodes)
+            if len(nodes) >= _GENRE_RECONCILE_MIN_FRACTION * len(stored):
+                # Plausibly complete — mirror Audible's current tree, pruning
+                # any stale placements (the ghost-root case).
+                await reconcile_genres(session, region, nodes)
+            else:
+                # Suspiciously small — add what we got, but don't prune.
+                await upsert_genres(session, region, nodes)
             await session.commit()
+            stored, _ = await get_stored_genres(session, region)
     except Exception as e:
         logger.warning(f"Genre taxonomy fetch failed for {region}: {e}")
 
-    # Return the accumulated union — additive upserts mean this never shrinks,
-    # and a failed fetch above just serves whatever was already stored.
-    stored, _ = await get_stored_genres(session, region)
     return stored
 
 

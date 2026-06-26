@@ -10,6 +10,24 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.8.0]
+
+### Added
+- **Flat option on `/categories`.** Pass `?flat=true` to get a flat list instead
+  of the nested tree. Every node at every level comes back as a single entry
+  carrying its `ancestors` — the {id, name} chain from the top-level root down to
+  its immediate parent, in order — so a node's depth and lineage are recoverable
+  without walking a tree. A node under more than one parent appears once per
+  placement, each with that placement's own ancestry. The default response is
+  unchanged (the nested tree).
+- **The `category` filter on the `/db/*` book endpoints accepts multiple ids.**
+  `?category=` now takes a comma-separated list (e.g. `18580628011,18573212011`)
+  and matches a book in any of them (a union). Omitting it still returns every
+  category, so the default is unchanged. Applies across all the DB book
+  endpoints, since they share the filter. The live `/new-releases` and
+  `/coming-soon` stay single-category — their Audible scan can't union without
+  walking each category separately.
+
 ## [1.7.0]
 
 ### Added

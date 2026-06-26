@@ -213,7 +213,7 @@ ABS will then call `/us/search?title=...&author=...` which returns the `{"matche
 | GET | `/quick-search` | Quick search via suggestions |
 | GET | `/new-releases` | Recently released books, scanned live from Audible, newest first. Scope to one `category` (from `/categories`); without it, returns a live sample |
 | GET | `/coming-soon` | Upcoming books, scanned live from Audible, soonest first. Scope to one `category` (from `/categories`); without it, returns a live sample |
-| GET | `/categories` | List Audible's genre categories for a region as a nested tree (up to five levels deep) — the ids for the `category` param |
+| GET | `/categories` | List Audible's genre categories for a region as a nested tree (up to five levels deep), or a flat list with `?flat=true` — the ids for the `category` param |
 | GET | `/{region}/search` | Regional search for Audiobookshelf compatibility |
 | GET | `/{region}/quick-search/search` | Regional quick search for Audiobookshelf compatibility |
 | GET | `/db/book` | Query the local indexed book library |
@@ -275,7 +275,7 @@ The same filter set is available on the other book-list DB endpoints too — `/d
 | `is_vvab` | bool | exact |
 | `plan_name` | string | JSONB contains |
 | `genre` | string | ILIKE against genre/tag names (e.g. `fantasy` matches "Science Fiction & Fantasy") |
-| `category` | string | Exact match on a category id from `/categories` (e.g. `18580628011`). Use `genre` for broad name matching |
+| `category` | string | Exact match on a category id from `/categories` (e.g. `18580628011`), or a comma-separated list to match any of several (e.g. `18580628011,18573212011`). Use `genre` for broad name matching |
 
 Use `/db/genres` to discover the genre/tag names for `genre` (optionally with `?search=`), or `/categories` to discover the category ids for `category`.
 
@@ -301,7 +301,7 @@ Audible exposes no direct new-releases or coming-soon feed, and any single catal
 
 For the **complete** list across all categories, use the **DB** endpoints (`/db/new-releases`, `/db/coming-soon`) — the seeder walks every category in the background and keeps them current — or aggregate per-category `/new-releases` calls client-side. Use the **live** endpoints when you want the freshest data for a specific category straight from Audible, including brand-new pre-orders the seeder may not have picked up yet.
 
-`GET /categories` returns the category ids (and names) you can pass as `category`, as a nested tree that mirrors Audible's full taxonomy — up to five levels deep and ragged (some branches stop early, some go the full depth), each node carrying its own children. It's fetched fresh from Audible on each call and stored additively, so it always reflects the current taxonomy. Note this is Audible's *category* taxonomy, which is different from `/db/genres` (the genre/tag *names* attached to stored books).
+`GET /categories` returns the category ids (and names) you can pass as `category`, as a nested tree that mirrors Audible's full taxonomy — up to five levels deep and ragged (some branches stop early, some go the full depth), each node carrying its own children. It's fetched fresh from Audible on each call and stored additively, so it always reflects the current taxonomy. Pass `?flat=true` to get a flat list instead of the tree — each node carries its `ancestors` (the {id, name} chain from the top-level root down to its parent, in order), so its depth and lineage are still recoverable. Note this is Audible's *category* taxonomy, which is different from `/db/genres` (the genre/tag *names* attached to stored books).
 
 ### Narrator filters
 

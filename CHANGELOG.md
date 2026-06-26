@@ -10,6 +10,28 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.9.0]
+
+### Added
+- **`?depth=N` on `/categories`.** Limit how many levels of the taxonomy come
+  back: `depth=1` returns just the top-level categories (the parents), `depth=2`
+  the top two levels, and so on; omit for the full tree. Works with both the
+  nested and flat (`?flat=true`) forms. Useful for pulling the top-level parent
+  set live rather than hardcoding it — handy since Audible reorganizes the top
+  level from time to time.
+
+### Fixed
+- **`/categories` now reconciles the stored taxonomy instead of only adding to
+  it.** The store was additive-only, which was correct when Audible *added* a
+  category but wrong when Audible *moved* one: the node appeared under its new
+  parent while the old placement lingered as a ghost (e.g. a category that's no
+  longer top-level still showing at the root). On a complete fetch the stored
+  tree is now reconciled to match Audible's current one — added, refreshed, and
+  pruned — so a restructure no longer leaves stale entries. Guarded so a
+  truncated or failed fetch only adds and never prunes, and the seeder (which
+  never wrote the taxonomy table) is unaffected. Clearing `catalog_genres` after
+  an Audible reshuffle is no longer necessary.
+
 ## [1.8.0]
 
 ### Added

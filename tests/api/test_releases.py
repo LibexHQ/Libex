@@ -201,6 +201,93 @@ async def test_categories_flat_false_returns_nested(async_client):
 
 
 # ============================================================
+# /categories depth limit
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_categories_depth_one_returns_roots_only(async_client):
+    """depth=1 returns only the top-level categories, each with no children."""
+    nodes = [
+        {"genre_id": "P1", "parent_id": "", "name": "Arts"},
+        {"genre_id": "P2", "parent_id": "", "name": "Fiction"},
+        {"genre_id": "C1", "parent_id": "P1", "name": "Performing"},
+        {"genre_id": "G1", "parent_id": "C1", "name": "Film & TV"},
+    ]
+    with patch("app.api.routes.releases.router._ensure_genres", new_callable=AsyncMock) as mock:
+        mock.return_value = nodes
+        response = await async_client.get("/categories?region=us&depth=1")
+        assert response.status_code == 200
+        data = response.json()
+    # only the two roots, alphabetical, none carrying children
+    assert [p["id"] for p in data] == ["P1", "P2"]
+    assert all(p["children"] == [] for p in data)
+
+
+@pytest.mark.asyncio
+async def test_categories_depth_two_returns_two_levels(async_client):
+    """depth=2 returns roots plus one level of children, and no deeper."""
+    nodes = [
+        {"genre_id": "P1", "parent_id": "", "name": "Arts"},
+        {"genre_id": "C1", "parent_id": "P1", "name": "Performing"},
+        {"genre_id": "G1", "parent_id": "C1", "name": "Film & TV"},   # depth 3 — excluded
+    ]
+    with patch("app.api.routes.releases.router._ensure_genres", new_callable=AsyncMock) as mock:
+        mock.return_value = nodes
+        response = await async_client.get("/categories?region=us&depth=2")
+        assert response.status_code == 200
+        data = response.json()
+    arts = next(p for p in data if p["id"] == "P1")
+    # the child is present, but its own children (the grandchild) are cut off
+    performing = next(c for c in arts["children"] if c["id"] == "C1")
+    assert performing["children"] == []
+
+
+@pytest.mark.asyncio
+async def test_categories_depth_one_flat_returns_roots_only(async_client):
+    """depth=1 with flat=true returns only the roots as flat entries."""
+    nodes = [
+        {"genre_id": "P1", "parent_id": "", "name": "Arts"},
+        {"genre_id": "P2", "parent_id": "", "name": "Fiction"},
+        {"genre_id": "C1", "parent_id": "P1", "name": "Performing"},
+        {"genre_id": "G1", "parent_id": "C1", "name": "Film & TV"},
+    ]
+    with patch("app.api.routes.releases.router._ensure_genres", new_callable=AsyncMock) as mock:
+        mock.return_value = nodes
+        response = await async_client.get("/categories?region=us&flat=true&depth=1")
+        assert response.status_code == 200
+        data = response.json()
+    # only the two roots, each with empty ancestors, no deeper nodes
+    assert {n["id"] for n in data} == {"P1", "P2"}
+    assert all(n["ancestors"] == [] for n in data)
+
+
+@pytest.mark.asyncio
+async def test_categories_no_depth_returns_full_tree(async_client):
+    """Omitting depth returns the full tree (depth is not capped)."""
+    nodes = [
+        {"genre_id": "P1", "parent_id": "", "name": "Arts"},
+        {"genre_id": "C1", "parent_id": "P1", "name": "Performing"},
+        {"genre_id": "G1", "parent_id": "C1", "name": "Film & TV"},   # depth 3 — present
+    ]
+    with patch("app.api.routes.releases.router._ensure_genres", new_callable=AsyncMock) as mock:
+        mock.return_value = nodes
+        response = await async_client.get("/categories?region=us")
+        assert response.status_code == 200
+        data = response.json()
+    arts = next(p for p in data if p["id"] == "P1")
+    performing = next(c for c in arts["children"] if c["id"] == "C1")
+    # the grandchild is still there — nothing was capped
+    assert [g["id"] for g in performing["children"]] == ["G1"]
+
+
+@pytest.mark.asyncio
+async def test_categories_depth_zero_rejected(async_client):
+    """depth must be at least 1; depth=0 is a validation error."""
+    response = await async_client.get("/categories?region=us&depth=0")
+    assert response.status_code == 422
+
+
+# ============================================================
 # category param plumbing on the live endpoints
 # ============================================================
 

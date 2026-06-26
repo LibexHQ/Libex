@@ -48,18 +48,23 @@ def apply_genre_filter(stmt: Select, genre: str | None) -> Select:
 
 def apply_category_filter(stmt: Select, category: str | None) -> Select:
     """
-    Filters a Book query to books tagged with a category by its exact id.
-    Matches Genre.asin (the Audible category id from /categories), so
+    Filters a Book query to books tagged with one of the given categories by
+    exact id. Matches Genre.asin (the Audible category id from /categories), so
     `category="18580628011"` returns only books in that exact category — unlike
-    the genre filter, which matches names broadly. Returns the statement
-    unchanged when category is None.
+    the genre filter, which matches names broadly. Accepts a comma-separated list
+    of ids (e.g. "18580628011,18573212011"); a book in any of them matches (a
+    union, not an intersection). Surrounding whitespace and empty entries are
+    ignored. Returns the statement unchanged when no usable id is given.
     """
     if not category:
+        return stmt
+    ids = [c.strip() for c in category.split(",") if c.strip()]
+    if not ids:
         return stmt
     matching_books = (
         select(book_genre.c.book_asin)
         .join(Genre, Genre.asin == book_genre.c.genre_asin)
-        .where(Genre.asin == category)
+        .where(Genre.asin.in_(ids))
     )
     return stmt.where(Book.asin.in_(matching_books))
 

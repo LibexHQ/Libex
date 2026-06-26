@@ -12,7 +12,7 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 
 # Local
-from app.services.db.writer import upsert_author
+from app.services.db.writer import upsert_author, reconcile_genres
 
 
 # ============================================================
@@ -274,3 +274,83 @@ async def test_upsert_author_empty_name_returns_none():
     result = await upsert_author(session, {"asin": "B000APHM1K", "name": "  ", "region": "us"})
     assert result is None
     session.execute.assert_not_called()
+
+
+# ============================================================
+# reconcile_genres — upsert then prune
+# ============================================================
+
+def _delete_capturing_session(*side_effects):
+    """
+    AsyncSession that records every executed statement, so a test can tell the
+    per-node upserts apart from the final prune delete.
+    """
+    s = AsyncMock()
+    s.executed = []
+
+    async def _execute(stmt, *a, **kw):
+        s.executed.append(stmt)
+        return MagicMock()
+
+    s.execute = AsyncMock(side_effect=_execute)
+    s.rollback = AsyncMock()
+    return s
+
+
+@pytest.mark.asyncio
+async def test_reconcile_genres_empty_list_noops():
+    """An empty genre list writes nothing."""
+    session = _delete_capturing_session()
+    await reconcile_genres(session, "us", [])
+    session.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_genres_upserts_every_node_then_prunes():
+    """
+    reconcile_genres issues one execute per node (the upserts) plus one final
+    execute (the prune delete) — so three nodes means four executes.
+    """
+    session = _delete_capturing_session()
+    genres = [
+        {"genre_id": "P1", "parent_id": "", "name": "Arts"},
+        {"genre_id": "C1", "parent_id": "P1", "name": "Performing"},
+        {"genre_id": "G1", "parent_id": "C1", "name": "Film"},
+    ]
+    await reconcile_genres(session, "us", genres)
+    # 3 upserts + 1 prune delete
+    assert session.execute.call_count == 4
+
+
+@pytest.mark.asyncio
+async def test_reconcile_genres_last_statement_is_a_delete():
+    """The final statement reconcile issues is a DELETE (the prune)."""
+    session = _delete_capturing_session()
+    genres = [
+        {"genre_id": "P1", "parent_id": "", "name": "Arts"},
+        {"genre_id": "C1", "parent_id": "P1", "name": "Performing"},
+    ]
+    await reconcile_genres(session, "us", genres)
+    last = session.executed[-1]
+    # the prune is a Delete construct; the upserts before it are Inserts
+    assert last.__class__.__name__ == "Delete"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_genres_prune_filters_to_region_and_fresh_keys():
+    """
+    The prune delete is scoped to the region and excludes the fresh keys — its
+    compiled SQL names the region and carries a NOT IN over (genre_id, parent_id).
+    """
+    session = _delete_capturing_session()
+    genres = [
+        {"genre_id": "P1", "parent_id": "", "name": "Arts"},
+        {"genre_id": "C1", "parent_id": "P1", "name": "Performing"},
+    ]
+    await reconcile_genres(session, "us", genres)
+    delete_stmt = session.executed[-1]
+    sql = str(delete_stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert "catalog_genres" in sql
+    assert "NOT IN" in sql.upper()
+    # both fresh ids appear in the keep-set of the NOT IN
+    assert "P1" in sql and "C1" in sql

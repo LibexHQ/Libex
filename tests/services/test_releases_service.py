@@ -335,3 +335,98 @@ async def test_fetch_catalog_genres_recurses_all_levels():
     assert ("G1", "C1") in by_id        # grandchild
     assert ("GG1", "G1") in by_id       # great-grandchild — recursion reached depth 4
     assert len(nodes) == 6
+
+
+# ============================================================
+# _ensure_genres — reconcile vs additive vs fallback
+# ============================================================
+
+def _nodes(n):
+    """Builds n distinct taxonomy nodes (flat, all top-level) for size-based tests."""
+    return [{"genre_id": f"G{i}", "parent_id": "", "name": f"N{i}"} for i in range(n)]
+
+
+@pytest.mark.asyncio
+async def test_ensure_genres_reconciles_on_complete_fetch():
+    """
+    A fetch that's a plausible fraction of what's stored is reconciled (prunes
+    stale placements), not merely added.
+    """
+    stored = _nodes(100)
+    fresh = _nodes(100)
+    with patch.object(releases, "_fetch_catalog_genres", new=AsyncMock(return_value=fresh)), \
+         patch.object(releases, "get_stored_genres", new=AsyncMock(return_value=(stored, None))), \
+         patch.object(releases, "reconcile_genres", new=AsyncMock()) as recon, \
+         patch.object(releases, "upsert_genres", new=AsyncMock()) as upsert:
+        session = AsyncMock()
+        await releases._ensure_genres(session, "us")
+        recon.assert_awaited_once()
+        upsert.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ensure_genres_additive_only_on_tiny_fetch():
+    """
+    A fetch far smaller than what's stored is treated as partial: nodes are added
+    but NOT pruned, so a transient glitch can't wipe real branches.
+    """
+    stored = _nodes(1000)
+    fresh = _nodes(10)  # 1% of stored — below the reconcile floor
+    with patch.object(releases, "_fetch_catalog_genres", new=AsyncMock(return_value=fresh)), \
+         patch.object(releases, "get_stored_genres", new=AsyncMock(return_value=(stored, None))), \
+         patch.object(releases, "reconcile_genres", new=AsyncMock()) as recon, \
+         patch.object(releases, "upsert_genres", new=AsyncMock()) as upsert:
+        session = AsyncMock()
+        await releases._ensure_genres(session, "us")
+        upsert.assert_awaited_once()
+        recon.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ensure_genres_reconciles_on_first_populate():
+    """
+    With nothing stored yet, a fetch reconciles cleanly (the prune simply has
+    nothing to remove) rather than being held back as 'too small'.
+    """
+    fresh = _nodes(50)
+    with patch.object(releases, "_fetch_catalog_genres", new=AsyncMock(return_value=fresh)), \
+         patch.object(releases, "get_stored_genres", new=AsyncMock(return_value=([], None))), \
+         patch.object(releases, "reconcile_genres", new=AsyncMock()) as recon, \
+         patch.object(releases, "upsert_genres", new=AsyncMock()) as upsert:
+        session = AsyncMock()
+        await releases._ensure_genres(session, "us")
+        recon.assert_awaited_once()
+        upsert.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ensure_genres_serves_stored_on_fetch_failure():
+    """
+    When the taxonomy fetch raises, nothing is written and the stored set is
+    returned unchanged — an Audible hiccup doesn't empty or alter the response.
+    """
+    stored = _nodes(100)
+    with patch.object(releases, "_fetch_catalog_genres", new=AsyncMock(side_effect=RuntimeError("down"))), \
+         patch.object(releases, "get_stored_genres", new=AsyncMock(return_value=(stored, None))), \
+         patch.object(releases, "reconcile_genres", new=AsyncMock()) as recon, \
+         patch.object(releases, "upsert_genres", new=AsyncMock()) as upsert:
+        session = AsyncMock()
+        result = await releases._ensure_genres(session, "us")
+        assert result == stored
+        recon.assert_not_awaited()
+        upsert.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ensure_genres_empty_fetch_does_not_write():
+    """An empty (but non-failing) fetch writes nothing and serves stored."""
+    stored = _nodes(100)
+    with patch.object(releases, "_fetch_catalog_genres", new=AsyncMock(return_value=[])), \
+         patch.object(releases, "get_stored_genres", new=AsyncMock(return_value=(stored, None))), \
+         patch.object(releases, "reconcile_genres", new=AsyncMock()) as recon, \
+         patch.object(releases, "upsert_genres", new=AsyncMock()) as upsert:
+        session = AsyncMock()
+        result = await releases._ensure_genres(session, "us")
+        assert result == stored
+        recon.assert_not_awaited()
+        upsert.assert_not_awaited()

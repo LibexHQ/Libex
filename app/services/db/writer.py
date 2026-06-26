@@ -16,7 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from asyncpg.exceptions import UniqueViolationError as AsyncpgUniqueViolation
 from sqlalchemy.dialects.postgresql import insert, JSONB
-from sqlalchemy import select, func, update, case, cast
+from sqlalchemy import select, func, update, case, cast, delete, tuple_
 
 # Database
 from app.db.models import (
@@ -719,3 +719,49 @@ async def upsert_genres(
             set_={"name": genre["name"], "last_checked": now},
         )
         await session.execute(stmt)
+
+
+async def reconcile_genres(
+    session: AsyncSession, region: str, genres: list[dict[str, str]]
+) -> None:
+    """
+    Makes the stored taxonomy for a region mirror the given set. Upserts every
+    node (insert new, refresh name and last_checked), then prunes — deletes any
+    stored node for the region whose (genre_id, parent_id) is not in the given
+    set.
+
+    Unlike upsert_genres, which is additive and never deletes, this prunes — so
+    it must only be called with a COMPLETE taxonomy, i.e. the single live
+    /categories fetch that returns the whole tree at once. Pruning is what lets
+    the tree self-heal when Audible restructures: when a category moves to a new
+    parent, an additive upsert leaves the old (id, old_parent) row behind as a
+    ghost (e.g. a category that's no longer top-level still showing at the root).
+    Reconcile removes those stale placements so the stored tree matches Audible's
+    current one. No-ops on an empty list.
+    """
+    if not genres:
+        return
+    now = _now()
+    fresh_keys = [(g["genre_id"], g.get("parent_id", "")) for g in genres]
+    for genre in genres:
+        parent_id = genre.get("parent_id", "")
+        stmt = insert(CatalogGenre).values(
+            region=region,
+            genre_id=genre["genre_id"],
+            parent_id=parent_id,
+            name=genre["name"],
+            last_checked=now,
+        ).on_conflict_do_update(
+            index_elements=["region", "genre_id", "parent_id"],
+            set_={"name": genre["name"], "last_checked": now},
+        )
+        await session.execute(stmt)
+    # Prune stale placements — e.g. a category's old parent_id after Audible
+    # moves it. Everything in the fresh (complete) fetch is kept; anything stored
+    # for this region but absent from it is removed.
+    await session.execute(
+        delete(CatalogGenre).where(
+            CatalogGenre.region == region,
+            tuple_(CatalogGenre.genre_id, CatalogGenre.parent_id).notin_(fresh_keys),
+        )
+    )

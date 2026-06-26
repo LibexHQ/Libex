@@ -112,6 +112,95 @@ async def test_categories_invalid_region_returns_400(async_client):
 
 
 # ============================================================
+# /categories flat mode
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_categories_flat_returns_flat_list(async_client):
+    """flat=true returns every node as a flat entry with ancestors, no children."""
+    with patch("app.api.routes.releases.router._ensure_genres", new_callable=AsyncMock) as mock:
+        mock.return_value = _NODES
+        response = await async_client.get("/categories?region=us&flat=true")
+        assert response.status_code == 200
+        data = response.json()
+    # all five nodes appear as flat entries
+    assert {n["id"] for n in data} == {"P1", "P2", "L1", "L2", "L3"}
+    # flat entries carry ancestors, not children
+    for node in data:
+        assert "ancestors" in node
+        assert "children" not in node
+
+
+@pytest.mark.asyncio
+async def test_categories_flat_ancestors_are_root_first(async_client):
+    """A deep node's ancestors run root-first down to its immediate parent."""
+    nodes = [
+        {"genre_id": "P1", "parent_id": "", "name": "Arts"},
+        {"genre_id": "C1", "parent_id": "P1", "name": "Performing"},
+        {"genre_id": "G1", "parent_id": "C1", "name": "Film & TV"},
+        {"genre_id": "GG1", "parent_id": "G1", "name": "Direction"},   # depth 4
+    ]
+    with patch("app.api.routes.releases.router._ensure_genres", new_callable=AsyncMock) as mock:
+        mock.return_value = nodes
+        response = await async_client.get("/categories?region=us&flat=true")
+        assert response.status_code == 200
+        data = response.json()
+
+    direction = next(n for n in data if n["id"] == "GG1")
+    # root-first chain down to (but not including) the node itself
+    assert [a["id"] for a in direction["ancestors"]] == ["P1", "C1", "G1"]
+    assert [a["name"] for a in direction["ancestors"]] == ["Arts", "Performing", "Film & TV"]
+
+
+@pytest.mark.asyncio
+async def test_categories_flat_top_level_has_no_ancestors(async_client):
+    """A top-level node has an empty ancestors list."""
+    with patch("app.api.routes.releases.router._ensure_genres", new_callable=AsyncMock) as mock:
+        mock.return_value = _NODES
+        response = await async_client.get("/categories?region=us&flat=true")
+        assert response.status_code == 200
+        data = response.json()
+    history = next(n for n in data if n["id"] == "P1")
+    assert history["ancestors"] == []
+
+
+@pytest.mark.asyncio
+async def test_categories_flat_dual_parent_appears_per_placement(async_client):
+    """A node under two parents appears once per placement, each with its lineage."""
+    nodes = [
+        {"genre_id": "P1", "parent_id": "", "name": "History"},
+        {"genre_id": "P2", "parent_id": "", "name": "Society"},
+        {"genre_id": "LX", "parent_id": "P1", "name": "Shared"},
+        {"genre_id": "LX", "parent_id": "P2", "name": "Shared"},
+    ]
+    with patch("app.api.routes.releases.router._ensure_genres", new_callable=AsyncMock) as mock:
+        mock.return_value = nodes
+        response = await async_client.get("/categories?region=us&flat=true")
+        assert response.status_code == 200
+        data = response.json()
+
+    shared = [n for n in data if n["id"] == "LX"]
+    assert len(shared) == 2
+    chains = sorted(tuple(a["id"] for a in n["ancestors"]) for n in shared)
+    assert chains == [("P1",), ("P2",)]
+
+
+@pytest.mark.asyncio
+async def test_categories_flat_false_returns_nested(async_client):
+    """flat=false (the default) still returns the nested tree with children."""
+    with patch("app.api.routes.releases.router._ensure_genres", new_callable=AsyncMock) as mock:
+        mock.return_value = _NODES
+        response = await async_client.get("/categories?region=us&flat=false")
+        assert response.status_code == 200
+        data = response.json()
+    # nested shape: top-level nodes carry children, not ancestors
+    history = next(p for p in data if p["id"] == "P1")
+    assert "children" in history
+    assert "ancestors" not in history
+    assert [c["name"] for c in history["children"]] == ["Ancient", "Modern"]
+
+
+# ============================================================
 # category param plumbing on the live endpoints
 # ============================================================
 

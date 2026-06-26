@@ -119,6 +119,7 @@ async def coming_soon(
 async def categories(
     region: str = Depends(valid_region),
     flat: Annotated[bool, Query(description="Return a flat list instead of a nested tree. Each node carries its full ancestry (root-first) so its place in the taxonomy is still recoverable.")] = False,
+    depth: Annotated[int | None, Query(ge=1, description="Limit the response to this many levels. depth=1 returns only the top-level categories, depth=2 the top two levels, and so on. Omit for the full tree.")] = None,
     session: AsyncSession = Depends(get_session),
 ) -> list[CategoryNode] | list[FlatCategoryNode]:
     """
@@ -131,6 +132,10 @@ async def categories(
     node at every level as a single entry carrying its `ancestors` — the chain of
     {id, name} from the top-level root down to its immediate parent, in order — so
     a node's depth and lineage are still recoverable without walking a tree.
+
+    Pass `depth=N` to limit how many levels come back: `depth=1` returns just the
+    top-level categories (the parents), `depth=2` the top two levels, and so on.
+    This works with both the nested and flat forms, and composes with `flat`.
 
     A node can sit under more than one parent; in the flat list it appears once
     per parent, each with that placement's own ancestry. These are the ids you
@@ -153,32 +158,44 @@ async def categories(
 
     if flat:
         def build_flat(parent_id: str, ancestors: list[CategoryAncestor]) -> list[FlatCategoryNode]:
+            # This node's level is its ancestor count + 1. Emit it only while
+            # within the depth limit, and stop descending once the next level
+            # would exceed it.
+            level = len(ancestors) + 1
             out: list[FlatCategoryNode] = []
             for n in sorted(by_parent.get(parent_id, []), key=lambda x: x["name"]):
-                out.append(
-                    FlatCategoryNode(
-                        id=n["genre_id"],
-                        name=n["name"],
-                        ancestors=ancestors,
+                if depth is None or level <= depth:
+                    out.append(
+                        FlatCategoryNode(
+                            id=n["genre_id"],
+                            name=n["name"],
+                            ancestors=ancestors,
+                        )
                     )
-                )
-                out.extend(
-                    build_flat(
-                        n["genre_id"],
-                        ancestors + [CategoryAncestor(id=n["genre_id"], name=n["name"])],
+                if depth is None or level < depth:
+                    out.extend(
+                        build_flat(
+                            n["genre_id"],
+                            ancestors + [CategoryAncestor(id=n["genre_id"], name=n["name"])],
+                        )
                     )
-                )
             return out
 
         return build_flat("", [])
 
-    def build(parent_id: str) -> list[CategoryNode]:
+    def build(parent_id: str, level: int = 1) -> list[CategoryNode]:
+        # Recurse into children only while a deeper level is still within the
+        # depth limit; otherwise the node's children come back empty.
         return sorted(
             (
                 CategoryNode(
                     id=n["genre_id"],
                     name=n["name"],
-                    children=build(n["genre_id"]),
+                    children=(
+                        build(n["genre_id"], level + 1)
+                        if depth is None or level < depth
+                        else []
+                    ),
                 )
                 for n in by_parent.get(parent_id, [])
             ),

@@ -281,16 +281,37 @@ async def upsert_author(session: AsyncSession, author: dict) -> int | None:
         if existing_id:
             return existing_id
 
-        stmt = insert(Author).values(
-            asin=None,
-            name=a_name,
-            region=a_region,
-            description=author.get("description"),
-            image=author.get("image"),
-            fetched_description=False,
-            created_at=_now(),
-            updated_at=_now(),
-        ).returning(Author.id)
+        # Insert a fresh null-asin row. A partial unique index on
+        # (name, region) WHERE asin IS NULL means a concurrent insert of the
+        # same author now conflicts instead of quietly duplicating — catch it,
+        # roll back, and return the row the winner inserted.
+        try:
+            result = await session.execute(
+                insert(Author).values(
+                    asin=None,
+                    name=a_name,
+                    region=a_region,
+                    description=author.get("description"),
+                    image=author.get("image"),
+                    fetched_description=False,
+                    created_at=_now(),
+                    updated_at=_now(),
+                ).returning(Author.id)
+            )
+            row = result.fetchone()
+            return row[0] if row else None
+        except (IntegrityError, AsyncpgUniqueViolation):
+            await session.rollback()
+            winner = await session.execute(
+                select(Author.id).where(
+                    Author.name == a_name,
+                    Author.region == a_region,
+                    Author.asin.is_(None),
+                )
+                .order_by(Author.id)
+                .limit(1)
+            )
+            return winner.scalar_one_or_none()
 
     result = await session.execute(stmt)
     row = result.fetchone()

@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 # Local
-from app.services.cache.manager import get, set, invalidate
+from app.services.cache.manager import get, set, invalidate, purge_expired
 
 
 # ============================================================
@@ -129,3 +129,59 @@ async def test_cache_invalidate_calls_commit():
 
     await invalidate(session, "book:us:B08G9PRS1K")
     session.commit.assert_called_once()
+
+
+# ============================================================
+# CACHE PURGE TESTS
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_cache_purge_calls_execute():
+    """Cache purge executes a single delete query."""
+    session = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.rowcount = 0
+    session.execute = AsyncMock(return_value=mock_result)
+    session.commit = AsyncMock()
+
+    await purge_expired(session)
+    session.execute.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_cache_purge_calls_commit():
+    """Cache purge commits the transaction."""
+    session = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.rowcount = 0
+    session.execute = AsyncMock(return_value=mock_result)
+    session.commit = AsyncMock()
+
+    await purge_expired(session)
+    session.commit.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_cache_purge_returns_rowcount():
+    """Cache purge returns the number of rows the delete removed."""
+    session = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.rowcount = 42
+    session.execute = AsyncMock(return_value=mock_result)
+    session.commit = AsyncMock()
+
+    count = await purge_expired(session)
+    assert count == 42
+
+
+@pytest.mark.asyncio
+async def test_cache_purge_returns_zero_when_nothing_expired():
+    """Cache purge returns 0 when the delete removes no rows."""
+    session = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.rowcount = 0
+    session.execute = AsyncMock(return_value=mock_result)
+    session.commit = AsyncMock()
+
+    count = await purge_expired(session)
+    assert count == 0

@@ -144,18 +144,18 @@ async def purge_expired(session: AsyncSession) -> int:
     Deletes all expired cache entries.
     Returns the number of rows deleted.
     Intended to be called on a schedule.
+
+    Deletes directly by the expiry predicate rather than collecting keys and
+    deleting by an IN list — an IN over every expired key blows past asyncpg's
+    32,767 bind-parameter limit once the cache is large, which was failing the
+    purge outright. A predicate delete has no per-row parameters, so it holds at
+    any size. The row count comes from the DELETE's own rowcount.
     """
     result = await session.execute(
-        select(Cache.key).where(
-            Cache.expires_at <= datetime.now(timezone.utc)
-        )
+        delete(Cache).where(Cache.expires_at <= datetime.now(timezone.utc))
     )
-    keys = [row[0] for row in result.fetchall()]
-    count = len(keys)
+    await session.commit()
 
-    if keys:
-        await session.execute(delete(Cache).where(Cache.key.in_(keys)))
-        await session.commit()
-
+    count = result.rowcount
     logger.info(f"Purged {count} expired cache entries")
     return count

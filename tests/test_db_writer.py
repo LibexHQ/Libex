@@ -246,6 +246,65 @@ async def test_upsert_author_null_asin_new_row_inserts():
 
 
 # ============================================================
+# NULL-ASIN LOOKUPS — DUPLICATE TOLERANCE
+# ============================================================
+# The unique constraint doesn't cover null asins (Postgres treats NULLs as
+# distinct), so a concurrent-write race can leave two null-asin rows for the
+# same (name, region). The lookups order by id and take the oldest so every
+# writer converges on one row instead of raising MultipleResultsFound.
+
+def _compiled(stmt) -> str:
+    """Compiles a statement to SQL with literals inlined, for substring checks."""
+    return str(stmt.compile(compile_kwargs={"literal_binds": True})).upper()
+
+
+@pytest.mark.asyncio
+async def test_upsert_author_upgrade_lookup_orders_and_limits():
+    """The step-2 null-asin lookup takes the oldest row: ORDER BY id LIMIT 1."""
+    session = _session(_scalar(None), _scalar(42), MagicMock())
+    await upsert_author(session, {
+        "asin": "B000APHM1K",
+        "name": "Vince Flynn",
+        "region": "us",
+    })
+    # second execute is the null-asin lookup
+    null_lookup = session.execute.call_args_list[1].args[0]
+    sql = _compiled(null_lookup)
+    assert "ORDER BY" in sql
+    assert "LIMIT" in sql
+
+
+@pytest.mark.asyncio
+async def test_upsert_author_no_asin_lookup_orders_and_limits():
+    """The no-asin branch's existing-row lookup also takes the oldest row."""
+    session = _session(_scalar(55))
+    await upsert_author(session, {
+        "asin": None,
+        "name": "Vince Flynn",
+        "region": "us",
+    })
+    # first (only) execute is the null-asin lookup
+    lookup = session.execute.call_args_list[0].args[0]
+    sql = _compiled(lookup)
+    assert "ORDER BY" in sql
+    assert "LIMIT" in sql
+
+
+@pytest.mark.asyncio
+async def test_upsert_author_upgrade_lookup_still_filters_null_asin():
+    """Duplicate tolerance didn't change what the lookup matches: null-asin only."""
+    session = _session(_scalar(None), _scalar(42), MagicMock())
+    await upsert_author(session, {
+        "asin": "B000APHM1K",
+        "name": "Vince Flynn",
+        "region": "us",
+    })
+    null_lookup = session.execute.call_args_list[1].args[0]
+    sql = _compiled(null_lookup)
+    assert "ASIN IS NULL" in sql
+
+
+# ============================================================
 # GUARD CLAUSES
 # ============================================================
 

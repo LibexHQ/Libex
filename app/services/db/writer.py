@@ -211,13 +211,19 @@ async def upsert_author(session: AsyncSession, author: dict) -> int | None:
         if existing_id:
             return existing_id
 
-        # Step 2: look for a null-asin row to upgrade.
+        # Step 2: look for a null-asin row to upgrade. The unique constraint
+        # doesn't cover null asins (Postgres treats NULLs as distinct), so a
+        # concurrent-write race can leave more than one null-asin row for the
+        # same (name, region) — order by id and take the oldest so every writer
+        # converges on the same row instead of raising MultipleResultsFound.
         null_result = await session.execute(
             select(Author.id).where(
                 Author.name == a_name,
                 Author.region == a_region,
                 Author.asin.is_(None),
             )
+            .order_by(Author.id)
+            .limit(1)
         )
         null_id = null_result.scalar_one_or_none()
 
@@ -260,12 +266,16 @@ async def upsert_author(session: AsyncSession, author: dict) -> int | None:
         ).returning(Author.id)
 
     else:
+        # Same duplicate tolerance as the upgrade lookup above: take the
+        # oldest null-asin row if the race ever left more than one.
         existing = await session.execute(
             select(Author.id).where(
                 Author.name == a_name,
                 Author.region == a_region,
                 Author.asin.is_(None),
             )
+            .order_by(Author.id)
+            .limit(1)
         )
         existing_id = existing.scalar_one_or_none()
         if existing_id:

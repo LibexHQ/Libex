@@ -305,6 +305,65 @@ async def test_upsert_author_upgrade_lookup_still_filters_null_asin():
 
 
 # ============================================================
+# NULL-ASIN INSERT — PARTIAL-INDEX CONFLICT HANDLING
+# ============================================================
+# A partial unique index on (name, region) WHERE asin IS NULL means a concurrent
+# insert of the same null-asin author conflicts instead of duplicating. The
+# insert path catches that, rolls back, and returns the row the winner inserted.
+
+@pytest.mark.asyncio
+async def test_upsert_author_null_asin_insert_conflict_returns_winner_id():
+    """
+    When the null-asin insert hits the partial-index conflict, it rolls back and
+    returns the id of the row the concurrent winner inserted.
+    """
+    session = _session(
+        _scalar(None),                               # initial lookup: no row yet
+        IntegrityError("duplicate", {}, Exception()),  # insert loses the race
+        _scalar(42),                                 # reselect finds the winner
+    )
+    result = await upsert_author(session, {
+        "asin": None,
+        "name": "Racey Author",
+        "region": "us",
+    })
+    assert result == 42
+
+
+@pytest.mark.asyncio
+async def test_upsert_author_null_asin_insert_conflict_calls_rollback():
+    """A conflict on the null-asin insert triggers a session rollback."""
+    session = _session(
+        _scalar(None),
+        IntegrityError("duplicate", {}, Exception()),
+        _scalar(42),
+    )
+    await upsert_author(session, {
+        "asin": None,
+        "name": "Racey Author",
+        "region": "us",
+    })
+    session.rollback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_upsert_author_null_asin_insert_conflict_does_not_reraise():
+    """A conflict on the null-asin insert is swallowed — it does not propagate."""
+    session = _session(
+        _scalar(None),
+        IntegrityError("duplicate", {}, Exception()),
+        _scalar(99),
+    )
+    # should not raise
+    result = await upsert_author(session, {
+        "asin": None,
+        "name": "Racey Author",
+        "region": "us",
+    })
+    assert result == 99
+
+
+# ============================================================
 # GUARD CLAUSES
 # ============================================================
 

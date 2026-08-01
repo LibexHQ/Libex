@@ -42,7 +42,7 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 
 # Services
-from app.services.audible.books import get_books_by_asins
+from app.services.audible.books import fetch_and_store_chapters, get_books_by_asins
 
 logger = get_logger()
 settings = get_settings()
@@ -158,6 +158,39 @@ async def _fetch_author_book_asins(name: str, region: str) -> list[str]:
     return asins
 
 
+async def _gather_chapters(asins: list[str], region: str, delay: float) -> None:
+    """
+    Fetches and stores chapters for books that haven't been checked yet.
+
+    Best-effort and paced by the seeder delay: each book is a separate Audible
+    call on the live IP, so we only touch books with chapters_checked_at still
+    null (newly discovered ones — already-checked books, including those the
+    backfill handled, are skipped) and space the calls out. fetch_and_store_chapters
+    never raises, and the whole thing is wrapped, so a chapter failure can never
+    disrupt the metadata persistence that is the seeder's actual job.
+    """
+    if not asins:
+        return
+
+    async with SessionFactory() as session:
+        result = await session.execute(
+            select(Book.asin).where(
+                Book.asin.in_(asins),
+                Book.chapters_checked_at.is_(None),
+            )
+        )
+        need = [row[0] for row in result.fetchall()]
+
+    for asin in need:
+        try:
+            async with SessionFactory() as session:
+                await fetch_and_store_chapters(asin, region, session)
+        except Exception:
+            pass
+        await asyncio.sleep(delay)
+        await asyncio.sleep(0)
+
+
 async def _fetch_and_persist(missing: list[str], region: str, delay: float) -> None:
     for i in range(0, len(missing), 50):
         chunk = missing[i:i + 50]
@@ -168,6 +201,9 @@ async def _fetch_and_persist(missing: list[str], region: str, delay: float) -> N
             pass
         await asyncio.sleep(delay)
         await asyncio.sleep(0)
+
+        # Gather chapters for the newly-persisted books (paced, best-effort).
+        await _gather_chapters(chunk, region, delay)
 
 
 # ============================================================

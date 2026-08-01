@@ -14,7 +14,11 @@ from datetime import datetime, timezone
 from typing import Any
 
 # Third party
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
+
+# Database
+from app.db.models import Book
 
 # Core
 from app.core.exceptions import NotFoundException
@@ -25,7 +29,7 @@ from app.core.utils import strip_html, strip_image_size_suffix
 from app.services.audible.client import audible_get, REGION_MAP
 from app.services.cache import manager as cache
 from app.services.cache.manager import book_key, chapters_key
-from app.services.db.writer import persist_books_background, persist_track_background
+from app.services.db.writer import persist_books_background, persist_track_background, upsert_track
 from app.services.db.reader import get_books_from_db, get_track_from_db
 
 logger = get_logger()
@@ -422,3 +426,65 @@ async def get_chapters(
             return cached
 
         raise NotFoundException("Audible unavailable and no cached chapter data found")
+
+
+async def fetch_and_store_chapters(
+    asin: str,
+    region: str,
+    session: AsyncSession,
+) -> str:
+    """
+    Fetches a book's chapters and stores them, stamping chapters_checked_at so the
+    book is recorded as checked whatever the outcome. Best-effort: this never
+    raises, so a chapter failure can't break whatever persistence flow called it
+    (the seeder relies on that — its job is book metadata, chapters are a bonus).
+
+    Outcomes mirror the standalone backfill:
+    - "stored":    chapters fetched and written to tracks; marked checked.
+    - "none":      resolved but Audible exposes no chapters; marked checked.
+    - "not_found": 404 — no chapter metadata anywhere (e.g. the ISBN-keyed
+                   records); marked checked so it isn't retried.
+    - "error":     transient failure (Audible 500/timeout/network) or a write
+                   failure; NOT marked, so a later pass (or the backfill) retries.
+
+    Coordinates with the standalone backfill via chapters_checked_at: a book
+    marked here won't be re-fetched there, and vice versa.
+    """
+    path = f"/1.0/content/{asin}/metadata"
+    params = {
+        "response_groups": "chapter_info, always-returned, content_reference, content_url",
+        "quality": "High",
+    }
+
+    try:
+        data = await audible_get(region, path, params)
+    except NotFoundException:
+        await _mark_chapters_checked(session, asin)
+        return "not_found"
+    except Exception as e:
+        logger.warning(f"Seeder chapters: fetch error for {asin} ({region}): {type(e).__name__}: {e}")
+        return "error"
+
+    if not data.get("content_metadata", {}).get("chapter_info"):
+        await _mark_chapters_checked(session, asin)
+        return "none"
+
+    try:
+        chapters = _normalize_chapters(data, asin)
+        await upsert_track(session, asin, chapters)
+        await _mark_chapters_checked(session, asin)
+        return "stored"
+    except Exception as e:
+        logger.warning(f"Seeder chapters: store failed for {asin}: {type(e).__name__}: {e}")
+        await session.rollback()
+        return "error"
+
+
+async def _mark_chapters_checked(session: AsyncSession, asin: str) -> None:
+    """Stamps chapters_checked_at on a book so it leaves the backfill queue."""
+    await session.execute(
+        update(Book)
+        .where(Book.asin == asin)
+        .values(chapters_checked_at=datetime.now(timezone.utc))
+    )
+    await session.commit()

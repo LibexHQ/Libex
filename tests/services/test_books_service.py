@@ -462,3 +462,91 @@ async def test_get_chapters_falls_back_to_db():
          patch("app.services.audible.books.cache.get", return_value=None):
         result = await get_chapters("B08G9PRS1K", "us", mock_session)
         assert result == cached_chapters
+
+# ============================================================
+# FETCH AND STORE CHAPTERS TESTS
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_fetch_and_store_chapters_stores_and_marks():
+    """On success: stores the track, marks the book checked, returns 'stored'."""
+    from app.services.audible.books import fetch_and_store_chapters
+
+    mock_session = AsyncMock()
+    data = {"content_metadata": {"chapter_info": {"chapters": []}}}
+
+    with patch("app.services.audible.books.audible_get", return_value=data), \
+         patch("app.services.audible.books.upsert_track", new_callable=AsyncMock) as mock_upsert:
+        result = await fetch_and_store_chapters("B08G9PRS1K", "us", mock_session)
+
+    assert result == "stored"
+    mock_upsert.assert_called_once()
+    # marked checked (the update + commit happened)
+    mock_session.execute.assert_awaited()
+    mock_session.commit.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fetch_and_store_chapters_none_when_no_chapter_info():
+    """Resolved but no chapter_info: marks checked, stores nothing, returns 'none'."""
+    from app.services.audible.books import fetch_and_store_chapters
+
+    mock_session = AsyncMock()
+    data = {"content_metadata": {}}
+
+    with patch("app.services.audible.books.audible_get", return_value=data), \
+         patch("app.services.audible.books.upsert_track", new_callable=AsyncMock) as mock_upsert:
+        result = await fetch_and_store_chapters("B08G9PRS1K", "us", mock_session)
+
+    assert result == "none"
+    mock_upsert.assert_not_called()
+    mock_session.commit.assert_awaited()  # still marked checked
+
+
+@pytest.mark.asyncio
+async def test_fetch_and_store_chapters_not_found_marks_checked():
+    """A 404 (NotFoundException) is terminal: marks checked, returns 'not_found'."""
+    from app.services.audible.books import fetch_and_store_chapters
+    from app.core.exceptions import NotFoundException
+
+    mock_session = AsyncMock()
+
+    with patch("app.services.audible.books.audible_get", side_effect=NotFoundException()), \
+         patch("app.services.audible.books.upsert_track", new_callable=AsyncMock) as mock_upsert:
+        result = await fetch_and_store_chapters("0008278482", "us", mock_session)
+
+    assert result == "not_found"
+    mock_upsert.assert_not_called()
+    mock_session.commit.assert_awaited()  # marked so it isn't retried
+
+
+@pytest.mark.asyncio
+async def test_fetch_and_store_chapters_error_does_not_mark():
+    """A transient error does NOT mark checked (so it retries) and returns 'error'."""
+    from app.services.audible.books import fetch_and_store_chapters
+
+    mock_session = AsyncMock()
+
+    with patch("app.services.audible.books.audible_get", side_effect=Exception("Audible 500")), \
+         patch("app.services.audible.books.upsert_track", new_callable=AsyncMock) as mock_upsert:
+        result = await fetch_and_store_chapters("B08G9PRS1K", "us", mock_session)
+
+    assert result == "error"
+    mock_upsert.assert_not_called()
+    mock_session.commit.assert_not_awaited()  # NOT marked
+
+
+@pytest.mark.asyncio
+async def test_fetch_and_store_chapters_never_raises_on_store_failure():
+    """A write failure is swallowed (returns 'error'), never propagates."""
+    from app.services.audible.books import fetch_and_store_chapters
+
+    mock_session = AsyncMock()
+    data = {"content_metadata": {"chapter_info": {"chapters": []}}}
+
+    with patch("app.services.audible.books.audible_get", return_value=data), \
+         patch("app.services.audible.books.upsert_track", new_callable=AsyncMock, side_effect=Exception("DB write failed")):
+        result = await fetch_and_store_chapters("B08G9PRS1K", "us", mock_session)
+
+    assert result == "error"
+    mock_session.rollback.assert_awaited()

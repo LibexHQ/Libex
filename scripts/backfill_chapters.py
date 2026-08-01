@@ -13,14 +13,20 @@ Design notes:
 - Reuses the app's own fetch/normalize/write path (audible_get, the chapter
   normalizer, upsert_track) so stored data is identical to on-demand fetches.
 - The work queue is self-checkpointing: a book leaves it the moment
-  chapters_checked_at is set, whether we found chapters or Audible had none. So
-  the run is fully resumable — stop and restart any time and it picks up where it
-  left off, and books with no chapters are never re-fetched.
+  chapters_checked_at is set, whether we stored chapters, found none, or Audible
+  404s the record. So the run is fully resumable and never re-fetches a book it
+  has already resolved.
+- A 404 (NotFoundException) is terminal: some records — notably ISBN-keyed ones
+  (~7% of the catalog, non-B ASINs) — return no chapter metadata in ANY region,
+  confirmed by cross-region probing. Retrying them would waste requests, never
+  drain the queue, and falsely trip the error back-off. So a 404 is marked
+  checked and counted as "not found", NOT as an error.
+- Only real transient failures (500s, timeouts, network errors) count as errors
+  and drive the back-off — that's the actual signature of the exit IP being
+  throttled.
 - Rate is a small random delay per request (averaging ~1/s, never bursting) plus
   a macro on/off schedule (~12h active, then a random pause), so the traffic
   isn't mechanically uniform.
-- On sustained non-404 errors (the signature of the IP getting throttled) it
-  backs off, and if it stays bad it pauses loudly rather than hammering.
 
 Run as a separate container off the Libex image:
 
@@ -45,6 +51,7 @@ import time
 from datetime import datetime, timezone
 
 # Third party
+import httpx
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -52,6 +59,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.db.models import Book, Track
 
 # Core
+from app.core.exceptions import NotFoundException
 from app.core.logging import get_logger, setup_logging
 
 # Services
@@ -93,14 +101,14 @@ PAUSE_MAX_HOURS = _env_float("BACKFILL_PAUSE_MAX_HOURS", 11.0)
 # not a rate knob).
 CHUNK_SIZE = _env_int("BACKFILL_CHUNK_SIZE", 500)
 
-# back-off: if the last WINDOW attempts had more than THRESHOLD non-404 errors,
-# the exit IP is probably being throttled — pause hard for COOLDOWN seconds.
+# back-off: if the last WINDOW attempts had more than THRESHOLD real errors
+# (NOT 404s), the exit IP is probably being throttled — pause hard for COOLDOWN.
 ERROR_WINDOW = _env_int("BACKFILL_ERROR_WINDOW", 50)
 ERROR_THRESHOLD = _env_int("BACKFILL_ERROR_THRESHOLD", 25)
 ERROR_COOLDOWN = _env_float("BACKFILL_ERROR_COOLDOWN", 1800.0)  # 30 min
 
 # how often to log a progress line
-PROGRESS_EVERY = _env_int("BACKFILL_PROGRESS_EVERY", 100)
+PROGRESS_EVERY = _env_int("BACKFILL_PROGRESS_EVERY", 50)
 
 CHAPTERS_PATH = "/1.0/content/{asin}/metadata"
 CHAPTERS_PARAMS = {
@@ -128,6 +136,17 @@ class _Stopper:
 
 
 # --- core operations -------------------------------------------------------
+
+async def _log_exit_ip() -> None:
+    """One-time startup check: confirm which IP our proxy actually exits from."""
+    proxy = os.environ.get("AUDIBLE_PROXY_URL") or None
+    try:
+        async with httpx.AsyncClient(proxy=proxy, timeout=15.0) as client:
+            resp = await client.get("https://api.ipify.org")
+            logger.info(f"Backfill: exit IP {resp.text.strip()} (via {proxy or 'direct'})")
+    except Exception as e:
+        logger.warning(f"Backfill: could not determine exit IP: {type(e).__name__}: {e}")
+
 
 async def _next_batch(session: AsyncSession, limit: int) -> list[tuple[str, str]]:
     """Returns up to `limit` (asin, region) pairs that still need checking."""
@@ -166,26 +185,38 @@ async def _store_chapters(session: AsyncSession, asin: str, chapters: dict) -> N
 
 
 class _Outcome:
-    STORED = "stored"       # chapters fetched and saved
-    NONE = "none"           # Audible has no chapters for this book
-    ERROR = "error"         # transient/other failure — do NOT mark, retry later
+    STORED = "stored"        # chapters fetched and saved
+    NONE = "none"            # resolved but Audible exposes no chapters
+    NOT_FOUND = "not_found"  # 404 — record has no fetchable chapters anywhere (terminal)
+    ERROR = "error"          # transient failure (500/timeout/network) — retry later
 
 
 async def _process_one(session: AsyncSession, asin: str, region: str) -> str:
     """
     Fetches and stores one book's chapters.
 
-    Returns an _Outcome. On STORED/NONE the book is marked checked (leaves the
-    queue). On ERROR nothing is marked, so it'll be retried on a later pass.
+    Outcomes:
+    - STORED / NONE / NOT_FOUND: the book is marked checked and leaves the queue.
+      NONE and NOT_FOUND both mean "nothing to store" (empty vs. 404) but are
+      counted separately for visibility. Neither is an error.
+    - ERROR: a transient failure (Audible 500, timeout, network). NOT marked, so
+      it's retried on a later pass, and it DOES count toward the error back-off.
     """
     try:
         data = await audible_get(region, CHAPTERS_PATH.format(asin=asin), CHAPTERS_PARAMS)
+    except NotFoundException:
+        # 404 — terminal. This record has no chapter metadata (confirmed across
+        # all regions for the ISBN-keyed class). Mark it and move on; do not retry
+        # and do not treat as an error.
+        await _mark_checked(session, asin)
+        return _Outcome.NOT_FOUND
     except Exception as e:
-        # network / Audible error — transient. Leave unmarked for retry.
-        logger.warning(f"Backfill: fetch failed for {asin} ({region}): {type(e).__name__}: {e}")
+        # transient (AudibleAPIException: 500/timeout/network). Leave unmarked for
+        # retry; this is what should drive the back-off.
+        logger.warning(f"Backfill: fetch error for {asin} ({region}): {type(e).__name__}: {e}")
         return _Outcome.ERROR
 
-    # Same "no chapters" check the on-demand path uses.
+    # Resolved, but no chapters present.
     if not data.get("content_metadata", {}).get("chapter_info"):
         await _mark_checked(session, asin)
         return _Outcome.NONE
@@ -215,6 +246,7 @@ async def _run(limit: int | None) -> None:
             "active_hours": ACTIVE_HOURS,
         },
     )
+    await _log_exit_ip()
 
     db_url = os.environ["DATABASE_URL"]
     engine = create_async_engine(db_url, pool_size=2, max_overflow=2)
@@ -224,8 +256,8 @@ async def _run(limit: int | None) -> None:
     signal.signal(signal.SIGTERM, stopper.request)
     signal.signal(signal.SIGINT, stopper.request)
 
-    processed = stored = none = errors = 0
-    recent_errors: list[bool] = []  # rolling window of "was this attempt an error"
+    processed = stored = none = not_found = errors = 0
+    recent_errors: list[bool] = []  # rolling window of "was this attempt a real error"
     active_until = time.monotonic() + ACTIVE_HOURS * 3600
 
     try:
@@ -263,10 +295,12 @@ async def _run(limit: int | None) -> None:
                         stored += 1
                     elif outcome == _Outcome.NONE:
                         none += 1
+                    elif outcome == _Outcome.NOT_FOUND:
+                        not_found += 1
                     elif is_error:
                         errors += 1
 
-                    # rolling error window for back-off
+                    # rolling error window for back-off (404s do NOT count)
                     recent_errors.append(is_error)
                     if len(recent_errors) > ERROR_WINDOW:
                         recent_errors.pop(0)
@@ -279,19 +313,20 @@ async def _run(limit: int | None) -> None:
                                 "processed": processed,
                                 "stored": stored,
                                 "no_chapters": none,
+                                "not_found": not_found,
                                 "errors": errors,
                                 "recent_error_rate": f"{rate:.0f}%",
                             },
                         )
 
-                    # back-off: too many recent errors => IP probably throttled
+                    # back-off: too many recent REAL errors => IP probably throttled
                     if (
                         len(recent_errors) >= ERROR_WINDOW
                         and sum(recent_errors) >= ERROR_THRESHOLD
                     ):
                         logger.error(
                             f"Backfill: {sum(recent_errors)}/{len(recent_errors)} recent "
-                            f"attempts failed — pausing {ERROR_COOLDOWN / 60:.0f}m (exit IP "
+                            f"requests errored — pausing {ERROR_COOLDOWN / 60:.0f}m (exit IP "
                             f"may be throttled)"
                         )
                         await _interruptible_sleep(ERROR_COOLDOWN, stopper)
@@ -309,6 +344,7 @@ async def _run(limit: int | None) -> None:
                 "processed": processed,
                 "stored": stored,
                 "no_chapters": none,
+                "not_found": not_found,
                 "errors": errors,
             },
         )

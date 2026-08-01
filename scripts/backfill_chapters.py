@@ -52,7 +52,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.db.models import Book, Track
 
 # Core
-from app.core.logging import get_logger
+from app.core.logging import get_logger, setup_logging
 
 # Services
 from app.services.audible.client import audible_get
@@ -330,6 +330,10 @@ def main() -> None:
         help="Process at most N books then stop (for a dry run). Omit to process all.",
     )
     args = parser.parse_args()
+    # Wire up the app's log handlers (stdout/stderr/file) — get_logger only
+    # fetches the logger; without this the handlers aren't attached and nothing
+    # is emitted when run as a standalone script.
+    setup_logging()
     asyncio.run(_run(args.limit))
 
 

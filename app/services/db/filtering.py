@@ -197,7 +197,7 @@ def apply_narrator_filters(
     if cultural_heritage is not None:
         stmt = stmt.where(Narrator.cultural_heritage.ilike(f"%{cultural_heritage}%"))
     if language is not None:
-        stmt = stmt.where(Narrator.languages.has_key(language))  # noqa: W601
+        stmt = stmt.where(Narrator.languages.has_key(language))
     if audiobooks_produced is not None:
         stmt = stmt.where(Narrator.audiobooks_produced == audiobooks_produced)
     return stmt

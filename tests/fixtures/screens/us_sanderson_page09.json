@@ -1,0 +1,51 @@
+{
+  "page_type": "audible-android-author-detail",
+  "page_id": "B001IGFHW6",
+  "sections": [
+    {
+      "id": "ad6d0474-4768-4b82-adb2-65de097455e9",
+      "model": {
+        "__component_type": "StandardAsinRowList",
+        "rows": [
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B097RX4375",
+              "title": "The Sunlit Man"
+            }
+          },
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B00TWHSWPW",
+              "title": "Firefight"
+            }
+          },
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B0CJG4GJV5",
+              "title": "Wind and Truth"
+            }
+          },
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B0BR8FCS2V",
+              "title": "Tress of the Emerald Sea: Secret Project"
+            }
+          },
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "3837151905",
+              "title": "Sturmklinge"
+            }
+          }
+        ]
+      },
+      "pagination": null
+    }
+  ],
+  "pagination_token": null
+}

@@ -1,0 +1,44 @@
+{
+  "page_type": "audible-android-author-detail",
+  "page_id": "B001IGFHW6",
+  "sections": [
+    {
+      "id": "grid",
+      "model": {
+        "__component_type": "StandardAsinRowList",
+        "rows": [
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B00THECIJG",
+              "title": "Elantris"
+            }
+          },
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "3837151905",
+              "title": "Sturmklinge"
+            }
+          },
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B0GV1KT9XC",
+              "title": "Wind and Truth"
+            }
+          },
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B09G3GS3PJ",
+              "title": "Tress of the Emerald Sea"
+            }
+          }
+        ]
+      },
+      "pagination": null
+    }
+  ],
+  "pagination_token": null
+}

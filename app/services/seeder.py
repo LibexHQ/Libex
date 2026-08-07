@@ -42,6 +42,7 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 
 # Services
+from app.services.audible.authors import fetch_author_books_by_name
 from app.services.audible.books import fetch_and_store_chapters, get_books_by_asins
 
 logger = get_logger()
@@ -118,44 +119,6 @@ async def _stamp_narrator(narrator_name: str) -> None:
             update(Narrator).where(Narrator.name == narrator_name).values(last_seeded_at=_now())
         )
         await session.commit()
-
-
-async def _fetch_author_book_asins(name: str, region: str) -> list[str]:
-    from app.services.audible.client import audible_get
-
-    asins: list[str] = []
-    page = 0
-    while page <= 20:
-        path = "/1.0/catalog/products"
-        params = {
-            "author": name,
-            "num_results": 50,
-            "page": page,
-            "response_groups": "product_desc,contributors,series,product_attrs,media",
-            "products_sort_by": "-ReleaseDate",
-        }
-        data = await audible_get(region, path, params)
-        products = data.get("products", [])
-        if not products:
-            break
-
-        for product in products:
-            matches = any(
-                a.get("name", "").lower() == name.lower()
-                for a in product.get("authors", [])
-            )
-            language = product.get("language", "").lower()
-            is_english = language.startswith("english") or language == "englisch"
-            asin = product.get("asin")
-            if asin and matches and is_english and asin not in asins:
-                asins.append(asin)
-
-        if len(products) < 50:
-            break
-        page += 1
-        await asyncio.sleep(0)
-
-    return asins
 
 
 async def _gather_chapters(asins: list[str], region: str, delay: float) -> None:
@@ -236,7 +199,7 @@ async def _expand_authors(region: str, delay: float) -> dict[str, int]:
 
     for author_id, author_asin, author_name in authors:
         try:
-            book_asins = await _fetch_author_book_asins(author_name, region)
+            book_asins, _ = await fetch_author_books_by_name(author_name, region)
             await asyncio.sleep(delay)
 
             if book_asins:

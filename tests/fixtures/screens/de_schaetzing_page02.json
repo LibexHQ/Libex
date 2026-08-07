@@ -1,0 +1,62 @@
+{
+  "page_type": "audible-android-author-detail",
+  "page_id": "B001ITXLB2",
+  "sections": [
+    {
+      "id": "grid",
+      "model": {
+        "__component_type": "StandardAsinRowList",
+        "header": {
+          "type": "AuthorListRefining",
+          "header_model": {}
+        },
+        "rows": [
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B0D268743S",
+              "title": "Abysses"
+            }
+          },
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B01G8Y21BW",
+              "title": "Keine Angst"
+            }
+          },
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "8831001531",
+              "title": "Il quinto giorno"
+            }
+          },
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "8831007165",
+              "title": "Silenzio Assoluto"
+            }
+          },
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B09Y9H3696",
+              "title": "Nelle nostre mani"
+            }
+          },
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B0FY6M69KD",
+              "title": "Il diavolo nella cattedrale"
+            }
+          }
+        ]
+      },
+      "pagination": null
+    }
+  ],
+  "pagination_token": null
+}

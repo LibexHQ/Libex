@@ -22,6 +22,7 @@ from sqlalchemy import select, func, update, case, cast, delete, tuple_
 from app.db.models import (
     Book,
     Author,
+    Cache,
     Genre,
     Narrator,
     Series,
@@ -717,6 +718,57 @@ def persist_cache_background(key: str, value) -> None:
             try:
                 async with _BackgroundSession() as session:
                     await cache.set(session, key, value)
+            except Exception as e:
+                logger.warning(f"Background cache persist failed for {key}: {e}")
+
+    asyncio.create_task(_persist())
+
+
+def persist_author_books_cache_background(key: str, asins: list[str]) -> None:
+    """
+    Fires a background task to write an author's book-ASIN list to cache.
+
+    An author's ASIN list only ever grows or reorders — it never legitimately
+    shrinks — so a write that would drop ASINs relative to what is already
+    stored is refused. Shrink is a shorter incoming list, or an incoming list
+    whose ASINs are a strict subset of the stored ones; a same-length list
+    that reorders or swaps members is not a shrink and is written normally.
+
+    The stored row is locked with SELECT ... FOR UPDATE before the comparison,
+    and the write happens later in the same transaction that took the lock, so
+    a second concurrent call for the same key blocks on the lock until the
+    first call's write has committed, then compares against that just-written
+    value instead of the stale one — the two calls can no longer both read the
+    old value and both pass the guard. This only protects a key that already
+    has a row: two calls racing to write the very first value for a brand-new
+    key still both proceed unconditionally, the same as any other first-write
+    upsert in this module, since there is nothing stored yet to shrink against.
+
+    A stored row past its expiry is still locked (so the lock keeps working),
+    but is treated as not-stored for the comparison, matching cache.get's own
+    expired-is-a-miss behavior — this guard does not protect an expired entry.
+    """
+    from app.services.cache import manager as cache
+
+    async def _persist():
+        async with _bg_write_semaphore:
+            try:
+                async with _BackgroundSession() as session:
+                    locked = await session.execute(
+                        select(Cache).where(Cache.key == key).with_for_update()
+                    )
+                    row = locked.scalar_one_or_none()
+                    stored = row.value if row and row.expires_at > _now() else None
+                    if stored:
+                        stored_set = set(stored)
+                        incoming_set = set(asins)
+                        if len(asins) < len(stored) or incoming_set < stored_set:
+                            logger.warning(
+                                f"Refused shrink for author books cache {key}: "
+                                f"stored={len(stored)} incoming={len(asins)}"
+                            )
+                            return
+                    await cache.set(session, key, asins)
             except Exception as e:
                 logger.warning(f"Background cache persist failed for {key}: {e}")
 

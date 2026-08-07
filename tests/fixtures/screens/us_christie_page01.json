@@ -1,0 +1,75 @@
+{
+  "page_type": "audible-android-author-detail",
+  "page_id": "B000APENBC",
+  "sections": [
+    {
+      "id": "teaser",
+      "model": {
+        "__component_type": "StandardAsinRowList",
+        "header": {
+          "type": "BasicHeader",
+          "header_model": {
+            "model": {
+              "title": {
+                "value": "Most popular"
+              }
+            }
+          }
+        },
+        "rows": [
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B0HCCCCL54",
+              "title": "And Then There Were None",
+              "authors": [
+                {
+                  "name": "Agatha Christie",
+                  "asin": "B000APENBC"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "pagination": null
+    },
+    {
+      "id": "grid",
+      "model": {
+        "__component_type": "StandardAsinRowList",
+        "header": {
+          "type": "AuthorListRefining",
+          "header_model": {
+            "product_count": 1115
+          }
+        },
+        "rows": [
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "0063066734",
+              "title": "Murder on the Orient Express"
+            }
+          },
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B0C3MGXXQ3",
+              "title": "The Murder of Roger Ackroyd"
+            }
+          },
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B00O4F6Z24",
+              "title": "Death on the Nile"
+            }
+          }
+        ]
+      },
+      "pagination": "eyJzY2hlZHVsaW5nX2luZm8iOnsicGFnZV9sb2FkX2lkIjoiMnhuYWcwdUE1elI4RTZQTyIsInNsb3QiOiJjZW50ZXItMTAiLCJ2ZXJzaW9uIjoiMSJ9LCJwYWdpbmF0aW9uX2luZm8iOnsicGFnZV9udW0iOiIyIn19"
+    }
+  ],
+  "pagination_token": null
+}

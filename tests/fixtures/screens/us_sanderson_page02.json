@@ -1,0 +1,51 @@
+{
+  "page_type": "audible-android-author-detail",
+  "page_id": "B001IGFHW6",
+  "sections": [
+    {
+      "id": "ad6d0474-4768-4b82-adb2-65de097455e9",
+      "model": {
+        "__component_type": "StandardAsinRowList",
+        "rows": [
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B019P7DVPE",
+              "title": "Calamity"
+            }
+          },
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B005ZUI3OA",
+              "title": "The Alloy of Law"
+            }
+          },
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B0B5M28HZK",
+              "title": "Tress of the Emerald Sea"
+            }
+          },
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B0D18CT2VY",
+              "title": "Yumi and the Nightmare Painter"
+            }
+          },
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B018UG5HJY",
+              "title": "Shadows of Self"
+            }
+          }
+        ]
+      },
+      "pagination": "eyJzY2hlZHVsaW5nX2luZm8iOnsicGFnZV9sb2FkX2lkIjoiNGIzaVhjamdBd2VDSU1pQSIsInNsb3QiOiJjZW50ZXItMTAiLCJ2ZXJzaW9uIjoiMSJ9LCJwYWdpbmF0aW9uX2luZm8iOnsicGFnZV9udW0iOiIzIn19"
+    }
+  ],
+  "pagination_token": null
+}

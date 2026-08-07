@@ -68,6 +68,12 @@ BASE_HEADERS: dict[str, str] = {
     "Accept-Charset": "utf-8",
 }
 
+# Device type id for the Android screens endpoints (e.g. the author-detail
+# screen). Scoped per-call via audible_get's extra_headers, never merged into
+# get_region_headers — stamping every call with one stable device id across a
+# single exit IP is exactly the shape a per-device throttle keys on.
+ANDROID_DEVICE_TYPE_ID = "A10KISP2GWF0E4"
+
 
 def get_region_headers(region: str) -> dict[str, str]:
     """Returns region-specific headers including locale, language, and X-ADP-SW."""
@@ -102,15 +108,21 @@ async def audible_get(
     region: str,
     path: str,
     params: dict[str, Any] | None = None,
+    extra_headers: dict[str, str] | None = None,
 ) -> Any:
     """
     Makes a GET request to the Audible API.
     Returns parsed JSON response.
     Raises AudibleAPIException on non-200 responses.
+
+    extra_headers overlays get_region_headers for this call only and must
+    contain module-level constants only — never a request-derived value.
     """
     region = validate_region(region)
     url = get_audible_url(region, path)
     headers = get_region_headers(region)
+    if extra_headers:
+        headers = {**headers, **extra_headers}
 
     async with httpx.AsyncClient(proxy=settings.audible_proxy_url or None) as client:
         try:
@@ -119,6 +131,7 @@ async def audible_get(
                 headers=headers,
                 params=params,
                 timeout=30.0,
+                follow_redirects=False,
             )
         except httpx.TimeoutException as e:
             raise AudibleAPIException(

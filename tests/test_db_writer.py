@@ -5,14 +5,21 @@ All DB interactions are mocked — we test our logic not SQLAlchemy.
 """
 
 # Standard library
-from unittest.mock import AsyncMock, MagicMock
+import asyncio
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # Third party
 import pytest
 from sqlalchemy.exc import IntegrityError
 
 # Local
-from app.services.db.writer import upsert_author, reconcile_genres
+from app.services.db.writer import (
+    upsert_author,
+    reconcile_genres,
+    persist_author_books_cache_background,
+)
 
 
 # ============================================================
@@ -472,3 +479,134 @@ async def test_reconcile_genres_prune_filters_to_region_and_fresh_keys():
     assert "NOT IN" in sql.upper()
     # both fresh ids appear in the keep-set of the NOT IN
     assert "P1" in sql and "C1" in sql
+
+
+# ============================================================
+# persist_author_books_cache_background — shrink-refusal backstop
+# ============================================================
+# The function fires a background asyncio task via create_task; these tests
+# intercept create_task and await the same coroutine directly instead of
+# letting it run detached, so the write-side logic itself — not just that a
+# task got scheduled — is under test.
+
+class _FakeSessionCM:
+    """An async context manager standing in for `_BackgroundSession()`."""
+
+    def __init__(self, session):
+        self._session = session
+
+    async def __aenter__(self):
+        return self._session
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
+def _fake_cache_row(value):
+    """
+    Stands in for the Cache row `SELECT ... FOR UPDATE` locks and reads
+    back via `.scalar_one_or_none()` — carries exactly the two attributes
+    the guard reads off it (`.value`, `.expires_at`), unexpired by default.
+    """
+    return SimpleNamespace(value=value, expires_at=datetime.now(timezone.utc) + timedelta(hours=1))
+
+
+async def _run_persist_author_books_cache_background(key, asins, stored):
+    """
+    Drives persist_author_books_cache_background's background task to
+    completion: create_task is intercepted so its coroutine is awaited
+    directly, and _BackgroundSession / cache.set are patched at the module
+    the function reads them from. session.execute(...).scalar_one_or_none()
+    is stubbed directly (the guard now takes a `SELECT ... FOR UPDATE` on
+    the Cache row instead of calling cache.get) to return a fake row
+    carrying `stored`, or None when nothing is stored yet. Returns the
+    mocked cache.set so callers can inspect what — or whether — it was
+    written.
+    """
+    mock_session = AsyncMock()
+    row = _fake_cache_row(stored) if stored is not None else None
+    mock_session.execute = AsyncMock(return_value=_scalar(row))
+    captured = {}
+
+    def _fake_create_task(coro):
+        captured["coro"] = coro
+        return MagicMock()
+
+    # A fresh semaphore scoped to this call, not the module-global one: the
+    # global is bound lazily to whichever event loop first uses it, and
+    # pytest-asyncio hands each test function its own loop, so sharing the
+    # module-global across tests would raise on the second test to reach it.
+    with patch("app.services.db.writer._BackgroundSession", return_value=_FakeSessionCM(mock_session)), \
+         patch("app.services.db.writer._bg_write_semaphore", asyncio.Semaphore(2)), \
+         patch("app.services.db.writer.asyncio.create_task", side_effect=_fake_create_task), \
+         patch("app.services.cache.manager.set", new=AsyncMock()) as mock_set:
+        persist_author_books_cache_background(key, asins)
+        await captured["coro"]
+
+    return mock_set
+
+
+@pytest.mark.asyncio
+async def test_persist_author_books_cache_background_refuses_shorter_list():
+    """A strictly shorter incoming list than what's stored is refused."""
+    mock_set = await _run_persist_author_books_cache_background(
+        "author_books:us:B000AUTHOR", ["B0ASIN0001"], stored=["B0ASIN0001", "B0ASIN0002"],
+    )
+    mock_set.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_persist_author_books_cache_background_refuses_strict_subset():
+    """A same-length-or-longer incoming list that is still a strict subset of
+    what's stored is refused — length alone isn't the whole check."""
+    mock_set = await _run_persist_author_books_cache_background(
+        "author_books:us:B000AUTHOR",
+        ["B0ASIN0001", "B0ASIN0001"],
+        stored=["B0ASIN0001", "B0ASIN0002"],
+    )
+    mock_set.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_persist_author_books_cache_background_refuses_empty_against_non_empty():
+    """An empty incoming list against a non-empty stored one is refused."""
+    mock_set = await _run_persist_author_books_cache_background(
+        "author_books:us:B000AUTHOR", [], stored=["B0ASIN0001"],
+    )
+    mock_set.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_persist_author_books_cache_background_writes_when_nothing_stored():
+    """When nothing is stored yet, the incoming list is written unconditionally."""
+    mock_set = await _run_persist_author_books_cache_background(
+        "author_books:us:B000AUTHOR", ["B0ASIN0001"], stored=None,
+    )
+    mock_set.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_persist_author_books_cache_background_writes_on_same_length_member_swap():
+    """A same-length list whose members differ from what's stored (a swap,
+    not a shrink) is written normally."""
+    mock_set = await _run_persist_author_books_cache_background(
+        "author_books:us:B000AUTHOR",
+        ["B0ASIN0003", "B0ASIN0002"],
+        stored=["B0ASIN0001", "B0ASIN0002"],
+    )
+    mock_set.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_persist_author_books_cache_background_persists_exact_order():
+    """The incoming list is persisted in exactly the order it was handed,
+    with no sorting or reordering applied."""
+    incoming = ["B0ASIN0003", "B0ASIN0001", "B0ASIN0002"]
+    mock_set = await _run_persist_author_books_cache_background(
+        "author_books:us:B000AUTHOR", incoming, stored=None,
+    )
+    mock_set.assert_awaited_once()
+    written_key = mock_set.await_args.args[1]
+    written_value = mock_set.await_args.args[2]
+    assert written_key == "author_books:us:B000AUTHOR"
+    assert written_value == incoming

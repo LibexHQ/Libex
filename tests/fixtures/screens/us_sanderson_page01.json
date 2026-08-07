@@ -1,0 +1,89 @@
+{
+  "page_type": "audible-android-author-detail",
+  "page_id": "B001IGFHW6",
+  "sections": [
+    {
+      "id": "834e5a58-2127-45c7-a5e2-d26e6ef8f931",
+      "model": {
+        "__component_type": "StandardAsinRowList",
+        "header": {
+          "type": "BasicHeader",
+          "header_model": {
+            "model": {
+              "title": {
+                "value": "Most popular"
+              }
+            }
+          }
+        },
+        "rows": [
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B002V0QCYU",
+              "title": "The Final Empire",
+              "authors": [
+                {
+                  "name": "Brandon Sanderson",
+                  "asin": "B001IGFHW6"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "pagination": null
+    },
+    {
+      "id": "ad6d0474-4768-4b82-adb2-65de097455e9",
+      "model": {
+        "__component_type": "StandardAsinRowList",
+        "header": {
+          "type": "AuthorListRefining",
+          "header_model": {
+            "product_count": 179
+          }
+        },
+        "rows": [
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "1250759781",
+              "title": "Rhythm of War"
+            }
+          },
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B0718Z5K4C",
+              "title": "Oathbringer"
+            }
+          },
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B00HWF0MHW",
+              "title": "Words of Radiance"
+            }
+          },
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B002VA9IKK",
+              "title": "The Way of Kings"
+            }
+          },
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B002V5GLQ4",
+              "title": "Mistborn: The Final Empire"
+            }
+          }
+        ]
+      },
+      "pagination": "eyJzY2hlZHVsaW5nX2luZm8iOnsicGFnZV9sb2FkX2lkIjoiNGIzaVhjamdBd2VDSU1pQSIsInNsb3QiOiJjZW50ZXItMTAiLCJ2ZXJzaW9uIjoiMSJ9LCJwYWdpbmF0aW9uX2luZm8iOnsicGFnZV9udW0iOiIyIn19"
+    }
+  ],
+  "pagination_token": null
+}

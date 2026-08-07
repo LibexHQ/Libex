@@ -10,6 +10,41 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.11.0]
+
+### Added
+- **`/author/books/{asin}` and `/author/{asin}/books` now union two independent
+  Audible sources and can only return more titles than before.** These
+  endpoints previously relied solely on a catalog search by the author's
+  resolved name; that search misses titles that don't credit the author under
+  the exact matched name (compilations, alternate creditings, and the like).
+  They now also walk Audible's author-detail listing — which lists an
+  author's titles directly by author ASIN rather than by name-matching — and
+  merge the two: any ASIN either source finds is included, so the result is
+  never smaller than the name search alone (one real author was previously
+  missing over twenty titles this way). List order is a deliberate
+  compatibility choice: name-search results keep their existing order first,
+  and any additional title found only via the author-detail listing is
+  appended after, so an ASIN's position in today's response is preserved and
+  a re-fetch only ever adds entries at the end. Applies to both the primary
+  and legacy path forms of this endpoint.
+
+### Fixed
+- **The author-detail listing behind the above was failing outright.** The
+  request to it was missing a header Audible's Android client always sends,
+  so Audible rejected it and the endpoint silently fell back to name search
+  only. That header is now sent, and a slow or degraded fetch is still
+  served in full to the caller but is no longer written into the cache as if
+  it were the complete answer — so a temporary Audible hiccup can no longer
+  leave a permanently short list cached for later `?cache=true` reads.
+- **ASIN format validation now rejects trailing garbage.** The validity check
+  matched from the start of the string but stopped at the pattern's `$`
+  end-anchor, which treats a trailing newline as "end of string" — so a value
+  shaped like a valid ASIN with a stray newline appended could still pass as
+  valid and get forwarded to Audible instead of being rejected up front. It
+  now requires the entire input to match the ASIN shape with nothing left
+  over. Applies everywhere an ASIN is validated — author, book, series, and
+  DB routes alike.
 ## [1.10.5]
 
 ### Changed
@@ -121,6 +156,7 @@ capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
   new host — but only when the notice is switched on. Left unset otherwise, so
   a self-hoster's "Try it out" and any generated SDK still target their own
   server, not the public instance.
+
 
 ## [1.9.0]
 

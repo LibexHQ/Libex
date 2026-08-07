@@ -1,0 +1,82 @@
+{
+  "page_type": "audible-android-author-detail",
+  "page_id": "B001IGFHW6",
+  "sections": [
+    {
+      "id": "teaser",
+      "model": {
+        "__component_type": "StandardAsinRowList",
+        "header": {
+          "type": "BasicHeader",
+          "header_model": {
+            "model": {
+              "title": {
+                "value": "Most popular"
+              }
+            }
+          }
+        },
+        "rows": [
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B00FEZJ7SM",
+              "title": "The Final Empire",
+              "authors": [
+                {
+                  "name": "Brandon Sanderson",
+                  "asin": "B001IGFHW6"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "pagination": null
+    },
+    {
+      "id": "grid",
+      "model": {
+        "__component_type": "StandardAsinRowList",
+        "header": {
+          "type": "AuthorListRefining",
+          "header_model": {
+            "product_count": 152
+          }
+        },
+        "rows": [
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B00FGHUJ44",
+              "title": "The Way of Kings"
+            }
+          },
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B00FGG100W",
+              "title": "Words of Radiance"
+            }
+          },
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B00FGA8FA6",
+              "title": "The Hero of Ages"
+            }
+          },
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B08KRKV8NT",
+              "title": "Rhythm of War"
+            }
+          }
+        ]
+      },
+      "pagination": "eyJzY2hlZHVsaW5nX2luZm8iOnsicGFnZV9sb2FkX2lkIjoiTURpaThPQjVSSWNFaVFxWiIsInNsb3QiOiJjZW50ZXItMTAiLCJ2ZXJzaW9uIjoiMSJ9LCJwYWdpbmF0aW9uX2luZm8iOnsicGFnZV9udW0iOiIyIn19"
+    }
+  ],
+  "pagination_token": null
+}

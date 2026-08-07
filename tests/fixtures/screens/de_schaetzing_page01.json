@@ -1,0 +1,82 @@
+{
+  "page_type": "audible-android-author-detail",
+  "page_id": "B001ITXLB2",
+  "sections": [
+    {
+      "id": "teaser",
+      "model": {
+        "__component_type": "StandardAsinRowList",
+        "header": {
+          "type": "BasicHeader",
+          "header_model": {
+            "model": {
+              "title": {
+                "value": "Am beliebtesten"
+              }
+            }
+          }
+        },
+        "rows": [
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B00IOTKUDG",
+              "title": "Der Schwarm",
+              "authors": [
+                {
+                  "name": "Frank Schätzing",
+                  "asin": "B001ITXLB2"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "pagination": null
+    },
+    {
+      "id": "grid",
+      "model": {
+        "__component_type": "StandardAsinRowList",
+        "header": {
+          "type": "AuthorListRefining",
+          "header_model": {
+            "product_count": 26
+          }
+        },
+        "rows": [
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B00IOTKUDG",
+              "title": "Der Schwarm"
+            }
+          },
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B007NG27L4",
+              "title": "Lautlos"
+            }
+          },
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B004V09PMY",
+              "title": "Der Schwarm"
+            }
+          },
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B0D5D75Z37",
+              "title": "Helden"
+            }
+          }
+        ]
+      },
+      "pagination": "eyJzY2hlZHVsaW5nX2luZm8iOnsicGFnZV9sb2FkX2lkIjoiamJTd1JUbERHR0I3cnhkbiIsInNsb3QiOiJjZW50ZXItMTAiLCJ2ZXJzaW9uIjoiMSJ9LCJwYWdpbmF0aW9uX2luZm8iOnsicGFnZV9udW0iOiIyIn19"
+    }
+  ],
+  "pagination_token": null
+}

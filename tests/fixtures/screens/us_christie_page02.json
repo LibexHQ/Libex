@@ -1,0 +1,44 @@
+{
+  "page_type": "audible-android-author-detail",
+  "page_id": "B000APENBC",
+  "sections": [
+    {
+      "id": "grid",
+      "model": {
+        "__component_type": "StandardAsinRowList",
+        "rows": [
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B0H7BP426J",
+              "title": "The ABC Murders"
+            }
+          },
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B0883F648X",
+              "title": "Evil Under the Sun"
+            }
+          },
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B0883F371V",
+              "title": "Peril at End House"
+            }
+          },
+          {
+            "row_variant_type": "ListenableAsin",
+            "product_metadata": {
+              "asin": "B08KQ5F9SQ",
+              "title": "A Murder Is Announced"
+            }
+          }
+        ]
+      },
+      "pagination": "eyJzY2hlZHVsaW5nX2luZm8iOnsicGFnZV9sb2FkX2lkIjoiMnhuYWcwdUE1elI4RTZQTyIsInNsb3QiOiJjZW50ZXItMTAiLCJ2ZXJzaW9uIjoiMSJ9LCJwYWdpbmF0aW9uX2luZm8iOnsicGFnZV9udW0iOiIzIn19"
+    }
+  ],
+  "pagination_token": null
+}

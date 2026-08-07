@@ -377,3 +377,55 @@ async def test_get_missing_asins_empty_short_circuits():
     result = await seeder._get_missing_asins(session, [])
     assert result == []
     session.execute.assert_not_awaited()
+
+
+# ============================================================
+# _expand_authors — fetch_author_books_by_name tuple unpack
+# ============================================================
+
+class _FakeSessionCM:
+    """Minimal async context manager standing in for SessionFactory()'s
+    `async with` usage, wrapping a single reusable mock session."""
+
+    def __init__(self, session):
+        self._session = session
+
+    async def __aenter__(self):
+        return self._session
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+@pytest.mark.asyncio
+async def test_expand_authors_unpacks_book_asins_tuple_not_bare_list():
+    """fetch_author_books_by_name returns (asins, pages_fetched) — shared with
+    get_author_books in app.services.audible.authors. The seeder's own deleted
+    helper it replaced returned a bare list; a regression back to treating the
+    shared helper's return value as that bare list would hand _get_missing_asins
+    a (list, int) tuple instead of a flat ASIN list."""
+    from unittest.mock import MagicMock
+
+    fake_authors = [(1, "B000AUTHOR1", "Frank Herbert")]
+    author_select_result = MagicMock()
+    author_select_result.fetchall.return_value = fake_authors
+    select_session = AsyncMock()
+    select_session.execute = AsyncMock(return_value=author_select_result)
+
+    captured = {}
+
+    async def _missing(session, asins):
+        captured["asins"] = list(asins)
+        return list(asins)
+
+    with patch.object(seeder, "SessionFactory", return_value=_FakeSessionCM(select_session)), \
+         patch.object(seeder, "fetch_author_books_by_name", new=AsyncMock(return_value=(["B0BOOK0001"], 1))), \
+         patch.object(seeder, "_get_missing_asins", new=AsyncMock(side_effect=_missing)), \
+         patch.object(seeder, "_fetch_and_persist", new=AsyncMock()), \
+         patch.object(seeder, "_stamp_author", new=AsyncMock()):
+        stats = await seeder._expand_authors("us", delay=0)
+
+    assert captured["asins"] == ["B0BOOK0001"]
+    assert stats["errors"] == 0
+    assert stats["books_discovered"] == 1
+    assert stats["authors_processed"] == 1

@@ -108,15 +108,24 @@ async def lifespan(app: FastAPI):
 # stayed silent on.
 migration_notice = build_migration_notice(settings)
 
-openapi_description = "Open, unrestricted Audible metadata API for the audiobook automation community."
+_BASE_DESCRIPTION = "Open, unrestricted Audible metadata API for the audiobook automation community."
+
 if migration_notice is not None:
-    openapi_description += (
-        f"\n\n**Migration notice:** Libex's public instance has moved to {migration_notice.new_host}. "
+    # Served from both hostnames off one description built at import time, so this can't
+    # say "this host" or "this instance" — read from libexdb.com, "this" would name the
+    # host the reader is already on instead of the one being retired.
+    openapi_description = (
+        "## Migration notice\n\n"
+        f"**Libex's public instance has moved to {migration_notice.new_host}.**\n\n"
         f"The previous host remains available until {migration_notice.sunset_display}, after which "
-        "it stops serving."
+        "it stops serving.\n"
+        "If you are using the old address, update your configuration.\n"
     )
     if migration_notice.info_url:
-        openapi_description += f" Details: {migration_notice.info_url}"
+        openapi_description += f"\n[Details and questions]({migration_notice.info_url})\n"
+    openapi_description += f"\n---\n\n{_BASE_DESCRIPTION}"
+else:
+    openapi_description = _BASE_DESCRIPTION
 
 app = FastAPI(
     title="Libex",

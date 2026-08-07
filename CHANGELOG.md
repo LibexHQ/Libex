@@ -10,6 +10,20 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.10.1]
+
+### Changed
+- **Migration notice is more visible, not new.** The README banner now
+  renders as GitHub `[!WARNING]`/`[!NOTE]` alerts instead of a plain
+  blockquote, and the OpenAPI `description` — shown only when the notice is
+  switched on — leads with a `## Migration notice` heading and a `---` rule
+  ahead of the normal blurb instead of trailing after it, and now spells out
+  "update your configuration" explicitly rather than only implying it. Same
+  host, same sunset date, same "stops serving" wording as 1.10.0 — this is a
+  presentation pass on an already-shipped notice, not a new one. Self-hosted
+  instances are unaffected either way: with the notice off (the default),
+  `openapi.json`'s `info.description` is byte-identical to before.
+
 ## [1.10.0]
 
 ### Added

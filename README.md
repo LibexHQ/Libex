@@ -16,14 +16,16 @@ Open, unrestricted Audible metadata API for the audiobook automation community.
 
 </div>
 
-> **Self-hosters: this does not affect you.** You already point at your own server, so
-> nothing changes and there is nothing to do.
+> [!WARNING]
+> **The public instance is moving to [libexdb.com](https://libexdb.com).**
 >
-> **The public instance is moving.** It is now available at
-> [libexdb.com](https://libexdb.com). The previous address, `libex.lostcartographer.xyz`,
-> keeps working until **4 November 2026**, after which it stops serving. If you use the
-> public instance, update your configuration to the new address — there is no rush before
-> that date.
+> The old address `libex.lostcartographer.xyz` **stops serving on 4 November 2026**.
+> If you use the public instance, update your configuration to `https://libexdb.com`.
+>
+> [Details and questions →](https://github.com/LibexHQ/Libex/issues/183)
+
+> [!NOTE]
+> **Self-hosting?** This doesn't affect you — you point at your own server. Nothing to do.
 
 ---
 

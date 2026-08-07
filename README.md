@@ -7,20 +7,29 @@
 [![GHCR](https://img.shields.io/badge/ghcr.io-libexhq%2Flibex-blue)](https://github.com/LibexHQ/Libex/pkgs/container/libex)
 [![Docker Hub](https://img.shields.io/badge/docker%20hub-sunbrolynk%2Flibex-blue)](https://hub.docker.com/r/sunbrolynk/libex)
 
-[![Books](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibex.lostcartographer.xyz%2Fdb%2Fstats&query=%24.books&label=Books&color=orange)](https://libex.lostcartographer.xyz/db/stats)
-[![Authors](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibex.lostcartographer.xyz%2Fdb%2Fstats&query=%24.authors&label=Authors&color=teal)](https://libex.lostcartographer.xyz/db/stats)
-[![Narrators](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibex.lostcartographer.xyz%2Fdb%2Fstats&query=%24.narrators&label=Narrators&color=blue)](https://libex.lostcartographer.xyz/db/stats)
-[![Series](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibex.lostcartographer.xyz%2Fdb%2Fstats&query=%24.series&label=Series&color=purple)](https://libex.lostcartographer.xyz/db/stats)
+[![Books](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats&query=%24.books&label=Books&color=orange)](https://libexdb.com/db/stats)
+[![Authors](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats&query=%24.authors&label=Authors&color=teal)](https://libexdb.com/db/stats)
+[![Narrators](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats&query=%24.narrators&label=Narrators&color=blue)](https://libexdb.com/db/stats)
+[![Series](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats&query=%24.series&label=Series&color=purple)](https://libexdb.com/db/stats)
 
 Open, unrestricted Audible metadata API for the audiobook automation community.
 
 </div>
 
+> **Self-hosters: this does not affect you.** You already point at your own server, so
+> nothing changes and there is nothing to do.
+>
+> **The public instance is moving.** It is now available at
+> [libexdb.com](https://libexdb.com). The previous address, `libex.lostcartographer.xyz`,
+> keeps working until **4 November 2026**, after which it stops serving. If you use the
+> public instance, update your configuration to the new address — there is no rush before
+> that date.
+
 ---
 
 ## Public Instance
 
-A free public instance of Libex is available at [Libex](https://libex.lostcartographer.xyz)
+A free public instance of Libex is available at [Libex](https://libexdb.com)
 
 This instance is maintained by the Libex project and is free for community use. No API key required. No rate limits beyond what Audible naturally enforces.
 

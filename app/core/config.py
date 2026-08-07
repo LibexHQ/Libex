@@ -20,7 +20,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "Libex"
-    app_version: str = "1.9.0"
+    app_version: str = "1.10.0"
     debug: bool = False
     host: str = "0.0.0.0"
     port: int = 3333
@@ -56,6 +56,13 @@ class Settings(BaseSettings):
 
     # Internal seed endpoint
     seed_secret: str = ""  # Empty = endpoint disabled. Set in env only.
+
+    # Migration notice
+    migration_notice_enabled: bool = False
+    migration_new_host: str = ""        # e.g. https://libexdb.com
+    migration_announced: str = ""       # ISO date, e.g. 2026-08-06
+    migration_sunset: str = ""          # ISO date, e.g. 2026-11-04
+    migration_info_url: str = ""        # URL of the pinned GitHub issue
 
 
 @lru_cache()

@@ -10,6 +10,45 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.10.0]
+
+### Added
+- **Public-instance migration notice, off by default.** Five new settings
+  (`migration_notice_enabled` and friends) control an announcement that the
+  public instance is moving from `libex.lostcartographer.xyz` to
+  `libexdb.com`. Every one defaults to off/empty, and unless you explicitly
+  set them the migration middleware is not even registered. The only wire
+  change that ships regardless is described below — a self-hosted instance
+  is otherwise byte-identical, `/health` included. If you run your own
+  server, nothing changes and there is nothing to do.
+- **`Deprecation`, `Sunset`, and `Link` response headers, when the notice is
+  enabled.** Follows RFC 9745 and RFC 8594: `Deprecation` marks the old host
+  deprecated as of 2026-08-06, `Sunset` gives the date it stops serving —
+  2026-11-04 — and `Link` points at the new host (`rel="canonical"`) and, if
+  configured, a details page (`rel="deprecation"`). Applied to every response
+  served on the old hostname, including an unhandled 500 — the one moment a
+  moving consumer most needs the pointer. The same container also answers on
+  the new host during the migration window, and a request that arrives there
+  gets none of this: no headers, and no `/health` notice below — the new
+  host never announces its own retirement to the consumers being asked to
+  move onto it. Separately, and regardless of whether the notice is switched
+  on at all, `Access-Control-Expose-Headers` now names all three on any
+  response that carries an `Origin` header, so a browser can already read
+  them once they do start appearing. That naming is the one wire change a
+  self-hosted instance can't opt out of; a request without an `Origin`
+  header sees no difference at all.
+- **`/health` gains an optional `notice` field.** Present when the migration
+  notice is enabled and the request arrived on the old hostname; suppressed
+  on the new host for the same reason the headers above are. `/health` is
+  not part of the AudiMeta DTO contract, so this is a safe additive field —
+  unlike the book/author/series responses, an extra key here can't trip up a
+  strict deserializer.
+- **OpenAPI docs carry the notice when enabled.** The `/docs` description
+  gains a migration paragraph, and the OpenAPI `servers` entry points at the
+  new host — but only when the notice is switched on. Left unset otherwise, so
+  a self-hoster's "Try it out" and any generated SDK still target their own
+  server, not the public instance.
+
 ## [1.9.0]
 
 ### Added

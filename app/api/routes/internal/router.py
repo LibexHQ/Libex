@@ -207,7 +207,7 @@ if __name__ == "__main__":
     print(f"  {hashed}")
     print()
     print("  Usage:")
-    print('  curl -X POST https://libex.lostcartographer.xyz/internal/seed/narrators \\')
+    print('  curl -X POST https://libexdb.com/internal/seed/narrators \\')
     print(f'    -H "Authorization: Bearer {token}" \\')
     print('    -H "Content-Type: application/json" \\')
     print('    -d @scrapers/narratorlist/output/narrators.json')

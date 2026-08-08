@@ -10,6 +10,8 @@ Falls back to DB when Audible is unavailable.
 
 # Standard library
 import asyncio
+import base64
+import json
 import re
 import time
 from dataclasses import dataclass
@@ -72,6 +74,22 @@ SCREENS_MAX_ROWS_PER_PAGE = 10000
 SCREENS_TOKEN_MAX_LEN = 512
 _SCREENS_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9+/=_-]+")
 
+# Audible's page size for this screen is fixed at 20 rows regardless of
+# num_results/page_size query params -- both tried live and confirmed
+# inert. That fixed width is what makes it possible to compute, from
+# product_count alone, how many pages a walk will need before fetching any
+# of them, and therefore to fan out to pages 2..N directly (see
+# _fanout_screen_pages) instead of only ever discovering page N+1 by
+# walking page N first.
+SCREENS_PAGE_SIZE = 20
+
+# The page_load_id field inside a minted continuation token (see
+# _mint_screen_token). Verified live: a real captured value, a fabricated
+# one, and omitting the field entirely all returned byte-identical pages --
+# there is nothing to harvest from a real response, so this is a fixed
+# constant rather than anything scraped off page 1.
+_SCREENS_TOKEN_PAGE_LOAD_ID = "libex-direct-page"
+
 # Bound for the name-search walk in _fetch_author_books_by_name_detailed,
 # same principle as the screens bounds above: the walk's real terminators
 # are the catalog endpoint's own total_results field (read from a live
@@ -87,15 +105,41 @@ NAME_SEARCH_MAX_PAGES = 5000
 # Bounded concurrency for the name-search walk's parallel page fetches --
 # unlike the screens endpoint's opaque continuation token, /catalog/products
 # takes a real page index, so pages don't have to be fetched one at a time.
-# This bound only ever applies on the live request path (get_author_books
-# passes NAME_SEARCH_CONCURRENCY explicitly); _fetch_author_books_by_name_detailed
-# defaults to concurrency=1 and fetch_author_books_by_name -- the wrapper the
-# seeder's paced per-author loop calls -- never overrides that default, so
-# the seeder's own pacing (SEEDER_REQUEST_DELAY) is untouched by this and
-# stays fully sequential. 8 is deliberately modest, not "as fast as
-# possible": this IP is shared with the live seeder and has already been
-# throttled into a VPN rotation once from an amplified request burst.
+# _fetch_author_books_by_name_detailed defaults to concurrency=1 and
+# fetch_author_books_by_name -- the wrapper the seeder's paced per-author
+# loop calls, and the only caller left on this walk now that get_author_books
+# fetches the catalog through _fetch_author_books_by_catalog instead (see
+# that function) -- never overrides that default, so the seeder's own
+# pacing (SEEDER_REQUEST_DELAY) is untouched by this and stays fully
+# sequential. This constant itself currently has no caller passing a value
+# other than the default: retained as a bounded option for a future caller
+# of _fetch_author_books_by_name_detailed that wants throttling on top of
+# whatever the shared client itself provides, sized modestly (not "as fast
+# as possible") since this IP is shared with the live seeder and has
+# already been throttled into a VPN rotation once from an amplified
+# request burst.
 NAME_SEARCH_CONCURRENCY = 8
+
+# Bounded concurrency for the screens walk's page 2..N fan-out (see
+# _fanout_screen_pages). Deliberately set to the same value as, and for the
+# same reason as, NAME_SEARCH_CONCURRENCY above: this IP is shared with the
+# live seeder and has already been throttled into a VPN rotation once from
+# an amplified request burst, and that risk is the harder failure mode
+# (indefinite, global) to weigh against the alternative of going too low.
+# Too low reintroduces the exact problem the fan-out exists to fix: the
+# author's underlying list drifts (a live probe of the identical page
+# 25-40 seconds apart returned different rows), and a walk that stretches
+# back into that drift window starts silently duplicating and dropping
+# titles at page boundaries again. At 8 in flight and roughly 0.5s/page,
+# Conan Doyle's ~225-page catalog (the largest known real one) is ~28
+# batches, ~14s wall clock -- comfortably inside the 25-40s drift window,
+# not a photo finish, without raising per-request concurrency past what
+# the name-search half already runs safely on this same shared IP. Unlike
+# the new catalog multi-sort walk's own wave 3 (_fetch_author_books_by_catalog),
+# which fires its remaining pages in one unbounded gather and relies on the
+# shared client's own global throttling, this walk's batching is left as
+# it was rather than changed to match -- it is being kept, not rebuilt.
+SCREENS_FANOUT_CONCURRENCY = 8
 
 # Wall-clock budget across the whole author-books union in get_author_books
 # (one screens walk plus one name search). This bounds the work a single
@@ -141,6 +185,20 @@ SCREENS_REASON_GRID_NOT_FOUND = "grid_not_found"
 # a walk that otherwise reached a confirmed pagination end cannot be scored
 # as having seen everything upstream had to offer.
 SCREENS_REASON_TRUNCATED = "sections_or_rows_truncated"
+# A repeated page signature during the direct-page-addressed fan-out
+# (_fanout_screen_pages) is NOT the same signal as a null continuation
+# token. Verified live: a real 404 past an author's true last page
+# (Sanderson page 10) confirms genuine completion, but requesting a page
+# past the true last one via a minted token does not error or come back
+# empty -- it PLATEAUS, returning the last real page's content again,
+# byte-identical, forever (Christie page 30 of a 56-page product_count-
+# implied walk repeats page 26's real content). A walk that stops on a
+# repeated signature has NOT been told by upstream that nothing further
+# remains -- product_count itself overstated the real catalog by more
+# than 2x for Christie -- so this is scored unclean, distinct from
+# SCREENS_REASON_COMPLETED, even though the walk correctly stops rather
+# than looping on repeated content forever.
+SCREENS_REASON_PLATEAU_TRUNCATED = "plateau_truncated"
 SCREENS_CLEAN_REASONS = frozenset({SCREENS_REASON_COMPLETED})
 
 
@@ -398,6 +456,230 @@ def _extract_next_token(data: dict) -> tuple[str | None, bool]:
     return token, False
 
 
+async def _fetch_screen_page(
+    asin: str,
+    region: str,
+    path: str,
+    token: str | None,
+) -> dict:
+    """
+    Fetches a single screens page for an already-upper-cased author ASIN.
+    Raises on failure; callers (the sequential walk in
+    _fetch_author_books_by_screen and the concurrent one in
+    _fanout_screen_pages) decide what a failed page means for their walk.
+    """
+    params: dict[str, str] = {"author_asin": asin}
+    if token:
+        params["pageSectionContinuationToken"] = token
+    return await audible_get(
+        region,
+        path,
+        params,
+        extra_headers={"X-Device-Type-Id": ANDROID_DEVICE_TYPE_ID},
+    )
+
+
+def _mint_screen_token(page_num: int) -> str:
+    """
+    Builds a pageSectionContinuationToken for an arbitrary page directly,
+    without ever having walked to page_num - 1 first.
+
+    Verified live against the real endpoint: a
+    real captured token, base64-decoded, is just
+    {"scheduling_info": {"page_load_id": "...", "slot": "center-10",
+    "version": "1"}, "pagination_info": {"page_num": "<N>"}}.
+    page_load_id is completely ignored by the endpoint -- a real captured
+    value, a fabricated one, and omitting the field entirely all returned
+    byte-identical pages -- so a fixed constant is used here rather than
+    anything harvested from a response. slot must be present and must be
+    the literal string "center-10": omitting it 400s, a garbage value
+    404s. version is optional and omitted here (confirmed live to change
+    nothing). page_num is a STRING in the real payloads, matched here
+    rather than an int, and the JSON carries no whitespace, matching what
+    Audible's own client sends.
+    """
+    payload = {
+        "scheduling_info": {
+            "page_load_id": _SCREENS_TOKEN_PAGE_LOAD_ID,
+            "slot": "center-10",
+        },
+        "pagination_info": {"page_num": str(page_num)},
+    }
+    raw = json.dumps(payload, separators=(",", ":")).encode("ascii")
+    return base64.b64encode(raw).decode("ascii")
+
+
+async def _fanout_screen_pages(
+    asin: str,
+    region: str,
+    path: str,
+    total_pages: int,
+    deadline: float | None,
+    asins: list[str],
+    seen_asins: set[str],
+    seen_page_signatures: set[tuple[str, ...]],
+    invalid_skipped: int,
+    attribution_rejected: int,
+    sections_truncated: int,
+    rows_truncated: int,
+) -> tuple[int, int, int, int, int, str, str | None]:
+    """
+    Fetches pages 2..total_pages of the screens walk concurrently, bounded
+    by SCREENS_FANOUT_CONCURRENCY, using continuation tokens minted
+    directly per page (_mint_screen_token) rather than harvested from the
+    previous page's response -- which is what makes fetching them out of
+    walk order possible at all. Only ever called once product_count on page
+    1 was a usable positive int and implies more than one page (see
+    _fetch_author_books_by_screen); a missing or unusable product_count
+    keeps that caller on the old sequential, token-following walk instead.
+
+    This exists because the underlying list drifts under a slow sequential
+    walk: a live probe of the identical page 25-40 seconds apart returned
+    different rows -- a new ASIN at the front, the tail item pushed off --
+    while pages fetched roughly 2 seconds apart tiled perfectly, zero
+    overlap and zero gap. A large author walked one page at a time (Conan
+    Doyle's ~4500 titles is ~225 pages, roughly two minutes sequentially)
+    silently duplicates and drops titles at page boundaries purely from
+    taking too long to read the whole list; the concurrency here is what
+    makes the result correct, not merely faster.
+
+    total_pages, computed by the caller from product_count, is never
+    trusted as an exact upper bound: probed live, requesting a page past a
+    real author's last one does not error or come back empty, it
+    PLATEAUS -- returning the last real page's content again,
+    byte-identical, forever, while the requested page number keeps
+    climbing (pages 56, 57, and 999 of a real 56-page author all came back
+    identical). So every page's ASIN signature is checked against every
+    signature already seen this walk (seen_page_signatures, seeded by the
+    caller with page 1's own); a repeat means the page immediately before
+    it was the true last page the fan-out will ever see new content from.
+    Unlike a null continuation token (a genuine upstream confirmation that
+    nothing remains -- the same signal a real 404 gives the sequential
+    walk), a repeated signature is this walk noticing it has started
+    plateauing on its own, not upstream telling it so: product_count is
+    exactly what fed total_pages here, and it overstated Christie's real
+    catalog by more than 2x. So a repeat is scored SCREENS_REASON_
+    PLATEAU_TRUNCATED -- unclean, distinct from SCREENS_REASON_COMPLETED --
+    even though the walk still correctly stops there rather than looping
+    on repeated content up to total_pages. Nothing from the repeating page
+    onward is kept either way.
+
+    Reassembly is always strict page-index order, never completion order:
+    asyncio.gather preserves input order regardless of which request
+    finishes first, and batches themselves are dispatched and folded in in
+    ascending page-number order, so a clean walk's ASIN list ends up in
+    the same order the old one-page-at-a-time walk would have produced.
+
+    A page-fetch failure, a non-dict page, or the SCREENS_MAX_ASINS cap
+    all end the walk at exactly the point they would in the sequential
+    walk -- everything from pages before that point is kept (asins and
+    seen_asins are mutated in place as pages are folded in, so the
+    caller's copies are already up to date on return), nothing from that
+    point on is used, even if it was already fetched as part of the same
+    batch. total_pages itself is pre-clamped to SCREENS_MAX_PAGES by the
+    caller; running the fan-out all the way through that clamp without a
+    clean stop is reported as SCREENS_REASON_PAGE_CAP, the same as the
+    sequential walk's own page cap -- this only ever fires against a
+    pathological upstream, since no real catalog approaches that page
+    count.
+
+    deadline, when given, is an absolute time.monotonic() bound checked
+    once before dispatching each batch; once passed the walk stops without
+    starting another batch and keeps what it already has.
+
+    Returns (pages_fetched, invalid_skipped, attribution_rejected,
+    sections_truncated, rows_truncated, termination_reason, page_error) --
+    the last five folding the caller's own running totals in, the same
+    convention _fetch_author_books_by_screen already uses for its own
+    counters.
+    """
+    page_cap_clamped = total_pages >= SCREENS_MAX_PAGES
+    pages_fetched = 0
+    reason = SCREENS_REASON_COMPLETED
+    page_error_detail: str | None = None
+    next_page_num = 2
+
+    while next_page_num <= total_pages:
+        if deadline is not None and time.monotonic() >= deadline:
+            reason = SCREENS_REASON_TIME_BUDGET
+            break
+
+        batch_page_nums = list(
+            range(next_page_num, min(next_page_num + SCREENS_FANOUT_CONCURRENCY, total_pages + 1))
+        )
+        results = await asyncio.gather(
+            *(_fetch_screen_page(asin, region, path, _mint_screen_token(p)) for p in batch_page_nums),
+            return_exceptions=True,
+        )
+
+        stop = False
+        for result in results:
+            if isinstance(result, BaseException):
+                reason = SCREENS_REASON_PAGE_ERROR
+                page_error_detail = f"{type(result).__name__}: {result}"
+                stop = True
+                break
+
+            if not isinstance(result, dict):
+                reason = SCREENS_REASON_NON_DICT_PAGE
+                stop = True
+                break
+
+            grid_rows, other_rows, _page_product_count, page_sections_truncated = (
+                _select_asin_rows(result)
+            )
+            sections_truncated += page_sections_truncated
+            grid_asins, grid_invalid, grid_rejected, grid_rows_truncated = _extract_row_asins(
+                grid_rows
+            )
+            other_asins, other_invalid, other_rejected, other_rows_truncated = _extract_row_asins(
+                other_rows, required_author_asin=asin
+            )
+            invalid_skipped += grid_invalid + other_invalid
+            attribution_rejected += grid_rejected + other_rejected
+            rows_truncated += grid_rows_truncated + other_rows_truncated
+            pages_fetched += 1
+
+            page_asins = grid_asins + other_asins
+            signature = tuple(page_asins)
+            is_plateau = signature in seen_page_signatures
+            seen_page_signatures.add(signature)
+
+            for row_asin in page_asins:
+                if row_asin not in seen_asins:
+                    seen_asins.add(row_asin)
+                    asins.append(row_asin)
+                if len(asins) >= SCREENS_MAX_ASINS:
+                    break
+
+            if len(asins) >= SCREENS_MAX_ASINS:
+                reason = SCREENS_REASON_ASIN_CAP
+                stop = True
+                break
+
+            if is_plateau:
+                reason = SCREENS_REASON_PLATEAU_TRUNCATED
+                stop = True
+                break
+
+        if stop:
+            break
+        next_page_num = batch_page_nums[-1] + 1
+    else:
+        if page_cap_clamped:
+            reason = SCREENS_REASON_PAGE_CAP
+
+    return (
+        pages_fetched,
+        invalid_skipped,
+        attribution_rejected,
+        sections_truncated,
+        rows_truncated,
+        reason,
+        page_error_detail,
+    )
+
+
 async def _fetch_author_books_by_screen(
     asin: str,
     region: str,
@@ -406,14 +688,34 @@ async def _fetch_author_books_by_screen(
     """
     Fetches book ASINs for an author from Audible's Android author-detail
     screen, which returns the author's title grid ASIN-exact rather than by
-    name-matching a catalog search. Paginates via the opaque continuation
-    token until it repeats, goes bad, is absent, or a page/ASIN/time bound
-    is hit. A transient failure fetching one page ends the walk but keeps
-    every ASIN already harvested from the pages before it rather than
-    discarding the whole walk.
+    name-matching a catalog search.
+
+    Page 1 is always fetched sequentially -- it is the only way to learn
+    product_count, and its teaser ("most popular") section carries titles
+    absent from the grid. From there:
+
+    - When page 1 reports a usable product_count (a positive int) that
+      implies more than one page at Audible's fixed SCREENS_PAGE_SIZE,
+      pages 2..N are fetched concurrently, bounded by
+      SCREENS_FANOUT_CONCURRENCY, via _fanout_screen_pages -- see that
+      function's docstring for why this is a correctness fix (the
+      underlying list drifts under a slow sequential walk) and not merely
+      a speed one, and for how it still detects and stops at the real end
+      of the catalog even when product_count overstates it.
+    - Otherwise (product_count missing, zero, or implying only page 1 is
+      needed), the walk falls back to the original behavior: paginating
+      via the opaque continuation token, one page at a time, until it
+      repeats, goes bad, is absent, or a page/ASIN/time bound is hit. This
+      keeps small catalogs and a page-shape change upstream degrading
+      gracefully rather than breaking outright.
+
+    A transient failure fetching one page ends the walk but keeps every
+    ASIN already harvested from the pages before it rather than discarding
+    the whole walk, in both modes.
 
     deadline, when given, is an absolute time.monotonic() bound checked
-    between pages; once passed the walk stops and returns what it has.
+    between pages (sequential mode) or once before each batch (fan-out
+    mode); once passed the walk stops and returns what it has.
 
     Never raises for "author not found" — the screen endpoint returns 200
     with zero rows for a bogus ASIN, so the empty result is the caller's
@@ -449,17 +751,8 @@ async def _fetch_author_books_by_screen(
             reason = SCREENS_REASON_TIME_BUDGET
             break
 
-        params: dict[str, str] = {"author_asin": asin}
-        if token:
-            params["pageSectionContinuationToken"] = token
-
         try:
-            data = await audible_get(
-                region,
-                path,
-                params,
-                extra_headers={"X-Device-Type-Id": ANDROID_DEVICE_TYPE_ID},
-            )
+            data = await _fetch_screen_page(asin, region, path, token)
         except Exception as e:
             reason = SCREENS_REASON_PAGE_ERROR
             page_error_detail = f"{type(e).__name__}: {e}"
@@ -496,6 +789,45 @@ async def _fetch_author_books_by_screen(
         if len(asins) >= SCREENS_MAX_ASINS:
             reason = SCREENS_REASON_ASIN_CAP
             break
+
+        # Direct page addressing: once page 1 has told us how many titles
+        # the author has, every remaining page's continuation token can be
+        # minted outright (see _mint_screen_token) instead of only ever
+        # being learned by fetching the page before it -- so pages 2..N
+        # are fetched concurrently here rather than one at a time for the
+        # rest of this loop. Only attempted once, on page 1: a usable
+        # product_count that implies more than SCREENS_PAGE_SIZE titles is
+        # required, so a missing/zero/unusable product_count (or one small
+        # enough that page 1 is already the whole catalog) falls through
+        # unchanged to the original token-chasing loop below, which is the
+        # explicit fallback this walk must degrade to rather than break on.
+        if pages_fetched == 1 and isinstance(product_count, int) and product_count > 0:
+            total_pages = min(-(-product_count // SCREENS_PAGE_SIZE), SCREENS_MAX_PAGES)
+            if total_pages > 1:
+                (
+                    fanout_pages_fetched,
+                    invalid_skipped,
+                    attribution_rejected,
+                    sections_truncated,
+                    rows_truncated,
+                    reason,
+                    page_error_detail,
+                ) = await _fanout_screen_pages(
+                    asin,
+                    region,
+                    path,
+                    total_pages=total_pages,
+                    deadline=deadline,
+                    asins=asins,
+                    seen_asins=seen_asins,
+                    seen_page_signatures={tuple(grid_asins + other_asins)},
+                    invalid_skipped=invalid_skipped,
+                    attribution_rejected=attribution_rejected,
+                    sections_truncated=sections_truncated,
+                    rows_truncated=rows_truncated,
+                )
+                pages_fetched += fanout_pages_fetched
+                break
 
         next_token, rejected = _extract_next_token(data)
         if rejected:
@@ -534,8 +866,18 @@ async def _fetch_author_books_by_screen(
         reason = SCREENS_REASON_TRUNCATED
 
     unclean = reason not in SCREENS_CLEAN_REASONS
-    shortfall = product_count is not None and len(asins) < product_count
 
+    # A dedicated warning that compared len(asins) against product_count
+    # used to fire here as a second, independent "shortfall" signal. It was
+    # dropped: probed live, Christie's grid-section product_count claims
+    # 1116 while the grid itself plateaus at 520 real ASINs -- product_count
+    # over-claims by more than 2x, so a magnitude computed against it is
+    # noise, not signal, on exactly the prolific authors this walk cares
+    # most about getting right. termination_reason already carries the
+    # meaningful distinction the shortfall warning was trying to surface
+    # (SCREENS_REASON_PLATEAU_TRUNCATED vs SCREENS_REASON_COMPLETED vs every
+    # other unclean reason), and product_count is still included below for
+    # anyone reading the log who wants to eyeball it themselves.
     if unclean:
         logger.warning("Audible Author Books screen ended without confirmed completion", extra={
             "author_asin": asin,
@@ -543,19 +885,10 @@ async def _fetch_author_books_by_screen(
             "termination_reason": reason,
             "pages_fetched": pages_fetched,
             "asins_collected": len(asins),
+            "product_count": product_count,
             "page_error": page_error_detail,
             "sections_truncated": sections_truncated,
             "rows_truncated": rows_truncated,
-        })
-    if shortfall:
-        logger.warning("Audible Author Books screen shortfall against reported product_count", extra={
-            "author_asin": asin,
-            "region": region,
-            "termination_reason": reason,
-            "pages_fetched": pages_fetched,
-            "asins_collected": len(asins),
-            "product_count": product_count,
-            "shortfall": product_count - len(asins),
         })
 
     return _ScreenBooksResult(
@@ -591,17 +924,23 @@ async def _fetch_name_search_page(name: str, region: str, page: int) -> dict:
 def _accept_name_search_products(
     products: list, name: str, seen: set[str], asins: list[str]
 ) -> None:
-    """Applies the exact-name, English-only, dedupe filter and appends
-    matches to asins in-place, in the order products was given."""
+    """Applies the exact-name, dedupe filter and appends matches to asins
+    in-place, in the order products was given.
+
+    No longer filters on language. Region scoping is per-host (a
+    de-region call hits api.audible.de), so a store's catalogue already IS
+    what that region means -- a Spanish-language Christie sold in the US
+    store is a legitimate US-region product. Verified live: the removed
+    english/englisch check was silently dropping 490 of Christie's 1100 US
+    ASINs (125 German, 118 Spanish, 94 Italian, 63 Swedish and more).
+    Region does the scoping; language filtering only ever did damage."""
     for product in products:
         matches = any(
             a.get("name", "").lower() == name.lower()
             for a in product.get("authors", [])
         )
-        language = product.get("language", "").lower()
-        is_english = language.startswith("english") or language == "englisch"
         asin = product.get("asin")
-        if asin and matches and is_english:
+        if asin and matches:
             asin = asin.upper()
             if asin not in seen:
                 seen.add(asin)
@@ -627,7 +966,12 @@ async def _fetch_author_books_by_name_detailed(
     shared fetch_author_books_by_name wrapper, which the seeder's paced
     per-author expansion loop calls, is untouched by this: it never passes
     concurrency, so it always runs sequential. get_author_books, the live
-    request path, is the only caller that opts into NAME_SEARCH_CONCURRENCY.
+    ASIN-scoped request path, now fetches the catalog through the separate
+    multi-sort, ASIN-attributed walk in _fetch_author_books_by_catalog
+    instead of this function -- this walk (and NAME_SEARCH_CONCURRENCY) is
+    reached today only via fetch_author_books_by_name and
+    get_author_books_by_name, both of which stay on the default
+    concurrency=1.
 
     Fetching is still strictly ordered: pages within a batch are requested
     concurrently but always reassembled and processed in ascending page-
@@ -802,8 +1146,10 @@ async def fetch_author_books_by_name(
     Returns (asins, pages_fetched). Shared by get_author_books_by_name in
     this module and by the seeder's author-expansion phase, neither of
     which needs to distinguish a confirmed-complete walk from one that
-    merely stopped -- get_author_books, which does, calls
-    _fetch_author_books_by_name_detailed directly instead.
+    merely stopped, nor has an author ASIN to attribute against --
+    get_author_books, the ASIN-scoped live request path, fetches the
+    catalog through the separate, ASIN-attributed multi-sort walk in
+    _fetch_author_books_by_catalog instead of this function entirely.
 
     Always runs at _fetch_author_books_by_name_detailed's default
     concurrency=1 (fully sequential, one page in flight at a time) since
@@ -812,11 +1158,7 @@ async def fetch_author_books_by_name(
     wrapper once per author inside its own deliberately spaced loop, and
     parallelizing page fetches inside a helper the seeder shares would
     silently turn every seeder author into a concurrent-request burst,
-    defeating that pacing across the seeder's whole run. Only
-    get_author_books, the live request path, opts into
-    NAME_SEARCH_CONCURRENCY, and it does so by calling
-    _fetch_author_books_by_name_detailed directly rather than through this
-    wrapper.
+    defeating that pacing across the seeder's whole run.
 
     deadline, when given, is an absolute time.monotonic() bound checked
     once before dispatching each batch; once passed the walk stops and
@@ -826,6 +1168,349 @@ async def fetch_author_books_by_name(
         name, region, deadline=deadline
     )
     return asins, pages_fetched
+
+
+# ============================================================
+# CATALOG MULTI-SORT WALK (get_author_books' 3 of its 4 sources)
+#
+# Distinct from _fetch_author_books_by_name_detailed above, which is a
+# single-sort, name-only walk kept unchanged (besides the language-filter
+# removal) for get_author_books_by_name and the seeder's per-author
+# expansion loop, neither of which has an author ASIN to attribute
+# against. get_author_books does have the ASIN, and probed live, the
+# catalog is neither a subset of the screens grid nor complete on its
+# own: for Agatha Christie (total_results 1138), walking -ReleaseDate
+# alone caps at 550 results, and walking ascending ReleaseDate caps at a
+# DIFFERENT 550 with zero overlap -- different sort orders open disjoint
+# windows into the same underlying result set, so ANY single sort misses
+# results a second sort would surface, and every sort still saturates at
+# roughly the same ~550-result ceiling no matter how far paging
+# continues past it.
+# ============================================================
+
+# Priority order matters here: -ReleaseDate first is compat-critical.
+# Consumers have always received the -ReleaseDate list at the front of
+# the response and must keep receiving that same list, in that same
+# order, unmoved at the front of the union -- see get_author_books.
+# Ascending
+# ReleaseDate is the bare field name, not "+ReleaseDate" -- probed live,
+# the leading "+" 400s. -Title is third, the last sort trusted enough to
+# spend a request on.
+_CATALOG_SORTS: tuple[str, ...] = ("-ReleaseDate", "ReleaseDate", "-Title")
+
+CATALOG_PAGE_SIZE = 50
+
+# Audible's observed deep-paging ceiling on /1.0/catalog/products,
+# independent of what total_results itself claims. Verified live against
+# Agatha Christie (total_results 1138): -ReleaseDate saturates at exactly
+# 550 results and never surfaces more no matter how many further pages
+# are requested; ascending ReleaseDate saturates at a different 550. This
+# bounds pages requested per sort (see _fetch_author_books_by_catalog)
+# rather than trusting total_results past it, the same principle
+# NAME_SEARCH's own total_results-vs-repeated-signature check applies to
+# the single-sort walk above.
+CATALOG_RESULT_CEILING = 550
+
+# Attribution tiers a catalog product can land in -- see
+# _classify_catalog_product. Counted separately in _CatalogBooksResult so
+# get_author_books can log how often each tier fired; how often
+# attribution falls back to a name match (rather than an authoritative
+# ASIN match) is worth knowing on its own.
+_CATALOG_TIER_ASIN_MATCH = "asin_match"
+_CATALOG_TIER_ASIN_REJECT = "asin_reject"
+_CATALOG_TIER_NAME_MATCH = "name_match"
+_CATALOG_TIER_NAME_REJECT = "name_reject"
+
+
+def _classify_catalog_product(
+    product: dict, author_asin: str, author_name: str | None
+) -> str:
+    """
+    Tiered author attribution for a single catalog product. An ASIN match
+    is authoritative and never loses to a name mismatch elsewhere on the
+    same product, but a product carrying no author ASIN at all must not
+    be excluded outright -- verified live, catalog products carry author
+    ASINs (`{"asin": "B000APENBC", "name": "Agatha Christie"}`) but not
+    always; some carry names only.
+
+    Order of decision:
+      1. any author entry's asin equals author_asin (case-insensitive)
+         -> _CATALOG_TIER_ASIN_MATCH, authoritative inclusion.
+      2. the product's authors carry ASINs but none matches
+         -> _CATALOG_TIER_ASIN_REJECT, exclusion: Audible told us who
+         wrote this and it is not the requested author.
+      3. no author entry carries any ASIN at all -> fall back to a
+         case-insensitive name match against the resolved author name
+         -> _CATALOG_TIER_NAME_MATCH (include) or
+         _CATALOG_TIER_NAME_REJECT (exclude).
+    """
+    authors = product.get("authors")
+    if not isinstance(authors, list):
+        authors = []
+
+    required = author_asin.upper()
+    any_asin_present = False
+    for entry in authors:
+        if not isinstance(entry, dict):
+            continue
+        entry_asin = entry.get("asin")
+        if isinstance(entry_asin, str) and entry_asin:
+            any_asin_present = True
+            if entry_asin.upper() == required:
+                return _CATALOG_TIER_ASIN_MATCH
+
+    if any_asin_present:
+        return _CATALOG_TIER_ASIN_REJECT
+
+    if author_name:
+        name_lower = author_name.strip().lower()
+        for entry in authors:
+            entry_name = entry.get("name") if isinstance(entry, dict) else None
+            if isinstance(entry_name, str) and entry_name.strip().lower() == name_lower:
+                return _CATALOG_TIER_NAME_MATCH
+
+    return _CATALOG_TIER_NAME_REJECT
+
+
+async def _fetch_catalog_page(name: str, region: str, page: int, sort: str) -> dict:
+    """
+    Fetches a single page of the catalog author-name search for a given
+    sort order, scoped to only what discovery needs. Raises on failure;
+    the caller decides what a failed page means for the walk.
+
+    response_groups is limited to contributors -- discovery only needs
+    asin plus author-attribution data, never the full response-group set
+    hydration (get_books_by_asins) requests. Fetching that here would be
+    both wasted work and a shape this function has no use for; hydration
+    still owns the DTO.
+    """
+    path = "/1.0/catalog/products"
+    params = {
+        "author": name,
+        "num_results": CATALOG_PAGE_SIZE,
+        "page": page,
+        "response_groups": "contributors",
+        "products_sort_by": sort,
+    }
+    return await audible_get(region, path, params)
+
+
+@dataclass
+class _CatalogBooksResult:
+    """
+    asins is ordered by _CATALOG_SORTS' own priority: every ASIN from
+    -ReleaseDate's pages first (in that sort's own order), then any new
+    ASIN from ascending ReleaseDate, then any new ASIN from -Title --
+    this is what lets get_author_books preserve the compat-critical
+    -ReleaseDate-first prefix without a separate sort step.
+
+    sort_errors carries one entry per page fetch that raised, prefixed
+    with which sort/page it was, so a partial catalog failure is tellable
+    from a clean walk that simply didn't need every sort.
+    """
+
+    asins: list[str]
+    pages_fetched: int
+    total_results: int | None
+    sorts_used: int
+    asin_match_count: int
+    asin_reject_count: int
+    name_match_count: int
+    name_reject_count: int
+    sort_errors: list[str]
+    truncated_by_deadline: bool = False
+
+
+def _process_catalog_page(
+    data: Any,
+    author_asin: str,
+    author_name: str | None,
+    seen: set[str],
+    asins: list[str],
+    counts: dict[str, int],
+) -> None:
+    """
+    Applies tiered attribution (_classify_catalog_product) to every
+    product on one already-fetched catalog page, appending accepted,
+    upper-cased, deduped ASINs to asins in-place and tallying every
+    tier's count in counts, including the rejected ones -- rejections are
+    not silent, they are how get_author_books reports the attribution
+    breakdown.
+    """
+    if not isinstance(data, dict):
+        return
+    products = data.get("products")
+    if not isinstance(products, list):
+        return
+    for product in products:
+        if not isinstance(product, dict):
+            continue
+        tier = _classify_catalog_product(product, author_asin, author_name)
+        counts[tier] = counts.get(tier, 0) + 1
+        if tier not in (_CATALOG_TIER_ASIN_MATCH, _CATALOG_TIER_NAME_MATCH):
+            continue
+        asin = product.get("asin")
+        if not isinstance(asin, str) or not is_valid_asin(asin):
+            continue
+        asin = asin.upper()
+        if asin not in seen:
+            seen.add(asin)
+            asins.append(asin)
+
+
+async def _fetch_author_books_by_catalog(
+    author_asin: str,
+    author_name: str,
+    region: str,
+    deadline: float | None = None,
+) -> _CatalogBooksResult:
+    """
+    Fetches book ASINs for an author from the catalog endpoint across
+    every trusted sort order, ASIN-attributed via _classify_catalog_product
+    rather than name-matched alone -- the catalog has no author-ASIN
+    filter (verified live: author_asin, authorAsin, contributor_asin, and
+    author_id are all silently ignored, returning the entire 74k-item
+    catalogue while looking like success), so author_name is what scopes
+    the query and author_asin is what scopes which of its results belong
+    to this author once results come back.
+
+    Two waves, matching get_author_books' own wave numbering:
+
+    - Wave 2 (here: page 0 of every sort in _CATALOG_SORTS, fired
+      together): the only way to learn total_results, and every sort's
+      page 0 is fetched regardless of how many sorts end up being needed
+      -- the request is already paid for, so its products are always
+      processed (see below), even for a sort beyond sorts_needed.
+    - Wave 3 (here: every further page every needed sort requires, fired
+      together in one gather -- no per-walk concurrency bound is applied;
+      the shared client throttles this globally): sorts_needed is
+      ceil(total_results / CATALOG_RESULT_CEILING), capped at
+      len(_CATALOG_SORTS) -- the number of trusted sort orders that exist
+      -- and pages per sort is ceil(min(total_results,
+      CATALOG_RESULT_CEILING) / CATALOG_PAGE_SIZE), since deep paging
+      caps at CATALOG_RESULT_CEILING regardless of what total_results
+      itself claims (see that constant's docstring).
+
+    Every page-0 response already fetched in wave 2 is processed
+    unconditionally, even for a sort past sorts_needed -- data already
+    paid for from a live request is never discarded. Only the *further*
+    pages of a sort past sorts_needed are skipped.
+
+    A single page's fetch failure is recorded in sort_errors and does not
+    stop the rest of the walk; every other page, sort, and the page-0
+    wave are unaffected -- a source that fails must not fail the whole
+    request (see get_author_books' own per-source failure handling for
+    the same principle one level up).
+
+    deadline, when given, is an absolute time.monotonic() bound: checked
+    once before wave 2 (an already-passed deadline skips catalog
+    entirely, returning an empty, deadline-truncated result) and once
+    while building the wave-3 page list (pages beyond the deadline are
+    never requested at all, not merely abandoned mid-flight).
+
+    total_results is read from whichever sort's page 0 reports it first
+    in _CATALOG_SORTS' own priority order -- every sort queries the same
+    author name, so the count is the same query surfaced through a
+    different sort, not a per-sort quantity.
+    """
+    seen: set[str] = set()
+    asins: list[str] = []
+    counts: dict[str, int] = {}
+    sort_errors: list[str] = []
+    pages_fetched = 0
+
+    if deadline is not None and time.monotonic() >= deadline:
+        return _CatalogBooksResult(
+            asins=[],
+            pages_fetched=0,
+            total_results=None,
+            sorts_used=0,
+            asin_match_count=0,
+            asin_reject_count=0,
+            name_match_count=0,
+            name_reject_count=0,
+            sort_errors=[],
+            truncated_by_deadline=True,
+        )
+
+    # Wave 2: page 0 of every trusted sort order, fired together.
+    page0_outcomes = await asyncio.gather(
+        *(_fetch_catalog_page(author_name, region, 0, sort) for sort in _CATALOG_SORTS),
+        return_exceptions=True,
+    )
+
+    total_results: int | None = None
+    page0_data: list[dict | None] = []
+    for sort, outcome in zip(_CATALOG_SORTS, page0_outcomes):
+        if isinstance(outcome, BaseException):
+            sort_errors.append(f"{sort} page 0: {type(outcome).__name__}: {outcome}")
+            page0_data.append(None)
+            continue
+        pages_fetched += 1
+        data = outcome if isinstance(outcome, dict) else None
+        page0_data.append(data)
+        if total_results is None and isinstance(data, dict):
+            candidate = data.get("total_results")
+            if isinstance(candidate, int) and candidate >= 0:
+                total_results = candidate
+
+    if total_results is not None:
+        sorts_needed = min(
+            len(_CATALOG_SORTS),
+            max(1, -(-total_results // CATALOG_RESULT_CEILING)),
+        )
+    else:
+        sorts_needed = 1
+
+    # Every page-0 response already fetched is processed, from every sort
+    # -- not only the ones sorts_needed says are required -- since the
+    # request has already been made; ordering falls out of _CATALOG_SORTS'
+    # own priority order for free.
+    for data in page0_data:
+        _process_catalog_page(data, author_asin, author_name, seen, asins, counts)
+
+    # Wave 3: every remaining page every needed sort requires, fired
+    # together in a single gather -- see docstring for why no per-walk
+    # concurrency bound is applied here.
+    wave3_targets: list[tuple[str, int]] = []
+    truncated_by_deadline = False
+    capped_total = (
+        min(total_results, CATALOG_RESULT_CEILING) if total_results is not None else CATALOG_PAGE_SIZE
+    )
+    pages_needed = -(-capped_total // CATALOG_PAGE_SIZE)
+    for sort in _CATALOG_SORTS[:sorts_needed]:
+        for page in range(1, pages_needed):
+            if deadline is not None and time.monotonic() >= deadline:
+                truncated_by_deadline = True
+                break
+            wave3_targets.append((sort, page))
+        if truncated_by_deadline:
+            break
+
+    if wave3_targets:
+        wave3_outcomes = await asyncio.gather(
+            *(_fetch_catalog_page(author_name, region, page, sort) for sort, page in wave3_targets),
+            return_exceptions=True,
+        )
+        for (sort, page), outcome in zip(wave3_targets, wave3_outcomes):
+            if isinstance(outcome, BaseException):
+                sort_errors.append(f"{sort} page {page}: {type(outcome).__name__}: {outcome}")
+                continue
+            pages_fetched += 1
+            _process_catalog_page(outcome, author_asin, author_name, seen, asins, counts)
+
+    return _CatalogBooksResult(
+        asins=asins,
+        pages_fetched=pages_fetched,
+        total_results=total_results,
+        sorts_used=sorts_needed,
+        asin_match_count=counts.get(_CATALOG_TIER_ASIN_MATCH, 0),
+        asin_reject_count=counts.get(_CATALOG_TIER_ASIN_REJECT, 0),
+        name_match_count=counts.get(_CATALOG_TIER_NAME_MATCH, 0),
+        name_reject_count=counts.get(_CATALOG_TIER_NAME_REJECT, 0),
+        sort_errors=sort_errors,
+        truncated_by_deadline=truncated_by_deadline,
+    )
 
 
 async def _resolve_author_name(
@@ -926,31 +1611,58 @@ async def get_author_books(
     use_cache: bool = False,
 ) -> list[str]:
     """
-    Fetches all book ASINs for an author.
+    Fetches all book ASINs for an author, as a four-source parallel union:
+    the Android author-detail screen (the only ASIN-exact source), and the
+    catalog endpoint walked across three sort orders (-ReleaseDate,
+    ascending ReleaseDate, -Title). None of the four is complete or a
+    subset of another -- verified live against Agatha Christie
+    (product_count 1116 on the screens grid, total_results 1138 on the
+    catalog): the screens grid itself serves only 520 unique ASINs before
+    plateauing; -ReleaseDate alone caps at 550 with zero overlap against
+    ascending ReleaseDate's own, different 550; and 28 of the screens
+    grid's 520 ASINs never appear anywhere in the catalog union at all.
+    Only the union of every source gets close to complete.
 
-    Unions two independent Audible paths so the result can never be smaller
-    than either alone: the standard catalog search by the author's resolved
-    name, and the Android author-detail screen, which returns the author's
-    title grid ASIN-exact. The name search runs first, against the full time
-    budget, and the screens walk runs second against whatever budget is
-    left: the name-search half is the one consumers already receive today
-    (get_author_books_by_name serves it standalone), so a degraded upstream
-    must not be able to starve it of every request before it gets to run --
-    a screens walk that consumes the whole budget and leaves the name search
-    zero requests would silently turn this union into screens-only, and
-    screens is not a superset of name-search results. The local DB is
-    consulted at two separate points: as a backstop appended to a degraded
-    but non-empty union (any DB-known ASIN neither Audible path surfaced),
-    and, only when both Audible paths come back entirely empty, as a full
-    fallback in its own right, followed by cache.
+    Four waves:
+      1. Resolve the author ASIN to a name via the contributors lookup --
+         required because the catalog has no author-ASIN filter (probed
+         live: author_asin, authorAsin, contributor_asin, and author_id
+         are all silently ignored).
+      2 & 3. The screens walk (_fetch_author_books_by_screen) and the
+         catalog walk (_fetch_author_books_by_catalog) each run their own
+         internal page-1/page-0-then-fan-out sequence, but the two
+         top-level walks run concurrently with each other via
+         asyncio.gather -- so screens' page 1 and every catalog sort's
+         page 0 go out together, and each source's own remaining pages go
+         out together shortly after, without one source's walk blocking
+         the other's. Neither walk applies its own concurrency bound
+         beyond what's already built into it; the shared client throttles
+         fan-out globally.
+      4. Union everything: catalog ASINs first (already -ReleaseDate-
+         first internally, since _CATALOG_SORTS orders that way and every
+         sort's page 0 is processed in priority order), then any
+         screens-only extra, then any DB-only extra the two live sources
+         didn't happen to surface this run.
 
-    List order is a consumer-visible contract: name-search ASINs come
-    first, in fetch_author_books_by_name's own (-ReleaseDate) order, and
-    screens-only extras are appended after, in screens order. Nothing in
-    this path is sorted — sort_dicts leaves order untouched when no sort
-    param is passed, and both routes default to None, so this order reaches
-    consumers directly. Ordering name-first means every ASIN a caller sees
-    today keeps its index; only new titles append.
+    List order is a consumer-visible contract: consumers have always
+    received the -ReleaseDate catalog list at the front of the response
+    and must keep receiving that same list, in that same order, unmoved
+    at the front of this union.
+    Nothing in this path is sorted -- sort_dicts leaves order untouched
+    when no sort param is passed, and both routes default to None, so
+    this order reaches consumers directly.
+
+    The DB's own record of this author's books is unioned in on every
+    request, not only when a live source fails -- this is the
+    less-data-never-accepted invariant applied at the response level: once
+    Libex has seen a book for an author, it can never vanish from this
+    response just because a source timed out or a sort window came back
+    short this run.
+
+    A source that fails (screens raises, or every catalog sort errors)
+    does not fail the whole request -- whatever the other sources and the
+    DB union surfaced is still served. Only when every source came back
+    entirely empty, live and DB alike, is NotFoundException raised.
     """
     if use_cache:
         cached = await cache.get(session, author_books_key(asin, region))
@@ -960,73 +1672,67 @@ async def get_author_books(
     start = time.monotonic()
     deadline = start + AUTHOR_BOOKS_TIME_BUDGET_SECONDS
 
+    # Wave 1.
     author_name: str | None = None
-    name_asins: list[str] = []
-    name_pages_fetched = 0
-    name_completed = True
-    name_error: str | None = None
+    name_resolution_error: str | None = None
     try:
         author_name = await _resolve_author_name(asin, region, session)
-        if author_name:
-            name_asins, name_pages_fetched, name_completed = (
-                await _fetch_author_books_by_name_detailed(
-                    author_name, region, deadline=deadline,
-                    concurrency=NAME_SEARCH_CONCURRENCY,
-                )
-            )
     except Exception as e:
-        name_error = f"{type(e).__name__}: {e}"
+        name_resolution_error = f"{type(e).__name__}: {e}"
 
+    # Waves 2 & 3: screens and catalog run concurrently as two top-level
+    # tasks. Catalog is only scheduled at all when a name was resolved --
+    # there is nothing to query the catalog with otherwise.
+    tasks = [_fetch_author_books_by_screen(asin, region, deadline=deadline)]
+    if author_name:
+        tasks.append(
+            _fetch_author_books_by_catalog(asin, author_name, region, deadline=deadline)
+        )
+    outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+
+    screen_outcome = outcomes[0]
     screen_result: _ScreenBooksResult | None = None
     screen_error: str | None = None
-    try:
-        screen_result = await _fetch_author_books_by_screen(asin, region, deadline=deadline)
-    except Exception as e:
-        screen_error = f"{type(e).__name__}: {e}"
+    if isinstance(screen_outcome, BaseException):
+        screen_error = f"{type(screen_outcome).__name__}: {screen_outcome}"
+    else:
+        screen_result = screen_outcome
     screen_asins = screen_result.asins if screen_result is not None else []
 
-    # Union ordering: name-search ASINs first, in their own order, then any
-    # screens-only ASIN not already present, in screens order.
-    seen = set(name_asins)
-    asins = list(name_asins)
+    catalog_result: _CatalogBooksResult | None = None
+    catalog_error: str | None = None
+    if author_name:
+        catalog_outcome = outcomes[1]
+        if isinstance(catalog_outcome, BaseException):
+            catalog_error = f"{type(catalog_outcome).__name__}: {catalog_outcome}"
+        else:
+            catalog_result = catalog_outcome
+    catalog_asins = catalog_result.asins if catalog_result is not None else []
+
+    # Wave 4, part one: catalog first (already -ReleaseDate-first
+    # internally), then any screens-only extra. Dedupe is ASIN-only, never
+    # on title -- the screens grid alone holds 18 distinct ASINs of a
+    # single title, each a real, separately trackable edition.
+    seen = set(catalog_asins)
+    asins = list(catalog_asins)
     for screen_asin in screen_asins:
         if screen_asin not in seen:
             seen.add(screen_asin)
             asins.append(screen_asin)
 
-    # name_clean is False whenever the name half errored, or ran but didn't
-    # reach a confirmed natural end (deadline-truncated or page-capped); it
-    # stays True when there was simply no name to search, since that half
-    # is then trivially complete rather than degraded.
-    name_clean = name_error is None and name_completed
-    name_degraded = not name_clean
-
-    # The DB fallback further down only fires when the union is entirely
-    # empty, so a degraded name half would otherwise skip this backstop and
-    # lose any DB-known title neither Audible path happened to surface -- a
-    # silent shrink against what a pure DB read for this author ASIN would
-    # offer on its own. This covers both arms of that: a degraded name half
-    # with an empty screens half (screen_asins alone used to gate this off
-    # before), and a degraded name half with a page-capped or otherwise
-    # partial but non-empty screens half that still doesn't cover every
-    # DB-known title. Any DB-known ASIN not already present is appended at
-    # the tail instead -- the existing prefix (name-search results, then
-    # screens extras) is never disturbed, only extended. Canonicalized
-    # upper-case here to match the three sibling ASIN producers above,
-    # since the reader returns ASINs as stored, not normalized.
-    if name_degraded:
-        db_asins = await get_author_book_asins_from_db(session, asin, region)
-        for db_asin in db_asins:
-            db_asin = db_asin.upper()
-            if db_asin not in seen:
-                seen.add(db_asin)
-                asins.append(db_asin)
+    # Wave 4, part two: the DB backstop, unioned on every request rather
+    # than only when a live source came back short or empty (see
+    # docstring). Canonicalized upper-case here to match the two live
+    # producers above, since the reader returns ASINs as stored, not
+    # normalized.
+    db_asins = await get_author_book_asins_from_db(session, asin, region)
+    for db_asin in db_asins:
+        db_asin = db_asin.upper()
+        if db_asin not in seen:
+            seen.add(db_asin)
+            asins.append(db_asin)
 
     if not asins:
-        db_asins = await get_author_book_asins_from_db(session, asin, region)
-        if db_asins:
-            return [db_asin.upper() for db_asin in db_asins]
-
         cached = await cache.get(session, author_books_key(asin, region))
         if cached:
             return cached
@@ -1036,55 +1742,101 @@ async def get_author_books(
             "region": region,
             "screen_error": screen_error,
             "screen_page_error": screen_result.page_error if screen_result else None,
-            "name_error": name_error,
+            "catalog_error": catalog_error,
+            "catalog_sort_errors": catalog_result.sort_errors if catalog_result else [],
+            "name_resolution_error": name_resolution_error,
         })
-        if screen_error is not None or name_error is not None:
+        if screen_error is not None or catalog_error is not None or name_resolution_error is not None:
             raise NotFoundException("Audible unavailable and no cached author books found")
         raise NotFoundException(f"No books found for author: {asin}")
 
     author_book_took = round((time.monotonic() - start) * 1000, 2)
 
+    # Completeness signal, measured against this union's own len(asins) --
+    # never against what a single source alone returned (that comparison
+    # is what the screens walk's own dropped warning used to make, and
+    # product_count over-claims a single source's reach by more than 2x;
+    # see _fetch_author_books_by_screen). catalog_result.total_results is
+    # the preferred claim; screen_result.product_count is used only when
+    # catalog produced none at all (catalog errored, or its page 0 never
+    # carried the field), since the two describe the same underlying
+    # catalog size rather than independent counts to add together. The
+    # union can legitimately exceed the claim -- screens and the DB
+    # backstop both surface ASINs the catalog sorts never do -- so an
+    # overshoot is never treated as a shortfall.
+    claimed_total = catalog_result.total_results if catalog_result is not None else None
+    if claimed_total is None and screen_result is not None:
+        claimed_total = screen_result.product_count
+
+    if claimed_total is None:
+        logger.info("Audible Author Books completeness check skipped: no claimed total from catalog or screens", extra={
+            "author_asin": asin,
+            "region": region,
+        })
+    else:
+        shortfall = claimed_total - len(asins)
+        if shortfall > 0:
+            shortfall_ratio = shortfall / claimed_total
+            # Christie -- a real, healthy result -- sits 5 short of a 1138
+            # claim, a 0.4% gap that must not warn or the signal is noise
+            # again on day one. 10% clears that gap with wide margin while
+            # still catching a result at half the claim, which obviously
+            # must warn.
+            if shortfall_ratio > 0.10:
+                logger.warning("Audible Author Books union fell short of the claimed total", extra={
+                    "author_asin": asin,
+                    "region": region,
+                    "author_book_num": len(asins),
+                    "claimed_total": claimed_total,
+                    "shortfall": shortfall,
+                    "shortfall_ratio": round(shortfall_ratio, 4),
+                    "screens_plateau_truncated": (
+                        screen_result is not None
+                        and screen_result.termination_reason == SCREENS_REASON_PLATEAU_TRUNCATED
+                    ),
+                })
+
     # less-data-never-accepted: this union is only ever written back to
-    # cache as the authoritative list when the screens walk confirmed it
-    # saw every upstream page (a clean termination -- SCREENS_CLEAN_REASONS
-    # already excludes every cap, page error, bad token, grid-not-found,
-    # time-budget, and truncation outcome, so screens_clean alone is the
-    # full "terminated cleanly" gate) and the name search that seeds the
-    # front of the list reached its own confirmed natural end. Any walk
-    # short of that is still served to this caller, but is not persisted as
-    # if it were complete -- this also covers the DB-backstopped union
-    # above, since a degraded name half never satisfies name_clean.
-    #
-    # This gate used to also require len(asins) >= product_count, but
-    # Audible's own reported product_count routinely over-counts by one or
-    # two (delisted or region-restricted titles still counted), and a name
-    # search that hit its own page cap (back when that cap was still small
-    # enough to bind on a real, prolific author) was never "completed" --
-    # combined, that made the write essentially never fire for exactly the
-    # prolific authors this union exists to serve. product_count is still
-    # checked for the shortfall WARNING below; it no longer vetoes the
-    # write. The backstop against writing back less than what's already
+    # cache as the authoritative list when every source that actually ran
+    # reached a confirmed, clean natural end. screens_clean mirrors the
+    # existing SCREENS_CLEAN_REASONS gate. catalog_clean is True either
+    # when catalog ran with no page-fetch errors and wasn't cut short by
+    # the deadline, or when catalog never ran at all because no author
+    # name was resolved -- that case is trivially complete (nothing to
+    # search), not degraded, the same distinction the old name_clean gate
+    # drew. The backstop against writing back less than what's already
     # stored is the shrink guard in the writer, which re-reads the stored
     # list and refuses a shorter one or a strict subset.
     screens_clean = (
         screen_result is not None
         and screen_result.termination_reason in SCREENS_CLEAN_REASONS
     )
-    if screens_clean and name_clean:
+    catalog_clean = (
+        author_name is None
+        or (
+            catalog_result is not None
+            and catalog_error is None
+            and not catalog_result.sort_errors
+            and not catalog_result.truncated_by_deadline
+        )
+    )
+    if screens_clean and catalog_clean:
         persist_author_books_cache_background(author_books_key(asin, region), asins)
 
     # A path that errored still counts as a degraded response even when the
-    # union it contributed to came back non-empty -- folding screen_error /
-    # name_error into the INFO line below as bare fields would let that
-    # degradation stay under the WARNING threshold and never reach a
-    # WARNING-level alert or stderr.
-    if screen_error is not None or name_error is not None:
+    # union it contributed to came back non-empty -- folding these into the
+    # INFO line below as bare fields would let that degradation stay under
+    # the WARNING threshold and never reach a WARNING-level alert or
+    # stderr.
+    if screen_error is not None or catalog_error is not None or name_resolution_error is not None:
         logger.warning("Audible Author Books served from a degraded path", extra={
             "author_asin": asin,
             "region": region,
             "screen_error": screen_error,
             "screen_page_error": screen_result.page_error if screen_result else None,
-            "name_error": name_error,
+            "catalog_error": catalog_error,
+            "catalog_sort_errors": catalog_result.sort_errors if catalog_result else [],
+            "name_resolution_error": name_resolution_error,
         })
 
     logger.info("Requested Audible Author Books", extra={
@@ -1092,7 +1844,7 @@ async def get_author_books(
         "author_name": author_name,
         "author_book_num": len(asins),
         "screen_asin_num": len(screen_asins),
-        "name_asin_num": len(name_asins),
+        "catalog_asin_num": len(catalog_asins),
         "screen_pages_fetched": screen_result.pages_fetched if screen_result else 0,
         "screen_product_count": screen_result.product_count if screen_result else None,
         "screen_invalid_skipped": screen_result.invalid_skipped if screen_result else 0,
@@ -1102,9 +1854,17 @@ async def get_author_books(
         "screen_termination_reason": screen_result.termination_reason if screen_result else None,
         "screen_error": screen_error,
         "screen_page_error": screen_result.page_error if screen_result else None,
-        "name_pages_fetched": name_pages_fetched,
-        "name_completed": name_completed,
-        "name_error": name_error,
+        "catalog_pages_fetched": catalog_result.pages_fetched if catalog_result else 0,
+        "catalog_total_results": catalog_result.total_results if catalog_result else None,
+        "catalog_sorts_used": catalog_result.sorts_used if catalog_result else 0,
+        "catalog_asin_match": catalog_result.asin_match_count if catalog_result else 0,
+        "catalog_asin_reject": catalog_result.asin_reject_count if catalog_result else 0,
+        "catalog_name_match": catalog_result.name_match_count if catalog_result else 0,
+        "catalog_name_reject": catalog_result.name_reject_count if catalog_result else 0,
+        "catalog_truncated_by_deadline": catalog_result.truncated_by_deadline if catalog_result else False,
+        "catalog_sort_errors": catalog_result.sort_errors if catalog_result else [],
+        "catalog_error": catalog_error,
+        "name_resolution_error": name_resolution_error,
         "author_book_took": author_book_took,
         "region": region,
     })

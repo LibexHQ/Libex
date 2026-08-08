@@ -9,6 +9,7 @@ Falls back to DB when Audible is unavailable.
 """
 
 # Standard library
+import asyncio
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -315,12 +316,57 @@ async def get_books_by_asins(
     try:
         start = time.monotonic()
         chunks = [fetch_asins[i:i + 50] for i in range(0, len(fetch_asins), 50)]
-        all_products = []
-        for chunk in chunks:
-            products = await _fetch_chunk(chunk, region)
-            all_products.extend(products)
+
+        # Fire every chunk concurrently -- audible_get itself is the throttle
+        # point (a process-wide bound lives there), so nothing here needs to
+        # cap fan-out. return_exceptions=True so a bad chunk can't wipe out
+        # the chunks that already came back; gather still guarantees results
+        # line up with chunks by index regardless of completion order, so
+        # reassembly below stays in the same order the caller passed in.
+        results = await asyncio.gather(
+            *(_fetch_chunk(chunk, region) for chunk in chunks),
+            return_exceptions=True,
+        )
 
         requested_took = round((time.monotonic() - start) * 1000, 2)
+
+        all_products: list[dict[str, Any]] = []
+        not_found_asins: list[str] = []
+        transient_failed_asins: list[str] = []
+        transient_errors: list[Exception] = []
+
+        for idx, (chunk, result) in enumerate(zip(chunks, results)):
+            if isinstance(result, NotFoundException):
+                # Only the single-ASIN branch of _fetch_chunk can 404, and it
+                # means that one ASIN doesn't exist for this region -- terminal
+                # for that ASIN, not a reason to discard everything else that
+                # already succeeded.
+                not_found_asins.extend(chunk)
+                continue
+            if isinstance(result, Exception):
+                transient_failed_asins.extend(chunk)
+                transient_errors.append(result)
+                logger.warning(
+                    f"Hydration chunk {idx + 1}/{len(chunks)} failed for "
+                    f"{len(chunk)} ASINs ({region}): {type(result).__name__}: {result}"
+                )
+                continue
+            all_products.extend(result)
+
+        if not_found_asins or transient_failed_asins:
+            logger.warning("Partial hydration shortfall", extra={
+                "requested_num": len(fetch_asins),
+                "not_found_asins": len(not_found_asins),
+                "failed_asins": len(transient_failed_asins),
+                "region": region,
+            })
+
+        # Every chunk that mattered failed transiently and nothing else came
+        # back -- fall through to the DB/cache fallback below exactly as a
+        # single sequential failure would have. A pure not-found (no transient
+        # errors) does NOT take this path: 404 is terminal, not a retry signal.
+        if transient_failed_asins and not all_products and not cached_results:
+            raise transient_errors[0]
 
         if not all_products and not cached_results:
             return []
@@ -334,6 +380,8 @@ async def get_books_by_asins(
             "requested_num": len(fetch_asins),
             "cache_hits": len(cached_results),
             "requested_took": requested_took,
+            "not_found_asins": len(not_found_asins),
+            "failed_asins": len(transient_failed_asins),
             "region": region,
         })
 

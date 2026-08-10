@@ -232,7 +232,17 @@ def _normalize_chapters(data: dict, asin: str) -> dict[str, Any]:
 
 
 def _filter_products(products: list[dict]) -> list[dict]:
-    """Filters out unreleased placeholder products."""
+    """Filters out unreleased placeholder products.
+
+    Also load-bearing for resolving a nonexistent-but-well-formed ASIN to
+    "not found": probed live, Audible's catalog endpoints don't 404 for one
+    of those in either _fetch_chunk branch -- they return 200 with a
+    hollow, titleless stub instead (a bogus single ASIN and a bogus ASIN
+    in a batch request both came back that way; a real ASIN came back
+    fully populated). Dropping anything with no title here is what turns
+    that stub into an empty result rather than a phantom book with every
+    field blank.
+    """
     return [
         p for p in products
         if p.get("title")
@@ -337,10 +347,18 @@ async def get_books_by_asins(
 
         for idx, (chunk, result) in enumerate(zip(chunks, results)):
             if isinstance(result, NotFoundException):
-                # Only the single-ASIN branch of _fetch_chunk can 404, and it
-                # means that one ASIN doesn't exist for this region -- terminal
-                # for that ASIN, not a reason to discard everything else that
-                # already succeeded.
+                # Only the single-ASIN branch of _fetch_chunk can raise this
+                # at all -- the batch endpoint's own response is always a 200
+                # with a products array, even when every requested ASIN is
+                # unknown, so a batch chunk never surfaces as an exception
+                # here. A nonexistent-but-well-formed ASIN doesn't reach this
+                # branch either way: probed live, Audible returns 200 with a
+                # hollow, titleless stub for one of those in both branches,
+                # and _filter_products (see that function) is what turns that
+                # stub into nothing to add rather than a 404. Whatever does
+                # reach this branch is terminal for that one ASIN regardless,
+                # not a reason to discard everything else that already
+                # succeeded.
                 not_found_asins.extend(chunk)
                 continue
             if isinstance(result, Exception):

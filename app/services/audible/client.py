@@ -131,6 +131,67 @@ def _get_audible_semaphore() -> asyncio.Semaphore:
 
 
 # ============================================================
+# SHARED HTTP CLIENT
+# ============================================================
+
+# The semaphore already guarantees at most AUDIBLE_CONCURRENCY_LIMIT calls are
+# ever in flight at once, so the pool is sized to match it exactly rather than
+# httpx's defaults (100 / 20): there is never a use for more than 10 open
+# connections, and keeping all 10 alive -- instead of the smaller default
+# keepalive pool -- means a fan-out that reuses the same shared client across
+# dozens of sequential requests (a prolific-author walk is ~57) gets a
+# reused, already-negotiated connection almost every time instead of paying a
+# fresh TCP+TLS handshake per call.
+_AUDIBLE_POOL_LIMITS = httpx.Limits(
+    max_connections=AUDIBLE_CONCURRENCY_LIMIT,
+    max_keepalive_connections=AUDIBLE_CONCURRENCY_LIMIT,
+)
+
+# audible_get is called from three different lifetimes -- request handlers,
+# asyncio.create_task background persisters, and the seeder's long-running
+# task -- with no single object owning all three, exactly the situation
+# _get_audible_semaphore above already solves. An httpx.AsyncClient binds to
+# the running loop through its connection pool the same way a Semaphore binds
+# through its waiter state, so this follows the identical shape: built lazily,
+# keyed to the loop that built it, rebuilt when that loop changes. Under
+# uvicorn that's once for the life of the process; under pytest-asyncio,
+# which hands every test function its own loop, each test gets its own client
+# instead of reusing pooled connections tied to a loop that's already gone.
+_audible_client: httpx.AsyncClient | None = None
+_audible_client_loop: asyncio.AbstractEventLoop | None = None
+
+
+async def _close_stale_client(client: httpx.AsyncClient) -> None:
+    """Closes a client left behind by a loop change. Best-effort: the client
+    may never have opened a real connection (nothing to close), and awaiting
+    aclose() on a loop other than the one that built it is unusual enough
+    that a failure here should never surface as this request's error."""
+    try:
+        await client.aclose()
+    except Exception:
+        logger.debug("Failed closing a stale Audible HTTP client", exc_info=True)
+
+
+def _get_audible_client() -> httpx.AsyncClient:
+    global _audible_client, _audible_client_loop
+    loop = asyncio.get_running_loop()
+    if _audible_client is None or _audible_client_loop is not loop:
+        stale = _audible_client
+        # settings is process-wide and never reloaded at runtime (get_settings
+        # is lru_cache'd), so reading audible_proxy_url once at construction
+        # here -- instead of per call, as the old per-request client did --
+        # can't go stale for the life of the process.
+        _audible_client = httpx.AsyncClient(
+            proxy=settings.audible_proxy_url or None,
+            limits=_AUDIBLE_POOL_LIMITS,
+        )
+        _audible_client_loop = loop
+        if stale is not None:
+            asyncio.create_task(_close_stale_client(stale))
+    return _audible_client
+
+
+# ============================================================
 # RETRY / BACKOFF
 # ============================================================
 
@@ -249,62 +310,62 @@ async def audible_get(
     if extra_headers:
         headers = {**headers, **extra_headers}
 
-    async with httpx.AsyncClient(proxy=settings.audible_proxy_url or None) as client:
-        for attempt in range(AUDIBLE_MAX_ATTEMPTS):
-            async with _get_audible_semaphore():
-                try:
-                    response = await client.get(
-                        url,
-                        headers=headers,
-                        params=params,
-                        timeout=30.0,
-                        follow_redirects=False,
-                    )
-                except httpx.TimeoutException as e:
-                    raise AudibleAPIException(
-                        f"Audible API timed out: {type(e).__name__} for {url}"
-                    )
-                except httpx.RequestError as e:
-                    # Many httpx.RequestError subclasses (ConnectError, ReadError, etc.)
-                    # have an empty str(), so include the type and URL or the message is
-                    # blank and the failure is undiagnosable.
-                    detail = str(e) or type(e).__name__
-                    raise AudibleAPIException(
-                        f"Audible API request failed: {detail} for {url}"
-                    )
-
-            if response.status_code == 404:
-                from app.core.exceptions import NotFoundException
-                raise NotFoundException()
-
-            if response.status_code == 200:
-                return response.json()
-
-            if _is_retryable_status(response.status_code):
-                retry_after = _parse_retry_after(response.headers.get("Retry-After"))
-                attempts_left = AUDIBLE_MAX_ATTEMPTS - attempt - 1
-                # A 429 is the early warning for the exact failure that cost
-                # this project a VPN rotation once already, so it's logged
-                # every time it's seen, whether or not this call still has
-                # attempts left to absorb it -- a retry succeeding on the
-                # next attempt must not make this go quiet.
-                logger.warning(
-                    "Audible API throttled or degraded",
-                    extra={
-                        "status_code": response.status_code,
-                        "region": region,
-                        "path": path,
-                        "attempt": attempt + 1,
-                        "max_attempts": AUDIBLE_MAX_ATTEMPTS,
-                        "retry_after": retry_after,
-                        "attempts_left": attempts_left,
-                    },
+    client = _get_audible_client()
+    for attempt in range(AUDIBLE_MAX_ATTEMPTS):
+        async with _get_audible_semaphore():
+            try:
+                response = await client.get(
+                    url,
+                    headers=headers,
+                    params=params,
+                    timeout=30.0,
+                    follow_redirects=False,
                 )
-                if attempts_left > 0:
-                    sleep_for = _compute_backoff_seconds(attempt, retry_after)
-                    await asyncio.sleep(sleep_for)
-                    continue
+            except httpx.TimeoutException as e:
+                raise AudibleAPIException(
+                    f"Audible API timed out: {type(e).__name__} for {url}"
+                )
+            except httpx.RequestError as e:
+                # Many httpx.RequestError subclasses (ConnectError, ReadError, etc.)
+                # have an empty str(), so include the type and URL or the message is
+                # blank and the failure is undiagnosable.
+                detail = str(e) or type(e).__name__
+                raise AudibleAPIException(
+                    f"Audible API request failed: {detail} for {url}"
+                )
 
-            raise AudibleAPIException(
-                f"Audible API returned {response.status_code} for {url}"
+        if response.status_code == 404:
+            from app.core.exceptions import NotFoundException
+            raise NotFoundException()
+
+        if response.status_code == 200:
+            return response.json()
+
+        if _is_retryable_status(response.status_code):
+            retry_after = _parse_retry_after(response.headers.get("Retry-After"))
+            attempts_left = AUDIBLE_MAX_ATTEMPTS - attempt - 1
+            # A 429 is the early warning for the exact failure that cost
+            # this project a VPN rotation once already, so it's logged
+            # every time it's seen, whether or not this call still has
+            # attempts left to absorb it -- a retry succeeding on the
+            # next attempt must not make this go quiet.
+            logger.warning(
+                "Audible API throttled or degraded",
+                extra={
+                    "status_code": response.status_code,
+                    "region": region,
+                    "path": path,
+                    "attempt": attempt + 1,
+                    "max_attempts": AUDIBLE_MAX_ATTEMPTS,
+                    "retry_after": retry_after,
+                    "attempts_left": attempts_left,
+                },
             )
+            if attempts_left > 0:
+                sleep_for = _compute_backoff_seconds(attempt, retry_after)
+                await asyncio.sleep(sleep_for)
+                continue
+
+        raise AudibleAPIException(
+            f"Audible API returned {response.status_code} for {url}"
+        )

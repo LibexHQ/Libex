@@ -13,30 +13,52 @@ capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 ## [1.11.0]
 
 ### Added
-- **`/author/books/{asin}` and `/author/{asin}/books` now union two independent
-  Audible sources and can only return more titles than before.** These
-  endpoints previously relied solely on a catalog search by the author's
-  resolved name; that search misses titles that don't credit the author under
-  the exact matched name (compilations, alternate creditings, and the like).
-  They now also walk Audible's author-detail listing — which lists an
-  author's titles directly by author ASIN rather than by name-matching — and
-  merge the two: any ASIN either source finds is included, so the result is
-  never smaller than the name search alone (one real author was previously
-  missing over twenty titles this way). List order is a deliberate
-  compatibility choice: name-search results keep their existing order first,
-  and any additional title found only via the author-detail listing is
-  appended after, so an ASIN's position in today's response is preserved and
-  a re-fetch only ever adds entries at the end. Applies to both the primary
-  and legacy path forms of this endpoint.
+- **Author book lookups by ASIN now search Audible's catalog directly across
+  three sort orders and stop dropping non-English editions, instead of
+  leaning on one name-matched search plus the author-detail listing.**
+  `/author/books/{asin}` and `/author/{asin}/books` previously unioned a
+  single name-matched catalog search with Audible's author-detail (screens)
+  listing — neither gets close to a prolific author's whole catalog alone.
+  Discovery now walks the catalog across three sort orders, matching each
+  result to the author by Audible's own author ASIN where it's supplied
+  (falling back to name matching only when it isn't), unions that with the
+  screens listing and with whatever Libex already has stored locally, and no
+  longer filters out non-English editions — that filter had been silently
+  dropping roughly 490 of Agatha Christie's ~1138 US titles. Measured in the
+  US store, Christie went from 149 books returned to 1133. The non-English
+  fix also applies to `/author/books?name=`, the name-only lookup used when
+  no ASIN is available. List order for the ASIN endpoints still starts with
+  the same release-date-ordered results as before, so an existing ASIN keeps
+  its position — a re-fetch only ever adds new titles after it. For an
+  unusually large catalog, Audible's own listings still cap how much any one
+  source hands back, so the result can still fall short of an author's true
+  full catalog; it falls short by far less than before, but "returns a lot
+  more" is not the same as "returns everything." Applies to both the primary
+  and legacy path forms of the ASIN endpoint.
 
 ### Fixed
-- **The author-detail listing behind the above was failing outright.** The
-  request to it was missing a header Audible's Android client always sends,
-  so Audible rejected it and the endpoint silently fell back to name search
+- **The author-detail (screens) listing was failing outright.** The request
+  to it was missing a header Audible's Android client always sends, so
+  Audible rejected it and the endpoint silently fell back to name search
   only. That header is now sent, and a slow or degraded fetch is still
   served in full to the caller but is no longer written into the cache as if
   it were the complete answer — so a temporary Audible hiccup can no longer
   leave a permanently short list cached for later `?cache=true` reads.
+- **Fetching the book details behind a listing no longer discards a whole
+  request over one bad batch.** Book details come back from Audible in
+  batches of 50 ASINs. Those batches used to run one after another, and if
+  any single one failed — a timeout, a rate limit, a server error — the
+  whole request gave up and fell back to whatever was already stored or
+  cached, throwing away every book the batches around it had already
+  fetched successfully. Batches now run concurrently, and every outbound
+  request to Audible retries automatically on a rate-limit or server-error
+  response (honoring Audible's `Retry-After` header when it sends one)
+  before being treated as failed; a 404 stays terminal and is never
+  retried. A batch that still fails after retries is now skipped rather
+  than aborting the request, and every book from a batch that did succeed
+  is still returned. This also makes fetching a long list of books
+  noticeably faster, which matters more now that author lookups can return
+  far more books than before.
 - **ASIN format validation now rejects trailing garbage.** The validity check
   matched from the start of the string but stopped at the pattern's `$`
   end-anchor, which treats a trailing newline as "end of string" — so a value

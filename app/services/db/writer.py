@@ -728,24 +728,28 @@ def persist_author_books_cache_background(key: str, asins: list[str]) -> None:
     """
     Fires a background task to write an author's book-ASIN list to cache.
 
-    An author's ASIN list only ever grows or reorders — it never legitimately
-    shrinks — so a write that would drop ASINs relative to what is already
-    stored is refused. Shrink is a shorter incoming list, or an incoming list
-    whose ASINs are a strict subset of the stored ones; a same-length list
-    that reorders or swaps members is not a shrink and is written normally.
+    An author's ASIN list only ever grows — it never legitimately shrinks —
+    so the write is the union of what's already stored and what just came
+    in, never a straight replacement. The catalog sort windows this list is
+    built from shift as new titles are released, so a later, equal-or-longer
+    run legitimately surfaces new ASINs while its own window pushes older
+    ones out; comparing the two lists for one to be a superset of the other
+    would refuse that normal case and discard the very ASINs it's meant to
+    protect. The union orders incoming ASINs first, then appends any
+    stored-only ones, since list order is a consumer-visible contract here.
 
-    The stored row is locked with SELECT ... FOR UPDATE before the comparison,
-    and the write happens later in the same transaction that took the lock, so
-    a second concurrent call for the same key blocks on the lock until the
-    first call's write has committed, then compares against that just-written
-    value instead of the stale one — the two calls can no longer both read the
-    old value and both pass the guard. This only protects a key that already
-    has a row: two calls racing to write the very first value for a brand-new
-    key still both proceed unconditionally, the same as any other first-write
-    upsert in this module, since there is nothing stored yet to shrink against.
+    The stored row is locked with SELECT ... FOR UPDATE before the union is
+    built, and the write happens later in the same transaction that took the
+    lock, so a second concurrent call for the same key blocks on the lock
+    until the first call's write has committed, then unions against that
+    just-written value instead of the stale one. This only protects a key
+    that already has a row: two calls racing to write the very first value
+    for a brand-new key still both proceed unconditionally, the same as any
+    other first-write upsert in this module, since there is nothing stored
+    yet to union with.
 
     A stored row past its expiry is still locked (so the lock keeps working),
-    but is treated as not-stored for the comparison, matching cache.get's own
+    but is treated as not-stored for the union, matching cache.get's own
     expired-is-a-miss behavior — this guard does not protect an expired entry.
     """
     from app.services.cache import manager as cache
@@ -759,16 +763,13 @@ def persist_author_books_cache_background(key: str, asins: list[str]) -> None:
                     )
                     row = locked.scalar_one_or_none()
                     stored = row.value if row and row.expires_at > _now() else None
+                    to_write = asins
                     if stored:
-                        stored_set = set(stored)
                         incoming_set = set(asins)
-                        if len(asins) < len(stored) or incoming_set < stored_set:
-                            logger.warning(
-                                f"Refused shrink for author books cache {key}: "
-                                f"stored={len(stored)} incoming={len(asins)}"
-                            )
-                            return
-                    await cache.set(session, key, asins)
+                        stored_only = [a for a in stored if a not in incoming_set]
+                        if stored_only:
+                            to_write = list(asins) + stored_only
+                    await cache.set(session, key, to_write)
             except Exception as e:
                 logger.warning(f"Background cache persist failed for {key}: {e}")
 

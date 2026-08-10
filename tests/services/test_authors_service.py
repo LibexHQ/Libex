@@ -384,8 +384,8 @@ async def test_fetch_author_books_by_name_never_overrides_concurrency():
     _fetch_author_books_by_name_detailed defaults to concurrency=1 (fully
     sequential) specifically so the seeder's own paced per-author loop,
     which calls this wrapper, is untouched by the live request path's
-    parallel batching. A future edit defaulting this to
-    NAME_SEARCH_CONCURRENCY would silently turn every seeder author into a
+    parallel batching. A future edit defaulting this wrapper to pass a
+    concurrency override would silently turn every seeder author into a
     concurrent-request burst, defeating that pacing on a shared IP that has
     already been throttled into a VPN rotation once from an amplified
     request burst."""
@@ -1554,6 +1554,130 @@ async def test_fetch_author_books_by_screen_sequential_fallback_when_product_cou
 
 
 # ============================================================
+# CATALOG MULTI-SORT WALK (_fetch_author_books_by_catalog) --
+# ceiling_saturated boundary
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_fetch_author_books_by_catalog_ceiling_saturated_false_at_exact_boundary():
+    """ceiling_saturated is False when total_results sits exactly at
+    len(_CATALOG_SORTS) * CATALOG_RESULT_CEILING -- the walk is structurally
+    capable of reaching that many, so this is not yet the saturated case;
+    only strictly exceeding it is. Deliberately expressed via the constants
+    rather than their current product literal, since CATALOG_RESULT_CEILING
+    is a measured, live-probed value that can be corrected independently of
+    this boundary rule."""
+    from app.services.audible.authors import (
+        _fetch_author_books_by_catalog, _CATALOG_SORTS, CATALOG_RESULT_CEILING,
+    )
+
+    boundary_total = len(_CATALOG_SORTS) * CATALOG_RESULT_CEILING
+
+    async def _get(region, path, params):
+        return {"total_results": boundary_total, "products": []}
+
+    with patch("app.services.audible.authors.audible_get", new=AsyncMock(side_effect=_get)):
+        result = await _fetch_author_books_by_catalog("B000AUTHOR", "Some Author", "us")
+
+    assert result.total_results == boundary_total
+    assert result.ceiling_saturated is False
+
+
+def _catalog_asin_match_products(prefix, n):
+    """n catalog products, each carrying the requested author's own ASIN so
+    _classify_catalog_product accepts every one of them as an authoritative
+    asin_match -- used to drive _fetch_author_books_by_catalog's plateau
+    detection directly rather than through the higher-level get_author_books
+    mocks used elsewhere in this file."""
+    return [
+        {"asin": f"B0{prefix}{i:04d}", "authors": [{"asin": "B000AUTHOR"}]}
+        for i in range(n)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_fetch_author_books_by_catalog_ceiling_saturated_true_from_observed_plateau():
+    """ceiling_saturated is measured from what the walk actually observed on
+    the wire -- a sort's own pages plateauing (re-serving an earlier page's
+    exact content) while the union it fed still falls short of upstream's
+    own total_results claim -- never from CATALOG_RESULT_CEILING arithmetic
+    alone (see _CatalogBooksResult's own docstring). Mocking every page as
+    empty products, as this test used to, can never plateau -- there is
+    nothing to repeat -- so it drives a walk whose -ReleaseDate pages
+    genuinely plateau instead: page 0 and page 1 each carry new content,
+    and every page after that re-serves page 1's exact content, matching
+    the live Conan Doyle/Christie behaviour the docstring describes."""
+    from app.services.audible.authors import _fetch_author_books_by_catalog, _CATALOG_SORTS
+
+    plateau_products = _catalog_asin_match_products("PLATEAU", 50)
+
+    async def _get(region, path, params):
+        sort = params["products_sort_by"]
+        page = params["page"]
+        if sort != _CATALOG_SORTS[0]:
+            # total_results=500 keeps sorts_needed at 1 -- only page 0 of
+            # every other sort is ever fetched (wave 2 fetches it
+            # regardless of whether that sort ends up needed).
+            return {"total_results": 500, "products": _catalog_asin_match_products(f"OTHER{_CATALOG_SORTS.index(sort)}", 10)}
+        if page == 0:
+            return {"total_results": 500, "products": _catalog_asin_match_products("PAGE0", 50)}
+        # page 1 is new content; every page after it re-serves page 1's
+        # exact signature -- the plateau.
+        return {"products": plateau_products}
+
+    with patch("app.services.audible.authors.audible_get", new=AsyncMock(side_effect=_get)):
+        result = await _fetch_author_books_by_catalog("B000AUTHOR", "Some Author", "us")
+
+    assert result.total_results == 500
+    assert result.ceiling_saturated is True
+    assert len(result.asins) < 500  # the union genuinely fell short of the claim
+
+
+@pytest.mark.asyncio
+async def test_fetch_author_books_by_catalog_ceiling_saturated_false_when_walk_reaches_total_without_plateauing():
+    """Complement to the observed-plateau case above: a walk whose pages
+    never repeat, reaching upstream's total_results through genuinely new
+    content on every page, must not be reported as ceiling_saturated --
+    reaching the claimed total cleanly is a complete walk, not a saturated
+    one, regardless of how many pages it took."""
+    from app.services.audible.authors import _fetch_author_books_by_catalog, _CATALOG_SORTS
+
+    async def _get(region, path, params):
+        sort = params["products_sort_by"]
+        page = params["page"]
+        if sort != _CATALOG_SORTS[0]:
+            return {"total_results": 100, "products": []}
+        if page == 0:
+            return {"total_results": 100, "products": _catalog_asin_match_products("PAGE0", 50)}
+        # page 1: genuinely new content, never repeats page 0's signature.
+        return {"products": _catalog_asin_match_products("PAGE1", 50)}
+
+    with patch("app.services.audible.authors.audible_get", new=AsyncMock(side_effect=_get)):
+        result = await _fetch_author_books_by_catalog("B000AUTHOR", "Some Author", "us")
+
+    assert result.total_results == 100
+    assert len(result.asins) == 100
+    assert result.ceiling_saturated is False
+
+
+@pytest.mark.asyncio
+async def test_fetch_author_books_by_catalog_ceiling_saturated_false_when_no_total_results():
+    """No total_results reported anywhere means nothing is known to compare
+    against the ceiling -- ceiling_saturated must default False, never be
+    inferred as saturated purely from the claim's absence."""
+    from app.services.audible.authors import _fetch_author_books_by_catalog
+
+    async def _get(region, path, params):
+        return {"products": []}
+
+    with patch("app.services.audible.authors.audible_get", new=AsyncMock(side_effect=_get)):
+        result = await _fetch_author_books_by_catalog("B000AUTHOR", "Some Author", "us")
+
+    assert result.total_results is None
+    assert result.ceiling_saturated is False
+
+
+# ============================================================
 # GET AUTHOR BOOKS — four-source union (screens, catalog, DB, cache)
 # ============================================================
 
@@ -1588,6 +1712,7 @@ def _catalog_result(
     name_reject_count=0,
     sort_errors=None,
     truncated_by_deadline=False,
+    ceiling_saturated=False,
 ):
     asins = list(asins)
     return _CatalogBooksResult(
@@ -1601,6 +1726,7 @@ def _catalog_result(
         name_reject_count=name_reject_count,
         sort_errors=list(sort_errors) if sort_errors else [],
         truncated_by_deadline=truncated_by_deadline,
+        ceiling_saturated=ceiling_saturated,
     )
 
 
@@ -2171,6 +2297,66 @@ async def test_get_author_books_no_cache_write_when_catalog_truncated_by_deadlin
 
 
 @pytest.mark.asyncio
+async def test_get_author_books_no_cache_write_when_catalog_ceiling_saturated():
+    """catalog_ceiling_saturated (upstream's own total_results exceeding
+    len(_CATALOG_SORTS) * CATALOG_RESULT_CEILING) blocks the cache write the
+    same way an outright catalog error does -- but unlike an error, this is
+    known arithmetically before a single further page is fetched, not
+    inferred from the union's eventual size. The full union is still
+    returned to the caller; only the cache write is suppressed. The dedicated
+    saturation warning fires with the exact ceiling numbers, and the
+    generic ratio-based shortfall warning does NOT also fire for the same
+    condition -- the two would otherwise double up on an identical cause.
+    The threshold is expressed via the constants, not their current product
+    literal, since CATALOG_RESULT_CEILING is a measured, live-probed value
+    independent of this boundary rule."""
+    from app.services.audible.authors import (
+        get_author_books, _CATALOG_SORTS, CATALOG_RESULT_CEILING,
+    )
+
+    mock_session = AsyncMock()
+    saturated_total = len(_CATALOG_SORTS) * CATALOG_RESULT_CEILING + 1
+    catalog_asins = [f"B0CATALOG{i:04d}" for i in range(600)]
+    screen_result = _screen_result(["B0SCREEN001"], product_count=1)
+    catalog_result = _catalog_result(
+        catalog_asins, total_results=saturated_total, ceiling_saturated=True,
+    )
+
+    with patch("app.services.audible.authors._fetch_author_books_by_screen", new=AsyncMock(return_value=screen_result)), \
+         patch("app.services.audible.authors._resolve_author_name", new=AsyncMock(return_value="Some Author")), \
+         patch("app.services.audible.authors._fetch_author_books_by_catalog", new=AsyncMock(return_value=catalog_result)), \
+         patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
+         patch("app.services.audible.authors.cache.get", return_value=None), \
+         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist, \
+         patch("app.services.audible.authors.logger") as mock_logger:
+        result = await get_author_books("B000AUTHOR", "us", mock_session)
+
+    # The union is still returned in full -- suppressing the cache write
+    # must not have become a truncated or empty response.
+    assert result == catalog_asins + ["B0SCREEN001"]
+    assert len(result) == 601
+    mock_persist.assert_not_called()
+
+    saturation_calls = [
+        c for c in mock_logger.warning.call_args_list
+        if c.args[0] == "Audible Author Books catalog saturated its sort ceiling, cache write suppressed"
+    ]
+    assert len(saturation_calls) == 1
+    extra = saturation_calls[0].kwargs["extra"]
+    assert extra["author_asin"] == "B000AUTHOR"
+    assert extra["region"] == "us"
+    assert extra["catalog_total_results"] == saturated_total
+    assert extra["catalog_max_fetchable"] == len(_CATALOG_SORTS) * CATALOG_RESULT_CEILING
+    assert extra["author_book_num"] == 601
+
+    shortfall_calls = [
+        c for c in mock_logger.warning.call_args_list
+        if c.args[0] == "Audible Author Books union fell short of the claimed total"
+    ]
+    assert shortfall_calls == []
+
+
+@pytest.mark.asyncio
 async def test_get_author_books_appends_db_known_asins_at_tail_when_catalog_degraded_and_screens_present():
     """When the catalog half is degraded (errored) and screens returned
     something, DB-known ASINs the union is still missing are appended after
@@ -2387,6 +2573,63 @@ async def test_get_author_books_shortfall_warning_does_not_fire_on_overshoot():
         if c.args[0] == "Audible Author Books union fell short of the claimed total"
     ]
     assert shortfall_calls == []
+
+
+@pytest.mark.asyncio
+async def test_get_author_books_shortfall_band_below_ceiling_still_writes_cache_and_warns():
+    """PINS CURRENT BEHAVIOR, NOT DESIRED BEHAVIOR. len(_CATALOG_SORTS) *
+    CATALOG_RESULT_CEILING is an optimistic upper bound: the three sorts walk
+    the same catalog in different orders and overlap heavily, so the
+    genuinely reachable union is lower than that product in practice. For a
+    total_results claim that requires every sort (i.e. anywhere past
+    (len(_CATALOG_SORTS) - 1) * CATALOG_RESULT_CEILING) but does not exceed
+    the full product, ceiling_saturated stays False even though the walk may
+    fall well short of the claim -- so this case still fires the generic
+    ratio shortfall warning AND still writes to cache, unlike the
+    ceiling-exceeded case one test above, which suppresses the write. This
+    test pins the worst case of that band -- total_results at the exact
+    ceiling, the closest a claim can get to saturation while still reading
+    False. This is characterised here as the boundary this slice leaves in
+    place; whether it should also suppress the write is a separate
+    question, out of scope for this test."""
+    from app.services.audible.authors import (
+        get_author_books, _CATALOG_SORTS, CATALOG_RESULT_CEILING,
+    )
+
+    mock_session = AsyncMock()
+    band_total = len(_CATALOG_SORTS) * CATALOG_RESULT_CEILING  # at the ceiling, not past it
+    catalog_asins = [f"B0CATALOG{i:04d}" for i in range(600)]
+    screen_result = _screen_result(["B0SCREEN001"], product_count=1)
+    catalog_result = _catalog_result(
+        catalog_asins, total_results=band_total, ceiling_saturated=False,
+    )
+
+    with patch("app.services.audible.authors._fetch_author_books_by_screen", new=AsyncMock(return_value=screen_result)), \
+         patch("app.services.audible.authors._resolve_author_name", new=AsyncMock(return_value="Some Author")), \
+         patch("app.services.audible.authors._fetch_author_books_by_catalog", new=AsyncMock(return_value=catalog_result)), \
+         patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
+         patch("app.services.audible.authors.cache.get", return_value=None), \
+         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist, \
+         patch("app.services.audible.authors.logger") as mock_logger:
+        result = await get_author_books("B000AUTHOR", "us", mock_session)
+
+    assert len(result) == 601
+    # Currently writes despite a real shortfall in this band.
+    mock_persist.assert_called_once()
+
+    shortfall_calls = [
+        c for c in mock_logger.warning.call_args_list
+        if c.args[0] == "Audible Author Books union fell short of the claimed total"
+    ]
+    assert len(shortfall_calls) == 1
+    assert shortfall_calls[0].kwargs["extra"]["claimed_total"] == band_total
+    assert shortfall_calls[0].kwargs["extra"]["shortfall"] == band_total - 601
+
+    saturation_calls = [
+        c for c in mock_logger.warning.call_args_list
+        if c.args[0] == "Audible Author Books catalog saturated its sort ceiling, cache write suppressed"
+    ]
+    assert saturation_calls == []
 
 
 @pytest.mark.asyncio
@@ -2717,16 +2960,21 @@ async def test_fetch_author_books_by_name_detailed_total_results_ends_walk_witho
 
 
 @pytest.mark.asyncio
-async def test_fetch_author_books_by_name_detailed_content_repeat_ends_walk_despite_inflated_total_results():
+async def test_fetch_author_books_by_name_detailed_content_repeat_stops_walk_but_is_not_completed():
     """Audible's catalog endpoint can report a total_results far past its
     real internal retrieval ceiling for a query (confirmed live against
     Arthur Conan Doyle: total_results claimed 5367, but page 10 was the
     last with new content -- every later page repeated page 10's exact
     content forever rather than going short). A repeated page signature
-    must be treated as having found that ceiling and end the walk as
-    confirmed-complete, rather than trusting total_results and paginating
-    through wasted, identical pages. The repeated page still counts toward
-    pages_fetched (it was genuinely fetched) but contributes no new ASINs."""
+    is this walk noticing its own plateau, not upstream confirming nothing
+    further remains -- the same distinction the screens walk draws between
+    SCREENS_REASON_PLATEAU_TRUNCATED and SCREENS_REASON_COMPLETED. It ends
+    the walk (so it doesn't paginate through wasted, identical pages
+    trusting the inflated total_results) but must NOT be reported as
+    completed -- a caller relying on this list as exhaustive needs to know
+    the walk merely stopped, not that it finished. The repeated page still
+    counts toward pages_fetched (it was genuinely fetched) but contributes
+    no new ASINs."""
     from app.services.audible.authors import _fetch_author_books_by_name_detailed
 
     page0 = {
@@ -2746,7 +2994,7 @@ async def test_fetch_author_books_by_name_detailed_content_repeat_ends_walk_desp
     assert mock_get.await_count == 3
     assert pages_fetched == 3
     assert len(asins) == 100  # page0's 50 + page1's 50 unique -- page2 contributes nothing new
-    assert completed is True
+    assert completed is False
 
 
 # ============================================================
@@ -3045,7 +3293,15 @@ async def test_get_author_books_degraded_path_warning_fires_on_successful_non_em
     warning. Name resolution failing outright means author_name stays None
     and the catalog wave is never scheduled (see get_author_books' own
     docstring), so catalog_error/catalog_sort_errors reflect that "never
-    ran" state, not a catalog-specific failure."""
+    ran" state, not a catalog-specific failure.
+
+    Also guards the regression this exact scenario used to hide: with
+    catalog never having run, the union being cached is screens-only --
+    catalog_clean now explicitly excludes the name_resolution_error case
+    (rather than reading "no author name" as trivially complete regardless
+    of why), so persist_author_books_cache_background must NOT fire here.
+    A screens-only partial view must never be written back as the
+    authoritative cached list."""
     from app.services.audible.authors import get_author_books
 
     mock_session = AsyncMock()
@@ -3055,11 +3311,12 @@ async def test_get_author_books_degraded_path_warning_fires_on_successful_non_em
          patch("app.services.audible.authors._resolve_author_name", new=AsyncMock(side_effect=RuntimeError("name boom"))), \
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
          patch("app.services.audible.authors.cache.get", return_value=None), \
-         patch("app.services.audible.authors.persist_author_books_cache_background"), \
+         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist, \
          patch("app.services.audible.authors.logger") as mock_logger:
         result = await get_author_books("B000AUTHOR", "us", mock_session)
 
     assert result == ["B0SCREEN001"]
+    mock_persist.assert_not_called()
     mock_logger.warning.assert_called_once_with(
         "Audible Author Books served from a degraded path",
         extra={
@@ -3070,5 +3327,114 @@ async def test_get_author_books_degraded_path_warning_fires_on_successful_non_em
             "catalog_error": None,
             "catalog_sort_errors": [],
             "name_resolution_error": "RuntimeError: name boom",
+            "db_error": None,
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_fetch_author_books_by_screen_every_warning_line_carries_author_asin():
+    """Restores the coverage of the deleted test of the same name (removed
+    in the commit that dropped _fetch_author_books_by_screen's own
+    per-screen shortfall warning, since that removal left only one warning
+    site in that function -- the original two-warnings-in-one-walk
+    assertion no longer applies there). Rescoped against the CURRENT
+    warning set across the whole ASIN-scoped author-books path -- which has
+    since grown a new warning line (the catalog ceiling-saturation warning)
+    -- rather than only the single warning left inside
+    _fetch_author_books_by_screen itself: every WARNING this path can emit,
+    from the screens-level unclean-termination line through every
+    get_author_books-level line (total failure, union shortfall, catalog
+    ceiling saturation, degraded path), must carry author_asin. This is
+    deliberately narrower than every warning module-wide:
+    _fetch_author_books_by_name_detailed's own page-fetch-failure warning
+    (a name-only walk with no ASIN in scope at all) carries author_name
+    instead, by design, and is not covered here."""
+    from app.services.audible.authors import (
+        get_author_books, _fetch_author_books_by_screen,
+        _CATALOG_SORTS, CATALOG_RESULT_CEILING,
+    )
+    from app.core.exceptions import NotFoundException
+
+    asin = "B000TARGET"
+    collected_extras = []
+
+    async def _run_get_author_books(
+        screen_result, resolve_name_result, catalog_outcome,
+        resolve_name_raises=False, catalog_raises=False,
+    ):
+        mock_session = AsyncMock()
+        resolve_name_mock = (
+            AsyncMock(side_effect=resolve_name_result)
+            if resolve_name_raises
+            else AsyncMock(return_value=resolve_name_result)
+        )
+        catalog_mock = (
+            AsyncMock(side_effect=catalog_outcome)
+            if catalog_raises
+            else AsyncMock(return_value=catalog_outcome)
+        )
+        with patch("app.services.audible.authors._fetch_author_books_by_screen", new=AsyncMock(return_value=screen_result)), \
+             patch("app.services.audible.authors._resolve_author_name", new=resolve_name_mock), \
+             patch("app.services.audible.authors._fetch_author_books_by_catalog", new=catalog_mock), \
+             patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
+             patch("app.services.audible.authors.cache.get", return_value=None), \
+             patch("app.services.audible.authors.persist_author_books_cache_background"), \
+             patch("app.services.audible.authors.logger") as mock_logger:
+            try:
+                await get_author_books(asin, "us", mock_session)
+            except NotFoundException:
+                pass
+        collected_extras.extend(c.kwargs["extra"] for c in mock_logger.warning.call_args_list)
+
+    # Scenario 1: total failure -- screen errors, no name resolved (catalog
+    # never scheduled), DB and cache both empty -> "unavailable from every
+    # path".
+    await _run_get_author_books(
+        _screen_result([], termination_reason=SCREENS_REASON_PAGE_ERROR, page_error="boom"),
+        None, _catalog_result([]),
+    )
+
+    # Scenario 2: union shortfall past the 10% threshold -> "union fell
+    # short of the claimed total".
+    await _run_get_author_books(
+        _screen_result([f"B0S{i:04d}" for i in range(500)], product_count=500),
+        "Some Author",
+        _catalog_result([f"B0C{i:04d}" for i in range(300)], total_results=1000),
+    )
+
+    # Scenario 3: catalog ceiling saturated -> the dedicated saturation
+    # warning (the new line this slice added).
+    saturated_total = len(_CATALOG_SORTS) * CATALOG_RESULT_CEILING + 1
+    await _run_get_author_books(
+        _screen_result(["B0SCREEN001"], product_count=1),
+        "Some Author",
+        _catalog_result(["B0CAT0001"], total_results=saturated_total, ceiling_saturated=True),
+    )
+
+    # Scenario 4: catalog errors outright, screens fine -> "served from a
+    # degraded path".
+    await _run_get_author_books(
+        _screen_result(["B0SCREEN002"], product_count=1),
+        "Some Author",
+        RuntimeError("catalog boom"),
+        catalog_raises=True,
+    )
+
+    assert len(collected_extras) == 4
+    for extra in collected_extras:
+        assert extra["author_asin"] == asin
+
+    # Scenario 5: the one warning site that still lives inside
+    # _fetch_author_books_by_screen itself -- exercised directly, since
+    # get_author_books' own mocking of that function bypasses its internals
+    # entirely.
+    echoing_page = {"sections": [_asin_section(
+        [_row("B0BOTH0001")], product_count=1000, pagination="SAMETOKEN",
+    )]}
+    with patch("app.services.audible.authors.audible_get", new=AsyncMock(return_value=echoing_page)), \
+         patch("app.services.audible.authors.logger") as mock_logger:
+        await _fetch_author_books_by_screen(asin, "us")
+
+    mock_logger.warning.assert_called_once()
+    assert mock_logger.warning.call_args.kwargs["extra"]["author_asin"] == asin

@@ -547,33 +547,59 @@ async def _run_persist_author_books_cache_background(key, asins, stored):
 
 
 @pytest.mark.asyncio
-async def test_persist_author_books_cache_background_refuses_shorter_list():
-    """A strictly shorter incoming list than what's stored is refused."""
+async def test_persist_author_books_cache_background_shorter_list_unions_in_the_missing_member():
+    """A strictly shorter incoming list never drops a stored member — the
+    write is the union, incoming first, with the stored-only ASIN appended."""
     mock_set = await _run_persist_author_books_cache_background(
         "author_books:us:B000AUTHOR", ["B0ASIN0001"], stored=["B0ASIN0001", "B0ASIN0002"],
     )
-    mock_set.assert_not_awaited()
+    mock_set.assert_awaited_once()
+    written_value = mock_set.await_args.args[2]
+    assert written_value == ["B0ASIN0001", "B0ASIN0002"]
 
 
 @pytest.mark.asyncio
-async def test_persist_author_books_cache_background_refuses_strict_subset():
+async def test_persist_author_books_cache_background_strict_subset_unions_in_the_missing_member():
     """A same-length-or-longer incoming list that is still a strict subset of
-    what's stored is refused — length alone isn't the whole check."""
+    what's stored still retains every stored member via the union — length
+    alone was never the whole check, and it still isn't."""
     mock_set = await _run_persist_author_books_cache_background(
         "author_books:us:B000AUTHOR",
         ["B0ASIN0001", "B0ASIN0001"],
         stored=["B0ASIN0001", "B0ASIN0002"],
     )
-    mock_set.assert_not_awaited()
+    mock_set.assert_awaited_once()
+    written_value = mock_set.await_args.args[2]
+    assert written_value == ["B0ASIN0001", "B0ASIN0001", "B0ASIN0002"]
 
 
 @pytest.mark.asyncio
-async def test_persist_author_books_cache_background_refuses_empty_against_non_empty():
-    """An empty incoming list against a non-empty stored one is refused."""
+async def test_persist_author_books_cache_background_empty_incoming_unions_in_all_of_stored():
+    """An empty incoming list against a non-empty stored one still retains
+    every stored member — the union of nothing-new with what's stored is
+    just what's stored, appended after the (empty) incoming order."""
     mock_set = await _run_persist_author_books_cache_background(
         "author_books:us:B000AUTHOR", [], stored=["B0ASIN0001"],
     )
-    mock_set.assert_not_awaited()
+    mock_set.assert_awaited_once()
+    written_value = mock_set.await_args.args[2]
+    assert written_value == ["B0ASIN0001"]
+
+
+@pytest.mark.asyncio
+async def test_persist_author_books_cache_background_equal_length_swap_retains_dropped_member():
+    """The old guard (`len(asins) < len(stored) or incoming_set < stored_set`)
+    let an equal-length swap through unconditionally and lost the member the
+    swap dropped: stored=['A','B','C'], incoming=['A','B','D'] silently lost
+    'C'. The union must retain it."""
+    mock_set = await _run_persist_author_books_cache_background(
+        "author_books:us:B000AUTHOR",
+        ["B0ASIN0001", "B0ASIN0002", "B0ASIN0004"],
+        stored=["B0ASIN0001", "B0ASIN0002", "B0ASIN0003"],
+    )
+    mock_set.assert_awaited_once()
+    written_value = mock_set.await_args.args[2]
+    assert written_value == ["B0ASIN0001", "B0ASIN0002", "B0ASIN0004", "B0ASIN0003"]
 
 
 @pytest.mark.asyncio

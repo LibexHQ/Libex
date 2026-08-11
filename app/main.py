@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 
 # Core
 from app.core.config import get_settings, check_retired_env_vars
-from app.core.logging import setup_logging
+from app.core.logging import setup_logging, stop_axiom_listener
 from app.core.exceptions import LibexException
 from app.core.middleware import setup_middleware
 from app.core.migration_notice import build_migration_notice, is_new_host_request
@@ -99,6 +99,10 @@ async def lifespan(app: FastAPI):
     purge_task.cancel()
     await engine.dispose()
     logger.info("Libex shutting down")
+    # Last, so the line above is still drained: stop() flushes the queue before
+    # the shipping thread exits. Deterministic here in a way atexit is not — a
+    # container stop runs lifespan shutdown, and buffered lines survive it.
+    stop_axiom_listener()
 
 
 # Off by default for self-hosters (migration_notice_enabled is False, migration_new_host

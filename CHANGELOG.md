@@ -10,6 +10,26 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.10.2]
+
+### Fixed
+- **The API could stop responding under load, including on `/health`.** Every
+  request shipped a log line to Axiom with a blocking network call made on the
+  same event loop that serves requests, and that call had no time limit. Libex
+  runs a single worker, so while a log line was in flight the API served nobody
+  — and because Axiom slows down once its ingest limits are crossed, more
+  traffic meant longer stalls, which meant more requests waiting, which meant
+  longer stalls again. Past a threshold that tips from "occasionally slow" to
+  "timing out constantly" rather than degrading gradually. `/health` was
+  affected too despite doing no work of its own, which is the clearest sign the
+  process itself was blocked rather than any one endpoint being slow. Log lines
+  now go onto a bounded queue that a background thread drains, so a request
+  hands its line over and continues; if the queue fills, lines are dropped
+  rather than making anyone wait. Log shipping also now gives up properly when
+  Axiom is failing instead of retrying on every record forever, and the client
+  has a timeout where it previously had none. What gets logged, at what level,
+  and with which fields is unchanged.
+
 ## [1.10.1]
 
 ### Changed

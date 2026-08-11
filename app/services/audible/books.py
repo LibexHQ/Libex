@@ -50,6 +50,23 @@ IMAGE_SIZES = "500,1000,2400,3200"
 
 UNRELEASED_PLACEHOLDER = "2200-01-01T00:00:00Z"
 
+# Below this many products, normalization runs inline on the event loop; at
+# or above it, the whole batch is handed to a single asyncio.to_thread call.
+# Measured (scratchpad benchmark, not part of this repo): a lone product
+# normalizes in ~0.2ms and a 50-ASIN chunk -- the largest a single Audible
+# catalog request ever returns, see the chunking below -- in ~4-5ms, while
+# the to_thread hop itself costs ~0.3-0.5ms of fixed overhead regardless of
+# batch size. Every book/series/search caller (single ASIN up to one chunk)
+# stays under this threshold and keeps its current inline timing exactly.
+# It's only get_author_books' hydration, which accumulates products across
+# many chunks before normalizing once, that can cross it -- the flagged
+# ~1530-product case blocks the loop for ~150ms inline with nothing else
+# able to run in that window, against ~180ms threaded but with the loop free
+# to service other requests throughout. The thread hop is a net wall-clock
+# loss at every size tested; the point is solely to stop a single request
+# from stalling every other connection the process is holding.
+NORMALIZE_THREAD_THRESHOLD = 100
+
 
 # ============================================================
 # HELPERS
@@ -205,6 +222,34 @@ def _normalize_product(product: dict, region: str) -> dict[str, Any]:
         "genres": _parse_genres(product),
         "series": series_list,
     }
+
+
+async def _normalize_products(products: list[dict], region: str) -> list[dict[str, Any]]:
+    """
+    Normalizes a batch of raw Audible products, offloading the whole batch
+    to a worker thread when it's large enough to be worth the hop (see
+    NORMALIZE_THREAD_THRESHOLD). One thread hop for the entire batch, never
+    one per product -- per-product hops would each pay the hop's own fixed
+    cost on top of the ~0.2ms of work being moved, which loses badly at the
+    hundreds-to-low-thousands sizes this exists for.
+
+    _normalize_product touches only its own arguments and pure helpers
+    (strip_html, strip_image_size_suffix, datetime parsing) -- no DB session,
+    no cache, no shared mutable state, and no read of any ContextVar, so
+    running it on another thread carries no correctness risk. In particular
+    it never reads the author_books_concurrency ContextVar in client.py,
+    which wouldn't propagate into a to_thread worker the way a normal await
+    does -- moot here since nothing in this path looks at it.
+
+    Ordering matches the input list either way (a single list comprehension,
+    run inline or inside one to_thread call), and a malformed product raises
+    out of that comprehension exactly as it always has -- offloading doesn't
+    change which products succeed or fail relative to each other, only which
+    thread does the work.
+    """
+    if len(products) < NORMALIZE_THREAD_THRESHOLD:
+        return [_normalize_product(p, region) for p in products]
+    return await asyncio.to_thread(lambda: [_normalize_product(p, region) for p in products])
 
 
 def _normalize_chapters(data: dict, asin: str) -> dict[str, Any]:
@@ -409,7 +454,7 @@ async def get_books_by_asins(
         if not all_products and not cached_results:
             return []
 
-        normalized = [_normalize_product(p, region) for p in all_products]
+        normalized = await _normalize_products(all_products, region)
 
         # Persist to DB and cache in the background
         persist_books_background(normalized, region)

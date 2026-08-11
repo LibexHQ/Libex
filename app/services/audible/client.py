@@ -13,8 +13,10 @@ This ensures data accuracy and freshness at all times.
 import asyncio
 import datetime
 import random
+from contextlib import contextmanager
+from contextvars import ContextVar
 from email.utils import parsedate_to_datetime
-from typing import Any
+from typing import Any, Iterator
 
 # Third party
 import httpx
@@ -106,7 +108,44 @@ def get_region_headers(region: str) -> dict[str, str]:
 # process-wide, instead of at any individual call site: a per-call-site
 # limit only expresses how eagerly that one walk wants to go, never what the
 # shared IP can take at once across all of them.
+#
+# This is the pool every call uses by default, including the seeder's own
+# continuous, unattended background work -- the workload that actually
+# caused the VPN rotation, since it runs sustained and unsupervised for as
+# long as the process is up. It stays exactly where the incident left it.
 AUDIBLE_CONCURRENCY_LIMIT = 10
+
+# A second, wider pool reserved for exactly one caller: a live author-books
+# request's own discovery-and-hydration fan-out (screens + catalog walk in
+# authors/, then get_books_by_asins hydrating the result), entered via
+# author_books_concurrency() below. That workload is a fundamentally
+# different shape from the sustained one above -- one user request fires a
+# bounded, self-terminating burst (well under 100 total calls even for the
+# largest known real catalog, capped by the screens plateau and
+# CATALOG_RESULT_CEILING well short of that -- see screens.py and
+# catalog.py) and then stops, driven by real user traffic Libex's own
+# hard-noes already forbid amplifying, not a standing crawl. Reusing
+# AUDIBLE_CONCURRENCY_LIMIT for it was the actual bug behind a live, measured
+# production outage: 5 concurrent author lookups queued behind a shared
+# 10-wide gate all 504'd at the fronting proxy's 30s timeout, and even a
+# single uncontended prolific-author request (Christie) measured at 28.22s
+# wall clock -- inside 2s of that same timeout.
+#
+# Measured directly against Audible (bypassing the production proxy, so
+# these are relative, not absolute, numbers -- see authors/__init__.py's own
+# note on this) across Conan Doyle and Christie, single and 5-concurrent:
+# raising the effective limit from 10 to 30 cut wall clock roughly in half to
+# a third in every case (a single Doyle discovery+hydration run: 5.03s at 10
+# vs 3.56s at 30; 5 concurrent mixed requests: 12.71s at 10 vs 5.77s at 30),
+# with zero throttled responses observed at 30, 60, or even 100 in flight --
+# and returns past 30 were flat or worse, not further improvement, so
+# headroom past ~30 buys nothing measurable while opening more simultaneous
+# connections against a shared IP that has already been throttled once on a
+# different workload. 25 is chosen a step below that measured plateau, not
+# at it, since the measurement was taken without the production proxy's own
+# real behavior in the loop and deserves a live check there before being
+# trusted at the ceiling this measured.
+AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT = 25
 
 # asyncio.Semaphore binds its internal waiter state to whichever event loop
 # is running the first time it's touched. Under uvicorn that's one long-lived
@@ -130,21 +169,94 @@ def _get_audible_semaphore() -> asyncio.Semaphore:
     return _audible_semaphore
 
 
+# Same per-loop-rebuild reasoning as _get_audible_semaphore above, kept as a
+# fully separate instance rather than a dict keyed by pool name: two pools
+# only, and a separate pair of module globals means the existing default-pool
+# tests (which poke _audible_semaphore / _audible_semaphore_loop directly)
+# stay exactly as they are, untouched by this pool's own lifecycle.
+_audible_author_books_semaphore: asyncio.Semaphore | None = None
+_audible_author_books_semaphore_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _get_audible_author_books_semaphore() -> asyncio.Semaphore:
+    global _audible_author_books_semaphore, _audible_author_books_semaphore_loop
+    loop = asyncio.get_running_loop()
+    if (
+        _audible_author_books_semaphore is None
+        or _audible_author_books_semaphore_loop is not loop
+    ):
+        _audible_author_books_semaphore = asyncio.Semaphore(AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT)
+        _audible_author_books_semaphore_loop = loop
+    return _audible_author_books_semaphore
+
+
+# Selects which pool audible_get acquires from, without adding a parameter to
+# audible_get itself or to any of its call sites: a threaded-through pool
+# parameter would have to be plumbed through every intermediate fetch
+# function in screens.py, catalog.py, and books.py, several of which are
+# shared with the seeder and must never pick up the wider pool, and several
+# existing tests patch audible_get itself with narrow, fixed-arity stand-ins
+# that a new always-passed kwarg would break outright. A ContextVar
+# sidesteps both: it's invisible to every call site (none of them change),
+# asyncio.gather's own tasks inherit whichever value was current when
+# gather() created them (contextvars.copy_context() happens at task
+# creation), and it flows unmodified through every further nested await and
+# nested gather inside that task -- which is exactly why wrapping only the
+# single outer gather in _walk_author_books and the single hydration gather
+# in get_books_by_asins (see author_books_concurrency's call sites) is
+# enough to cover every audible_get call underneath either, with nothing
+# else in either module touched.
+_audible_concurrency_pool: ContextVar[str] = ContextVar(
+    "_audible_concurrency_pool", default="default"
+)
+
+
+@contextmanager
+def author_books_concurrency() -> Iterator[None]:
+    """
+    Marks every audible_get call made within this block -- directly or via
+    any further nested await, task, or gather it spawns -- as belonging to
+    the wider AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT pool instead of the
+    default AUDIBLE_CONCURRENCY_LIMIT one. Reserved for the live
+    author-books discovery and hydration fan-out (see
+    AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT's own docstring for why that
+    workload, and only that one, gets the wider pool); every other caller
+    -- single book/author/series lookups, the seeder, chapter backfills --
+    never enters this block and stays on the default pool exactly as before.
+    """
+    token = _audible_concurrency_pool.set("author_books")
+    try:
+        yield
+    finally:
+        _audible_concurrency_pool.reset(token)
+
+
+def _current_audible_semaphore() -> asyncio.Semaphore:
+    if _audible_concurrency_pool.get() == "author_books":
+        return _get_audible_author_books_semaphore()
+    return _get_audible_semaphore()
+
+
 # ============================================================
 # SHARED HTTP CLIENT
 # ============================================================
 
-# The semaphore already guarantees at most AUDIBLE_CONCURRENCY_LIMIT calls are
-# ever in flight at once, so the pool is sized to match it exactly rather than
-# httpx's defaults (100 / 20): there is never a use for more than 10 open
-# connections, and keeping all 10 alive -- instead of the smaller default
-# keepalive pool -- means a fan-out that reuses the same shared client across
-# dozens of sequential requests (a prolific-author walk is ~57) gets a
-# reused, already-negotiated connection almost every time instead of paying a
-# fresh TCP+TLS handshake per call.
+# The two semaphores together guarantee at most AUDIBLE_CONCURRENCY_LIMIT +
+# AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT calls are ever in flight across both
+# pools at once, so the shared client's own connection pool is sized to match
+# that sum rather than httpx's defaults (100 / 20) or either semaphore alone:
+# capping it at just one pool's limit would let that pool's own connections
+# fill the shared client's ceiling and leave the other pool queuing on a free
+# connection despite still having permits free on its own semaphore --
+# exactly the hidden cross-pool contention the two-pool split exists to
+# avoid. Keeping every connection up to that sum alive -- instead of the
+# smaller default keepalive pool -- means a fan-out that reuses the same
+# shared client across dozens of sequential requests (a prolific-author walk
+# is ~60-90) gets a reused, already-negotiated connection almost every time
+# instead of paying a fresh TCP+TLS handshake per call.
 _AUDIBLE_POOL_LIMITS = httpx.Limits(
-    max_connections=AUDIBLE_CONCURRENCY_LIMIT,
-    max_keepalive_connections=AUDIBLE_CONCURRENCY_LIMIT,
+    max_connections=AUDIBLE_CONCURRENCY_LIMIT + AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT,
+    max_keepalive_connections=AUDIBLE_CONCURRENCY_LIMIT + AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT,
 )
 
 # audible_get is called from three different lifetimes -- request handlers,
@@ -303,6 +415,12 @@ async def audible_get(
     AUDIBLE_MAX_ATTEMPTS times with backoff (see the CONCURRENCY BOUND and
     RETRY / BACKOFF sections above). A 404 stays terminal and is never
     retried; neither is any other 4xx, nor a timeout or connection failure.
+
+    Which of the two concurrency pools this call draws from is read from a
+    ContextVar (_current_audible_semaphore), never a parameter here -- see
+    author_books_concurrency's own docstring for why. Every call site in
+    this codebase is unaffected either way; only whether it currently runs
+    inside an author_books_concurrency() block changes.
     """
     region = validate_region(region)
     url = get_audible_url(region, path)
@@ -312,7 +430,7 @@ async def audible_get(
 
     client = _get_audible_client()
     for attempt in range(AUDIBLE_MAX_ATTEMPTS):
-        async with _get_audible_semaphore():
+        async with _current_audible_semaphore():
             try:
                 response = await client.get(
                     url,
@@ -348,13 +466,18 @@ async def audible_get(
             # this project a VPN rotation once already, so it's logged
             # every time it's seen, whether or not this call still has
             # attempts left to absorb it -- a retry succeeding on the
-            # next attempt must not make this go quiet.
+            # next attempt must not make this go quiet. pool is included so
+            # a throttle traced to the wider author-books pool (see
+            # AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT) is distinguishable at
+            # the log line from one on the default pool every other caller
+            # still uses, rather than only visible by cross-referencing path.
             logger.warning(
                 "Audible API throttled or degraded",
                 extra={
                     "status_code": response.status_code,
                     "region": region,
                     "path": path,
+                    "pool": _audible_concurrency_pool.get(),
                     "attempt": attempt + 1,
                     "max_attempts": AUDIBLE_MAX_ATTEMPTS,
                     "retry_after": retry_after,

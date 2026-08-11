@@ -11,6 +11,7 @@ Falls back to DB when Audible is unavailable.
 # Standard library
 import asyncio
 import time
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from typing import Any
 
@@ -27,7 +28,7 @@ from app.core.logging import get_logger
 from app.core.utils import strip_html, strip_image_size_suffix
 
 # Services
-from app.services.audible.client import audible_get, REGION_MAP
+from app.services.audible.client import audible_get, author_books_concurrency, REGION_MAP
 from app.services.cache import manager as cache
 from app.services.cache.manager import book_key, chapters_key
 from app.services.db.writer import persist_books_background, persist_track_background, upsert_track
@@ -289,11 +290,24 @@ async def get_books_by_asins(
     region: str,
     session: AsyncSession,
     use_cache: bool = False,
+    high_concurrency: bool = False,
 ) -> list[dict[str, Any]]:
     """
     Fetches one or more books by ASIN from Audible.
     Writes results to relational DB and cache.
     Falls back to DB then cache when Audible is unavailable.
+
+    high_concurrency, when True, runs the chunk fan-out below inside
+    author_books_concurrency() (see client.py), drawing from the wider
+    AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT pool instead of the default one.
+    Set only by the author-ASIN routes hydrating get_author_books' own
+    result -- the one path where a single request legitimately fans out to
+    dozens of chunk requests and a live, measured production outage
+    (5 concurrent author lookups 504ing at the fronting proxy's 30s timeout)
+    traced directly back to that fan-out being serialized behind the
+    default pool. Every other caller (single/small ASIN lists from the book,
+    series, and search routes, and the seeder) defaults to False and is
+    unaffected.
     """
     if not asins:
         raise NotFoundException("No ASINs provided")
@@ -333,10 +347,16 @@ async def get_books_by_asins(
         # the chunks that already came back; gather still guarantees results
         # line up with chunks by index regardless of completion order, so
         # reassembly below stays in the same order the caller passed in.
-        results = await asyncio.gather(
-            *(_fetch_chunk(chunk, region) for chunk in chunks),
-            return_exceptions=True,
-        )
+        #
+        # nullcontext when high_concurrency is False keeps every other
+        # caller's behavior byte-identical to before this parameter existed
+        # -- the pool draw only changes for the one path that opts in.
+        pool_context = author_books_concurrency() if high_concurrency else nullcontext()
+        with pool_context:
+            results = await asyncio.gather(
+                *(_fetch_chunk(chunk, region) for chunk in chunks),
+                return_exceptions=True,
+            )
 
         requested_took = round((time.monotonic() - start) * 1000, 2)
 

@@ -23,7 +23,7 @@ from app.core.logging import get_logger
 from app.core.utils import strip_html
 
 # Services
-from app.services.audible.client import audible_get, LOCALE_MAP
+from app.services.audible.client import audible_get, author_books_concurrency, LOCALE_MAP
 from app.services.audible.authors.screens import (
     _fetch_author_books_by_screen,
     _ScreenBooksResult,
@@ -59,6 +59,22 @@ logger = get_logger()
 # That's a deliberate latency/completeness tradeoff, not an oversight, and
 # changing it is a separate decision from the caps in screens.py and
 # catalog.py.
+#
+# This alone is not what keeps a live author-books request under the
+# fronting proxy's timeout -- it only ever bounded discovery, and hydration
+# (get_books_by_asins, run after this returns) had no bound of its own at
+# all, which is what actually produced a live, measured production outage:
+# every one of 5 concurrent author lookups 504'd at exactly 30.1s, and even
+# a single uncontended prolific-author request (Christie) measured 28.22s
+# wall clock. The actual fix is client.py's AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT
+# pool (entered below via author_books_concurrency) -- see that constant's
+# own docstring for the measurements: raising the effective in-flight limit
+# from 10 to 25-30 for this call path cut wall clock roughly in half to a
+# third in every case measured, both single-request and 5-concurrent, which
+# is what actually keeps a full, untruncated result inside the proxy's
+# window rather than needing to return less than what Audible has. This
+# 45s deadline remains underneath that as a backstop against a genuinely
+# pathological walk, not the mechanism the outage fix relies on.
 AUTHOR_BOOKS_TIME_BUDGET_SECONDS = 45.0
 
 # TTL for an author-books cache write that did not reach a confirmed-clean,
@@ -363,12 +379,22 @@ async def _walk_author_books(
     # Waves 2 & 3: screens and catalog run concurrently as two top-level
     # tasks. Catalog is only scheduled at all when a name was resolved --
     # there is nothing to query the catalog with otherwise.
-    tasks = [_fetch_author_books_by_screen(asin, region, deadline=deadline)]
-    if author_name:
-        tasks.append(
-            _fetch_author_books_by_catalog(asin, author_name, region, deadline=deadline)
-        )
-    outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+    #
+    # author_books_concurrency() puts every audible_get call this gather
+    # spawns -- both top-level tasks and every further nested gather each
+    # of them runs internally (screens' own page fan-out, catalog's wave 2
+    # and wave 3) -- on the wider AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT pool
+    # instead of the default one every other Audible caller (single book/
+    # author/series lookups, the seeder) still uses. See that pool's own
+    # docstring in client.py for why this call path specifically gets it
+    # and the measurements behind the chosen limit.
+    with author_books_concurrency():
+        tasks = [_fetch_author_books_by_screen(asin, region, deadline=deadline)]
+        if author_name:
+            tasks.append(
+                _fetch_author_books_by_catalog(asin, author_name, region, deadline=deadline)
+            )
+        outcomes = await asyncio.gather(*tasks, return_exceptions=True)
 
     screen_outcome = outcomes[0]
     screen_result: _ScreenBooksResult | None = None

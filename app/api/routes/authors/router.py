@@ -95,7 +95,13 @@ async def get_books_by_author(
     asins = await get_author_books(asin, region, session, cache)
     if not asins:
         raise NotFoundException("No books found for author")
-    books = await get_books_by_asins(asins, region, session)
+    # high_concurrency=True: this hydration is the second half of the same
+    # live author-books request get_author_books' own discovery walk just
+    # ran, and a live, measured production outage traced directly to that
+    # pairing running serialized behind the default Audible concurrency pool
+    # -- see get_books_by_asins' own docstring and client.py's
+    # AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT for the measurements.
+    books = await get_books_by_asins(asins, region, session, high_concurrency=True)
     books = filter_dicts(books, filters.as_kwargs())
     books = sort_dicts(books, sort.value if sort is not None else None, order.value, BOOK_SORT_FIELDS)
     return [BookResponse(**b) for b in books]
@@ -117,7 +123,9 @@ async def get_books_by_author_primary(
     asins = await get_author_books(asin, region, session, cache)
     if not asins:
         raise NotFoundException("No books found for author")
-    books = await get_books_by_asins(asins, region, session)
+    # high_concurrency=True: same pairing as get_books_by_author above (this
+    # is its legacy-route twin) -- see that call site's comment.
+    books = await get_books_by_asins(asins, region, session, high_concurrency=True)
     books = filter_dicts(books, filters.as_kwargs())
     books = sort_dicts(books, sort.value if sort is not None else None, order.value, BOOK_SORT_FIELDS)
     return [BookResponse(**b) for b in books]

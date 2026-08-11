@@ -18,7 +18,11 @@ from app.core.logging import get_logger
 from app.core.middleware import is_valid_asin
 
 # Services
-from app.services.audible.client import audible_get, ANDROID_DEVICE_TYPE_ID
+from app.services.audible.client import (
+    audible_get,
+    ANDROID_DEVICE_TYPE_ID,
+    AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT,
+)
 
 logger = get_logger()
 
@@ -77,23 +81,29 @@ SCREENS_PAGE_SIZE = 20
 _SCREENS_TOKEN_PAGE_LOAD_ID = "libex-direct-page"
 
 # Bounded concurrency for the screens walk's page 2..N fan-out (see
-# _fanout_screen_pages). This IP is shared with the live seeder and has
-# already been throttled into a VPN rotation once from an amplified
-# request burst, and that risk is the harder failure mode (indefinite,
-# global) to weigh against the alternative of going too low. Too low
-# reintroduces the exact problem the fan-out exists to fix: the author's
-# underlying list drifts (a live probe of the identical page 25-40
-# seconds apart returned different rows), and a walk that stretches back
-# into that drift window starts silently duplicating and dropping titles
-# at page boundaries again. At 8 in flight and roughly 0.5s/page, Conan
-# Doyle's ~225-page catalog (the largest known real one) is ~28 batches,
-# ~14s wall clock -- comfortably inside the 25-40s drift window, not a
-# photo finish. Unlike the catalog multi-sort walk's own wave 3
-# (_fetch_author_books_by_catalog), which fires its remaining pages in one
-# unbounded gather and relies on the shared client's own global
-# throttling, this walk keeps its own explicit per-batch bound, since it
-# is the walk that surfaced the drift problem the bound exists to fix.
-SCREENS_FANOUT_CONCURRENCY = 8
+# _fanout_screen_pages). Too low reintroduces the exact problem the fan-out
+# exists to fix: the author's underlying list drifts (a live probe of the
+# identical page 25-40 seconds apart returned different rows), and a walk
+# that stretches back into that drift window starts silently duplicating
+# and dropping titles at page boundaries again -- so wider is strictly
+# safer here, not just faster, up to whatever the shared IP can actually
+# take at once.
+#
+# Tied directly to AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT rather than kept
+# as its own independent number: this walk only ever runs as part of the
+# live author-books request that pool is reserved for (see that constant's
+# own docstring in client.py for the measurements behind its value and why
+# that call path specifically gets a wider pool than the shared IP's
+# default), and every audible_get call this walk makes already draws from
+# that same pool via author_books_concurrency() (entered by the caller in
+# authors/__init__.py, not here). Capping this walk's own batch width below
+# the pool it draws from would just leave permits unused on that pool for
+# no benefit, so there is no separate, smaller number to justify -- this
+# was previously kept deliberately tighter (8) specifically because it
+# shared its risk exposure, through the single default pool, with the
+# seeder's own sustained background work; splitting that pool off is what
+# removes the reason to hold this one back independently.
+SCREENS_FANOUT_CONCURRENCY = AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT
 
 # Termination reasons for the screens walk. "completed" is the only clean
 # reason: it means the walk stopped because upstream reported no further

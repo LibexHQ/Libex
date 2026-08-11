@@ -1560,22 +1560,35 @@ async def test_fetch_author_books_by_screen_sequential_fallback_when_product_cou
 
 # ============================================================
 # CATALOG MULTI-SORT WALK (_fetch_author_books_by_catalog) --
-# ceiling_saturated boundary
+# sliced boundary
+# (renamed from the deleted ceiling_saturated boundary suite: the old
+# field required a plateau AND an observed union shortfall together;
+# `sliced` is the walk's own decision, taken before Phase 2-4 even run,
+# of whether category slicing is warranted at all -- a baseline plateau OR
+# an over-claimed total_results, with no shortfall precondition. Three of
+# the four cases below still land on the same verdict either way, since
+# their own totals never approached the old multi-sort threshold in the
+# first place; only the plateau case's docstring changed in substance.)
 # ============================================================
 
 @pytest.mark.asyncio
-async def test_fetch_author_books_by_catalog_ceiling_saturated_false_at_exact_boundary():
-    """ceiling_saturated is False when total_results sits exactly at
-    len(_CATALOG_SORTS) * CATALOG_RESULT_CEILING -- the walk is structurally
-    capable of reaching that many, so this is not yet the saturated case;
-    only strictly exceeding it is. Deliberately expressed via the constants
-    rather than their current product literal, since CATALOG_RESULT_CEILING
-    is a measured, live-probed value that can be corrected independently of
-    this boundary rule."""
+async def test_fetch_author_books_by_catalog_sliced_false_at_exact_boundary():
+    """sliced (needs_slicing) is False when total_results sits exactly at
+    CATALOG_RESULT_CEILING -- the walk is structurally capable of reaching
+    that many from the two baseline sorts alone, so this is not yet the
+    case that needs category slicing; only strictly exceeding it is. The
+    old boundary here was len(_CATALOG_SORTS) * CATALOG_RESULT_CEILING
+    (every one of the five sorts spent unfiltered); the new adaptive walk
+    only ever spends _CATALOG_BASELINE_SORTS (two sorts) unfiltered before
+    deciding whether slicing is needed, so the boundary is
+    CATALOG_RESULT_CEILING alone now, not multiplied by the sort count.
+    Deliberately expressed via the constant rather than a literal, since
+    CATALOG_RESULT_CEILING is a measured, live-probed value that can be
+    corrected independently of this boundary rule."""
     from app.services.audible.authors import _fetch_author_books_by_catalog
-    from app.services.audible.authors.catalog import _CATALOG_SORTS, CATALOG_RESULT_CEILING
+    from app.services.audible.authors.catalog import CATALOG_RESULT_CEILING
 
-    boundary_total = len(_CATALOG_SORTS) * CATALOG_RESULT_CEILING
+    boundary_total = CATALOG_RESULT_CEILING
 
     async def _get(region, path, params):
         return {"total_results": boundary_total, "products": []}
@@ -1584,7 +1597,7 @@ async def test_fetch_author_books_by_catalog_ceiling_saturated_false_at_exact_bo
         result = await _fetch_author_books_by_catalog("B000AUTHOR", "Some Author", "us")
 
     assert result.total_results == boundary_total
-    assert result.ceiling_saturated is False
+    assert result.sliced is False
 
 
 def _catalog_asin_match_products(prefix, n):
@@ -1600,17 +1613,25 @@ def _catalog_asin_match_products(prefix, n):
 
 
 @pytest.mark.asyncio
-async def test_fetch_author_books_by_catalog_ceiling_saturated_true_from_observed_plateau():
-    """ceiling_saturated is measured from what the walk actually observed on
-    the wire -- a sort's own pages plateauing (re-serving an earlier page's
-    exact content) while the union it fed still falls short of upstream's
-    own total_results claim -- never from CATALOG_RESULT_CEILING arithmetic
-    alone (see _CatalogBooksResult's own docstring). Mocking every page as
-    empty products, as this test used to, can never plateau -- there is
-    nothing to repeat -- so it drives a walk whose -ReleaseDate pages
+async def test_fetch_author_books_by_catalog_sliced_true_from_observed_plateau():
+    """sliced is True whenever a baseline sort's own pages are directly
+    observed to plateau (Audible re-serving an earlier page's exact
+    content -- see _catalog_page_signature), the same live signal the old
+    ceiling_saturated used -- but, unlike that old field, sliced no longer
+    also requires the union to have already fallen short of total_results:
+    the walk decides whether slicing is warranted immediately after Phase
+    1, before Phase 2-4 (which is what would actually grow or fail to grow
+    the union) has even run, so there is nothing yet to compare a final
+    union size against. Mocking every page as empty products, as the
+    deleted predecessor test used to, can never plateau -- there is
+    nothing to repeat -- so this drives a walk whose -ReleaseDate pages
     genuinely plateau instead: page 0 and page 1 each carry new content,
     and every page after that re-serves page 1's exact content, matching
-    the live Conan Doyle/Christie behaviour the docstring describes."""
+    the live Conan Doyle/Christie behaviour the module docstring
+    describes. The two harvested products carry no category_ladders, so
+    Phase 2 finds nothing to slice with and this stays a pure Phase-1
+    boundary check -- see the dedicated slicing_incomplete tests below for
+    that consequence on its own."""
     from app.services.audible.authors import _fetch_author_books_by_catalog
     from app.services.audible.authors.catalog import _CATALOG_SORTS
 
@@ -1620,10 +1641,9 @@ async def test_fetch_author_books_by_catalog_ceiling_saturated_true_from_observe
         sort = params["products_sort_by"]
         page = params["page"]
         if sort != _CATALOG_SORTS[0]:
-            # total_results=500 keeps sorts_needed at 1 -- only page 0 of
-            # every other sort is ever fetched (wave 2 fetches it
-            # regardless of whether that sort ends up needed).
-            return {"total_results": 500, "products": _catalog_asin_match_products(f"OTHER{_CATALOG_SORTS.index(sort)}", 10)}
+            # total_results=500 keeps this sort's own pages_needed at 1 --
+            # only page 0 of the second baseline sort is ever fetched.
+            return {"total_results": 500, "products": _catalog_asin_match_products("OTHER", 10)}
         if page == 0:
             return {"total_results": 500, "products": _catalog_asin_match_products("PAGE0", 50)}
         # page 1 is new content; every page after it re-serves page 1's
@@ -1634,26 +1654,21 @@ async def test_fetch_author_books_by_catalog_ceiling_saturated_true_from_observe
         result = await _fetch_author_books_by_catalog("B000AUTHOR", "Some Author", "us")
 
     assert result.total_results == 500
-    assert result.ceiling_saturated is True
-    assert len(result.asins) < 500  # the union genuinely fell short of the claim
+    assert result.sliced is True
 
 
 @pytest.mark.asyncio
-async def test_fetch_author_books_by_catalog_ceiling_saturated_false_when_walk_reaches_total_without_plateauing():
+async def test_fetch_author_books_by_catalog_sliced_false_when_walk_reaches_total_without_plateauing():
     """Complement to the observed-plateau case above: a walk whose pages
-    never repeat must not be reported as ceiling_saturated, even when the
-    union it produced falls short of upstream's total_results -- falling
-    short of the claim is not, on its own, saturation; only an observed
-    repeat is. Page 1 here is a short final page (30 products, not a full
-    50) -- the same real short-final-page shape
+    never repeat, and whose total_results claim never exceeds
+    CATALOG_RESULT_CEILING, must not be sliced -- falling short of the
+    claim is not, on its own, a reason to slice; only a plateau or an
+    over-claimed total is. Page 1 here is a short final page (30 products,
+    not a full 50) -- the same real short-final-page shape
     _fetch_author_books_by_name_detailed treats as a genuine end signal --
     so the union lands 20 short of total_results while every page's
     content is still genuinely new (a distinct ASIN prefix per page, never
-    repeating the page before it). With total_results not None and
-    len(asins) < total_results both already True here, sort_plateaued is
-    the only thing left that can hold ceiling_saturated at False; unlike
-    the exact-reach version of this scenario, that third clause cannot
-    quietly do the holding on its own."""
+    repeating the page before it)."""
     from app.services.audible.authors import _fetch_author_books_by_catalog
     from app.services.audible.authors.catalog import _CATALOG_SORTS
 
@@ -1675,14 +1690,15 @@ async def test_fetch_author_books_by_catalog_ceiling_saturated_false_when_walk_r
     assert result.total_results == 100
     assert len(result.asins) == 80
     assert len(result.asins) < result.total_results
-    assert result.ceiling_saturated is False
+    assert result.sliced is False
 
 
 @pytest.mark.asyncio
-async def test_fetch_author_books_by_catalog_ceiling_saturated_false_when_no_total_results():
+async def test_fetch_author_books_by_catalog_sliced_false_when_no_total_results():
     """No total_results reported anywhere means nothing is known to compare
-    against the ceiling -- ceiling_saturated must default False, never be
-    inferred as saturated purely from the claim's absence."""
+    against the ceiling, and no plateau was observed either -- sliced must
+    default False, never be inferred True purely from the claim's
+    absence."""
     from app.services.audible.authors import _fetch_author_books_by_catalog
 
     async def _get(region, path, params):
@@ -1692,7 +1708,341 @@ async def test_fetch_author_books_by_catalog_ceiling_saturated_false_when_no_tot
         result = await _fetch_author_books_by_catalog("B000AUTHOR", "Some Author", "us")
 
     assert result.total_results is None
-    assert result.ceiling_saturated is False
+    assert result.sliced is False
+
+
+# ============================================================
+# CATALOG ADAPTIVE SLICING (Phases 2-4: rank, probe, spend) -- entirely new
+# code this slice added, with no prior test coverage at all.
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_fetch_author_books_by_catalog_sanderson_control_never_slices_under_every_ceiling():
+    """Sanderson is the control for the whole adaptive-slicing feature: an
+    author whose real total (203, the live-measured value) stays well
+    under CATALOG_RESULT_CEILING on both baseline sorts must never trigger
+    slicing, no matter how rich a category signal the baseline pages carry
+    -- sliced stays False, and Phase 2-4 must never fire a single probe or
+    expand request, matching the live 1.0-1.5s solo measurement this
+    feature must never regress for an author this size. Proven by counting
+    audible_get calls directly: only the baseline pages (5 per sort, the
+    real page count 203 total_results implies) are ever fetched, and every
+    one of them carries no category_id and a baseline sort."""
+    from app.services.audible.authors import _fetch_author_books_by_catalog
+    from app.services.audible.authors.catalog import _CATALOG_BASELINE_SORTS
+
+    def _product(page, i):
+        return {
+            "asin": f"B0P{page}{i:04d}",
+            "authors": [{"asin": "B000AUTHOR"}],
+            # A rich category signal on every product -- if the slicing
+            # gate were broken (e.g. triggering on harvested category
+            # richness instead of the ceiling/plateau signal), this is
+            # exactly the bait that would trip it.
+            "category_ladders": [{"ladder": [
+                {"id": "18580", "name": "Science Fiction & Fantasy"},
+                {"id": "18574", "name": "Epic"},
+            ]}],
+        }
+
+    async def _get(region, path, params):
+        page = params["page"]
+        count = 3 if page == 4 else 50
+        return {"total_results": 203, "products": [_product(page, i) for i in range(count)]}
+
+    mock_get = AsyncMock(side_effect=_get)
+    with patch("app.services.audible.authors.catalog.audible_get", new=mock_get):
+        result = await _fetch_author_books_by_catalog("B000AUTHOR", "Brandon Sanderson", "us")
+
+    assert mock_get.await_count == 10  # 5 pages x 2 baseline sorts, nothing more
+    for call in mock_get.await_args_list:
+        assert call.args[2].get("category_id") is None
+        assert call.args[2]["products_sort_by"] in _CATALOG_BASELINE_SORTS
+
+    assert result.total_results == 203
+    assert result.sliced is False
+    assert result.slicing_incomplete is False
+    assert result.categories_harvested == 0
+    assert result.categories_considered == 0
+    assert result.categories_expanded == 0
+    assert result.windows_used == 2
+
+
+@pytest.mark.asyncio
+async def test_fetch_author_books_by_catalog_dry_streak_stops_walk_and_only_paying_categories_expand():
+    """One scenario proving three tightly related new-code properties at
+    once, since they only make sense observed together:
+
+    1. Phase 2 ranks harvested candidates by descending baseline frequency
+       -- CAT1 (rank 1) is folded and evaluated before CAT2..CAT5.
+    2. A category whose probe adds fewer than CATALOG_DRY_WINDOW_MIN_NEW new
+       ASINs is dry; CATALOG_DRY_STREAK_LIMIT consecutive dry candidates in
+       ranked fold order stops the walk from ever folding a lower-ranked
+       one, even when that lower-ranked candidate's own probe (already
+       fetched -- the whole batch is paid for up front, see Phase 3's own
+       docstring) would have paid off on its own. CAT5 here is
+       deliberately the strongest individual candidate of the five and is
+       still shut out purely by rank position once the streak trips at
+       CAT4.
+    3. Only a category that earned it (paying -- here, only CAT1) gets its
+       remaining sorts spent in Phase 4; CAT2-CAT5 never do.
+    """
+    from app.services.audible.authors import _fetch_author_books_by_catalog
+    from app.services.audible.authors.catalog import (
+        _CATALOG_CATEGORY_PROBE_SORT,
+        _CATALOG_CATEGORY_SPEND_SORTS,
+        CATALOG_DRY_STREAK_LIMIT,
+    )
+
+    assert CATALOG_DRY_STREAK_LIMIT == 3  # this test's fold order relies on the exact limit
+
+    # Each product's own ladder is a strict prefix of the one before it, so
+    # CAT1 appears on all 5 baseline products, CAT2 on 4, ... CAT5 on 1 --
+    # a clean, unambiguous frequency gradient for Phase 2 to rank.
+    all_cats = [{"id": f"CAT{n}", "name": f"Cat {n}"} for n in range(1, 6)]
+    baseline_products = [
+        {
+            "asin": f"B0BASE{n:04d}",
+            "authors": [{"asin": "B000AUTHOR"}],
+            "category_ladders": [{"ladder": all_cats[:n]}],
+        }
+        for n in range(1, 6)
+    ]
+
+    spend_tags = {"-ReleaseDate": "C1XA", "ReleaseDate": "C1XB", "Title": "C1XC", "Relevance": "C1XD"}
+
+    async def _get(region, path, params):
+        sort = params["products_sort_by"]
+        page = params["page"]
+        category_id = params.get("category_id")
+
+        if category_id is None:
+            # Phase 1 baseline. -ReleaseDate plateaus (page 0 == page 1)
+            # to trigger slicing without needing a large total_results and
+            # the many baseline pages that would imply.
+            if sort == "-ReleaseDate":
+                return {"total_results": 60, "products": baseline_products}
+            return {"products": []}
+
+        if sort == _CATALOG_CATEGORY_PROBE_SORT:
+            if category_id == "CAT1":
+                if page == 0:
+                    return {"total_results": 100, "products": _catalog_asin_match_products("C1P0", 50)}
+                return {"products": _catalog_asin_match_products("C1P1", 50)}
+            if category_id in ("CAT2", "CAT3", "CAT4"):
+                return {"total_results": 30, "products": _catalog_asin_match_products(f"{category_id}P0", 20)}
+            if category_id == "CAT5":
+                if page == 0:
+                    return {"total_results": 100, "products": _catalog_asin_match_products("C5P0", 50)}
+                return {"products": _catalog_asin_match_products("C5P1", 50)}
+            raise AssertionError(f"unexpected probe category {category_id}")
+
+        # Phase 4 spend sorts -- only CAT1 should ever be reached.
+        if category_id == "CAT1" and sort in _CATALOG_CATEGORY_SPEND_SORTS:
+            return {"total_results": 5, "products": _catalog_asin_match_products(spend_tags[sort], 5)}
+
+        raise AssertionError(f"unexpected category-scoped request: {category_id} {sort} page {page}")
+
+    mock_get = AsyncMock(side_effect=_get)
+    with patch("app.services.audible.authors.catalog.audible_get", new=mock_get):
+        result = await _fetch_author_books_by_catalog("B000AUTHOR", "Some Author", "us")
+
+    assert result.sliced is True
+    assert result.categories_harvested == 5
+    assert result.categories_considered == 5  # every candidate is still probed up front
+    assert result.categories_expanded == 1    # only CAT1 paid
+    assert result.windows_used == 11          # 2 baseline + 5 considered + 1 expanded x 4 spend sorts
+
+    # CAT5's cheap-tier probe (folded unconditionally, in Phase 3's first
+    # pass, before the dry-streak fold even starts) is present...
+    assert "B0C5P00000" in result.asins
+    # ...but CAT5's full-tier probe (fetched as part of the up-front batch,
+    # but never folded because the dry streak already broke the ranked
+    # fold loop before CAT5's turn was reached) is not -- this is the
+    # streak actually stopping the walk, not CAT5 merely being weak.
+    assert "B0C5P10000" not in result.asins
+
+    # No spend-sort request ever reached CAT2, CAT3, or CAT4 -- only a
+    # paying category earns Phase 4; every category-scoped call this walk
+    # made for them carries the probe sort and nothing else.
+    for call in mock_get.await_args_list:
+        params = call.args[2]
+        if params.get("category_id") in ("CAT2", "CAT3", "CAT4"):
+            assert params["products_sort_by"] == _CATALOG_CATEGORY_PROBE_SORT
+
+    assert mock_get.await_count == 14  # 3 baseline + 7 probe + 4 spend
+
+
+@pytest.mark.asyncio
+async def test_fetch_author_books_by_catalog_candidate_cap_does_not_mark_slicing_incomplete():
+    """THE MOST IMPORTANT TEST IN THIS SLICE'S REWRITE (see
+    _CatalogBooksResult.slicing_incomplete's own docstring and
+    CATALOG_MAX_CANDIDATE_CATEGORIES's). Live measurement showed Conan
+    Doyle harvests roughly 120 categories and Christie roughly 112 --
+    hitting CATALOG_MAX_CANDIDATE_CATEGORIES (40) is routine for exactly
+    the prolific authors this feature targets, not pathological. Left
+    unguarded, every flagship author would be marked degraded on every
+    single request (a short TTL instead of the default one, re-walked far
+    more often than necessary) -- strictly worse than not slicing at all.
+    This drives a harvest of more candidates than the cap (a single
+    baseline product whose own category ladder alone carries more rungs
+    than the cap) and asserts the cap truncating the ranked list does NOT,
+    on its own, set slicing_incomplete."""
+    from app.services.audible.authors import _fetch_author_books_by_catalog
+    from app.services.audible.authors.catalog import CATALOG_MAX_CANDIDATE_CATEGORIES
+
+    harvested_count = CATALOG_MAX_CANDIDATE_CATEGORIES + 5
+    rungs = [{"id": f"CAT{i:03d}", "name": f"Category {i}"} for i in range(harvested_count)]
+    baseline_product = {
+        "asin": "B0BASELINE1",
+        "authors": [{"asin": "B000AUTHOR"}],
+        "category_ladders": [{"ladder": rungs}],
+    }
+
+    async def _get(region, path, params):
+        sort = params["products_sort_by"]
+        category_id = params.get("category_id")
+
+        if category_id is None:
+            if sort == "-ReleaseDate":
+                # Plateau: page 0 and page 1 return the identical product,
+                # which is what tells the walk slicing is needed at all,
+                # without inflating total_results past
+                # CATALOG_RESULT_CEILING and forcing a large baseline page
+                # count for no reason.
+                return {"total_results": 60, "products": [baseline_product]}
+            return {"products": []}
+
+        # Every candidate probe comes back genuinely empty -- deliberately
+        # dry, since this test is only about the cap/incomplete gate, not
+        # about which categories pay off.
+        return {"total_results": 0, "products": []}
+
+    mock_get = AsyncMock(side_effect=_get)
+    with patch("app.services.audible.authors.catalog.audible_get", new=mock_get):
+        result = await _fetch_author_books_by_catalog("B000AUTHOR", "Some Author", "us")
+
+    assert result.sliced is True
+    assert result.categories_harvested == harvested_count
+    assert result.categories_considered == CATALOG_MAX_CANDIDATE_CATEGORIES
+    assert result.slicing_incomplete is False
+    assert mock_get.await_count == 3 + CATALOG_MAX_CANDIDATE_CATEGORIES
+
+
+@pytest.mark.asyncio
+async def test_fetch_author_books_by_catalog_empty_harvest_marks_slicing_incomplete():
+    """The other direction of the same guard: an author large enough to
+    need slicing (the baseline plateaued) but with literally nothing
+    harvested to slice by -- no category ever surfaced on a baseline page
+    at all -- points at something broken upstream (a response-shape
+    change, category_ladders silently empty) rather than a genuinely
+    uncategorized catalog, and slicing_incomplete must fire. Pairing this
+    with the cap test above by direction is the whole point: hitting the
+    cap with a real harvest must read complete, hitting nothing must not."""
+    from app.services.audible.authors import _fetch_author_books_by_catalog
+
+    # Same plateau shape as the cap test, but the accepted product carries
+    # no category_ladders key at all.
+    baseline_product = {"asin": "B0BASELINE1", "authors": [{"asin": "B000AUTHOR"}]}
+
+    async def _get(region, path, params):
+        sort = params["products_sort_by"]
+        category_id = params.get("category_id")
+        if category_id is not None:
+            raise AssertionError("no candidates were harvested; Phase 3 must never fire")
+        if sort == "-ReleaseDate":
+            return {"total_results": 60, "products": [baseline_product]}
+        return {"products": []}
+
+    mock_get = AsyncMock(side_effect=_get)
+    with patch("app.services.audible.authors.catalog.audible_get", new=mock_get):
+        result = await _fetch_author_books_by_catalog("B000AUTHOR", "Some Author", "us")
+
+    assert result.sliced is True
+    assert result.categories_harvested == 0
+    assert result.categories_considered == 0
+    assert result.slicing_incomplete is True
+    assert mock_get.await_count == 3  # baseline only -- Phase 3/4 never fire
+
+
+@pytest.mark.asyncio
+async def test_fetch_author_books_by_catalog_probes_categories_with_title_sort_not_baseline_sort():
+    """Pins the live-found probe-sort bug: using -ReleaseDate (a baseline
+    sort) as the category probe silently failed for a 'mega-category' --
+    one covering nearly the author's whole catalog, whose -ReleaseDate
+    window then nearly duplicates Phase 1's own unfiltered -ReleaseDate
+    window already folded in, so its probe measures almost no new content
+    and the category gets dropped as dry before the walk ever reaches one
+    actually worth spending on. Switching the probe to -Title (orthogonal
+    to recency) took Conan Doyle from 1369 to 4164 catalog ASINs live.
+    This asserts every category-scoped probe request actually carries
+    _CATALOG_CATEGORY_PROBE_SORT and never one of the two baseline sorts --
+    it fails if the probe sort is ever reverted to (or silently replaced
+    by) a baseline sort."""
+    from app.services.audible.authors import _fetch_author_books_by_catalog
+    from app.services.audible.authors.catalog import _CATALOG_BASELINE_SORTS, _CATALOG_CATEGORY_PROBE_SORT
+
+    assert _CATALOG_CATEGORY_PROBE_SORT == "-Title"
+    assert _CATALOG_CATEGORY_PROBE_SORT not in _CATALOG_BASELINE_SORTS
+
+    baseline_product = {
+        "asin": "B0BASELINE1",
+        "authors": [{"asin": "B000AUTHOR"}],
+        "category_ladders": [{"ladder": [{"id": "CAT1", "name": "Cat One"}]}],
+    }
+    probe_sorts_seen = []
+
+    async def _get(region, path, params):
+        sort = params["products_sort_by"]
+        category_id = params.get("category_id")
+        if category_id is not None:
+            probe_sorts_seen.append(sort)
+            return {"total_results": 0, "products": []}
+        if sort == "-ReleaseDate":
+            return {"total_results": 60, "products": [baseline_product]}
+        return {"products": []}
+
+    mock_get = AsyncMock(side_effect=_get)
+    with patch("app.services.audible.authors.catalog.audible_get", new=mock_get):
+        await _fetch_author_books_by_catalog("B000AUTHOR", "Some Author", "us")
+
+    assert probe_sorts_seen == [_CATALOG_CATEGORY_PROBE_SORT]
+    assert "-ReleaseDate" not in probe_sorts_seen
+    assert "ReleaseDate" not in probe_sorts_seen
+
+
+def test_process_catalog_page_populates_names_into_an_already_empty_dict():
+    """Pins `category_names if category_names is not None else {}`, not
+    `category_names or {}` -- an empty-but-real dict is falsy the moment it
+    happens to be empty on a given call, and `or` would silently swap it
+    for a throwaway that's discarded the instant this call returns, losing
+    every name harvested this call rather than mutating the caller's own
+    dict in place. Passing an explicitly empty (not None) dict is the only
+    way this bug is invisible to every other test in this file, since every
+    other caller either passes None (which both spellings handle
+    identically) or a dict that's already non-empty by the time it
+    matters."""
+    from app.services.audible.authors.catalog import _process_catalog_page
+
+    product = {
+        "asin": "B0CATNAME01",
+        "authors": [{"asin": "B000AUTHOR"}],
+        "category_ladders": [{"ladder": [{"id": "18580", "name": "Science Fiction & Fantasy"}]}],
+    }
+    data = {"products": [product]}
+    seen: set[str] = set()
+    asins: list[str] = []
+    counts: dict[str, int] = {}
+    category_frequency: dict[str, int] = {}
+    category_names: dict[str, str] = {}  # explicitly empty, not None
+
+    _process_catalog_page(
+        data, "B000AUTHOR", "Some Author", seen, asins, counts,
+        category_frequency=category_frequency, category_names=category_names,
+    )
+
+    assert category_names == {"18580": "Science Fiction & Fantasy"}
+    assert category_frequency == {"18580": 1}
 
 
 # ============================================================
@@ -1723,28 +2073,36 @@ def _catalog_result(
     asins,
     pages_fetched=1,
     total_results=None,
-    sorts_used=1,
     asin_match_count=None,
     asin_reject_count=0,
     name_match_count=0,
     name_reject_count=0,
     sort_errors=None,
     truncated_by_deadline=False,
-    ceiling_saturated=False,
+    slicing_incomplete=False,
+    sliced=False,
+    categories_harvested=0,
+    categories_considered=0,
+    categories_expanded=0,
+    windows_used=0,
 ):
     asins = list(asins)
     return _CatalogBooksResult(
         asins=asins,
         pages_fetched=pages_fetched,
         total_results=total_results,
-        sorts_used=sorts_used,
         asin_match_count=len(asins) if asin_match_count is None else asin_match_count,
         asin_reject_count=asin_reject_count,
         name_match_count=name_match_count,
         name_reject_count=name_reject_count,
         sort_errors=list(sort_errors) if sort_errors else [],
         truncated_by_deadline=truncated_by_deadline,
-        ceiling_saturated=ceiling_saturated,
+        slicing_incomplete=slicing_incomplete,
+        sliced=sliced,
+        categories_harvested=categories_harvested,
+        categories_considered=categories_considered,
+        categories_expanded=categories_expanded,
+        windows_used=windows_used,
     )
 
 
@@ -2364,29 +2722,37 @@ async def test_get_author_books_caches_with_short_ttl_when_catalog_truncated_by_
 
 
 @pytest.mark.asyncio
-async def test_get_author_books_caches_with_short_ttl_when_catalog_ceiling_saturated():
-    """catalog_ceiling_saturated (upstream's own total_results exceeding
-    len(_CATALOG_SORTS) * CATALOG_RESULT_CEILING) routes the cache write to
-    the short degraded TTL the same way an outright catalog error does --
-    but unlike an error, this is known arithmetically before a single
-    further page is fetched, not inferred from the union's eventual size.
-    The full union is still returned to the caller and still written back
-    (the writer's union can only grow the stored list); only the TTL
-    differs. The dedicated saturation warning fires with the exact ceiling
-    numbers, and the generic ratio-based shortfall warning does NOT also
-    fire for the same condition -- the two would otherwise double up on an
-    identical cause. The threshold is expressed via the constants, not
-    their current product literal, since CATALOG_RESULT_CEILING is a
-    measured, live-probed value independent of this boundary rule."""
+async def test_get_author_books_caches_with_short_ttl_when_catalog_slicing_incomplete():
+    """catalog_result.slicing_incomplete (the walk decided category slicing
+    was needed -- the baseline plateaued or over-claimed total_results --
+    but found literally nothing to slice with) routes the cache write to
+    the short degraded TTL, replacing the deleted
+    ceiling-saturated-driven test here: this is the single highest-value
+    guard in the rewritten slice. Live measurement showed Conan Doyle
+    harvests roughly 120 categories and Christie roughly 112 -- hitting
+    CATALOG_MAX_CANDIDATE_CATEGORIES is *routine* for exactly the prolific
+    authors this feature targets, so slicing_incomplete must NOT fire
+    merely because the cap truncated the ranked candidate list (see the
+    dedicated cap test in the catalog-level suite) -- if it did, every
+    flagship author would be marked degraded and re-walked on every single
+    request instead of earning the default TTL once, which is strictly
+    worse than not slicing at all. This test pins the one case that SHOULD
+    fire it: nothing was harvested to slice with despite needing to. The
+    full union is still returned to the caller and still written back (the
+    writer's union can only grow the stored list); only the TTL differs,
+    and the dedicated warning fires with the exact harvested/considered/
+    expanded counts. The generic ratio-based shortfall warning does NOT
+    also fire for the same condition, since catalog_result.sliced (True
+    whenever slicing_incomplete is) suppresses it independently -- the two
+    would otherwise double up on the same underlying cause."""
     from app.services.audible.authors import get_author_books
-    from app.services.audible.authors.catalog import _CATALOG_SORTS, CATALOG_RESULT_CEILING
 
     mock_session = AsyncMock()
-    saturated_total = len(_CATALOG_SORTS) * CATALOG_RESULT_CEILING + 1
     catalog_asins = [f"B0CATALOG{i:04d}" for i in range(600)]
     screen_result = _screen_result(["B0SCREEN001"], product_count=1)
     catalog_result = _catalog_result(
-        catalog_asins, total_results=saturated_total, ceiling_saturated=True,
+        catalog_asins, total_results=2000, sliced=True, slicing_incomplete=True,
+        categories_harvested=0, categories_considered=0, categories_expanded=0,
     )
 
     with patch("app.services.audible.authors._fetch_author_books_by_screen", new=AsyncMock(return_value=screen_result)), \
@@ -2407,17 +2773,61 @@ async def test_get_author_books_caches_with_short_ttl_when_catalog_ceiling_satur
     _, persist_kwargs = mock_persist.call_args
     assert persist_kwargs["ttl_seconds"] == AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS
 
-    saturation_calls = [
+    slicing_calls = [
         c for c in mock_logger.warning.call_args_list
-        if c.args[0] == "Audible Author Books catalog saturated its sort ceiling, cached with a short TTL"
+        if c.args[0] == "Audible Author Books catalog could not finish slicing by category, cached with a short TTL"
     ]
-    assert len(saturation_calls) == 1
-    extra = saturation_calls[0].kwargs["extra"]
+    assert len(slicing_calls) == 1
+    extra = slicing_calls[0].kwargs["extra"]
     assert extra["author_asin"] == "B000AUTHOR"
     assert extra["region"] == "us"
-    assert extra["catalog_total_results"] == saturated_total
-    assert extra["catalog_max_fetchable"] == len(_CATALOG_SORTS) * CATALOG_RESULT_CEILING
+    assert extra["catalog_total_results"] == 2000
+    assert extra["catalog_categories_harvested"] == 0
+    assert extra["catalog_categories_considered"] == 0
+    assert extra["catalog_categories_expanded"] == 0
     assert extra["author_book_num"] == 601
+
+    shortfall_calls = [
+        c for c in mock_logger.warning.call_args_list
+        if c.args[0] == "Audible Author Books union fell short of the claimed total"
+    ]
+    assert shortfall_calls == []
+
+
+@pytest.mark.asyncio
+async def test_get_author_books_shortfall_warning_does_not_fire_when_catalog_sliced_but_clean():
+    """A catalog walk that sliced by category and finished cleanly (no
+    slicing_incomplete, no sort_errors, no deadline truncation) still
+    suppresses the generic ratio-based shortfall warning against its own
+    claimed_total, even when the union genuinely falls short of it -- a
+    category slice that stopped on a dry streak (see
+    CATALOG_DRY_STREAK_LIMIT) is expected to land under the unfiltered
+    baseline's own total_results claim by design, not a shortfall worth
+    warning about (see get_author_books' own shortfall-suppression
+    comment). A clean slice also earns the default cache TTL, unlike the
+    slicing_incomplete case above."""
+    from app.services.audible.authors import get_author_books
+
+    mock_session = AsyncMock()
+    catalog_asins = [f"B0CATALOG{i:04d}" for i in range(600)]
+    screen_result = _screen_result(["B0SCREEN001"], product_count=1)
+    catalog_result = _catalog_result(
+        catalog_asins, total_results=2000, sliced=True, slicing_incomplete=False,
+    )
+
+    with patch("app.services.audible.authors._fetch_author_books_by_screen", new=AsyncMock(return_value=screen_result)), \
+         patch("app.services.audible.authors._resolve_author_name", new=AsyncMock(return_value="Some Author")), \
+         patch("app.services.audible.authors._fetch_author_books_by_catalog", new=AsyncMock(return_value=catalog_result)), \
+         patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
+         patch("app.services.audible.authors.cache.get", return_value=None), \
+         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist, \
+         patch("app.services.audible.authors.logger") as mock_logger:
+        result = await get_author_books("B000AUTHOR", "us", mock_session)
+
+    assert len(result) == 601
+    mock_persist.assert_called_once()
+    _, persist_kwargs = mock_persist.call_args
+    assert persist_kwargs["ttl_seconds"] is None
 
     shortfall_calls = [
         c for c in mock_logger.warning.call_args_list
@@ -2654,60 +3064,24 @@ async def test_get_author_books_shortfall_warning_does_not_fire_on_overshoot():
     assert shortfall_calls == []
 
 
-@pytest.mark.asyncio
-async def test_get_author_books_shortfall_band_below_ceiling_still_writes_cache_and_warns():
-    """PINS CURRENT BEHAVIOR, NOT DESIRED BEHAVIOR. len(_CATALOG_SORTS) *
-    CATALOG_RESULT_CEILING is an optimistic upper bound: the three sorts walk
-    the same catalog in different orders and overlap heavily, so the
-    genuinely reachable union is lower than that product in practice. For a
-    total_results claim that requires every sort (i.e. anywhere past
-    (len(_CATALOG_SORTS) - 1) * CATALOG_RESULT_CEILING) but does not exceed
-    the full product, ceiling_saturated stays False even though the walk may
-    fall well short of the claim -- so this case still fires the generic
-    ratio shortfall warning AND still writes to cache, unlike the
-    ceiling-exceeded case one test above, which suppresses the write. This
-    test pins the worst case of that band -- total_results at the exact
-    ceiling, the closest a claim can get to saturation while still reading
-    False. This is characterised here as the boundary this slice leaves in
-    place; whether it should also suppress the write is a separate
-    question, out of scope for this test."""
-    from app.services.audible.authors import get_author_books
-    from app.services.audible.authors.catalog import _CATALOG_SORTS, CATALOG_RESULT_CEILING
-
-    mock_session = AsyncMock()
-    band_total = len(_CATALOG_SORTS) * CATALOG_RESULT_CEILING  # at the ceiling, not past it
-    catalog_asins = [f"B0CATALOG{i:04d}" for i in range(600)]
-    screen_result = _screen_result(["B0SCREEN001"], product_count=1)
-    catalog_result = _catalog_result(
-        catalog_asins, total_results=band_total, ceiling_saturated=False,
-    )
-
-    with patch("app.services.audible.authors._fetch_author_books_by_screen", new=AsyncMock(return_value=screen_result)), \
-         patch("app.services.audible.authors._resolve_author_name", new=AsyncMock(return_value="Some Author")), \
-         patch("app.services.audible.authors._fetch_author_books_by_catalog", new=AsyncMock(return_value=catalog_result)), \
-         patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
-         patch("app.services.audible.authors.cache.get", return_value=None), \
-         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist, \
-         patch("app.services.audible.authors.logger") as mock_logger:
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
-
-    assert len(result) == 601
-    # Currently writes despite a real shortfall in this band.
-    mock_persist.assert_called_once()
-
-    shortfall_calls = [
-        c for c in mock_logger.warning.call_args_list
-        if c.args[0] == "Audible Author Books union fell short of the claimed total"
-    ]
-    assert len(shortfall_calls) == 1
-    assert shortfall_calls[0].kwargs["extra"]["claimed_total"] == band_total
-    assert shortfall_calls[0].kwargs["extra"]["shortfall"] == band_total - 601
-
-    saturation_calls = [
-        c for c in mock_logger.warning.call_args_list
-        if c.args[0] == "Audible Author Books catalog saturated its sort ceiling, cache write suppressed"
-    ]
-    assert saturation_calls == []
+# test_get_author_books_shortfall_band_below_ceiling_still_writes_cache_and_warns
+# was deleted here, not renamed: it pinned a specific arithmetic band under
+# the OLD three-sort optimistic-upper-bound calculation
+# (len(_CATALOG_SORTS) * CATALOG_RESULT_CEILING) -- a claim that required
+# every sort but didn't exceed that product still read ceiling_saturated
+# False even though the union routinely fell short in practice. That banded
+# imperfection has no analog under the new arithmetic: sliced is now a
+# boolean decision (a baseline plateau or total_results simply exceeding
+# CATALOG_RESULT_CEILING), taken before Phase 2-4 run at all, with no
+# multi-sort product and no band to be caught inside. Nothing replaces this
+# exact test because its subject -- the old multi-sort ceiling's own
+# optimism -- no longer exists as a computation. The property that still
+# matters post-rewrite (does `sliced` alone suppress the generic shortfall
+# warning, regardless of degree) is covered instead by
+# test_get_author_books_shortfall_warning_does_not_fire_when_catalog_sliced_but_clean
+# (in the cache-TTL section above), alongside
+# test_get_author_books_shortfall_warning_fires_past_ten_percent_gap above
+# for the unsliced case.
 
 
 @pytest.mark.asyncio
@@ -3539,20 +3913,19 @@ async def test_fetch_author_books_by_screen_every_warning_line_carries_author_as
     site in that function -- the original two-warnings-in-one-walk
     assertion no longer applies there). Rescoped against the CURRENT
     warning set across the whole ASIN-scoped author-books path -- which has
-    since grown a new warning line (the catalog ceiling-saturation warning)
-    -- rather than only the single warning left inside
-    _fetch_author_books_by_screen itself: every WARNING this path can emit,
-    from the screens-level unclean-termination line through every
-    get_author_books-level line (total failure, union shortfall, catalog
-    ceiling saturation, degraded path), must carry author_asin. This is
-    deliberately narrower than every warning module-wide:
-    _fetch_author_books_by_name_detailed's own page-fetch-failure warning
-    (a name-only walk with no ASIN in scope at all) carries author_name
-    instead, by design, and is not covered here."""
+    since grown a new warning line (the catalog slicing-incomplete warning,
+    replacing the deleted ceiling-saturation one) -- rather than only the
+    single warning left inside _fetch_author_books_by_screen itself: every
+    WARNING this path can emit, from the screens-level unclean-termination
+    line through every get_author_books-level line (total failure, union
+    shortfall, catalog slicing incomplete, degraded path), must carry
+    author_asin. This is deliberately narrower than every warning
+    module-wide: _fetch_author_books_by_name_detailed's own
+    page-fetch-failure warning (a name-only walk with no ASIN in scope at
+    all) carries author_name instead, by design, and is not covered here."""
     from app.services.audible.authors import (
         get_author_books, _fetch_author_books_by_screen,
     )
-    from app.services.audible.authors.catalog import _CATALOG_SORTS, CATALOG_RESULT_CEILING
     from app.core.exceptions import NotFoundException
 
     asin = "B000TARGET"
@@ -3602,13 +3975,16 @@ async def test_fetch_author_books_by_screen_every_warning_line_carries_author_as
         _catalog_result([f"B0C{i:04d}" for i in range(300)], total_results=1000),
     )
 
-    # Scenario 3: catalog ceiling saturated -> the dedicated saturation
-    # warning (the new line this slice added).
-    saturated_total = len(_CATALOG_SORTS) * CATALOG_RESULT_CEILING + 1
+    # Scenario 3: catalog could not finish slicing by category -> the
+    # dedicated slicing-incomplete warning (the new line this slice added,
+    # replacing the deleted ceiling-saturation line) AND the generic
+    # degraded-path warning, since slicing_incomplete is one of the
+    # catalog_degraded conditions -- two warning lines from one cause, both
+    # still required to carry author_asin.
     await _run_get_author_books(
         _screen_result(["B0SCREEN001"], product_count=1),
         "Some Author",
-        _catalog_result(["B0CAT0001"], total_results=saturated_total, ceiling_saturated=True),
+        _catalog_result(["B0CAT0001"], total_results=2000, sliced=True, slicing_incomplete=True),
     )
 
     # Scenario 4: catalog errors outright, screens fine -> "served from a
@@ -3620,7 +3996,7 @@ async def test_fetch_author_books_by_screen_every_warning_line_carries_author_as
         catalog_raises=True,
     )
 
-    assert len(collected_extras) == 4
+    assert len(collected_extras) == 5  # scenario 3 fires two lines, see above
     for extra in collected_extras:
         assert extra["author_asin"] == asin
 

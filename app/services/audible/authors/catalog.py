@@ -2,9 +2,9 @@
 Audible author-books catalog walks.
 Fetches an author's book ASINs from the /1.0/catalog/products endpoint --
 both the single-sort, name-only walk (_fetch_author_books_by_name_detailed)
-and the ASIN-attributed multi-sort walk (_fetch_author_books_by_catalog).
-Both hit the same endpoint, differing only in response_groups and
-products_sort_by, so they stay together in this module rather than two
+and the ASIN-attributed, category-sliced walk (_fetch_author_books_by_catalog).
+Both hit the same endpoint, differing only in response_groups and the sort/
+category_id params sent, so they stay together in this module rather than two
 sibling modules that would each own only half of it.
 """
 
@@ -318,49 +318,143 @@ async def fetch_author_books_by_name(
 
 
 # ============================================================
-# CATALOG MULTI-SORT WALK (get_author_books' 3 of its 4 sources)
+# CATALOG WINDOWED WALK (get_author_books' 3 of its 4 sources)
 #
 # Distinct from _fetch_author_books_by_name_detailed above, which stays a
 # single-sort, name-only walk serving get_author_books_by_name and the
 # seeder's per-author expansion loop, neither of which has an author ASIN
-# to attribute against. get_author_books does have the ASIN, and probed live, the
-# catalog is neither a subset of the screens grid nor complete on its
-# own: for Agatha Christie (total_results 1138), walking -ReleaseDate
-# alone plateaus at 500 distinct results, and walking ascending
-# ReleaseDate plateaus at a DIFFERENT 499 with zero overlap -- different
-# sort orders open disjoint windows into the same underlying result set,
-# so ANY single sort misses results a second sort would surface, and
-# every sort still plateaus at roughly the same ~500-result ceiling no
-# matter how far paging continues past it.
+# to attribute against. get_author_books does have the ASIN, and probed
+# live, the catalog is neither a subset of the screens grid nor complete
+# on its own -- and, further, Audible's deep-paging ceiling (see
+# CATALOG_RESULT_CEILING) turned out to apply per (products_sort_by,
+# category_id) pair, not per author: two different sorts over the SAME
+# unfiltered query open disjoint windows into the same result set (for
+# Agatha Christie, total_results 1138, descending -ReleaseDate plateaus
+# at 500 distinct results and ascending ReleaseDate plateaus at a
+# DIFFERENT 499, zero overlap), and scoping the same sort to a
+# category_id the author's own books actually carry opens ANOTHER,
+# separately-ceilinged window (measured against Arthur Conan Doyle,
+# total_results 4501 us: five sorts over one fat category alone reached
+# roughly 1850 distinct results, well past what five unfiltered sorts
+# could ever reach against the same 500-per-sort ceiling). This walk
+# spends its request budget accordingly: two cheap, disjoint unfiltered
+# sorts first, then further sorts only inside whichever categories the
+# author's own books were actually seen to carry and that a one-sort
+# probe showed still had new content to give -- see
+# _fetch_author_books_by_catalog's own docstring for the full sequence.
 # ============================================================
 
 # Priority order matters here: -ReleaseDate first is compat-critical.
 # Consumers have always received the -ReleaseDate list at the front of
 # the response and must keep receiving that same list, in that same
 # order, unmoved at the front of the union -- see get_author_books.
-# Ascending
-# ReleaseDate is the bare field name, not "+ReleaseDate" -- probed live,
-# the leading "+" 400s. -Title is third, the last sort trusted enough to
-# spend a request on.
-_CATALOG_SORTS: tuple[str, ...] = ("-ReleaseDate", "ReleaseDate", "-Title")
+# Ascending ReleaseDate is the bare field name, not "+ReleaseDate" --
+# probed live, the leading "+" 400s. -Title, Title and Relevance are the
+# only other sorts trusted enough to spend a request on -- every other
+# spelling tried (BestSellers, Runtime, Price, Rating, Popularity,
+# PurchaseDate in either direction) either silently duplicates Relevance
+# or 400s outright, so there is no sixth sort to add here.
+_CATALOG_SORTS: tuple[str, ...] = ("-ReleaseDate", "ReleaseDate", "-Title", "Title", "Relevance")
+
+# The two cheap, provably disjoint sorts spent unfiltered on every author,
+# regardless of size -- see the module-level walk's Phase 1. Kept to just
+# these two (not all five) unfiltered: a third, fourth and fifth unfiltered
+# sort would cost as much as this walk's entire category-probing phase
+# while -- unlike a category window -- never opening a genuinely new slice
+# of a small-to-medium author's results, which the unfiltered pair (or
+# even one of them alone) has already fully captured.
+_CATALOG_BASELINE_SORTS: tuple[str, ...] = _CATALOG_SORTS[:2]
+
+# The sort a candidate category is first tried with (see
+# _fetch_author_books_by_catalog's Phase 3) -- deliberately NOT one of
+# _CATALOG_BASELINE_SORTS. A first attempt reused -ReleaseDate here and
+# measured badly wrong for exactly the case that matters most: an author
+# whose catalog is dominated by one genre has a "mega-category" covering
+# nearly every book they've written, and that category's own -ReleaseDate
+# window is then nearly identical to Phase 1's unfiltered -ReleaseDate
+# window already folded in -- both are "this author's most recent books",
+# scoped or not. Measured live against Arthur Conan Doyle: his three
+# highest-frequency harvested categories (a mega-category and its two
+# nested children, together covering the overwhelming majority of his
+# baseline products) each probed at exactly 0 new ASINs under
+# -ReleaseDate, immediately tripping CATALOG_DRY_STREAK_LIMIT and ending
+# the walk before it reached a single category actually worth spending
+# on. -Title is untouched by Phase 1 and orthogonal to recency, so it
+# does not share that bias regardless of how much of the catalog a
+# candidate category covers.
+_CATALOG_CATEGORY_PROBE_SORT: str = "-Title"
+
+# The remaining sorts a category earns once its probe shows it has real new
+# content to give (see _fetch_author_books_by_catalog's Phase 4) -- every
+# _CATALOG_SORTS entry except whichever one Phase 3 already spent as the
+# probe, in the same priority order.
+_CATALOG_CATEGORY_SPEND_SORTS: tuple[str, ...] = tuple(
+    sort for sort in _CATALOG_SORTS if sort != _CATALOG_CATEGORY_PROBE_SORT
+)
 
 CATALOG_PAGE_SIZE = 50
 
 # Audible's observed deep-paging ceiling on /1.0/catalog/products,
-# independent of what total_results itself claims. Verified live, us
-# region: descending -ReleaseDate plateaus at 500 distinct results for
-# both Arthur Conan Doyle and Agatha Christie (total_results 1138), page
-# 11 byte-identical to page 10; Christie's ascending ReleaseDate
-# plateaus one short of that, at 499, also from page 11 on; Brandon
-# Sanderson's real total of 153 stays under the ceiling and paginates
-# normally. The endpoint never 404s or comes back short past the
-# ceiling -- it returns HTTP 200 with the prior page's content repeating
-# indefinitely. This bounds pages requested per sort (see
-# _fetch_author_books_by_catalog) rather than trusting total_results
-# past it, the same principle NAME_SEARCH's own
+# independent of what total_results itself claims, and independent of
+# category_id -- it applies per (products_sort_by, category_id) pair, not
+# per author or per query shape (see the section banner above). Verified
+# live, us region: descending -ReleaseDate plateaus at 500 distinct
+# results for both Arthur Conan Doyle and Agatha Christie (unfiltered
+# total_results 1138), page 11 byte-identical to page 10; Christie's
+# ascending ReleaseDate plateaus one short of that, at 499, also from page
+# 11 on; a category-scoped query plateaus the same way once its own
+# results run past 500, at the same page 11 boundary. Brandon Sanderson's
+# real total of 153 stays under the ceiling on every sort and paginates
+# normally. The endpoint never 404s or comes back short past the ceiling
+# -- it returns HTTP 200 with the prior page's content repeating
+# indefinitely. This bounds pages requested per window (unfiltered sort or
+# category+sort pair alike -- see _pages_needed_for) rather than trusting
+# total_results past it, the same principle NAME_SEARCH's own
 # total_results-vs-repeated-signature check applies to the single-sort
 # walk above.
 CATALOG_RESULT_CEILING = 500
+
+# A window (Phase 1's unfiltered sorts, a Phase 3 probe, or a Phase 4
+# spend) whose fold adds fewer than this many ASINs the walk hadn't
+# already seen is "dry" for the purposes of CATALOG_DRY_STREAK_LIMIT
+# below. Measured live against Arthur Conan Doyle: a nested category's
+# probe (Mystery, a child of the already-probed Mystery, Thriller &
+# Suspense) added only 21 new ASINs -- explicitly the "near worthless"
+# case this threshold exists to catch -- while every category actually
+# worth its remaining sorts added well over 200. 50 sits comfortably
+# between the two with margin on both sides, rather than at either
+# measured value itself.
+CATALOG_DRY_WINDOW_MIN_NEW = 50
+
+# How many consecutive dry windows (see CATALOG_DRY_WINDOW_MIN_NEW) end the
+# walk's exploration of further, lower-ranked categories -- see
+# _fetch_author_books_by_catalog's Phase 3. Not measured directly (the live
+# trace behind this feature never produced two dry probes back to back),
+# so this is a deliberate margin rather than a fitted value: one dry
+# category alone (a nested subcategory whose parent was already probed, the
+# single case actually observed) must not end the walk early and cost a
+# real, separately-ceilinged category its chance, but the walk still has to
+# stop somewhere once the signal has genuinely dried up. 3 gives that
+# margin cheaply -- see the Phase 3 docstring for why a wider streak here
+# costs wall-clock time only in the batch it appears in, not per category.
+CATALOG_DRY_STREAK_LIMIT = 3
+
+# Cap on how many of the ranked candidates (see Phase 2) Phase 3 will ever
+# probe. Unlike every other bound in this codebase, this one is routinely
+# expected to bind on real, large multi-genre authors, not just a
+# pathological upstream: measured live, Arthur Conan Doyle's baseline pages
+# alone surface on the order of 120 distinct category ladder rungs (every
+# level of every ladder on every accepted product -- see
+# _harvest_category_ladders), the overwhelming majority of them niche
+# leaves a single product happens to carry. Because Phase 2 ranks
+# candidates by descending frequency before this cap is applied, truncating
+# here drops exactly that long, low-frequency tail first -- a rung seen on
+# one or two products is both the least likely to be a real, separately-
+# ceilinged category worth a request and the least likely to ever ranked-in
+# ahead of a genuinely fat one. This is why hitting this cap does NOT, on
+# its own, mark _CatalogBooksResult.slicing_incomplete -- see that field's
+# own docstring.
+CATALOG_MAX_CANDIDATE_CATEGORIES = 40
 
 # Attribution tiers a catalog product can land in -- see
 # _classify_catalog_product. Counted separately in _CatalogBooksResult so
@@ -430,74 +524,106 @@ def _classify_catalog_product(
     return _CATALOG_TIER_NAME_REJECT
 
 
-async def _fetch_catalog_page(name: str, region: str, page: int, sort: str) -> dict:
+async def _fetch_catalog_page(
+    name: str,
+    region: str,
+    page: int,
+    sort: str,
+    category_id: str | None = None,
+    include_categories: bool = False,
+) -> dict:
     """
     Fetches a single page of the catalog author-name search for a given
-    sort order, scoped to only what discovery needs. Raises on failure;
-    the caller decides what a failed page means for the walk.
+    sort order, optionally scoped to a category_id, scoped to only what
+    discovery needs. Raises on failure; the caller decides what a failed
+    page means for the walk.
 
-    response_groups is limited to contributors -- discovery only needs
-    asin plus author-attribution data, never the full response-group set
+    response_groups is limited to contributors -- plus category_ladders
+    when include_categories is set, for the unfiltered baseline pages
+    _fetch_author_books_by_catalog harvests candidate categories from --
+    discovery only needs asin, author-attribution data and, for those
+    baseline pages, category placement; never the full response-group set
     hydration (get_books_by_asins) requests. Fetching that here would be
     both wasted work and a shape this function has no use for; hydration
     still owns the DTO.
     """
     path = "/1.0/catalog/products"
-    params = {
+    params: dict[str, Any] = {
         "author": name,
         "num_results": CATALOG_PAGE_SIZE,
         "page": page,
-        "response_groups": "contributors",
+        "response_groups": "contributors, category_ladders" if include_categories else "contributors",
         "products_sort_by": sort,
     }
+    if category_id:
+        params["category_id"] = category_id
     return await audible_get(region, path, params)
 
 
 @dataclass
 class _CatalogBooksResult:
     """
-    asins is ordered by _CATALOG_SORTS' own priority: every ASIN from
-    -ReleaseDate's pages first (page 0 through however many further pages
-    that sort needed, in ascending page order), then ascending
-    ReleaseDate's pages the same way, then -Title's -- this is what lets
-    get_author_books preserve the compat-critical -ReleaseDate-first
-    prefix without a separate sort step. Wave 3 fetches every needed
-    sort's remaining pages together in a single gather for speed, but
-    folding them into asins is a separate step done strictly one sort at
-    a time, in _CATALOG_SORTS order -- fetch concurrency and fold order
-    are deliberately decoupled, since firing the fetches together does
-    not by itself guarantee they land in this order.
+    asins is ordered by fold order, not fetch order: Phase 1's
+    -ReleaseDate window in full (page 0 through however many further
+    pages it needed, in ascending page order), then Phase 1's ReleaseDate
+    window the same way, then -- only for an author whose baseline
+    plateaued or over-claimed total_results (see
+    _fetch_author_books_by_catalog) -- every category window Phases 3 and
+    4 folded in, each in ranked-candidate-then-sort-priority order. This
+    is what lets get_author_books preserve the compat-critical
+    -ReleaseDate-first prefix without a separate sort step: every window
+    is fetched concurrently with its siblings for speed, but folded into
+    asins strictly one window at a time, in this order -- fetch
+    concurrency and fold order are deliberately decoupled throughout this
+    walk, since firing requests together does not by itself guarantee
+    they land in this order.
 
     sort_errors carries one entry per page fetch that raised, prefixed
-    with which sort/page it was, so a partial catalog failure is tellable
-    from a clean walk that simply didn't need every sort.
+    with which window/page it was, so a partial catalog failure is
+    tellable from a clean walk that simply didn't need every window.
 
-    ceiling_saturated is True when at least one sort's own pages were
-    observed to plateau -- Audible re-serving an earlier page's exact
-    content instead of new results (verified live: Conan Doyle's
-    -ReleaseDate page 11 is byte-identical to page 10; Christie's
-    -ReleaseDate and ascending ReleaseDate both plateau the same way, also
-    at page 11) -- while the union this walk produced still falls short of
-    total_results, upstream's own claim. This is a measured signal, read
-    off what the walk actually observed on the wire, not an arithmetic
-    threshold computed from total_results and CATALOG_RESULT_CEILING alone
-    -- that measurement was taken in the us store only, so a region whose
-    real deep-paging ceiling differs would make an arithmetic-only
-    threshold wrong in either direction: too low flags a walk that
-    genuinely finished, too high misses one that silently stopped short.
+    truncated_by_deadline is True when the caller's deadline cut the walk
+    short before it reached a natural end -- a real interruption, not the
+    walk's own designed stopping point (see CATALOG_DRY_STREAK_LIMIT).
+
+    slicing_incomplete is True only when the walk determined it needed to
+    slice by category (the baseline plateaued or over-claimed
+    total_results) but found literally nothing to slice with -- no
+    category ever surfaced on a baseline page at all, which for an author
+    large enough to need slicing points at something broken (a response-
+    shape change upstream, category_ladders silently empty) rather than a
+    genuinely uncategorized catalog. It is deliberately NOT set merely
+    because CATALOG_MAX_CANDIDATE_CATEGORIES capped how many ranked
+    candidates got probed -- see that constant's own docstring for why
+    that cap routinely binds on a real, large multi-genre author and does
+    not mean anything was missed: Phase 2's frequency ranking already
+    tries the candidates most likely to matter first, and Phase 3's dry
+    streak already self-limits how far down that ranked list is worth
+    going. categories_harvested (the pre-cap count) and
+    categories_considered (the post-cap count actually probed) are both
+    logged so that gap stays visible without gating completeness on it.
+
+    sliced is True whenever Phase 3/4 category slicing ran at all, purely
+    informational (logged, never used to gate completeness) -- distinct
+    from slicing_incomplete, which only fires when slicing was needed but
+    nothing was found to slice with.
     """
 
     asins: list[str]
     pages_fetched: int
     total_results: int | None
-    sorts_used: int
-    asin_match_count: int
-    asin_reject_count: int
-    name_match_count: int
-    name_reject_count: int
     sort_errors: list[str]
     truncated_by_deadline: bool = False
-    ceiling_saturated: bool = False
+    slicing_incomplete: bool = False
+    sliced: bool = False
+    categories_harvested: int = 0
+    categories_considered: int = 0
+    categories_expanded: int = 0
+    windows_used: int = 0
+    asin_match_count: int = 0
+    asin_reject_count: int = 0
+    name_match_count: int = 0
+    name_reject_count: int = 0
 
 
 def _catalog_page_signature(data: Any) -> tuple[Any, ...] | None:
@@ -522,6 +648,47 @@ def _catalog_page_signature(data: Any) -> tuple[Any, ...] | None:
     return tuple(p.get("asin") if isinstance(p, dict) else None for p in products)
 
 
+def _harvest_category_ladders(
+    product: dict, frequency: dict[str, int], names: dict[str, str]
+) -> None:
+    """
+    Tallies every rung of an already-accepted baseline product's
+    category_ladders into frequency (category_id -> how many of this
+    author's own baseline products carried it) and records each id's
+    display name the first time it's seen, in names -- this is the ranking
+    signal _fetch_author_books_by_catalog's Phase 2 sorts candidate
+    categories by.
+
+    Every rung at every level counts, not just the leaf: a ladder runs
+    top (a broad genre) to bottom (a narrow subcategory), and a broad
+    parent naturally accumulates a higher count than its own children
+    simply because more of the author's products carry it -- which is
+    exactly what should rank it as a candidate ahead of its children,
+    without this module ever having to model the ladder's own tree shape
+    to get that ordering (see the Phase 2/3 docstrings for why the walk
+    deliberately does not).
+    """
+    ladders = product.get("category_ladders")
+    if not isinstance(ladders, list):
+        return
+    for ladder in ladders:
+        if not isinstance(ladder, dict):
+            continue
+        rungs = ladder.get("ladder")
+        if not isinstance(rungs, list):
+            continue
+        for rung in rungs:
+            if not isinstance(rung, dict):
+                continue
+            category_id = rung.get("id")
+            if not isinstance(category_id, str) or not category_id:
+                continue
+            frequency[category_id] = frequency.get(category_id, 0) + 1
+            name = rung.get("name")
+            if category_id not in names and isinstance(name, str) and name:
+                names[category_id] = name
+
+
 def _process_catalog_page(
     data: Any,
     author_asin: str,
@@ -529,6 +696,8 @@ def _process_catalog_page(
     seen: set[str],
     asins: list[str],
     counts: dict[str, int],
+    category_frequency: dict[str, int] | None = None,
+    category_names: dict[str, str] | None = None,
 ) -> None:
     """
     Applies tiered attribution (_classify_catalog_product) to every
@@ -537,6 +706,13 @@ def _process_catalog_page(
     tier's count in counts, including the rejected ones -- rejections are
     not silent, they are how get_author_books reports the attribution
     breakdown.
+
+    category_frequency, when given (only for Phase 1's baseline pages --
+    see _fetch_author_books_by_catalog), also harvests every accepted
+    product's category_ladders via _harvest_category_ladders. Harvesting
+    only from accepted products, never rejected ones, keeps a name-search
+    false positive (a same-named but different author) from polluting
+    this author's own category signal.
     """
     if not isinstance(data, dict):
         return
@@ -550,6 +726,15 @@ def _process_catalog_page(
         counts[tier] = counts.get(tier, 0) + 1
         if tier not in (_CATALOG_TIER_ASIN_MATCH, _CATALOG_TIER_NAME_MATCH):
             continue
+        if category_frequency is not None:
+            # `category_names if category_names is not None else {}`, not
+            # `category_names or {}` -- an already-populated dict is still
+            # falsy once it happens to be empty on a given call, and `or`
+            # would silently swap it for a throwaway that's discarded the
+            # moment this call returns, losing every name harvested so far.
+            _harvest_category_ladders(
+                product, category_frequency, category_names if category_names is not None else {}
+            )
         asin = product.get("asin")
         # Truthy-only, not is_valid_asin: catalog products include
         # ISBN-keyed records whose asin field is not a 10-char B-format
@@ -567,6 +752,92 @@ def _process_catalog_page(
             asins.append(asin)
 
 
+@dataclass(frozen=True)
+class _CatalogWindow:
+    """
+    One (category_id, products_sort_by) pair -- the atomic unit this walk
+    spends a request budget on. category_id is None for Phase 1's two
+    unfiltered sorts; harvest is True only for those same two, since
+    category candidates are only ever mined from the baseline (see
+    _fetch_author_books_by_catalog's Phase 2). Frozen and hashable so a
+    window can key the outcome dicts the batch helpers below return.
+    """
+
+    category_id: str | None
+    sort: str
+    harvest: bool = False
+
+
+def _window_label(window: _CatalogWindow) -> str:
+    """Formats a window for a sort_errors entry -- category-qualified for
+    a category window, bare for a Phase 1 unfiltered one."""
+    if window.category_id is None:
+        return window.sort
+    return f"category {window.category_id} {window.sort}"
+
+
+def _pages_needed_for(total_results: int | None) -> int:
+    """
+    Pages one window needs to reach CATALOG_RESULT_CEILING, given that
+    window's own page-0 total_results claim. Absent a usable total_results
+    (missing, wrong type, or negative), falls back to a single page --
+    there is nothing else to size a further-page batch from, and firing a
+    speculative multi-page batch for a window whose real size is unknown
+    would risk paying for empty pages past whatever this window's real
+    total is. Deep paging caps at CATALOG_RESULT_CEILING regardless of
+    what total_results itself claims (see that constant's docstring), so
+    total_results is capped before the page count is derived from it.
+    """
+    capped = min(total_results, CATALOG_RESULT_CEILING) if total_results is not None else CATALOG_PAGE_SIZE
+    return -(-capped // CATALOG_PAGE_SIZE)
+
+
+async def _fetch_window_page0_batch(
+    author_name: str, region: str, windows: list[_CatalogWindow]
+) -> dict[_CatalogWindow, Any]:
+    """Fetches page 0 of every window in one gather, keyed back by window
+    so the caller can look up any one window's outcome (a dict response,
+    or the exception it raised) without depending on gather's return
+    order lining up with anything but the input list, which zip already
+    guarantees regardless."""
+    outcomes = await asyncio.gather(
+        *(
+            _fetch_catalog_page(
+                author_name, region, 0, w.sort,
+                category_id=w.category_id, include_categories=w.harvest,
+            )
+            for w in windows
+        ),
+        return_exceptions=True,
+    )
+    return dict(zip(windows, outcomes))
+
+
+async def _fetch_window_rest_batch(
+    author_name: str,
+    region: str,
+    targets: list[tuple[_CatalogWindow, int]],
+) -> dict[tuple[_CatalogWindow, int], Any]:
+    """Fetches every (window, page) pair in targets in one gather, keyed
+    back the same way _fetch_window_page0_batch is. An empty targets list
+    (every window in this round was small enough that page 0 was already
+    the whole window) skips the gather call entirely rather than firing
+    one for nothing."""
+    if not targets:
+        return {}
+    outcomes = await asyncio.gather(
+        *(
+            _fetch_catalog_page(
+                author_name, region, page, w.sort,
+                category_id=w.category_id, include_categories=w.harvest,
+            )
+            for w, page in targets
+        ),
+        return_exceptions=True,
+    )
+    return dict(zip(targets, outcomes))
+
+
 async def _fetch_author_books_by_catalog(
     author_asin: str,
     author_name: str,
@@ -574,72 +845,111 @@ async def _fetch_author_books_by_catalog(
     deadline: float | None = None,
 ) -> _CatalogBooksResult:
     """
-    Fetches book ASINs for an author from the catalog endpoint across
-    every trusted sort order, ASIN-attributed via _classify_catalog_product
-    rather than name-matched alone -- the catalog has no author-ASIN
-    filter (verified live: author_asin, authorAsin, contributor_asin, and
-    author_id are all silently ignored, returning the entire 74k-item
-    catalogue while looking like success), so author_name is what scopes
-    the query and author_asin is what scopes which of its results belong
-    to this author once results come back.
+    Fetches book ASINs for an author from the catalog endpoint, ASIN-
+    attributed via _classify_catalog_product rather than name-matched
+    alone -- the catalog has no author-ASIN filter (verified live:
+    author_asin, authorAsin, contributor_asin, and author_id are all
+    silently ignored, returning the entire 74k-item catalogue while
+    looking like success), so author_name is what scopes the query and
+    author_asin is what scopes which of its results belong to this
+    author once results come back.
 
-    Two waves, matching get_author_books' own wave numbering:
+    Audible's deep-paging ceiling (CATALOG_RESULT_CEILING, measured at
+    500 distinct results) turned out to apply per (products_sort_by,
+    category_id) pair, not per author -- see the module-level section
+    banner above. This walk exploits that in four phases, spending more
+    of its request budget only on an author actually large enough to need
+    it:
 
-    - Wave 2 (here: page 0 of every sort in _CATALOG_SORTS, fired
-      together): the only way to learn total_results, and every sort's
-      page 0 is fetched regardless of how many sorts end up being needed
-      -- the request is already paid for, so its products are always
-      processed (see below), even for a sort beyond sorts_needed.
-    - Wave 3 (here: every further page every needed sort requires, fired
-      together in one gather -- no per-walk concurrency bound is applied;
-      the shared client throttles this globally): sorts_needed is
-      ceil(total_results / CATALOG_RESULT_CEILING), capped at
-      len(_CATALOG_SORTS) -- the number of trusted sort orders that exist
-      -- and pages per sort is ceil(min(total_results,
-      CATALOG_RESULT_CEILING) / CATALOG_PAGE_SIZE), since deep paging
-      caps at CATALOG_RESULT_CEILING regardless of what total_results
-      itself claims (see that constant's docstring).
+    Phase 1 (baseline, always run): the two cheap, provably disjoint
+    unfiltered sorts in _CATALOG_BASELINE_SORTS (-ReleaseDate, then
+    ReleaseDate), each windowed to CATALOG_RESULT_CEILING. category_ladders
+    is harvested from every accepted product on these pages (see
+    _process_catalog_page) -- free, no extra requests, since the pages
+    were already being fetched for their ASINs. For any author whose real
+    catalog stays under the ceiling (Brandon Sanderson's 203 titles,
+    total_results well under CATALOG_RESULT_CEILING), this phase alone
+    already has everything, and phases 2-4 below never run at all -- no
+    author under every ceiling pays anything for slicing it doesn't need.
 
-    Every page-0 response already fetched in wave 2 is processed
-    unconditionally, even for a sort past sorts_needed -- data already
-    paid for from a live request is never discarded. Only the *further*
-    pages of a sort past sorts_needed are skipped.
+    Phase 1 also decides whether slicing is needed at all: only when the
+    baseline's own total_results claim exceeds CATALOG_RESULT_CEILING, or
+    a baseline sort's own pages were directly observed to plateau
+    (Audible re-serving an earlier page's exact content -- see
+    _catalog_page_signature), does this walk spend anything past Phase 1.
 
-    Fetching and folding are deliberately different orders: every sort's
-    page 0 (wave 2) and every needed sort's further pages (wave 3) are
-    each fired together in their own single gather, for speed, but the
-    responses are folded into asins strictly one sort at a time, in
-    _CATALOG_SORTS priority order -- a sort's page 0 and every further
-    page it needed, in ascending page order, before the next sort's page
-    0 is touched at all. Firing requests together does not by itself
-    produce that order, so it is enforced as a separate fold step; this
-    is what keeps -ReleaseDate an unbroken prefix of asins (see
-    _CatalogBooksResult's own docstring) rather than interleaved with
-    another sort's page 0.
+    Phase 2 (rank candidates, no requests): the harvested category ids are
+    ranked by how many baseline products carried each one, descending,
+    capped at CATALOG_MAX_CANDIDATE_CATEGORIES. This walk deliberately
+    does not model the category ladder's own parent/child structure to
+    order or prune this list -- a live trace showed it wouldn't help: a
+    nested category can self-eliminate on a low probe yield (a strict
+    subset largely already seen via its already-probed parent), but a
+    MORE deeply nested category can also turn out to hold hundreds of
+    genuinely new ASINs a shallower relative did not surface, because
+    each sort order opens a different slice of that category's own
+    separately-ceilinged result set -- hierarchy position doesn't predict
+    that, only spending a request and observing it does (Phase 3).
+
+    Phase 3 (probe, cheap-then-full): every ranked candidate's page 0 is
+    fetched together in one gather -- this is the cheap tier, one request
+    per candidate regardless of how many total this walk ends up ranking.
+    A candidate whose page 0 adds not a single new ASIN over everything
+    already seen is dropped here, at the cost of the one request already
+    spent learning that -- a category whose first (and best-sorted) 50
+    results are already fully known is not worth a further nine requests
+    to confirm. Every surviving candidate's remaining pages (up to
+    CATALOG_RESULT_CEILING, via _pages_needed_for) are then fetched
+    together in a second gather -- the full-probe tier. Folded strictly in
+    rank order, each candidate's total new-ASIN count (across both tiers)
+    is compared against CATALOG_DRY_WINDOW_MIN_NEW: at or above, the
+    category earns Phase 4; below, it's dry. CATALOG_DRY_STREAK_LIMIT
+    consecutive dry candidates in this ranked fold stops the walk from
+    considering any further, lower-ranked one -- see that constant's own
+    docstring for why the whole batch is still fetched up front rather
+    than probed one candidate at a time: every candidate in a single
+    batch was already going to be paid for regardless of where the streak
+    lands, so batching costs nothing a strictly sequential probe wouldn't
+    also have cost, while turning what would be dozens of sequential
+    round trips into two.
+
+    Phase 4 (spend): every category that earned it in Phase 3 gets its
+    remaining sorts (_CATALOG_CATEGORY_SPEND_SORTS) -- again fetched as
+    two gathers (every window's page 0 together, then every window's
+    remaining pages together) and folded in category-rank-then-sort-
+    priority order. A category found to pay is never revisited or
+    re-judged mid-Phase-4; only Phase 3's ranked-candidate exploration is
+    what CATALOG_DRY_STREAK_LIMIT can cut short.
+
+    Throughout every phase, fetching and folding are deliberately
+    different orders -- every window in a round is fired together for
+    speed, but folded into asins one window at a time in a fixed priority
+    order (see _CatalogBooksResult's own docstring) -- and a page-0
+    response already fetched is always processed, even for a window that
+    turns out not to need (or not to have room in the deadline for) its
+    remaining pages; data already paid for from a live request is never
+    discarded.
 
     A single page's fetch failure is recorded in sort_errors and does not
-    stop the rest of the walk; every other page, sort, and the page-0
-    wave are unaffected -- a source that fails must not fail the whole
-    request (see get_author_books' own per-source failure handling for
+    stop the rest of the walk -- every other page, window, and phase is
+    unaffected (see get_author_books' own per-source failure handling for
     the same principle one level up).
 
     deadline, when given, is an absolute time.monotonic() bound: checked
-    once before wave 2 (an already-passed deadline skips catalog
-    entirely, returning an empty, deadline-truncated result) and once
-    while building the wave-3 page list (pages beyond the deadline are
-    never requested at all, not merely abandoned mid-flight).
+    once before Phase 1 starts (an already-passed deadline skips the
+    whole walk, returning an empty, deadline-truncated result) and once
+    before each further gather this walk fires; a deadline crossed
+    between rounds stops the walk from starting another one rather than
+    letting it run to a natural end.
 
-    total_results is read from whichever sort's page 0 reports it first
-    in _CATALOG_SORTS' own priority order -- every sort queries the same
-    author name, so the count is the same query surfaced through a
-    different sort, not a per-sort quantity.
-
-    ceiling_saturated (see _CatalogBooksResult) is derived in the fold
-    step below from what the walk actually observed -- a sort's own pages
-    plateauing (_catalog_page_signature) compared against total_results --
-    not from CATALOG_RESULT_CEILING arithmetic alone; that constant is
-    used only above, to bound sorts_needed and pages_needed, the page
-    budget this walk is allowed to spend.
+    total_results is read from whichever baseline sort's page 0 reports
+    it first, in _CATALOG_BASELINE_SORTS' own priority order -- both
+    sorts query the identical unfiltered author-name search, so the
+    count is the same query surfaced through a different sort, not a
+    per-sort quantity. It is never read from a category-scoped window; a
+    category's own total_results describes only that category's slice,
+    not the author's whole catalog, and would be the wrong claim for
+    get_author_books' own completeness check against this field.
     """
     seen: set[str] = set()
     asins: list[str] = []
@@ -647,147 +957,241 @@ async def _fetch_author_books_by_catalog(
     sort_errors: list[str] = []
     pages_fetched = 0
 
-    if deadline is not None and time.monotonic() >= deadline:
+    def deadline_passed() -> bool:
+        return deadline is not None and time.monotonic() >= deadline
+
+    if deadline_passed():
         return _CatalogBooksResult(
             asins=[],
             pages_fetched=0,
             total_results=None,
-            sorts_used=0,
-            asin_match_count=0,
-            asin_reject_count=0,
-            name_match_count=0,
-            name_reject_count=0,
             sort_errors=[],
             truncated_by_deadline=True,
         )
 
-    # Wave 2: page 0 of every trusted sort order, fired together.
-    page0_outcomes = await asyncio.gather(
-        *(_fetch_catalog_page(author_name, region, 0, sort) for sort in _CATALOG_SORTS),
-        return_exceptions=True,
-    )
+    # ---- Phase 1: baseline, unfiltered, the two disjoint sorts ----
+    baseline_windows = [_CatalogWindow(None, sort, harvest=True) for sort in _CATALOG_BASELINE_SORTS]
+    baseline_page0 = await _fetch_window_page0_batch(author_name, region, baseline_windows)
 
     total_results: int | None = None
-    page0_data: list[dict | None] = []
-    for sort, outcome in zip(_CATALOG_SORTS, page0_outcomes):
+    baseline_totals: dict[_CatalogWindow, int | None] = {}
+    for window in baseline_windows:
+        outcome = baseline_page0[window]
         if isinstance(outcome, BaseException):
-            sort_errors.append(f"{sort} page 0: {type(outcome).__name__}: {outcome}")
-            page0_data.append(None)
+            sort_errors.append(f"{_window_label(window)} page 0: {type(outcome).__name__}: {outcome}")
+            baseline_totals[window] = None
             continue
         pages_fetched += 1
-        data = outcome if isinstance(outcome, dict) else None
-        page0_data.append(data)
-        if total_results is None and isinstance(data, dict):
-            candidate = data.get("total_results")
-            if isinstance(candidate, int) and candidate >= 0:
-                total_results = candidate
+        candidate_total = outcome.get("total_results") if isinstance(outcome, dict) else None
+        baseline_totals[window] = candidate_total if isinstance(candidate_total, int) and candidate_total >= 0 else None
+        if total_results is None and baseline_totals[window] is not None:
+            total_results = baseline_totals[window]
 
-    if total_results is not None:
-        sorts_needed = min(
-            len(_CATALOG_SORTS),
-            max(1, -(-total_results // CATALOG_RESULT_CEILING)),
-        )
-    else:
-        sorts_needed = 1
-
-    # Wave 3: every remaining page every needed sort requires, fired
-    # together in a single gather -- see docstring for why no per-walk
-    # concurrency bound is applied here. Fetched here, but not folded into
-    # asins yet -- see the fold loop below for why.
-    wave3_targets: list[tuple[str, int]] = []
     truncated_by_deadline = False
-    capped_total = (
-        min(total_results, CATALOG_RESULT_CEILING) if total_results is not None else CATALOG_PAGE_SIZE
-    )
-    pages_needed = -(-capped_total // CATALOG_PAGE_SIZE)
-    for sort in _CATALOG_SORTS[:sorts_needed]:
+    baseline_rest_targets: list[tuple[_CatalogWindow, int]] = []
+    for window in baseline_windows:
+        pages_needed = _pages_needed_for(baseline_totals.get(window))
         for page in range(1, pages_needed):
-            if deadline is not None and time.monotonic() >= deadline:
-                truncated_by_deadline = True
-                break
-            wave3_targets.append((sort, page))
-        if truncated_by_deadline:
-            break
+            baseline_rest_targets.append((window, page))
 
-    wave3_outcomes_by_target: dict[tuple[str, int], Any] = {}
-    if wave3_targets:
-        wave3_outcomes = await asyncio.gather(
-            *(_fetch_catalog_page(author_name, region, page, sort) for sort, page in wave3_targets),
-            return_exceptions=True,
+    baseline_rest: dict[tuple[_CatalogWindow, int], Any] = {}
+    if baseline_rest_targets:
+        if deadline_passed():
+            truncated_by_deadline = True
+        else:
+            baseline_rest = await _fetch_window_rest_batch(author_name, region, baseline_rest_targets)
+
+    category_frequency: dict[str, int] = {}
+    category_names: dict[str, str] = {}
+    baseline_plateaued = False
+    for window in baseline_windows:
+        page0_outcome = baseline_page0[window]
+        page0_data = page0_outcome if isinstance(page0_outcome, dict) else None
+        _process_catalog_page(
+            page0_data, author_asin, author_name, seen, asins, counts,
+            category_frequency=category_frequency, category_names=category_names,
         )
-        wave3_outcomes_by_target = dict(zip(wave3_targets, wave3_outcomes))
-
-    # Fold order is the ordering contract: every page-0 response already
-    # fetched is processed, from every sort, since the request has
-    # already been made -- but strictly one sort at a time, in
-    # _CATALOG_SORTS priority order, a sort's own page 0 followed
-    # immediately by every further page that same sort needed, before the
-    # next sort's page 0 is touched at all. Wave 2 and wave 3 were each
-    # fired together purely for fetch speed; folding them in fetch-
-    # completion or gather-return order instead of this one would let a
-    # later sort's page 0 land ahead of an earlier sort's own further
-    # pages, breaking -ReleaseDate's unbroken-prefix guarantee (see
-    # _CatalogBooksResult's docstring).
-    # sort_plateaued tracks, across every sort folded below, whether any
-    # one of them was caught re-serving an earlier page's exact raw
-    # content -- Audible's own deep-paging ceiling, observed on the wire,
-    # rather than assumed from CATALOG_RESULT_CEILING. Compared per sort
-    # against that sort's own previous page in ascending order (seeded
-    # with page 0's signature), the same "current page repeats the one
-    # immediately before it" check the name-search and screens walks each
-    # use for their own plateau detection. A page whose signature can't be
-    # read (fetch failed, non-dict, no products list -- see
-    # _catalog_page_signature) never counts as a repeat of anything and
-    # is never itself compared against, so a fetch failure can't be
-    # mistaken for two genuinely identical pages of content.
-    sort_plateaued = False
-    for index, sort in enumerate(_CATALOG_SORTS):
-        _process_catalog_page(page0_data[index], author_asin, author_name, seen, asins, counts)
-        if index >= sorts_needed:
-            continue
-        previous_signature = _catalog_page_signature(page0_data[index])
+        previous_signature = _catalog_page_signature(page0_data)
+        pages_needed = _pages_needed_for(baseline_totals.get(window))
         for page in range(1, pages_needed):
-            target = (sort, page)
-            if target not in wave3_outcomes_by_target:
+            target = (window, page)
+            if target not in baseline_rest:
                 continue
-            outcome = wave3_outcomes_by_target[target]
+            outcome = baseline_rest[target]
             if isinstance(outcome, BaseException):
-                sort_errors.append(f"{sort} page {page}: {type(outcome).__name__}: {outcome}")
+                sort_errors.append(f"{_window_label(window)} page {page}: {type(outcome).__name__}: {outcome}")
                 continue
             pages_fetched += 1
-            page_signature = _catalog_page_signature(outcome)
-            if (
-                page_signature
-                and previous_signature is not None
-                and page_signature == previous_signature
-            ):
-                sort_plateaued = True
-            if page_signature is not None:
-                previous_signature = page_signature
-            _process_catalog_page(outcome, author_asin, author_name, seen, asins, counts)
+            signature = _catalog_page_signature(outcome)
+            if signature and previous_signature is not None and signature == previous_signature:
+                baseline_plateaued = True
+            if signature is not None:
+                previous_signature = signature
+            _process_catalog_page(
+                outcome, author_asin, author_name, seen, asins, counts,
+                category_frequency=category_frequency, category_names=category_names,
+            )
 
-    # Measured, not assumed (see _CatalogBooksResult.ceiling_saturated):
-    # true only when a sort was actually observed to plateau AND the union
-    # it fed still falls short of what upstream itself claimed via
-    # total_results. CATALOG_RESULT_CEILING never enters this predicate --
-    # it only ever bounded the page budget above, in sorts_needed and
-    # pages_needed.
-    ceiling_saturated = (
-        sort_plateaued
-        and total_results is not None
-        and len(asins) < total_results
+    # A baseline that neither over-claimed nor plateaued already has
+    # everything this author has to give -- see Phase 1's own docstring.
+    needs_slicing = baseline_plateaued or (
+        total_results is not None and total_results > CATALOG_RESULT_CEILING
     )
+
+    categories_harvested = 0
+    categories_considered = 0
+    categories_expanded = 0
+    slicing_incomplete = False
+
+    if needs_slicing and not truncated_by_deadline and not deadline_passed():
+        # ---- Phase 2: rank harvested candidates, no requests ----
+        ranked = sorted(category_frequency.items(), key=lambda kv: kv[1], reverse=True)
+        candidate_ids = [category_id for category_id, _frequency in ranked[:CATALOG_MAX_CANDIDATE_CATEGORIES]]
+        categories_harvested = len(ranked)
+        categories_considered = len(candidate_ids)
+        # See CATALOG_MAX_CANDIDATE_CATEGORIES and _CatalogBooksResult's own
+        # docstrings: the cap truncating the ranked list is routine on a
+        # real large author and not, on its own, evidence anything was
+        # missed. Only a genuinely empty harvest despite needing to slice
+        # counts as incomplete here.
+        slicing_incomplete = not category_frequency
+
+        if candidate_ids:
+            # ---- Phase 3: cheap page-0 tier, every candidate at once ----
+            probe_windows = [_CatalogWindow(cid, _CATALOG_CATEGORY_PROBE_SORT) for cid in candidate_ids]
+            probe_page0 = await _fetch_window_page0_batch(author_name, region, probe_windows)
+
+            probe_ok: set[_CatalogWindow] = set()
+            probe_totals: dict[_CatalogWindow, int | None] = {}
+            advancing: list[_CatalogWindow] = []
+            for window in probe_windows:
+                outcome = probe_page0[window]
+                if isinstance(outcome, BaseException):
+                    sort_errors.append(f"{_window_label(window)} page 0: {type(outcome).__name__}: {outcome}")
+                    continue
+                pages_fetched += 1
+                probe_ok.add(window)
+                candidate_total = outcome.get("total_results") if isinstance(outcome, dict) else None
+                probe_totals[window] = candidate_total if isinstance(candidate_total, int) and candidate_total >= 0 else None
+                before = len(seen)
+                _process_catalog_page(outcome, author_asin, author_name, seen, asins, counts)
+                if len(seen) > before:
+                    advancing.append(window)
+
+            # ---- Phase 3 continued: full-probe tier for surviving candidates ----
+            probe_rest_targets: list[tuple[_CatalogWindow, int]] = []
+            for window in advancing:
+                pages_needed = _pages_needed_for(probe_totals.get(window))
+                for page in range(1, pages_needed):
+                    probe_rest_targets.append((window, page))
+
+            probe_rest: dict[tuple[_CatalogWindow, int], Any] = {}
+            if probe_rest_targets:
+                if deadline_passed():
+                    truncated_by_deadline = True
+                else:
+                    probe_rest = await _fetch_window_rest_batch(author_name, region, probe_rest_targets)
+
+            paying: list[str] = []
+            dry_streak = 0
+            for window in probe_windows:
+                if window not in probe_ok:
+                    continue
+                before = len(seen)
+                if window in advancing:
+                    pages_needed = _pages_needed_for(probe_totals.get(window))
+                    for page in range(1, pages_needed):
+                        target = (window, page)
+                        if target not in probe_rest:
+                            continue
+                        outcome = probe_rest[target]
+                        if isinstance(outcome, BaseException):
+                            sort_errors.append(f"{_window_label(window)} page {page}: {type(outcome).__name__}: {outcome}")
+                            continue
+                        pages_fetched += 1
+                        _process_catalog_page(outcome, author_asin, author_name, seen, asins, counts)
+                new_count = len(seen) - before
+                if new_count >= CATALOG_DRY_WINDOW_MIN_NEW:
+                    dry_streak = 0
+                    paying.append(window.category_id)
+                else:
+                    dry_streak += 1
+                    if dry_streak >= CATALOG_DRY_STREAK_LIMIT:
+                        break
+
+            categories_expanded = len(paying)
+
+            # ---- Phase 4: remaining sorts for every category that paid ----
+            if paying:
+                if truncated_by_deadline or deadline_passed():
+                    truncated_by_deadline = True
+                else:
+                    expand_windows = [
+                        _CatalogWindow(category_id, sort)
+                        for category_id in paying
+                        for sort in _CATALOG_CATEGORY_SPEND_SORTS
+                    ]
+                    expand_page0 = await _fetch_window_page0_batch(author_name, region, expand_windows)
+
+                    expand_ok: set[_CatalogWindow] = set()
+                    expand_totals: dict[_CatalogWindow, int | None] = {}
+                    for window in expand_windows:
+                        outcome = expand_page0[window]
+                        if isinstance(outcome, BaseException):
+                            sort_errors.append(f"{_window_label(window)} page 0: {type(outcome).__name__}: {outcome}")
+                            continue
+                        pages_fetched += 1
+                        expand_ok.add(window)
+                        candidate_total = outcome.get("total_results") if isinstance(outcome, dict) else None
+                        expand_totals[window] = candidate_total if isinstance(candidate_total, int) and candidate_total >= 0 else None
+
+                    expand_rest_targets: list[tuple[_CatalogWindow, int]] = []
+                    for window in expand_ok:
+                        pages_needed = _pages_needed_for(expand_totals.get(window))
+                        for page in range(1, pages_needed):
+                            expand_rest_targets.append((window, page))
+
+                    expand_rest: dict[tuple[_CatalogWindow, int], Any] = {}
+                    if expand_rest_targets:
+                        if deadline_passed():
+                            truncated_by_deadline = True
+                        else:
+                            expand_rest = await _fetch_window_rest_batch(author_name, region, expand_rest_targets)
+
+                    for window in expand_windows:
+                        if window not in expand_ok:
+                            continue
+                        page0_outcome = expand_page0[window]
+                        page0_data = page0_outcome if isinstance(page0_outcome, dict) else None
+                        _process_catalog_page(page0_data, author_asin, author_name, seen, asins, counts)
+                        pages_needed = _pages_needed_for(expand_totals.get(window))
+                        for page in range(1, pages_needed):
+                            target = (window, page)
+                            if target not in expand_rest:
+                                continue
+                            outcome = expand_rest[target]
+                            if isinstance(outcome, BaseException):
+                                sort_errors.append(f"{_window_label(window)} page {page}: {type(outcome).__name__}: {outcome}")
+                                continue
+                            pages_fetched += 1
+                            _process_catalog_page(outcome, author_asin, author_name, seen, asins, counts)
+
+    windows_used = len(baseline_windows) + categories_considered + categories_expanded * len(_CATALOG_CATEGORY_SPEND_SORTS)
 
     return _CatalogBooksResult(
         asins=asins,
         pages_fetched=pages_fetched,
         total_results=total_results,
-        sorts_used=sorts_needed,
+        sort_errors=sort_errors,
+        truncated_by_deadline=truncated_by_deadline,
+        slicing_incomplete=slicing_incomplete,
+        sliced=needs_slicing,
+        categories_harvested=categories_harvested,
+        categories_considered=categories_considered,
+        categories_expanded=categories_expanded,
+        windows_used=windows_used,
         asin_match_count=counts.get(_CATALOG_TIER_ASIN_MATCH, 0),
         asin_reject_count=counts.get(_CATALOG_TIER_ASIN_REJECT, 0),
         name_match_count=counts.get(_CATALOG_TIER_NAME_MATCH, 0),
         name_reject_count=counts.get(_CATALOG_TIER_NAME_REJECT, 0),
-        sort_errors=sort_errors,
-        truncated_by_deadline=truncated_by_deadline,
-        ceiling_saturated=ceiling_saturated,
     )

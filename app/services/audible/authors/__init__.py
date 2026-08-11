@@ -33,8 +33,6 @@ from app.services.audible.authors.screens import (
 from app.services.audible.authors.catalog import (
     _fetch_author_books_by_catalog,
     _CatalogBooksResult,
-    _CATALOG_SORTS,
-    CATALOG_RESULT_CEILING,
     fetch_author_books_by_name,
 )
 from app.services.cache import manager as cache
@@ -300,15 +298,17 @@ async def _walk_author_books(
     """
     Fetches all book ASINs for an author, as a four-source parallel union:
     the Android author-detail screen (the only ASIN-exact source), and the
-    catalog endpoint walked across three sort orders (-ReleaseDate,
-    ascending ReleaseDate, -Title). None of the four is complete or a
-    subset of another -- verified live against Agatha Christie
-    (product_count 1116 on the screens grid, total_results 1138 on the
-    catalog): the screens grid itself serves only 520 unique ASINs before
-    plateauing; -ReleaseDate alone plateaus at 500 with zero overlap
-    against ascending ReleaseDate's own, different 499; and 28 of the screens
-    grid's 520 ASINs never appear anywhere in the catalog union at all.
-    Only the union of every source gets close to complete.
+    catalog endpoint, windowed across unfiltered sorts and, for a large
+    enough author, further sliced by category (see
+    _fetch_author_books_by_catalog's own docstring for the full phase
+    sequence). None of the four is complete or a subset of another --
+    verified live against Agatha Christie (product_count 1116 on the
+    screens grid, total_results 1138 on the catalog): the screens grid
+    itself serves only 520 unique ASINs before plateauing; -ReleaseDate
+    alone plateaus at 500 with zero overlap against ascending
+    ReleaseDate's own, different 499; and 28 of the screens grid's 520
+    ASINs never appear anywhere in the catalog union at all. Only the
+    union of every source gets close to complete.
 
     Four waves:
       1. Resolve the author ASIN to a name via the contributors lookup --
@@ -319,18 +319,18 @@ async def _walk_author_books(
          catalog walk (_fetch_author_books_by_catalog) each run their own
          internal page-1/page-0-then-fan-out sequence, but the two
          top-level walks run concurrently with each other via
-         asyncio.gather -- so screens' page 1 and every catalog sort's
-         page 0 go out together, and each source's own remaining pages go
-         out together shortly after, without one source's walk blocking
-         the other's. Neither walk applies its own concurrency bound
-         beyond what's already built into it; the shared client throttles
+         asyncio.gather -- so screens' page 1 and the catalog's first
+         windows go out together, and each source's own further rounds go
+         out shortly after, without one source's walk blocking the
+         other's. Neither walk applies its own concurrency bound beyond
+         what's already built into it; the shared client throttles
          fan-out globally.
       4. Union everything: catalog ASINs first (already -ReleaseDate-
          first internally -- _fetch_author_books_by_catalog folds every
-         sort's pages into its own result strictly one sort at a time, in
-         _CATALOG_SORTS priority order, not merely in fetch order), then
-         any screens-only extra, then any DB-only extra the two live
-         sources didn't happen to surface this run.
+         window into its own result strictly one window at a time, in a
+         fixed priority order, not merely in fetch order), then any
+         screens-only extra, then any DB-only extra the two live sources
+         didn't happen to surface this run.
 
     List order is a consumer-visible contract: consumers have always
     received the -ReleaseDate catalog list at the front of the response
@@ -415,33 +415,34 @@ async def _walk_author_books(
             catalog_result = catalog_outcome
     catalog_asins = catalog_result.asins if catalog_result is not None else []
 
-    # Measured by _fetch_author_books_by_catalog itself, from what the
-    # catalog wave actually observed on the wire (see
-    # _CatalogBooksResult.ceiling_saturated) -- a sort's own pages caught
-    # plateauing while the union it fed still fell short of upstream's own
-    # total_results claim, not an arithmetic threshold guessed against a
-    # constant.
-    catalog_ceiling_saturated = catalog_result is not None and catalog_result.ceiling_saturated
-
     # catalog_error alone is essentially never set: _fetch_author_books_by_catalog
-    # swallows every per-page and per-sort failure into sort_errors /
+    # swallows every per-page and per-window failure into sort_errors /
     # truncated_by_deadline rather than raising, so an outright exception
     # from the gather is the rare case, not the common one. catalog_degraded
     # is the signal that actually reflects that -- it also covers those
-    # swallowed failures -- but deliberately excludes
-    # catalog_ceiling_saturated (that has its own dedicated warning below
-    # with the exact ceiling numbers attached; reusing this signal for it
-    # too would double-report the identical condition) and excludes the
-    # case where catalog never ran because no author name was resolved
-    # (that is name_resolution_error's concern, not catalog's).
+    # swallowed failures and catalog_result.slicing_incomplete (the walk
+    # decided it needed to slice by category but couldn't fully act on
+    # that -- see _CatalogBooksResult's own docstring) -- but deliberately
+    # does NOT treat catalog_result.sliced on its own as degraded: a
+    # prolific author's baseline windows saturating their own
+    # CATALOG_RESULT_CEILING and needing category slicing is the walk
+    # working as designed, not a failure, and a walk that finished slicing
+    # cleanly (dry-streak or ran out of ranked candidates, neither of
+    # which sets sort_errors, truncated_by_deadline, or
+    # slicing_incomplete) must read as complete -- treating a routine
+    # ceiling as degraded here is exactly what previously forced every
+    # prolific author to re-walk on every single request instead of
+    # earning the default cache TTL once. Excludes the case where catalog
+    # never ran because no author name was resolved (that is
+    # name_resolution_error's concern, not catalog's).
     catalog_degraded = (
         author_name is not None
-        and not catalog_ceiling_saturated
         and (
             catalog_error is not None
             or catalog_result is None
             or catalog_result.sort_errors
             or catalog_result.truncated_by_deadline
+            or catalog_result.slicing_incomplete
         )
     )
 
@@ -531,11 +532,14 @@ async def _walk_author_books(
             # claim, a 0.4% gap that must not warn or the signal is noise
             # again on day one. 10% clears that gap with wide margin while
             # still catching a result at half the claim, which obviously
-            # must warn. Excluded when catalog_ceiling_saturated: that case
-            # is reported separately below, at the cache-write gate, with
-            # the exact ceiling numbers attached rather than a ratio -- the
-            # two would otherwise both fire over the identical condition.
-            if shortfall_ratio > 0.10 and not catalog_ceiling_saturated:
+            # must warn. Excluded when the catalog walk sliced by category
+            # (catalog_result.sliced): a sliced walk's own claimed_total is
+            # still just the unfiltered baseline's total_results, which a
+            # deliberately-not-exhaustive category slice (stopped on a dry
+            # streak once further exploration stopped paying off -- see
+            # _fetch_author_books_by_catalog) is expected to land under
+            # without that being a shortfall to warn about.
+            if shortfall_ratio > 0.10 and not (catalog_result is not None and catalog_result.sliced):
                 logger.warning("Audible Author Books union fell short of the claimed total", extra={
                     "author_asin": asin,
                     "region": region,
@@ -558,22 +562,30 @@ async def _walk_author_books(
     # incomplete result. What still varies by completeness is the TTL.
     # screens_clean mirrors the existing SCREENS_CLEAN_REASONS gate.
     # catalog_clean is True either when catalog ran with no page-fetch
-    # errors, wasn't cut short by the deadline, and didn't saturate its own
-    # sort ceiling (catalog_ceiling_saturated -- known arithmetically from
-    # upstream's own total_results, not inferred from the union's eventual
-    # size), or when author_name is a confirmed absence: _resolve_author_name
-    # returned None without raising, meaning Audible itself reported this
-    # author has no name, so the catalog wave has nothing to search and
-    # that case is trivially complete, not degraded. author_name is also
-    # None when name resolution raised instead of confirming an absence --
-    # name_resolution_error is checked explicitly here to keep the two
-    # apart, since that case means the catalog wave never got a chance to
-    # run at all and must not read as trivially complete. db_clean is
-    # False when the DB backstop read itself failed (returned None,
-    # distinct from a genuinely empty list) -- a failed DB read means the
-    # union never got the chance to include whatever it already had stored,
-    # so this run is not confirmed complete either. When all three hold,
-    # the write gets the default TTL (settings.cache_ttl, unchanged);
+    # errors, wasn't cut short by the deadline, and wasn't left unable to
+    # finish slicing what it identified as worth slicing
+    # (catalog_result.slicing_incomplete), or when author_name is a
+    # confirmed absence: _resolve_author_name returned None without
+    # raising, meaning Audible itself reported this author has no name, so
+    # the catalog wave has nothing to search and that case is trivially
+    # complete, not degraded. catalog_result.sliced is deliberately NOT
+    # part of this gate -- a walk that sliced by category and then stopped
+    # cleanly, on a dry streak or by running out of ranked candidates (see
+    # _fetch_author_books_by_catalog's own docstring), is exactly this
+    # feature completing as designed and must earn the same default TTL a
+    # small author's single-baseline-pass walk does; gating on "did it
+    # need to slice at all" is the trap that would turn every prolific
+    # author's request into a re-walk every AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS
+    # forever, which is strictly worse than not slicing at all. author_name
+    # is also None when name resolution raised instead of confirming an
+    # absence -- name_resolution_error is checked explicitly here to keep
+    # the two apart, since that case means the catalog wave never got a
+    # chance to run at all and must not read as trivially complete.
+    # db_clean is False when the DB backstop read itself failed (returned
+    # None, distinct from a genuinely empty list) -- a failed DB read means
+    # the union never got the chance to include whatever it already had
+    # stored, so this run is not confirmed complete either. When all three
+    # hold, the write gets the default TTL (settings.cache_ttl, unchanged);
     # otherwise it gets the short AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS,
     # so an incomplete result refreshes soon rather than sitting for a full
     # day, or -- the old behavior -- never being written at all, which meant
@@ -590,7 +602,7 @@ async def _walk_author_books(
             and catalog_error is None
             and not catalog_result.sort_errors
             and not catalog_result.truncated_by_deadline
-            and not catalog_ceiling_saturated
+            and not catalog_result.slicing_incomplete
         )
     )
     is_complete = screens_clean and catalog_clean and db_clean
@@ -599,18 +611,24 @@ async def _walk_author_books(
         asins,
         ttl_seconds=None if is_complete else AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS,
     )
-    if catalog_ceiling_saturated:
-        # A distinct, measured signal -- a sort's own pages plateaued,
-        # not an outright per-page error -- so it's called out on its own
-        # with the exact numbers, separate from the generic degraded-path
-        # warning below, which only fires on an outright error. The write
-        # itself still happens (see above); this only reports why it got
-        # the short TTL instead of the default one.
-        logger.warning("Audible Author Books catalog saturated its sort ceiling, cached with a short TTL", extra={
+    if catalog_result is not None and catalog_result.slicing_incomplete:
+        # A distinct, measured signal -- the walk identified categories
+        # worth slicing by (its baseline plateaued or over-claimed
+        # total_results) but found literally nothing to slice with, which
+        # for an author this large points at something broken upstream
+        # (see _CatalogBooksResult's own docstring for why hitting
+        # CATALOG_MAX_CANDIDATE_CATEGORIES alone does NOT set this) -- so
+        # it's called out on its own, separate from the generic
+        # degraded-path warning below, which only fires on an outright
+        # error. The write itself still happens (see above); this only
+        # reports why it got the short TTL instead of the default one.
+        logger.warning("Audible Author Books catalog could not finish slicing by category, cached with a short TTL", extra={
             "author_asin": asin,
             "region": region,
             "catalog_total_results": catalog_result.total_results,
-            "catalog_max_fetchable": len(_CATALOG_SORTS) * CATALOG_RESULT_CEILING,
+            "catalog_categories_harvested": catalog_result.categories_harvested,
+            "catalog_categories_considered": catalog_result.categories_considered,
+            "catalog_categories_expanded": catalog_result.categories_expanded,
             "author_book_num": len(asins),
         })
 
@@ -656,13 +674,17 @@ async def _walk_author_books(
         "screen_page_error": screen_result.page_error if screen_result else None,
         "catalog_pages_fetched": catalog_result.pages_fetched if catalog_result else 0,
         "catalog_total_results": catalog_result.total_results if catalog_result else None,
-        "catalog_sorts_used": catalog_result.sorts_used if catalog_result else 0,
+        "catalog_windows_used": catalog_result.windows_used if catalog_result else 0,
+        "catalog_sliced": catalog_result.sliced if catalog_result else False,
+        "catalog_categories_harvested": catalog_result.categories_harvested if catalog_result else 0,
+        "catalog_categories_considered": catalog_result.categories_considered if catalog_result else 0,
+        "catalog_categories_expanded": catalog_result.categories_expanded if catalog_result else 0,
+        "catalog_slicing_incomplete": catalog_result.slicing_incomplete if catalog_result else False,
         "catalog_asin_match": catalog_result.asin_match_count if catalog_result else 0,
         "catalog_asin_reject": catalog_result.asin_reject_count if catalog_result else 0,
         "catalog_name_match": catalog_result.name_match_count if catalog_result else 0,
         "catalog_name_reject": catalog_result.name_reject_count if catalog_result else 0,
         "catalog_truncated_by_deadline": catalog_result.truncated_by_deadline if catalog_result else False,
-        "catalog_ceiling_saturated": catalog_ceiling_saturated,
         "catalog_sort_errors": catalog_result.sort_errors if catalog_result else [],
         "catalog_error": catalog_error,
         "name_resolution_error": name_resolution_error,

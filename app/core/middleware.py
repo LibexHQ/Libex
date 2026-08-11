@@ -80,6 +80,10 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                 "request_id": request_id,
                 "method": request.method,
                 "url": request.url.path,
+                # Path alone cannot answer which parameters consumers actually
+                # use. No secret travels this way -- the internal routes
+                # authenticate on an Authorization header, not a query param.
+                "query": request.url.query,
                 "status": response.status_code,
                 "userAgent": user_agent,
                 "took": took,

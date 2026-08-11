@@ -508,6 +508,32 @@ def test_is_new_host_request_case_insensitive():
 # ============================================================
 
 
+def test_logging_middleware_extra_includes_query_string(client, caplog):
+    """
+    The path alone cannot answer which query parameters consumers actually
+    send — a question that could not be answered at all before this field
+    existed, because only `request.url.path` was recorded.
+    """
+    with caplog.at_level(logging.INFO, logger="libex"):
+        client.get("/openapi.json?cache=false&region=de")
+
+    request_records = [r for r in caplog.records if r.getMessage() == "Request completed"]
+    assert request_records
+    assert request_records[-1].query == "cache=false&region=de"
+
+
+def test_logging_middleware_query_is_empty_string_when_absent(client, caplog):
+    """A request with no query string logs an empty value, never None — the
+    field must be present on every record so a query for its absence is
+    meaningful rather than ambiguous."""
+    with caplog.at_level(logging.INFO, logger="libex"):
+        client.get("/openapi.json")
+
+    request_records = [r for r in caplog.records if r.getMessage() == "Request completed"]
+    assert request_records
+    assert request_records[-1].query == ""
+
+
 def test_logging_middleware_extra_includes_actual_host(client, caplog):
     """
     The `Host` a request arrived on is the only way to tell old-host traffic

@@ -10,6 +10,19 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.10.4]
+
+### Fixed
+- **`/db/book/{asin}` returned nothing at all for some books.** A book stored
+  without any plan data has `plans` recorded as null, and the response model
+  requires a list there — as it always has. Rather than a normal error, the
+  mismatch aborted the connection before any response was written, so the caller
+  saw a gateway timeout rather than anything explaining what went wrong. The
+  same path is used as the fallback when Audible is unreachable, so the fallback
+  meant to keep things working was failing for exactly those books too. A book
+  with no plans now returns an empty list, which is what the documented response
+  shape has always promised.
+
 ## [1.10.3]
 
 ### Fixed

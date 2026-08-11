@@ -303,6 +303,44 @@ async def test_get_book_from_db_returns_dict_on_hit():
 
 
 @pytest.mark.asyncio
+async def test_get_book_from_db_coerces_null_plans_to_empty_list():
+    """A stored NULL in the nullable plans column must not reach the response
+    model as None. BookResponse declares plans as a list, and its
+    default_factory only applies when the key is absent — an explicit None
+    raises ResponseValidationError, which escapes the middleware stack as a
+    dropped connection rather than a 5xx, so the caller gets nothing at all."""
+    book = _make_book()
+    book.plans = None
+    session = _make_session_with_book(book)
+    result = await get_book_from_db(session, "B08G9PRS1K")
+    assert result["plans"] == []
+
+
+@pytest.mark.asyncio
+async def test_get_book_from_db_null_plans_row_satisfies_the_response_model():
+    """The reader's output for a NULL-plans row must validate against the
+    response model that the route declares — the reader returning [] is only
+    half the contract."""
+    from app.api.routes.books.schemas import BookResponse
+
+    book = _make_book()
+    book.plans = None
+    session = _make_session_with_book(book)
+    result = await get_book_from_db(session, "B08G9PRS1K")
+    assert BookResponse.model_validate(result).plans == []
+
+
+@pytest.mark.asyncio
+async def test_get_book_from_db_preserves_populated_plans():
+    """Coercing NULL must not flatten a real plan list."""
+    book = _make_book()
+    book.plans = ["US Minerva", "Radio"]
+    session = _make_session_with_book(book)
+    result = await get_book_from_db(session, "B08G9PRS1K")
+    assert result["plans"] == ["US Minerva", "Radio"]
+
+
+@pytest.mark.asyncio
 async def test_get_book_from_db_returns_none_on_miss():
     """Returns None when book is not found."""
     session = _make_session_with_book(None)

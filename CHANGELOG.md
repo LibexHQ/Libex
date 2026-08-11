@@ -10,6 +10,21 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.10.3]
+
+### Fixed
+- **Requests queued behind each other under concurrent load.** The database
+  connection pool was never configured, so it ran on the library's defaults of
+  fifteen connections total — shared by the API, both seeder loops, and every
+  background write. Past fifteen simultaneous requests the rest simply waited,
+  and measured against the live service twenty concurrent requests to
+  `/db/stats` stretched from 1.5 to over 4 seconds purely from queueing. There
+  was also no limit on how long a single query could run, so one stuck
+  statement held its connection indefinitely with nothing to reclaim it, and
+  the pool bled down until the container restarted. The pool is now sized
+  explicitly, and both a per-query timeout and an idle-transaction timeout are
+  set so a connection can no longer be held forever.
+
 ## [1.10.2]
 
 ### Fixed

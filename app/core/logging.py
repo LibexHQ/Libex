@@ -1,8 +1,10 @@
 # Standard library
+import atexit
 import datetime
 import logging
 import logging.handlers
 import os
+import queue
 import sys
 
 # Local
@@ -70,7 +72,59 @@ class MaxLevelFilter(logging.Filter):
         return record.levelno <= self.max_level
 
 
+# axiom_py's sync Client (0.10.0) has no timeout argument anywhere in its
+# constructor or in ingest_events — checked directly against the installed
+# package, not assumed. Its session is a plain requests Session, so a default
+# is applied to that instead (see _apply_default_timeout). This bounds the
+# one background thread that ever calls it; it does not need to be long,
+# since a slow-but-alive endpoint and a hung one look the same to a caller
+# that only cares about not blocking forever.
+_AXIOM_TIMEOUT_SECONDS = 5.0
+
+# DirectAxiomHandler only ever runs on a QueueListener's own thread (see
+# _start_axiom_listener), never on the caller's. This bounds how many queued
+# records can pile up while that thread is blocked inside a single
+# ingest_events call (up to _AXIOM_TIMEOUT_SECONDS) before new records start
+# being dropped instead of queued. Each event is a small JSON dict — a
+# message plus a handful of extra fields — so even a full queue is at most a
+# few MB resident, and it drains in a fraction of a second once the blocked
+# call returns (or once the breaker below opens and emit becomes a no-op).
+_AXIOM_QUEUE_MAXSIZE = 2000
+
+
+def _apply_default_timeout(client) -> None:
+    """
+    Wraps client.session.request so any call through it that doesn't already
+    carry an explicit timeout gets _AXIOM_TIMEOUT_SECONDS instead. This is
+    the only timeout knob axiom_py's Client exposes — there is no
+    constructor argument and no way to inject a pre-configured
+    transport, only the already-built `.session` attribute to adjust after
+    the fact.
+    """
+    session = getattr(client, "session", None)
+    if session is None:
+        return
+    original_request = session.request
+
+    def _request_with_timeout(method, url, **kwargs):
+        kwargs.setdefault("timeout", _AXIOM_TIMEOUT_SECONDS)
+        return original_request(method, url, **kwargs)
+
+    session.request = _request_with_timeout
+
+
 class DirectAxiomHandler(logging.Handler):
+    """
+    Ships a record to Axiom via a synchronous, blocking ingest_events call.
+
+    Never attach this to a logger directly — it is only ever driven by a
+    QueueListener on its own background thread (see _start_axiom_listener),
+    so the network call here never runs on the thread that called
+    logger.info(...). On the API's single event loop, that caller is the
+    loop itself, and the whole point of the queue is that it must never be
+    the one blocked on Axiom.
+    """
+
     def __init__(self, client, dataset):
         super().__init__()
         self.client = client
@@ -78,6 +132,14 @@ class DirectAxiomHandler(logging.Handler):
         self._ingest_failed = False
 
     def emit(self, record):
+        if self._ingest_failed:
+            # The circuit is open and stays open for the life of the process:
+            # a transient blip and a dead endpoint look identical from here,
+            # and retrying with a backoff is meaningfully more state for a
+            # best-effort side channel whose loss degrades nothing else —
+            # stdout, stderr, and the file handler are all unaffected. Log
+            # shipping comes back on the next deploy.
+            return
         try:
             event = {
                 "_time": datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z",
@@ -88,18 +150,73 @@ class DirectAxiomHandler(logging.Handler):
             }
             self.client.ingest_events(dataset=self.dataset, events=[event])
         except Exception as e:
-            # Shipping logs to Axiom is best-effort. If it fails (a bad token, a
-            # network blip), we must not surface it on every record — the default
-            # Handler.handleError dumps a full traceback per call, which floods the
-            # log. Warn once, straight to stderr (never through the logger, which
-            # would recurse back into this handler), then stay silent.
-            if not self._ingest_failed:
-                self._ingest_failed = True
-                print(
-                    f"Axiom log shipping failed ({e}); suppressing further Axiom "
-                    "errors. Other log handlers are unaffected.",
-                    file=sys.stderr,
-                )
+            # Shipping logs to Axiom is best-effort. Warn once, straight to
+            # stderr (never through the logger, which would recurse back into
+            # this handler), then open the circuit above so ingest_events is
+            # never called again this process.
+            self._ingest_failed = True
+            print(
+                f"Axiom log shipping failed ({e}); disabling further Axiom "
+                "ingestion for this process. Other log handlers are unaffected.",
+                file=sys.stderr,
+            )
+
+
+class _DroppingQueueHandler(logging.handlers.QueueHandler):
+    """
+    A record that can't be queued without blocking is dropped instead of
+    waiting — the same trade the network call itself makes: nothing here may
+    slow the caller down. The base QueueHandler already uses put_nowait, but
+    its default error path (handleError) prints a full traceback per dropped
+    record, which is its own flood under sustained overload; a full queue is
+    treated as a normal, silent drop instead.
+    """
+
+    def enqueue(self, record):
+        try:
+            self.queue.put_nowait(record)
+        except queue.Full:
+            pass
+
+
+_axiom_listener: logging.handlers.QueueListener | None = None
+
+
+def _start_axiom_listener(direct_handler: DirectAxiomHandler) -> logging.Handler:
+    """
+    Starts a QueueListener that owns direct_handler on its own background
+    thread, and returns the (non-blocking) handler the logger should attach
+    in its place.
+
+    Registered with atexit rather than the app lifespan: this module has no
+    reference to the FastAPI app, and reaching for one would be a layering
+    inversion for a logging module. atexit gives the same guarantee a
+    lifespan shutdown hook would — the listener is stopped and its queue
+    drained on normal interpreter exit — without one. stop_axiom_listener()
+    is also exposed directly for a caller (tests, or a future lifespan hook)
+    that wants a deterministic shutdown point instead of waiting for exit.
+    """
+    global _axiom_listener
+    record_queue: queue.Queue = queue.Queue(maxsize=_AXIOM_QUEUE_MAXSIZE)
+    listener = logging.handlers.QueueListener(record_queue, direct_handler)
+    listener.start()
+    _axiom_listener = listener
+    atexit.register(listener.stop)
+    return _DroppingQueueHandler(record_queue)
+
+
+def stop_axiom_listener() -> None:
+    """Stops the Axiom queue listener, if one was started, flushing any
+    queued records to the (real or mocked) Axiom client first. Also drops the
+    atexit hook registered in _start_axiom_listener — QueueListener.stop() is
+    not itself idempotent (it joins and clears its worker thread), so leaving
+    the hook registered would crash atexit on process exit after an already
+    -stopped listener."""
+    global _axiom_listener
+    if _axiom_listener is not None:
+        atexit.unregister(_axiom_listener.stop)
+        _axiom_listener.stop()
+        _axiom_listener = None
 
 
 def _resolve_level(settings) -> int:
@@ -161,12 +278,15 @@ def setup_logging() -> logging.Logger:
     except OSError as e:
         logger.warning(f"File logging unavailable, skipping: {e}")
 
-    # Axiom handler (optional)
+    # Axiom handler (optional). The logger only ever gets the queue-backed
+    # handler below — DirectAxiomHandler itself runs on the listener's
+    # background thread, never on the caller's.
     if AXIOM_AVAILABLE and Client and settings.axiom_token and settings.axiom_dataset:
         try:
             client = Client(token=settings.axiom_token)
-            axiom_handler = DirectAxiomHandler(client=client, dataset=settings.axiom_dataset)
-            logger.addHandler(axiom_handler)
+            _apply_default_timeout(client)
+            direct_handler = DirectAxiomHandler(client=client, dataset=settings.axiom_dataset)
+            logger.addHandler(_start_axiom_listener(direct_handler))
             logger.info("Axiom logging enabled")
         except Exception as e:
             logger.warning(f"Axiom logging failed to initialize: {e}")

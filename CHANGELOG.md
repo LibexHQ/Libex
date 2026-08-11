@@ -10,6 +10,17 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.10.5]
+
+### Changed
+- **Request logs now record the query string alongside the path.** Only the path
+  was recorded before, so there was no way to answer which parameters callers
+  actually use — whether anyone passes a region, which sort and filter options
+  see real traffic, or whether the caching parameter is used at all. Those
+  questions could not be answered even in principle. Nothing sensitive travels
+  in a query string here: the internal endpoints authenticate on a header, and
+  search terms were already logged separately.
+
 ## [1.10.4]
 
 ### Fixed

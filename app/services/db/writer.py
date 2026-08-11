@@ -724,7 +724,9 @@ def persist_cache_background(key: str, value) -> None:
     asyncio.create_task(_persist())
 
 
-def persist_author_books_cache_background(key: str, asins: list[str]) -> None:
+def persist_author_books_cache_background(
+    key: str, asins: list[str], ttl_seconds: int | None = None
+) -> None:
     """
     Fires a background task to write an author's book-ASIN list to cache.
 
@@ -751,6 +753,13 @@ def persist_author_books_cache_background(key: str, asins: list[str]) -> None:
     A stored row past its expiry is still locked (so the lock keeps working),
     but is treated as not-stored for the union, matching cache.get's own
     expired-is-a-miss behavior — this guard does not protect an expired entry.
+
+    ttl_seconds is passed straight through to cache.set: since this write is
+    always a union that can only grow the stored list, never shrink it, a
+    caller who knows this run's own result is incomplete can still write it
+    with a shorter TTL than the default so it refreshes sooner, rather than
+    withholding the write entirely. None keeps cache.set's own default
+    (settings.cache_ttl).
     """
     from app.services.cache import manager as cache
 
@@ -769,7 +778,7 @@ def persist_author_books_cache_background(key: str, asins: list[str]) -> None:
                         stored_only = [a for a in stored if a not in incoming_set]
                         if stored_only:
                             to_write = list(asins) + stored_only
-                    await cache.set(session, key, to_write)
+                    await cache.set(session, key, to_write, ttl_seconds=ttl_seconds)
             except Exception as e:
                 logger.warning(f"Background cache persist failed for {key}: {e}")
 

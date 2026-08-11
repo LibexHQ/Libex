@@ -17,6 +17,10 @@ import pytest
 from app.services.audible.authors import (
     _normalize_author,
     _generate_session_id,
+    _CatalogBooksResult,
+    AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS,
+)
+from app.services.audible.authors.screens import (
     _select_asin_rows,
     _extract_row_asins,
     _extract_next_token,
@@ -36,7 +40,6 @@ from app.services.audible.authors import (
     SCREENS_MAX_SECTIONS,
     SCREENS_MAX_ROWS_PER_PAGE,
     SCREENS_PAGE_SIZE,
-    _CatalogBooksResult,
 )
 
 # ============================================================
@@ -271,7 +274,7 @@ async def test_fetch_author_books_by_name_matches_author_case_insensitively():
     from app.services.audible.authors import fetch_author_books_by_name
 
     page = {"products": [_product_by_name("B0MATCH0001", "FRANK HERBERT")]}
-    with patch("app.services.audible.authors.audible_get", new=AsyncMock(return_value=page)):
+    with patch("app.services.audible.authors.catalog.audible_get", new=AsyncMock(return_value=page)):
         asins, _ = await fetch_author_books_by_name("frank herbert", "us")
     assert asins == ["B0MATCH0001"]
 
@@ -281,7 +284,7 @@ async def test_fetch_author_books_by_name_excludes_non_matching_author():
     from app.services.audible.authors import fetch_author_books_by_name
 
     page = {"products": [_product_by_name("B0OTHER0001", "Some Other Author")]}
-    with patch("app.services.audible.authors.audible_get", new=AsyncMock(return_value=page)):
+    with patch("app.services.audible.authors.catalog.audible_get", new=AsyncMock(return_value=page)):
         asins, _ = await fetch_author_books_by_name("Frank Herbert", "us")
     assert asins == []
 
@@ -303,7 +306,7 @@ async def test_fetch_author_books_by_name_includes_every_language_no_filter():
         _product_by_name("B0ENGLISH01", "Frank Herbert", language="english"),
         _product_by_name("B0GERMAN001", "Frank Herbert", language="german"),
     ]}
-    with patch("app.services.audible.authors.audible_get", new=AsyncMock(return_value=page)):
+    with patch("app.services.audible.authors.catalog.audible_get", new=AsyncMock(return_value=page)):
         asins, _ = await fetch_author_books_by_name("Frank Herbert", "us")
     assert set(asins) == {"B0ENGLISH01", "B0GERMAN001"}
 
@@ -320,7 +323,7 @@ async def test_fetch_author_books_by_name_accepts_englisch_language_label():
     from app.services.audible.authors import fetch_author_books_by_name
 
     page = {"products": [_product_by_name("B0ENGLISH02", "Frank Herbert", language="Englisch")]}
-    with patch("app.services.audible.authors.audible_get", new=AsyncMock(return_value=page)):
+    with patch("app.services.audible.authors.catalog.audible_get", new=AsyncMock(return_value=page)):
         asins, _ = await fetch_author_books_by_name("Frank Herbert", "us")
     assert asins == ["B0ENGLISH02"]
 
@@ -333,7 +336,7 @@ async def test_fetch_author_books_by_name_dedupes_asins():
         _product_by_name("B0DUPE00001", "Frank Herbert"),
         _product_by_name("B0DUPE00001", "Frank Herbert"),
     ]}
-    with patch("app.services.audible.authors.audible_get", new=AsyncMock(return_value=page)):
+    with patch("app.services.audible.authors.catalog.audible_get", new=AsyncMock(return_value=page)):
         asins, _ = await fetch_author_books_by_name("Frank Herbert", "us")
     assert asins.count("B0DUPE00001") == 1
 
@@ -345,7 +348,7 @@ async def test_fetch_author_books_by_name_stops_on_short_page():
 
     page = {"products": [_product_by_name("B0SHORT0001", "Frank Herbert")]}
     mock_get = AsyncMock(return_value=page)
-    with patch("app.services.audible.authors.audible_get", new=mock_get):
+    with patch("app.services.audible.authors.catalog.audible_get", new=mock_get):
         await fetch_author_books_by_name("Frank Herbert", "us")
     assert mock_get.await_count == 1
 
@@ -358,7 +361,7 @@ async def test_fetch_author_books_by_name_paginates_full_pages():
     full_page = {"products": [_product_by_name(f"B0FULL{i:05d}", "Frank Herbert") for i in range(50)]}
     short_page = {"products": [_product_by_name("B0LASTPAGE1", "Frank Herbert")]}
     mock_get = AsyncMock(side_effect=[full_page, short_page])
-    with patch("app.services.audible.authors.audible_get", new=mock_get):
+    with patch("app.services.audible.authors.catalog.audible_get", new=mock_get):
         asins, _ = await fetch_author_books_by_name("Frank Herbert", "us")
     assert mock_get.await_count == 2
     assert "B0LASTPAGE1" in asins
@@ -373,7 +376,7 @@ async def test_fetch_author_books_by_name_never_passes_extra_headers():
 
     page = {"products": [_product_by_name("B0NOHEADER1", "Frank Herbert")]}
     mock_get = AsyncMock(return_value=page)
-    with patch("app.services.audible.authors.audible_get", new=mock_get):
+    with patch("app.services.audible.authors.catalog.audible_get", new=mock_get):
         await fetch_author_books_by_name("Frank Herbert", "us")
     assert "extra_headers" not in mock_get.await_args.kwargs
 
@@ -392,7 +395,7 @@ async def test_fetch_author_books_by_name_never_overrides_concurrency():
     from app.services.audible.authors import fetch_author_books_by_name
 
     mock_detailed = AsyncMock(return_value=(["B0SEEDER001"], 1, True))
-    with patch("app.services.audible.authors._fetch_author_books_by_name_detailed", new=mock_detailed):
+    with patch("app.services.audible.authors.catalog._fetch_author_books_by_name_detailed", new=mock_detailed):
         await fetch_author_books_by_name("Frank Herbert", "us")
 
     assert "concurrency" not in mock_detailed.await_args.kwargs
@@ -708,7 +711,7 @@ async def test_fetch_author_books_by_screen_unions_grid_and_attributed_teaser():
         _asin_section(grid_rows, product_count=3, pagination=None),
     ]}
 
-    with patch("app.services.audible.authors.audible_get", new=AsyncMock(return_value=page1)):
+    with patch("app.services.audible.authors.screens.audible_get", new=AsyncMock(return_value=page1)):
         result = await _fetch_author_books_by_screen("B000TARGET", "us")
 
     assert set(result.asins) == {"B0GRID0001", "B0GRID0002", "B0GRID0003", "B0TEASGOOD"}
@@ -724,7 +727,7 @@ async def test_fetch_author_books_by_screen_accepts_single_section_continuation_
     page1 = {"sections": [_asin_section([_row("B0PAGE1001")], product_count=2, pagination="NEXTTOKEN01")]}
     page2 = {"sections": [_asin_section([_row("B0PAGE2001")], pagination=None)]}
 
-    with patch("app.services.audible.authors.audible_get", new=AsyncMock(side_effect=[page1, page2])):
+    with patch("app.services.audible.authors.screens.audible_get", new=AsyncMock(side_effect=[page1, page2])):
         result = await _fetch_author_books_by_screen("B000TARGET", "us")
 
     assert set(result.asins) == {"B0PAGE1001", "B0PAGE2001"}
@@ -742,7 +745,7 @@ async def test_fetch_author_books_by_screen_stops_on_repeated_token():
     echoing_page = {"sections": [_asin_section([_row("B0ECHO0001")], pagination="SAMETOKEN")]}
     mock_get = AsyncMock(return_value=echoing_page)
 
-    with patch("app.services.audible.authors.audible_get", new=mock_get):
+    with patch("app.services.audible.authors.screens.audible_get", new=mock_get):
         result = await _fetch_author_books_by_screen("B000TARGET", "us")
 
     assert mock_get.await_count == 2  # initial fetch + one continuation, then the repeat stops it
@@ -761,7 +764,7 @@ async def test_fetch_author_books_by_screen_stops_on_rejected_token():
     bad_token_page = {"sections": [_asin_section([_row("B0BADTOK01")], pagination=12345)]}
     mock_get = AsyncMock(return_value=bad_token_page)
 
-    with patch("app.services.audible.authors.audible_get", new=mock_get):
+    with patch("app.services.audible.authors.screens.audible_get", new=mock_get):
         result = await _fetch_author_books_by_screen("B000TARGET", "us")
 
     assert mock_get.await_count == 1
@@ -780,7 +783,7 @@ async def test_fetch_author_books_by_screen_non_dict_page_stops_walk_but_keeps_p
     page1 = {"sections": [_asin_section([_row("B0GOODPG01")], pagination="TOK0001")]}
     mock_get = AsyncMock(side_effect=[page1, ["not", "a", "dict"]])
 
-    with patch("app.services.audible.authors.audible_get", new=mock_get):
+    with patch("app.services.audible.authors.screens.audible_get", new=mock_get):
         result = await _fetch_author_books_by_screen("B000TARGET", "us")
 
     assert mock_get.await_count == 2
@@ -802,7 +805,7 @@ async def test_fetch_author_books_by_screen_page_error_keeps_prior_pages_harvest
     page2 = _load_screen_fixture("us_sanderson_page02")
     mock_get = AsyncMock(side_effect=[page1, page2, RuntimeError("upstream reset")])
 
-    with patch("app.services.audible.authors.audible_get", new=mock_get):
+    with patch("app.services.audible.authors.screens.audible_get", new=mock_get):
         result = await _fetch_author_books_by_screen("B001IGFHW6", "us")
 
     expected_from_page1 = {"B002V0QCYU", "1250759781", "B0718Z5K4C", "B00HWF0MHW", "B002VA9IKK", "B002V5GLQ4"}
@@ -825,7 +828,7 @@ async def test_fetch_author_books_by_screen_exceeding_deadline_stops_walk_and_se
     page1 = {"sections": [_asin_section([_row("B0BUDGET01"), _row("B0BUDGET02")], pagination="TOK0001")]}
     mock_get = AsyncMock(return_value=page1)
 
-    with patch("app.services.audible.authors.audible_get", new=mock_get), \
+    with patch("app.services.audible.authors.screens.audible_get", new=mock_get), \
          patch("app.services.audible.authors.time.monotonic", side_effect=[0.0, 100.0]):
         result = await _fetch_author_books_by_screen("B000TARGET", "us", deadline=50.0)
 
@@ -863,7 +866,7 @@ async def test_fetch_author_books_by_screen_token_travels_in_params_not_path():
     page2 = {"sections": [_asin_section([_row("B0PAGE2001")], pagination=None)]}
     mock_get = AsyncMock(side_effect=[page1, page2])
 
-    with patch("app.services.audible.authors.audible_get", new=mock_get):
+    with patch("app.services.audible.authors.screens.audible_get", new=mock_get):
         await _fetch_author_books_by_screen("B000TARGET", "us")
 
     calls = mock_get.await_args_list
@@ -883,7 +886,7 @@ async def test_fetch_author_books_by_screen_sends_device_header():
 
     page = {"sections": [_asin_section([_row("B0DEVICE01")], pagination=None)]}
     mock_get = AsyncMock(return_value=page)
-    with patch("app.services.audible.authors.audible_get", new=mock_get):
+    with patch("app.services.audible.authors.screens.audible_get", new=mock_get):
         await _fetch_author_books_by_screen("B000TARGET", "us")
 
     assert mock_get.await_args.kwargs["extra_headers"] == {"X-Device-Type-Id": ANDROID_DEVICE_TYPE_ID}
@@ -904,7 +907,7 @@ async def test_fetch_author_books_by_screen_real_page_sends_exact_device_header_
 
     page1 = _load_screen_fixture("us_sanderson_page01")
     mock_get = AsyncMock(side_effect=[page1, {"sections": []}])
-    with patch("app.services.audible.authors.audible_get", new=mock_get):
+    with patch("app.services.audible.authors.screens.audible_get", new=mock_get):
         await _fetch_author_books_by_screen("B001IGFHW6", "us")
 
     first_call = mock_get.await_args_list[0]
@@ -922,7 +925,7 @@ async def test_fetch_author_books_by_screen_sends_author_asin_param():
     page2 = {"sections": [_asin_section([_row("B0PAGE2001")], pagination=None)]}
     mock_get = AsyncMock(side_effect=[page1, page2])
 
-    with patch("app.services.audible.authors.audible_get", new=mock_get):
+    with patch("app.services.audible.authors.screens.audible_get", new=mock_get):
         await _fetch_author_books_by_screen("B000TARGET", "us")
 
     for call in mock_get.await_args_list:
@@ -936,7 +939,7 @@ async def test_fetch_author_books_by_screen_bogus_author_returns_empty_without_r
     from app.services.audible.authors import _fetch_author_books_by_screen
 
     empty_page = {"sections": []}
-    with patch("app.services.audible.authors.audible_get", new=AsyncMock(return_value=empty_page)):
+    with patch("app.services.audible.authors.screens.audible_get", new=AsyncMock(return_value=empty_page)):
         result = await _fetch_author_books_by_screen("B000BOGUS0", "us")
 
     assert result.asins == []
@@ -948,7 +951,7 @@ async def test_fetch_author_books_by_screen_invalid_input_asin_short_circuits():
     from app.services.audible.authors import _fetch_author_books_by_screen
 
     mock_get = AsyncMock()
-    with patch("app.services.audible.authors.audible_get", new=mock_get):
+    with patch("app.services.audible.authors.screens.audible_get", new=mock_get):
         result = await _fetch_author_books_by_screen("not-an-asin", "us")
 
     mock_get.assert_not_awaited()
@@ -966,7 +969,8 @@ async def test_fetch_author_books_by_screen_stops_at_page_cap_and_warns_once():
     equivalent completeness signal now lives one level up, computed against
     get_author_books' own union total rather than a single source's reach —
     see the GET AUTHOR BOOKS shortfall-warning tests."""
-    from app.services.audible.authors import _fetch_author_books_by_screen, SCREENS_MAX_PAGES
+    from app.services.audible.authors import _fetch_author_books_by_screen
+    from app.services.audible.authors.screens import SCREENS_MAX_PAGES
 
     call_count = {"n": 0}
 
@@ -985,8 +989,8 @@ async def test_fetch_author_books_by_screen_stops_at_page_cap_and_warns_once():
             [_row(f"B0PAGE{n:04d}")], product_count=product_count, pagination=None,
         )]}
 
-    with patch("app.services.audible.authors.audible_get", new=AsyncMock(side_effect=_get)), \
-         patch("app.services.audible.authors.logger") as mock_logger:
+    with patch("app.services.audible.authors.screens.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.authors.screens.logger") as mock_logger:
         result = await _fetch_author_books_by_screen("B000TARGET", "us")
 
     assert result.pages_fetched == SCREENS_MAX_PAGES
@@ -1011,7 +1015,8 @@ async def test_fetch_author_books_by_screen_stops_at_page_cap_and_warns_once():
 
 @pytest.mark.asyncio
 async def test_fetch_author_books_by_screen_stops_at_asin_cap_and_warns_once():
-    from app.services.audible.authors import _fetch_author_books_by_screen, SCREENS_MAX_ASINS
+    from app.services.audible.authors import _fetch_author_books_by_screen
+    from app.services.audible.authors.screens import SCREENS_MAX_ASINS
 
     call_count = {"n": 0}
     reported_product_count = SCREENS_MAX_ASINS + 5000
@@ -1028,8 +1033,8 @@ async def test_fetch_author_books_by_screen_stops_at_asin_cap_and_warns_once():
         product_count = reported_product_count if n == 1 else None
         return {"sections": [_asin_section(rows, product_count=product_count, pagination=f"TOK{n:04d}")]}
 
-    with patch("app.services.audible.authors.audible_get", new=AsyncMock(side_effect=_get)), \
-         patch("app.services.audible.authors.logger") as mock_logger:
+    with patch("app.services.audible.authors.screens.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.authors.screens.logger") as mock_logger:
         result = await _fetch_author_books_by_screen("B000TARGET", "us")
 
     assert len(result.asins) == SCREENS_MAX_ASINS
@@ -1080,8 +1085,8 @@ async def test_fetch_author_books_by_screen_fanout_walk_matching_product_count_e
         product_count = reported_product_count if n == 1 else None
         return {"sections": [_asin_section(rows, product_count=product_count, pagination=None)]}
 
-    with patch("app.services.audible.authors.audible_get", new=AsyncMock(side_effect=_get)), \
-         patch("app.services.audible.authors.logger") as mock_logger:
+    with patch("app.services.audible.authors.screens.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.authors.screens.logger") as mock_logger:
         result = await _fetch_author_books_by_screen("B000TARGET", "us")
 
     assert result.pages_fetched == total_pages
@@ -1101,8 +1106,8 @@ async def test_fetch_author_books_by_screen_no_warning_on_normal_complete_walk()
     )]}
     page2 = {"sections": [_asin_section([_row("B0PAGE2001")], pagination=None)]}
 
-    with patch("app.services.audible.authors.audible_get", new=AsyncMock(side_effect=[page1, page2])), \
-         patch("app.services.audible.authors.logger") as mock_logger:
+    with patch("app.services.audible.authors.screens.audible_get", new=AsyncMock(side_effect=[page1, page2])), \
+         patch("app.services.audible.authors.screens.logger") as mock_logger:
         result = await _fetch_author_books_by_screen("B000TARGET", "us")
 
     assert len(result.asins) == 3 == result.product_count
@@ -1120,8 +1125,8 @@ async def test_fetch_author_books_by_screen_unclean_warning_fires_independent_of
 
     echoing_page = {"sections": [_asin_section([_row("B0ECHO0002")], pagination="SAMETOKEN")]}
 
-    with patch("app.services.audible.authors.audible_get", new=AsyncMock(return_value=echoing_page)), \
-         patch("app.services.audible.authors.logger") as mock_logger:
+    with patch("app.services.audible.authors.screens.audible_get", new=AsyncMock(return_value=echoing_page)), \
+         patch("app.services.audible.authors.screens.logger") as mock_logger:
         result = await _fetch_author_books_by_screen("B000TARGET", "us")
 
     assert result.product_count is None
@@ -1159,8 +1164,8 @@ async def test_fetch_author_books_by_screen_plateau_on_real_shaped_pages_scores_
     # null-token end.
     mock_get = AsyncMock(side_effect=_screen_page_router({1: page1, 2: page2}, default=page2))
 
-    with patch("app.services.audible.authors.audible_get", new=mock_get), \
-         patch("app.services.audible.authors.logger") as mock_logger:
+    with patch("app.services.audible.authors.screens.audible_get", new=mock_get), \
+         patch("app.services.audible.authors.screens.logger") as mock_logger:
         result = await _fetch_author_books_by_screen("B000APENBC", "us")
 
     assert result.termination_reason == SCREENS_REASON_PLATEAU_TRUNCATED
@@ -1190,7 +1195,7 @@ async def test_fetch_author_books_by_screen_ambiguous_multi_section_admits_grid_
         _asin_section([attributed_row], pagination=None),
     ]}
 
-    with patch("app.services.audible.authors.audible_get", new=AsyncMock(return_value=page)):
+    with patch("app.services.audible.authors.screens.audible_get", new=AsyncMock(return_value=page)):
         result = await _fetch_author_books_by_screen("B000TARGET", "us")
 
     assert "B0AMBIGRID" in result.asins
@@ -1210,7 +1215,7 @@ async def test_fetch_author_books_by_screen_tracks_invalid_and_attribution_rejec
         _asin_section(grid_rows, pagination=None),
     ]}
 
-    with patch("app.services.audible.authors.audible_get", new=AsyncMock(return_value=page)):
+    with patch("app.services.audible.authors.screens.audible_get", new=AsyncMock(return_value=page)):
         result = await _fetch_author_books_by_screen("B000TARGET", "us")
 
     assert result.invalid_skipped == 1
@@ -1240,8 +1245,8 @@ async def test_fetch_author_books_by_screen_repeated_page_content_scores_plateau
         [_row("B0BOTH0001")], product_count=1000, pagination="SAMETOKEN",
     )]}
 
-    with patch("app.services.audible.authors.audible_get", new=AsyncMock(return_value=echoing_page)), \
-         patch("app.services.audible.authors.logger") as mock_logger:
+    with patch("app.services.audible.authors.screens.audible_get", new=AsyncMock(return_value=echoing_page)), \
+         patch("app.services.audible.authors.screens.logger") as mock_logger:
         result = await _fetch_author_books_by_screen("B000TARGET", "us")
 
     assert result.termination_reason == SCREENS_REASON_PLATEAU_TRUNCATED
@@ -1291,7 +1296,7 @@ async def test_fetch_author_books_by_screen_real_capture_walk_unions_teaser_and_
     page_end = _load_screen_fixture("us_sanderson_page09")
 
     mock_get = AsyncMock(side_effect=_screen_page_router({1: page1, 2: page2}, default=page_end))
-    with patch("app.services.audible.authors.audible_get", new=mock_get):
+    with patch("app.services.audible.authors.screens.audible_get", new=mock_get):
         result = await _fetch_author_books_by_screen("B001IGFHW6", "us")
 
     expected = {
@@ -1322,7 +1327,7 @@ async def test_fetch_author_books_by_screen_real_capture_walk_threads_au_region(
     page2 = _load_screen_fixture("au_sanderson_page08")
     mock_get = AsyncMock(side_effect=_screen_page_router({1: page1}, default=page2))
 
-    with patch("app.services.audible.authors.audible_get", new=mock_get):
+    with patch("app.services.audible.authors.screens.audible_get", new=mock_get):
         result = await _fetch_author_books_by_screen("B001IGFHW6", "au")
 
     expected = {
@@ -1355,7 +1360,7 @@ async def test_fetch_author_books_by_screen_real_capture_walk_de_region_non_engl
     page2 = _load_screen_fixture("de_schaetzing_page02")
     mock_get = AsyncMock(side_effect=[page1, page2])
 
-    with patch("app.services.audible.authors.audible_get", new=mock_get):
+    with patch("app.services.audible.authors.screens.audible_get", new=mock_get):
         result = await _fetch_author_books_by_screen("B001ITXLB2", "de")
 
     expected = {
@@ -1381,7 +1386,7 @@ async def test_fetch_author_books_by_screen_threads_region_for_all_regions():
     empty_page = {"sections": []}
     for region in sorted(VALID_REGIONS):
         mock_get = AsyncMock(return_value=empty_page)
-        with patch("app.services.audible.authors.audible_get", new=mock_get):
+        with patch("app.services.audible.authors.screens.audible_get", new=mock_get):
             await _fetch_author_books_by_screen("B000TARGET", region)
         assert mock_get.await_args.args[0] == region, f"region not threaded for {region}"
 
@@ -1397,7 +1402,7 @@ def test_mint_screen_token_exact_shape():
     omitted slot 400s, a wrong value 404s, and neither is derivable from
     the code without the referenced live investigation, so this is pinned
     as a literal rather than inferred from behavior."""
-    from app.services.audible.authors import _mint_screen_token, _SCREENS_TOKEN_PAGE_LOAD_ID
+    from app.services.audible.authors.screens import _mint_screen_token, _SCREENS_TOKEN_PAGE_LOAD_ID
 
     token = _mint_screen_token(5)
     raw = base64.b64decode(token)
@@ -1419,7 +1424,7 @@ def test_mint_screen_token_page_num_stringified_not_left_as_int():
     itself round-trips an int-typed page_num back as an int on decode, so
     this asserts against the pre-decode literal, not just the decoded
     type."""
-    from app.services.audible.authors import _mint_screen_token
+    from app.services.audible.authors.screens import _mint_screen_token
 
     raw = base64.b64decode(_mint_screen_token(12)).decode("ascii")
     assert '"page_num":"12"' in raw
@@ -1449,7 +1454,7 @@ async def test_fetch_author_books_by_screen_fanout_reassembles_in_page_order_not
         await asyncio.sleep(delays.get(page_num, 0))
         return pages_by_num[page_num]
 
-    with patch("app.services.audible.authors.audible_get", new=AsyncMock(side_effect=_get)):
+    with patch("app.services.audible.authors.screens.audible_get", new=AsyncMock(side_effect=_get)):
         result = await _fetch_author_books_by_screen("B000TARGET", "us")
 
     assert result.asins == ["B0ORDER001", "B0ORDER002", "B0ORDER003"]
@@ -1487,7 +1492,7 @@ async def test_fetch_author_books_by_screen_fanout_plateau_stops_at_first_confir
         page_num = _decode_screen_token_page_num(token)
         return real_pages.get(page_num, plateau_page)
 
-    with patch("app.services.audible.authors.audible_get", new=AsyncMock(side_effect=_get)):
+    with patch("app.services.audible.authors.screens.audible_get", new=AsyncMock(side_effect=_get)):
         result = await _fetch_author_books_by_screen("B000TARGET", "us")
 
     assert result.asins == ["B0PLAT0001", "B0PLAT0002", "B0PLAT0003"]
@@ -1518,7 +1523,7 @@ async def test_fetch_author_books_by_screen_total_pages_uses_ceiling_not_floor_d
     page2 = {"sections": [_asin_section([_row("B0CEIL0002")], pagination=None)]}
 
     mock_get = AsyncMock(side_effect=_screen_page_router({1: page1, 2: page2}))
-    with patch("app.services.audible.authors.audible_get", new=mock_get):
+    with patch("app.services.audible.authors.screens.audible_get", new=mock_get):
         result = await _fetch_author_books_by_screen("B000TARGET", "us")
 
     assert result.asins == ["B0CEIL0001", "B0CEIL0002"]
@@ -1543,8 +1548,8 @@ async def test_fetch_author_books_by_screen_sequential_fallback_when_product_cou
     )]}
     page2 = {"sections": [_asin_section([_row("B0SEQ00002")], pagination=None)]}
 
-    with patch("app.services.audible.authors.audible_get", new=AsyncMock(side_effect=[page1, page2])), \
-         patch("app.services.audible.authors._fanout_screen_pages", new=AsyncMock()) as mock_fanout:
+    with patch("app.services.audible.authors.screens.audible_get", new=AsyncMock(side_effect=[page1, page2])), \
+         patch("app.services.audible.authors.screens._fanout_screen_pages", new=AsyncMock()) as mock_fanout:
         result = await _fetch_author_books_by_screen("B000TARGET", "us")
 
     mock_fanout.assert_not_called()
@@ -1567,16 +1572,15 @@ async def test_fetch_author_books_by_catalog_ceiling_saturated_false_at_exact_bo
     rather than their current product literal, since CATALOG_RESULT_CEILING
     is a measured, live-probed value that can be corrected independently of
     this boundary rule."""
-    from app.services.audible.authors import (
-        _fetch_author_books_by_catalog, _CATALOG_SORTS, CATALOG_RESULT_CEILING,
-    )
+    from app.services.audible.authors import _fetch_author_books_by_catalog
+    from app.services.audible.authors.catalog import _CATALOG_SORTS, CATALOG_RESULT_CEILING
 
     boundary_total = len(_CATALOG_SORTS) * CATALOG_RESULT_CEILING
 
     async def _get(region, path, params):
         return {"total_results": boundary_total, "products": []}
 
-    with patch("app.services.audible.authors.audible_get", new=AsyncMock(side_effect=_get)):
+    with patch("app.services.audible.authors.catalog.audible_get", new=AsyncMock(side_effect=_get)):
         result = await _fetch_author_books_by_catalog("B000AUTHOR", "Some Author", "us")
 
     assert result.total_results == boundary_total
@@ -1607,7 +1611,8 @@ async def test_fetch_author_books_by_catalog_ceiling_saturated_true_from_observe
     genuinely plateau instead: page 0 and page 1 each carry new content,
     and every page after that re-serves page 1's exact content, matching
     the live Conan Doyle/Christie behaviour the docstring describes."""
-    from app.services.audible.authors import _fetch_author_books_by_catalog, _CATALOG_SORTS
+    from app.services.audible.authors import _fetch_author_books_by_catalog
+    from app.services.audible.authors.catalog import _CATALOG_SORTS
 
     plateau_products = _catalog_asin_match_products("PLATEAU", 50)
 
@@ -1625,7 +1630,7 @@ async def test_fetch_author_books_by_catalog_ceiling_saturated_true_from_observe
         # exact signature -- the plateau.
         return {"products": plateau_products}
 
-    with patch("app.services.audible.authors.audible_get", new=AsyncMock(side_effect=_get)):
+    with patch("app.services.audible.authors.catalog.audible_get", new=AsyncMock(side_effect=_get)):
         result = await _fetch_author_books_by_catalog("B000AUTHOR", "Some Author", "us")
 
     assert result.total_results == 500
@@ -1636,11 +1641,21 @@ async def test_fetch_author_books_by_catalog_ceiling_saturated_true_from_observe
 @pytest.mark.asyncio
 async def test_fetch_author_books_by_catalog_ceiling_saturated_false_when_walk_reaches_total_without_plateauing():
     """Complement to the observed-plateau case above: a walk whose pages
-    never repeat, reaching upstream's total_results through genuinely new
-    content on every page, must not be reported as ceiling_saturated --
-    reaching the claimed total cleanly is a complete walk, not a saturated
-    one, regardless of how many pages it took."""
-    from app.services.audible.authors import _fetch_author_books_by_catalog, _CATALOG_SORTS
+    never repeat must not be reported as ceiling_saturated, even when the
+    union it produced falls short of upstream's total_results -- falling
+    short of the claim is not, on its own, saturation; only an observed
+    repeat is. Page 1 here is a short final page (30 products, not a full
+    50) -- the same real short-final-page shape
+    _fetch_author_books_by_name_detailed treats as a genuine end signal --
+    so the union lands 20 short of total_results while every page's
+    content is still genuinely new (a distinct ASIN prefix per page, never
+    repeating the page before it). With total_results not None and
+    len(asins) < total_results both already True here, sort_plateaued is
+    the only thing left that can hold ceiling_saturated at False; unlike
+    the exact-reach version of this scenario, that third clause cannot
+    quietly do the holding on its own."""
+    from app.services.audible.authors import _fetch_author_books_by_catalog
+    from app.services.audible.authors.catalog import _CATALOG_SORTS
 
     async def _get(region, path, params):
         sort = params["products_sort_by"]
@@ -1649,14 +1664,17 @@ async def test_fetch_author_books_by_catalog_ceiling_saturated_false_when_walk_r
             return {"total_results": 100, "products": []}
         if page == 0:
             return {"total_results": 100, "products": _catalog_asin_match_products("PAGE0", 50)}
-        # page 1: genuinely new content, never repeats page 0's signature.
-        return {"products": _catalog_asin_match_products("PAGE1", 50)}
+        # page 1: a short final page, genuinely new content that never
+        # repeats page 0's signature -- the union falls 20 short of
+        # total_results without ever plateauing.
+        return {"products": _catalog_asin_match_products("PAGE1", 30)}
 
-    with patch("app.services.audible.authors.audible_get", new=AsyncMock(side_effect=_get)):
+    with patch("app.services.audible.authors.catalog.audible_get", new=AsyncMock(side_effect=_get)):
         result = await _fetch_author_books_by_catalog("B000AUTHOR", "Some Author", "us")
 
     assert result.total_results == 100
-    assert len(result.asins) == 100
+    assert len(result.asins) == 80
+    assert len(result.asins) < result.total_results
     assert result.ceiling_saturated is False
 
 
@@ -1670,7 +1688,7 @@ async def test_fetch_author_books_by_catalog_ceiling_saturated_false_when_no_tot
     async def _get(region, path, params):
         return {"products": []}
 
-    with patch("app.services.audible.authors.audible_get", new=AsyncMock(side_effect=_get)):
+    with patch("app.services.audible.authors.catalog.audible_get", new=AsyncMock(side_effect=_get)):
         result = await _fetch_author_books_by_catalog("B000AUTHOR", "Some Author", "us")
 
     assert result.total_results is None
@@ -2067,6 +2085,35 @@ async def test_get_author_books_persists_cache_when_screens_and_catalog_both_cle
 
 
 @pytest.mark.asyncio
+async def test_get_author_books_uses_default_ttl_when_screens_and_catalog_both_clean():
+    """A confirmed-complete union (screens_clean, catalog_clean, db_clean
+    all True) must be persisted with the default TTL -- ttl_seconds=None,
+    which cache.set resolves to settings.cache_ttl -- not the short
+    degraded one. Nothing else in this suite pins the TTL on the complete
+    path, so a bug that routed every write through the degraded TTL would
+    otherwise pass the whole suite."""
+    from app.services.audible.authors import get_author_books
+
+    mock_session = AsyncMock()
+    screen_result = _screen_result(["B0SCREEN001"], product_count=1)
+    catalog_result = _catalog_result(["B0NAME00001"], total_results=1)
+
+    with patch("app.services.audible.authors._fetch_author_books_by_screen", new=AsyncMock(return_value=screen_result)), \
+         patch("app.services.audible.authors._resolve_author_name", new=AsyncMock(return_value="Some Author")), \
+         patch("app.services.audible.authors._fetch_author_books_by_catalog", new=AsyncMock(return_value=catalog_result)), \
+         patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
+         patch("app.services.audible.authors.cache.get", return_value=None), \
+         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist:
+        result = await get_author_books("B000AUTHOR", "us", mock_session)
+
+    assert result == ["B0NAME00001", "B0SCREEN001"]
+    mock_persist.assert_called_once()
+    persist_args, persist_kwargs = mock_persist.call_args
+    assert persist_args[1] == ["B0NAME00001", "B0SCREEN001"]
+    assert persist_kwargs["ttl_seconds"] is None
+
+
+@pytest.mark.asyncio
 async def test_get_author_books_persists_cache_when_name_never_resolved():
     """catalog_clean is trivially True when no author name resolved at all
     (author_name is None) -- nothing to search the catalog with is not a
@@ -2092,10 +2139,12 @@ async def test_get_author_books_persists_cache_when_name_never_resolved():
 
 
 @pytest.mark.asyncio
-async def test_get_author_books_no_cache_write_on_unclean_screens_termination():
-    """An unclean screens termination must not be written back as if it
-    were the authoritative list — but the caller still gets the degraded
-    union, not an error."""
+async def test_get_author_books_caches_with_short_ttl_on_unclean_screens_termination():
+    """An unclean screens termination is still written back -- the writer's
+    union can only grow the stored list, never shrink it -- but with the
+    short degraded TTL rather than the default, so it refreshes soon
+    instead of sitting for a full day. The caller still gets the degraded
+    union either way, not an error."""
     from app.services.audible.authors import get_author_books
 
     mock_session = AsyncMock()
@@ -2113,13 +2162,15 @@ async def test_get_author_books_no_cache_write_on_unclean_screens_termination():
         result = await get_author_books("B000AUTHOR", "us", mock_session)
 
     assert result == ["B0NAME00001", "B0SCREEN001"]
-    mock_persist.assert_not_called()
+    mock_persist.assert_called_once()
+    _, persist_kwargs = mock_persist.call_args
+    assert persist_kwargs["ttl_seconds"] == AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS
 
 
 @pytest.mark.asyncio
-async def test_get_author_books_no_cache_write_on_grid_not_found():
+async def test_get_author_books_caches_with_short_ttl_on_grid_not_found():
     """A walk reclassified from completed to grid_not_found is unclean and
-    must not be persisted as the authoritative list."""
+    caches with the short degraded TTL, not the default one."""
     from app.services.audible.authors import get_author_books
 
     mock_session = AsyncMock()
@@ -2137,16 +2188,19 @@ async def test_get_author_books_no_cache_write_on_grid_not_found():
         result = await get_author_books("B000AUTHOR", "us", mock_session)
 
     assert result == ["B0NAME00001", "B0SCREEN001"]
-    mock_persist.assert_not_called()
+    mock_persist.assert_called_once()
+    _, persist_kwargs = mock_persist.call_args
+    assert persist_kwargs["ttl_seconds"] == AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS
 
 
 @pytest.mark.asyncio
-async def test_get_author_books_no_cache_write_on_truncated_termination():
+async def test_get_author_books_caches_with_short_ttl_on_truncated_termination():
     """A walk demoted from completed to sections_or_rows_truncated (a
     SCREENS_MAX_SECTIONS or SCREENS_MAX_ROWS_PER_PAGE cap trimmed data mid-
-    walk) is unclean and must not be persisted as the authoritative list --
-    some upstream content was never even looked at, so it's not a confirmed-
-    complete read regardless of how pagination itself ended."""
+    walk) is unclean -- some upstream content was never even looked at, so
+    it's not a confirmed-complete read regardless of how pagination itself
+    ended -- and caches with the short degraded TTL rather than the
+    default."""
     from app.services.audible.authors import get_author_books
 
     mock_session = AsyncMock()
@@ -2164,15 +2218,17 @@ async def test_get_author_books_no_cache_write_on_truncated_termination():
         result = await get_author_books("B000AUTHOR", "us", mock_session)
 
     assert result == ["B0NAME00001", "B0SCREEN001"]
-    mock_persist.assert_not_called()
+    mock_persist.assert_called_once()
+    _, persist_kwargs = mock_persist.call_args
+    assert persist_kwargs["ttl_seconds"] == AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS
 
 
 @pytest.mark.asyncio
-async def test_get_author_books_no_cache_write_on_plateau_truncated_termination():
+async def test_get_author_books_caches_with_short_ttl_on_plateau_truncated_termination():
     """A screens walk that plateaus (SCREENS_REASON_PLATEAU_TRUNCATED) is
     unclean the same way a token repeat or a page cap is -- upstream never
-    confirmed the walk saw everything, so it must not be persisted as the
-    authoritative list either."""
+    confirmed the walk saw everything, so it caches with the short degraded
+    TTL rather than the default one."""
     from app.services.audible.authors import get_author_books
 
     mock_session = AsyncMock()
@@ -2190,7 +2246,9 @@ async def test_get_author_books_no_cache_write_on_plateau_truncated_termination(
         result = await get_author_books("B000AUTHOR", "us", mock_session)
 
     assert result == ["B0NAME00001", "B0SCREEN001"]
-    mock_persist.assert_not_called()
+    mock_persist.assert_called_once()
+    _, persist_kwargs = mock_persist.call_args
+    assert persist_kwargs["ttl_seconds"] == AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS
 
 
 @pytest.mark.asyncio
@@ -2223,10 +2281,11 @@ async def test_get_author_books_persists_cache_despite_known_shortfall():
 
 
 @pytest.mark.asyncio
-async def test_get_author_books_no_cache_write_when_catalog_errored():
-    """Even a clean, no-shortfall screens walk must not be persisted if the
-    catalog wave that seeds the front of the list errored outright — the
-    union is still missing whatever the catalog would have contributed."""
+async def test_get_author_books_caches_with_short_ttl_when_catalog_errored():
+    """Even a clean, no-shortfall screens walk caches with the short
+    degraded TTL, not the default one, if the catalog wave that seeds the
+    front of the list errored outright — the union is still missing
+    whatever the catalog would have contributed."""
     from app.services.audible.authors import get_author_books
 
     mock_session = AsyncMock()
@@ -2241,15 +2300,18 @@ async def test_get_author_books_no_cache_write_when_catalog_errored():
         result = await get_author_books("B000AUTHOR", "us", mock_session)
 
     assert result == ["B0SCREEN001"]
-    mock_persist.assert_not_called()
+    mock_persist.assert_called_once()
+    _, persist_kwargs = mock_persist.call_args
+    assert persist_kwargs["ttl_seconds"] == AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS
 
 
 @pytest.mark.asyncio
-async def test_get_author_books_no_cache_write_when_catalog_has_sort_errors():
+async def test_get_author_books_caches_with_short_ttl_when_catalog_has_sort_errors():
     """catalog_clean requires an empty sort_errors list, not merely the
     absence of a top-level catalog_error -- a catalog walk that ran but had
-    one sort fail partway (sort_errors non-empty) must still block the
-    write, even though _fetch_author_books_by_catalog itself didn't raise."""
+    one sort fail partway (sort_errors non-empty) still caches, but with the
+    short degraded TTL, even though _fetch_author_books_by_catalog itself
+    didn't raise."""
     from app.services.audible.authors import get_author_books
 
     mock_session = AsyncMock()
@@ -2268,14 +2330,17 @@ async def test_get_author_books_no_cache_write_when_catalog_has_sort_errors():
         result = await get_author_books("B000AUTHOR", "us", mock_session)
 
     assert result == ["B0NAME00001", "B0SCREEN001"]
-    mock_persist.assert_not_called()
+    mock_persist.assert_called_once()
+    _, persist_kwargs = mock_persist.call_args
+    assert persist_kwargs["ttl_seconds"] == AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS
 
 
 @pytest.mark.asyncio
-async def test_get_author_books_no_cache_write_when_catalog_truncated_by_deadline():
+async def test_get_author_books_caches_with_short_ttl_when_catalog_truncated_by_deadline():
     """A catalog walk cut short by the shared deadline (truncated_by_deadline
     True) is degraded the same way an error is, even with no sort_errors and
-    no exception raised."""
+    no exception raised -- so it caches with the short degraded TTL rather
+    than the default one."""
     from app.services.audible.authors import get_author_books
 
     mock_session = AsyncMock()
@@ -2293,26 +2358,28 @@ async def test_get_author_books_no_cache_write_when_catalog_truncated_by_deadlin
         result = await get_author_books("B000AUTHOR", "us", mock_session)
 
     assert result == ["B0NAME00001", "B0SCREEN001"]
-    mock_persist.assert_not_called()
+    mock_persist.assert_called_once()
+    _, persist_kwargs = mock_persist.call_args
+    assert persist_kwargs["ttl_seconds"] == AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS
 
 
 @pytest.mark.asyncio
-async def test_get_author_books_no_cache_write_when_catalog_ceiling_saturated():
+async def test_get_author_books_caches_with_short_ttl_when_catalog_ceiling_saturated():
     """catalog_ceiling_saturated (upstream's own total_results exceeding
-    len(_CATALOG_SORTS) * CATALOG_RESULT_CEILING) blocks the cache write the
-    same way an outright catalog error does -- but unlike an error, this is
-    known arithmetically before a single further page is fetched, not
-    inferred from the union's eventual size. The full union is still
-    returned to the caller; only the cache write is suppressed. The dedicated
-    saturation warning fires with the exact ceiling numbers, and the
-    generic ratio-based shortfall warning does NOT also fire for the same
-    condition -- the two would otherwise double up on an identical cause.
-    The threshold is expressed via the constants, not their current product
-    literal, since CATALOG_RESULT_CEILING is a measured, live-probed value
-    independent of this boundary rule."""
-    from app.services.audible.authors import (
-        get_author_books, _CATALOG_SORTS, CATALOG_RESULT_CEILING,
-    )
+    len(_CATALOG_SORTS) * CATALOG_RESULT_CEILING) routes the cache write to
+    the short degraded TTL the same way an outright catalog error does --
+    but unlike an error, this is known arithmetically before a single
+    further page is fetched, not inferred from the union's eventual size.
+    The full union is still returned to the caller and still written back
+    (the writer's union can only grow the stored list); only the TTL
+    differs. The dedicated saturation warning fires with the exact ceiling
+    numbers, and the generic ratio-based shortfall warning does NOT also
+    fire for the same condition -- the two would otherwise double up on an
+    identical cause. The threshold is expressed via the constants, not
+    their current product literal, since CATALOG_RESULT_CEILING is a
+    measured, live-probed value independent of this boundary rule."""
+    from app.services.audible.authors import get_author_books
+    from app.services.audible.authors.catalog import _CATALOG_SORTS, CATALOG_RESULT_CEILING
 
     mock_session = AsyncMock()
     saturated_total = len(_CATALOG_SORTS) * CATALOG_RESULT_CEILING + 1
@@ -2331,15 +2398,18 @@ async def test_get_author_books_no_cache_write_when_catalog_ceiling_saturated():
          patch("app.services.audible.authors.logger") as mock_logger:
         result = await get_author_books("B000AUTHOR", "us", mock_session)
 
-    # The union is still returned in full -- suppressing the cache write
-    # must not have become a truncated or empty response.
+    # The union is still returned in full and still written back -- only
+    # the TTL is short, not a truncated or empty response or a suppressed
+    # write.
     assert result == catalog_asins + ["B0SCREEN001"]
     assert len(result) == 601
-    mock_persist.assert_not_called()
+    mock_persist.assert_called_once()
+    _, persist_kwargs = mock_persist.call_args
+    assert persist_kwargs["ttl_seconds"] == AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS
 
     saturation_calls = [
         c for c in mock_logger.warning.call_args_list
-        if c.args[0] == "Audible Author Books catalog saturated its sort ceiling, cache write suppressed"
+        if c.args[0] == "Audible Author Books catalog saturated its sort ceiling, cached with a short TTL"
     ]
     assert len(saturation_calls) == 1
     extra = saturation_calls[0].kwargs["extra"]
@@ -2357,12 +2427,12 @@ async def test_get_author_books_no_cache_write_when_catalog_ceiling_saturated():
 
 
 @pytest.mark.asyncio
-async def test_get_author_books_appends_db_known_asins_at_tail_when_catalog_degraded_and_screens_present():
+async def test_get_author_books_appends_db_known_asins_at_tail_and_caches_with_short_ttl_when_catalog_degraded_and_screens_present():
     """When the catalog half is degraded (errored) and screens returned
     something, DB-known ASINs the union is still missing are appended after
     the catalog+screens prefix rather than serving screens-only — the
-    existing prefix order is undisturbed, only extended, and this union is
-    never treated as authoritative for caching."""
+    existing prefix order is undisturbed, only extended — and this union is
+    written back with the short degraded TTL, not the default one."""
     from app.services.audible.authors import get_author_books
 
     mock_session = AsyncMock()
@@ -2381,7 +2451,9 @@ async def test_get_author_books_appends_db_known_asins_at_tail_when_catalog_degr
         result = await get_author_books("B000AUTHOR", "us", mock_session)
 
     assert result == ["B0SCREEN001", "B0SCREEN002", "B0DBTAIL0001"]
-    mock_persist.assert_not_called()
+    mock_persist.assert_called_once()
+    _, persist_kwargs = mock_persist.call_args
+    assert persist_kwargs["ttl_seconds"] == AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS
 
 
 # ============================================================
@@ -2418,10 +2490,11 @@ async def test_get_author_books_db_union_fires_even_on_a_fully_clean_non_degrade
 
 
 @pytest.mark.asyncio
-async def test_get_author_books_db_union_backstop_when_catalog_degraded_and_screens_truly_empty():
+async def test_get_author_books_db_union_backstop_caches_with_short_ttl_when_catalog_degraded_and_screens_truly_empty():
     """The DB union still fires and fills the gap when the catalog half is
     degraded (carrying sort_errors, not a confirmed clean walk) and the
-    screens half contributed nothing at all."""
+    screens half contributed nothing at all -- and the result still caches,
+    with the short degraded TTL rather than the default one."""
     from app.services.audible.authors import get_author_books
 
     mock_session = AsyncMock()
@@ -2442,14 +2515,18 @@ async def test_get_author_books_db_union_backstop_when_catalog_degraded_and_scre
 
     assert result == ["B0NAME00001", "B0NAME00002", "B0DBEXTRA01", "B0DBEXTRA02", "B0DBEXTRA03"]
     mock_db.assert_awaited_once()
-    mock_persist.assert_not_called()
+    mock_persist.assert_called_once()
+    _, persist_kwargs = mock_persist.call_args
+    assert persist_kwargs["ttl_seconds"] == AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS
 
 
 @pytest.mark.asyncio
-async def test_get_author_books_db_union_backstop_when_screens_degraded_and_catalog_partial():
+async def test_get_author_books_db_union_backstop_caches_with_short_ttl_when_screens_degraded_and_catalog_partial():
     """Both halves degraded and non-empty -- screens page-capped (unclean,
     but contributed titles) alongside a catalog walk carrying sort_errors.
-    The DB union still fires and fills the gap regardless."""
+    The DB union still fires and fills the gap regardless, and the result
+    still caches, with the short degraded TTL rather than the default
+    one."""
     from app.services.audible.authors import get_author_books
 
     mock_session = AsyncMock()
@@ -2471,7 +2548,9 @@ async def test_get_author_books_db_union_backstop_when_screens_degraded_and_cata
 
     assert result == ["B0NAME00001", "B0SCREEN001", "B0SCREEN002", "B0DBTAIL0001"]
     mock_db.assert_awaited_once()
-    mock_persist.assert_not_called()
+    mock_persist.assert_called_once()
+    _, persist_kwargs = mock_persist.call_args
+    assert persist_kwargs["ttl_seconds"] == AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS
 
 
 # ============================================================
@@ -2592,9 +2671,8 @@ async def test_get_author_books_shortfall_band_below_ceiling_still_writes_cache_
     False. This is characterised here as the boundary this slice leaves in
     place; whether it should also suppress the write is a separate
     question, out of scope for this test."""
-    from app.services.audible.authors import (
-        get_author_books, _CATALOG_SORTS, CATALOG_RESULT_CEILING,
-    )
+    from app.services.audible.authors import get_author_books
+    from app.services.audible.authors.catalog import _CATALOG_SORTS, CATALOG_RESULT_CEILING
 
     mock_session = AsyncMock()
     band_total = len(_CATALOG_SORTS) * CATALOG_RESULT_CEILING  # at the ceiling, not past it
@@ -2838,7 +2916,7 @@ async def test_fetch_author_books_by_name_detailed_deadline_truncation_sets_comp
     fetched stops the walk there and reports completed=False — distinct
     from a short page, which is the catalog endpoint's own confirmed-end
     signal and reports True."""
-    from app.services.audible.authors import _fetch_author_books_by_name_detailed
+    from app.services.audible.authors.catalog import _fetch_author_books_by_name_detailed
 
     full_page = {"products": [_product_by_name(f"B0FULL{i:05d}", "Frank Herbert") for i in range(50)]}
     mock_get = AsyncMock(return_value=full_page)
@@ -2859,7 +2937,7 @@ async def test_fetch_author_books_by_name_detailed_deadline_truncation_sets_comp
         call_count["n"] += 1
         return 0.0 if call_count["n"] == 1 else 100.0
 
-    with patch("app.services.audible.authors.audible_get", new=mock_get), \
+    with patch("app.services.audible.authors.catalog.audible_get", new=mock_get), \
          patch("app.services.audible.authors.time.monotonic", side_effect=_fake_monotonic):
         asins, pages_fetched, completed = await _fetch_author_books_by_name_detailed(
             "Frank Herbert", "us", deadline=50.0
@@ -2875,10 +2953,10 @@ async def test_fetch_author_books_by_name_detailed_deadline_truncation_sets_comp
 async def test_fetch_author_books_by_name_detailed_short_page_sets_completed_true():
     """A page shorter than num_results is the catalog endpoint's own
     confirmed-end signal, distinct from a deadline cutting the walk short."""
-    from app.services.audible.authors import _fetch_author_books_by_name_detailed
+    from app.services.audible.authors.catalog import _fetch_author_books_by_name_detailed
 
     short_page = {"products": [_product_by_name("B0SHORT0002", "Frank Herbert")]}
-    with patch("app.services.audible.authors.audible_get", new=AsyncMock(return_value=short_page)):
+    with patch("app.services.audible.authors.catalog.audible_get", new=AsyncMock(return_value=short_page)):
         asins, pages_fetched, completed = await _fetch_author_books_by_name_detailed(
             "Frank Herbert", "us"
         )
@@ -2896,7 +2974,7 @@ async def test_fetch_author_books_by_name_detailed_mid_batch_failure_truncates_a
     failure, the same 'clean prefix, never a hole' guarantee the old
     sequential walk gave. completed stays False since a mid-walk failure is
     not one of the walk's two genuine end signals."""
-    from app.services.audible.authors import _fetch_author_books_by_name_detailed
+    from app.services.audible.authors.catalog import _fetch_author_books_by_name_detailed
 
     page0 = {"products": [_product_by_name(f"B0PAGE0{i:03d}", "Frank Herbert") for i in range(50)]}
     page1 = {"products": [_product_by_name(f"B0PAGE1{i:03d}", "Frank Herbert") for i in range(50)]}
@@ -2914,8 +2992,8 @@ async def test_fetch_author_books_by_name_detailed_mid_batch_failure_truncates_a
             return page3
         raise AssertionError(f"unexpected page requested: {page}")
 
-    with patch("app.services.audible.authors.audible_get", new=AsyncMock(side_effect=_get)), \
-         patch("app.services.audible.authors.logger") as mock_logger:
+    with patch("app.services.audible.authors.catalog.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.authors.catalog.logger") as mock_logger:
         asins, pages_fetched, completed = await _fetch_author_books_by_name_detailed(
             "Frank Herbert", "us", concurrency=3,
         )
@@ -2939,7 +3017,7 @@ async def test_fetch_author_books_by_name_detailed_total_results_ends_walk_witho
     never needs to probe an extra page past the known end just to observe
     a short/empty page, even though the last known page here is itself a
     full (non-short) page."""
-    from app.services.audible.authors import _fetch_author_books_by_name_detailed
+    from app.services.audible.authors.catalog import _fetch_author_books_by_name_detailed
 
     page0 = {
         "total_results": 100,
@@ -2948,7 +3026,7 @@ async def test_fetch_author_books_by_name_detailed_total_results_ends_walk_witho
     page1 = {"products": [_product_by_name(f"B0PAGE1{i:03d}", "Frank Herbert") for i in range(50)]}
     mock_get = AsyncMock(side_effect=[page0, page1])
 
-    with patch("app.services.audible.authors.audible_get", new=mock_get):
+    with patch("app.services.audible.authors.catalog.audible_get", new=mock_get):
         asins, pages_fetched, completed = await _fetch_author_books_by_name_detailed(
             "Frank Herbert", "us"
         )
@@ -2975,7 +3053,7 @@ async def test_fetch_author_books_by_name_detailed_content_repeat_stops_walk_but
     the walk merely stopped, not that it finished. The repeated page still
     counts toward pages_fetched (it was genuinely fetched) but contributes
     no new ASINs."""
-    from app.services.audible.authors import _fetch_author_books_by_name_detailed
+    from app.services.audible.authors.catalog import _fetch_author_books_by_name_detailed
 
     page0 = {
         "total_results": 5367,
@@ -2986,7 +3064,7 @@ async def test_fetch_author_books_by_name_detailed_content_repeat_stops_walk_but
     page2 = {"products": repeated_products}  # identical signature to page1 -- the plateau
     mock_get = AsyncMock(side_effect=[page0, page1, page2])
 
-    with patch("app.services.audible.authors.audible_get", new=mock_get):
+    with patch("app.services.audible.authors.catalog.audible_get", new=mock_get):
         asins, pages_fetched, completed = await _fetch_author_books_by_name_detailed(
             "Frank Herbert", "us"
         )
@@ -3056,7 +3134,7 @@ async def test_fetch_author_books_by_screen_absent_sections_triggers_grid_not_fo
     grid was ever found -- it must not score as a clean, complete walk."""
     from app.services.audible.authors import _fetch_author_books_by_screen
 
-    with patch("app.services.audible.authors.audible_get", new=AsyncMock(return_value={})):
+    with patch("app.services.audible.authors.screens.audible_get", new=AsyncMock(return_value={})):
         result = await _fetch_author_books_by_screen("B000TARGET", "us")
 
     assert result.pages_fetched == 1
@@ -3071,7 +3149,7 @@ async def test_fetch_author_books_by_screen_empty_sections_triggers_grid_not_fou
     case as an absent one."""
     from app.services.audible.authors import _fetch_author_books_by_screen
 
-    with patch("app.services.audible.authors.audible_get", new=AsyncMock(return_value={"sections": []})):
+    with patch("app.services.audible.authors.screens.audible_get", new=AsyncMock(return_value={"sections": []})):
         result = await _fetch_author_books_by_screen("B000TARGET", "us")
 
     assert result.termination_reason == SCREENS_REASON_GRID_NOT_FOUND
@@ -3095,7 +3173,7 @@ async def test_fetch_author_books_by_screen_renamed_component_type_triggers_grid
     }
     page = {"sections": [renamed_section]}
 
-    with patch("app.services.audible.authors.audible_get", new=AsyncMock(return_value=page)):
+    with patch("app.services.audible.authors.screens.audible_get", new=AsyncMock(return_value=page)):
         result = await _fetch_author_books_by_screen("B000TARGET", "us")
 
     assert result.asins == []
@@ -3107,8 +3185,8 @@ async def test_fetch_author_books_by_screen_renamed_component_type_triggers_grid
 async def test_fetch_author_books_by_screen_grid_not_found_fires_unclean_warning():
     from app.services.audible.authors import _fetch_author_books_by_screen
 
-    with patch("app.services.audible.authors.audible_get", new=AsyncMock(return_value={})), \
-         patch("app.services.audible.authors.logger") as mock_logger:
+    with patch("app.services.audible.authors.screens.audible_get", new=AsyncMock(return_value={})), \
+         patch("app.services.audible.authors.screens.logger") as mock_logger:
         result = await _fetch_author_books_by_screen("B000TARGET", "us")
 
     assert result.termination_reason == SCREENS_REASON_GRID_NOT_FOUND
@@ -3139,7 +3217,7 @@ async def test_fetch_author_books_by_screen_sections_truncated_counter_and_demot
     # already None by default (_asin_section's default), so this walk would
     # otherwise terminate as a clean, confirmed-complete COMPLETED walk.
 
-    with patch("app.services.audible.authors.audible_get", new=AsyncMock(return_value=page)):
+    with patch("app.services.audible.authors.screens.audible_get", new=AsyncMock(return_value=page)):
         result = await _fetch_author_books_by_screen("B000TARGET", "us")
 
     assert result.sections_truncated == overflow
@@ -3169,7 +3247,7 @@ async def test_fetch_author_books_by_screen_rows_truncated_counter_and_demotion(
     # this isolated to the single-page row cap.
     page = {"sections": [_asin_section(rows, product_count=1)]}
 
-    with patch("app.services.audible.authors.audible_get", new=AsyncMock(return_value=page)):
+    with patch("app.services.audible.authors.screens.audible_get", new=AsyncMock(return_value=page)):
         result = await _fetch_author_books_by_screen("B000TARGET", "us")
 
     assert result.rows_truncated == overflow
@@ -3210,7 +3288,7 @@ async def test_fetch_author_books_by_screen_grid_beyond_section_cap_is_not_misat
     # The real grid sits AFTER every decoy -- well past SCREENS_MAX_SECTIONS.
     page = {"sections": decoy_sections + [grid_section]}
 
-    with patch("app.services.audible.authors.audible_get", new=AsyncMock(return_value=page)):
+    with patch("app.services.audible.authors.screens.audible_get", new=AsyncMock(return_value=page)):
         result = await _fetch_author_books_by_screen("B000TARGET", "us")
 
     expected_grid_asins = {row["product_metadata"]["asin"] for row in real_grid_rows}
@@ -3279,14 +3357,14 @@ async def test_fetch_author_books_by_screen_page_error_distinguishes_exception_t
         (TypeError("unexpected shape"), "TypeError: unexpected shape"),
     ]
     for exc, expected in cases:
-        with patch("app.services.audible.authors.audible_get", new=AsyncMock(side_effect=exc)):
+        with patch("app.services.audible.authors.screens.audible_get", new=AsyncMock(side_effect=exc)):
             result = await _fetch_author_books_by_screen("B000TARGET", "us")
         assert result.page_error == expected, f"mismatch for {type(exc).__name__}"
         assert result.termination_reason == SCREENS_REASON_PAGE_ERROR
 
 
 @pytest.mark.asyncio
-async def test_get_author_books_degraded_path_warning_fires_on_successful_non_empty_request():
+async def test_get_author_books_degraded_path_warning_fires_and_caches_with_short_ttl_on_successful_non_empty_request():
     """The 'served from a degraded path' warning must fire even when the
     request succeeds and the union it contributed to is non-empty -- a
     degraded path that still produced output is not exempt from the
@@ -3299,9 +3377,11 @@ async def test_get_author_books_degraded_path_warning_fires_on_successful_non_em
     catalog never having run, the union being cached is screens-only --
     catalog_clean now explicitly excludes the name_resolution_error case
     (rather than reading "no author name" as trivially complete regardless
-    of why), so persist_author_books_cache_background must NOT fire here.
-    A screens-only partial view must never be written back as the
-    authoritative cached list."""
+    of why), so persist_author_books_cache_background must fire here with
+    the short degraded TTL, not the default one. A screens-only partial
+    view is written back (the writer's own union can only grow the stored
+    list, never shrink it), but must never be trusted as settled for a
+    full day."""
     from app.services.audible.authors import get_author_books
 
     mock_session = AsyncMock()
@@ -3316,7 +3396,9 @@ async def test_get_author_books_degraded_path_warning_fires_on_successful_non_em
         result = await get_author_books("B000AUTHOR", "us", mock_session)
 
     assert result == ["B0SCREEN001"]
-    mock_persist.assert_not_called()
+    mock_persist.assert_called_once()
+    _, persist_kwargs = mock_persist.call_args
+    assert persist_kwargs["ttl_seconds"] == AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS
     mock_logger.warning.assert_called_once_with(
         "Audible Author Books served from a degraded path",
         extra={
@@ -3330,6 +3412,123 @@ async def test_get_author_books_degraded_path_warning_fires_on_successful_non_em
             "db_error": None,
         },
     )
+
+
+# ============================================================
+# GET AUTHOR BOOKS — single-flight coalescing (_author_books_inflight)
+#
+# get_author_books coalesces concurrent callers for the same (asin, region)
+# onto one _walk_author_books call. These tests patch _walk_author_books
+# itself (not the four-source internals _walk_author_books delegates to,
+# already covered above) so the leader/follower behavior can be driven and
+# observed directly, independent of what a real walk does.
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_get_author_books_coalesces_concurrent_calls_for_same_author_onto_one_walk():
+    """N concurrent callers for the same (asin, region) share exactly one
+    underlying walk and all receive its result -- not N independent walks
+    that happen to agree."""
+    from app.services.audible.authors import get_author_books
+
+    call_count = 0
+    release = asyncio.Event()
+
+    async def _slow_walk(asin, region, session):
+        nonlocal call_count
+        call_count += 1
+        await release.wait()
+        return ["B0COALESCE1"]
+
+    sessions = [AsyncMock() for _ in range(5)]
+
+    with patch("app.services.audible.authors._walk_author_books", new=_slow_walk):
+        tasks = [asyncio.ensure_future(get_author_books("B000AUTHOR", "us", s)) for s in sessions]
+        # Give every caller a chance to reach the inflight check before the
+        # walk is allowed to finish, so a bug that let each caller start
+        # its own walk would actually show up as call_count > 1 here.
+        for _ in range(10):
+            await asyncio.sleep(0)
+        release.set()
+        results = await asyncio.gather(*tasks)
+
+    assert call_count == 1
+    assert results == [["B0COALESCE1"]] * 5
+
+
+@pytest.mark.asyncio
+async def test_get_author_books_does_not_coalesce_different_asin_or_region():
+    """Different (asin, region) pairs -- whether the ASIN differs or only
+    the region does -- must not share a walk; each gets its own."""
+    from app.services.audible.authors import get_author_books
+
+    calls: list[tuple[str, str]] = []
+
+    async def _walk(asin, region, session):
+        calls.append((asin, region))
+        return [f"B0{asin}{region.upper()}"]
+
+    sessions = [AsyncMock() for _ in range(3)]
+
+    with patch("app.services.audible.authors._walk_author_books", new=_walk):
+        results = await asyncio.gather(
+            get_author_books("B000AUTHOR1", "us", sessions[0]),
+            get_author_books("B000AUTHOR2", "us", sessions[1]),
+            get_author_books("B000AUTHOR1", "uk", sessions[2]),
+        )
+
+    assert sorted(calls) == sorted([
+        ("B000AUTHOR1", "us"), ("B000AUTHOR2", "us"), ("B000AUTHOR1", "uk"),
+    ])
+    assert results == [["B0B000AUTHOR1US"], ["B0B000AUTHOR2US"], ["B0B000AUTHOR1UK"]]
+
+
+@pytest.mark.asyncio
+async def test_get_author_books_leader_failure_propagates_to_followers_and_clears_inflight_entry():
+    """When the leader's walk raises, every follower waiting on it sees the
+    same exception rather than hanging or silently getting an empty result
+    -- and the inflight entry is removed on the way out, so this author
+    isn't permanently uncoalescable after one failed walk. A leftover entry
+    here would mean every future call for this author either raises
+    forever or, if it awaited a completed-with-exception task incorrectly,
+    could never take the leader path again."""
+    from app.services.audible.authors import get_author_books, _author_books_inflight
+
+    call_count = 0
+    release = asyncio.Event()
+
+    async def _failing_walk(asin, region, session):
+        nonlocal call_count
+        call_count += 1
+        await release.wait()
+        raise RuntimeError("walk boom")
+
+    sessions = [AsyncMock() for _ in range(3)]
+
+    with patch("app.services.audible.authors._walk_author_books", new=_failing_walk):
+        tasks = [asyncio.ensure_future(get_author_books("B000AUTHOR", "us", s)) for s in sessions]
+        for _ in range(10):
+            await asyncio.sleep(0)
+        release.set()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    assert call_count == 1
+    assert len(results) == 3
+    for r in results:
+        assert isinstance(r, RuntimeError)
+        assert str(r) == "walk boom"
+    assert ("B000AUTHOR", "us") not in _author_books_inflight
+
+    # A follow-up call for the same key must run its own fresh walk rather
+    # than being poisoned by the failed one -- proves the cleanup actually
+    # unblocks future calls, not merely that the dict looks empty.
+    async def _recovers(asin, region, session):
+        return ["B0RECOVERED1"]
+
+    with patch("app.services.audible.authors._walk_author_books", new=_recovers):
+        recovered = await get_author_books("B000AUTHOR", "us", AsyncMock())
+
+    assert recovered == ["B0RECOVERED1"]
 
 
 @pytest.mark.asyncio
@@ -3352,8 +3551,8 @@ async def test_fetch_author_books_by_screen_every_warning_line_carries_author_as
     instead, by design, and is not covered here."""
     from app.services.audible.authors import (
         get_author_books, _fetch_author_books_by_screen,
-        _CATALOG_SORTS, CATALOG_RESULT_CEILING,
     )
+    from app.services.audible.authors.catalog import _CATALOG_SORTS, CATALOG_RESULT_CEILING
     from app.core.exceptions import NotFoundException
 
     asin = "B000TARGET"
@@ -3432,8 +3631,8 @@ async def test_fetch_author_books_by_screen_every_warning_line_carries_author_as
     echoing_page = {"sections": [_asin_section(
         [_row("B0BOTH0001")], product_count=1000, pagination="SAMETOKEN",
     )]}
-    with patch("app.services.audible.authors.audible_get", new=AsyncMock(return_value=echoing_page)), \
-         patch("app.services.audible.authors.logger") as mock_logger:
+    with patch("app.services.audible.authors.screens.audible_get", new=AsyncMock(return_value=echoing_page)), \
+         patch("app.services.audible.authors.screens.logger") as mock_logger:
         await _fetch_author_books_by_screen(asin, "us")
 
     mock_logger.warning.assert_called_once()

@@ -404,7 +404,7 @@ CATALOG_PAGE_SIZE = 50
 # ascending ReleaseDate plateaus one short of that, at 499, also from page
 # 11 on; a category-scoped query plateaus the same way once its own
 # results run past 500, at the same page 11 boundary. Brandon Sanderson's
-# real total of 153 stays under the ceiling on every sort and paginates
+# real total of 203 stays under the ceiling on every sort and paginates
 # normally. The endpoint never 404s or comes back short past the ceiling
 # -- it returns HTTP 200 with the prior page's content repeating
 # indefinitely. This bounds pages requested per window (unfiltered sort or
@@ -1063,6 +1063,17 @@ async def _fetch_author_books_by_catalog(
 
             probe_ok: set[_CatalogWindow] = set()
             probe_totals: dict[_CatalogWindow, int | None] = {}
+            # Each window's own page-0 new-ASIN yield, captured the instant
+            # it's folded below -- this is the cheap tier's half of the
+            # "across both tiers" score the docstring above promises. It has
+            # to be captured per-window here, in this same fold-order loop,
+            # rather than re-derived later from len(seen): every window's
+            # page 0 is folded into seen in this one loop before the second
+            # loop below ever runs, so by the time that second loop reaches
+            # any given window, seen already contains that window's own
+            # page-0 ASINs and a before/after diff there would double-count
+            # nothing -- it would count nothing at all for page 0.
+            probe_page0_new: dict[_CatalogWindow, int] = {}
             advancing: list[_CatalogWindow] = []
             for window in probe_windows:
                 outcome = probe_page0[window]
@@ -1075,7 +1086,9 @@ async def _fetch_author_books_by_catalog(
                 probe_totals[window] = candidate_total if isinstance(candidate_total, int) and candidate_total >= 0 else None
                 before = len(seen)
                 _process_catalog_page(outcome, author_asin, author_name, seen, asins, counts)
-                if len(seen) > before:
+                added = len(seen) - before
+                probe_page0_new[window] = added
+                if added > 0:
                     advancing.append(window)
 
             # ---- Phase 3 continued: full-probe tier for surviving candidates ----
@@ -1110,7 +1123,18 @@ async def _fetch_author_books_by_catalog(
                             continue
                         pages_fetched += 1
                         _process_catalog_page(outcome, author_asin, author_name, seen, asins, counts)
-                new_count = len(seen) - before
+                # The full-probe (rest-page) tier's own yield, plus the
+                # cheap (page-0) tier's yield already captured above -- see
+                # probe_page0_new. Scoring the rest tier alone here (the
+                # defect this replaced) silently scored every category
+                # whose page 0 already carried CATALOG_DRY_WINDOW_MIN_NEW or
+                # more new ASINs as dry the moment its remaining pages
+                # added nothing further, and, worse, scored a category with
+                # no total_results on its page 0 as dry BY CONSTRUCTION --
+                # _pages_needed_for(None) returns 1, so range(1, 1) never
+                # fetches a rest page at all regardless of how many new
+                # ASINs page 0 alone genuinely contributed.
+                new_count = probe_page0_new.get(window, 0) + (len(seen) - before)
                 if new_count >= CATALOG_DRY_WINDOW_MIN_NEW:
                     dry_streak = 0
                     paying.append(window.category_id)

@@ -15,11 +15,14 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 
 # Local
+from app.core.config import get_settings
 from app.services.db.writer import (
     upsert_author,
     reconcile_genres,
     persist_author_books_cache_background,
 )
+
+settings = get_settings()
 
 
 # ============================================================
@@ -502,16 +505,23 @@ class _FakeSessionCM:
         return False
 
 
-def _fake_cache_row(value):
+def _fake_cache_row(value, expires_at=None):
     """
     Stands in for the Cache row `SELECT ... FOR UPDATE` locks and reads
     back via `.scalar_one_or_none()` — carries exactly the two attributes
-    the guard reads off it (`.value`, `.expires_at`), unexpired by default.
+    the guard reads off it (`.value`, `.expires_at`), unexpired by default
+    (now + 1h) unless the caller hands a specific expires_at to drive the
+    keep-later-expiry rule.
     """
-    return SimpleNamespace(value=value, expires_at=datetime.now(timezone.utc) + timedelta(hours=1))
+    return SimpleNamespace(
+        value=value,
+        expires_at=expires_at if expires_at is not None else datetime.now(timezone.utc) + timedelta(hours=1),
+    )
 
 
-async def _run_persist_author_books_cache_background(key, asins, stored):
+async def _run_persist_author_books_cache_background(
+    key, asins, stored, stored_expires_at=None, ttl_seconds=None, frozen_now=None,
+):
     """
     Drives persist_author_books_cache_background's background task to
     completion: create_task is intercepted so its coroutine is awaited
@@ -519,12 +529,16 @@ async def _run_persist_author_books_cache_background(key, asins, stored):
     the function reads them from. session.execute(...).scalar_one_or_none()
     is stubbed directly (the guard now takes a `SELECT ... FOR UPDATE` on
     the Cache row instead of calling cache.get) to return a fake row
-    carrying `stored`, or None when nothing is stored yet. Returns the
-    mocked cache.set so callers can inspect what — or whether — it was
-    written.
+    carrying `stored`, or None when nothing is stored yet. stored_expires_at
+    lets a caller drive the keep-later-expiry rule with a specific stored
+    row expiry instead of the unexpired-by-default one hour out.
+    frozen_now, when given, pins the module's own _now() so the expiry
+    arithmetic in the keep-later comparison is exact rather than off by
+    however long the test happened to take to run. Returns the mocked
+    cache.set so callers can inspect what -- or whether -- it was written.
     """
     mock_session = AsyncMock()
-    row = _fake_cache_row(stored) if stored is not None else None
+    row = _fake_cache_row(stored, expires_at=stored_expires_at) if stored is not None else None
     mock_session.execute = AsyncMock(return_value=_scalar(row))
     captured = {}
 
@@ -540,8 +554,13 @@ async def _run_persist_author_books_cache_background(key, asins, stored):
          patch("app.services.db.writer._bg_write_semaphore", asyncio.Semaphore(2)), \
          patch("app.services.db.writer.asyncio.create_task", side_effect=_fake_create_task), \
          patch("app.services.cache.manager.set", new=AsyncMock()) as mock_set:
-        persist_author_books_cache_background(key, asins)
-        await captured["coro"]
+        if frozen_now is not None:
+            with patch("app.services.db.writer._now", return_value=frozen_now):
+                persist_author_books_cache_background(key, asins, ttl_seconds=ttl_seconds)
+                await captured["coro"]
+        else:
+            persist_author_books_cache_background(key, asins, ttl_seconds=ttl_seconds)
+            await captured["coro"]
 
     return mock_set
 
@@ -636,3 +655,70 @@ async def test_persist_author_books_cache_background_persists_exact_order():
     written_value = mock_set.await_args.args[2]
     assert written_key == "author_books:us:B000AUTHOR"
     assert written_value == incoming
+
+
+# ============================================================
+# persist_author_books_cache_background — keep-later expiry
+# ============================================================
+# A plain overwrite of expires_at with whatever this call's own ttl_seconds
+# implies would let a degraded (short-TTL) write clobber an already-earned
+# long window down to the short one -- these pin that the write keeps
+# whichever expiry is LATER, the stored row's or the one this call is
+# asking for, in both directions.
+
+@pytest.mark.asyncio
+async def test_persist_author_books_cache_background_degraded_write_does_not_shorten_earned_long_window():
+    """A stored row with ~20000s left on an already-earned long window,
+    written again with the short degraded TTL (900s, matching
+    AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS), must keep the LATER, longer
+    expiry rather than being clobbered down to 900s -- a plain overwrite
+    (the pre-fix behavior) would apply the incoming 900s unconditionally
+    regardless of what's already been earned."""
+    frozen_now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    stored_expires_at = frozen_now + timedelta(seconds=20000)
+
+    mock_set = await _run_persist_author_books_cache_background(
+        "author_books:us:B000AUTHOR", ["B0ASIN0001"], stored=["B0ASIN0001"],
+        stored_expires_at=stored_expires_at, ttl_seconds=900, frozen_now=frozen_now,
+    )
+
+    mock_set.assert_awaited_once()
+    written_ttl = mock_set.await_args.kwargs["ttl_seconds"]
+    assert written_ttl == 20000
+
+
+@pytest.mark.asyncio
+async def test_persist_author_books_cache_background_long_write_still_extends_a_shorter_stored_window():
+    """Complement to the above: a stored row with only 300s left, written
+    with the default day-long TTL (ttl_seconds=None -> settings.cache_ttl),
+    must extend all the way out to the new, later expiry -- the keep-later
+    rule must not freeze the window at whatever was first earned, only
+    refuse to shorten it."""
+    frozen_now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    stored_expires_at = frozen_now + timedelta(seconds=300)
+
+    mock_set = await _run_persist_author_books_cache_background(
+        "author_books:us:B000AUTHOR", ["B0ASIN0001"], stored=["B0ASIN0001"],
+        stored_expires_at=stored_expires_at, ttl_seconds=None, frozen_now=frozen_now,
+    )
+
+    mock_set.assert_awaited_once()
+    written_ttl = mock_set.await_args.kwargs["ttl_seconds"]
+    assert written_ttl == settings.cache_ttl
+
+
+@pytest.mark.asyncio
+async def test_persist_author_books_cache_background_no_stored_row_uses_requested_ttl_outright():
+    """With nothing stored to compare against, there is no later expiry to
+    keep -- the requested ttl_seconds (or the default) is used as-is, same
+    as a first write always has been."""
+    frozen_now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    mock_set = await _run_persist_author_books_cache_background(
+        "author_books:us:B000AUTHOR", ["B0ASIN0001"], stored=None,
+        ttl_seconds=900, frozen_now=frozen_now,
+    )
+
+    mock_set.assert_awaited_once()
+    written_ttl = mock_set.await_args.kwargs["ttl_seconds"]
+    assert written_ttl == 900

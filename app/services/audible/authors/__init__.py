@@ -28,7 +28,7 @@ from app.services.audible.authors.screens import (
     _fetch_author_books_by_screen,
     _ScreenBooksResult,
     SCREENS_REASON_PLATEAU_TRUNCATED,
-    SCREENS_CLEAN_REASONS,
+    SCREENS_BROKEN_REASONS,
 )
 from app.services.audible.authors.catalog import (
     _fetch_author_books_by_catalog,
@@ -476,8 +476,31 @@ async def _walk_author_books(
             seen.add(db_asin)
             asins.append(db_asin)
 
+    # Same defect class as the wave-1 rollback above, one phase later: the
+    # get_author_book_asins_from_db read just above is this function's last
+    # touch of session on the common (non-empty-union) path below, and
+    # use_cache defaults False at the router -- get_books_by_asins then
+    # never touches session at all during hydration. Left open, session
+    # would sit checked out of the pool, idle-in-transaction, for the
+    # entire hydration this function's return kicks off (measured: 84
+    # chunks for a 4164-ASIN author, 10-15s+, plus normalizing every one of
+    # those objects), pinning xmin cluster-wide against autovacuum for a
+    # window idle_in_transaction_session_timeout (60s) never catches
+    # because the hydration itself runs under that by design. Nothing below
+    # this point still needs the transaction open; SQLAlchemy re-acquires
+    # automatically the next time session touches the DB (the empty-union
+    # cache.get fallback immediately below).
+    await session.rollback()
+
     if not asins:
         cached = await cache.get(session, author_books_key(asin, region))
+        # cache.get issues its own SELECT, autobeginning a fresh transaction
+        # on session the same way the DB backstop read above did -- rolled
+        # back here for the same reason, so this rare empty-union path
+        # can't leave session idle-in-transaction through the rest of this
+        # branch either, whether it returns the cache hit below or falls
+        # through to raise NotFoundException.
+        await session.rollback()
         if cached:
             return cached
 
@@ -560,7 +583,29 @@ async def _walk_author_books(
     # partial write can only ever grow the stored list, never shrink it --
     # there is no storage-side reason left to withhold this write on an
     # incomplete result. What still varies by completeness is the TTL.
-    # screens_clean mirrors the existing SCREENS_CLEAN_REASONS gate.
+    #
+    # screens_clean asks the same question catalog_clean and db_clean ask
+    # of their own waves below: did THIS wave fail its own job, not "did it
+    # single-handedly finish a job it was never architecturally responsible
+    # for finishing alone". The catalog wave runs unconditionally and the
+    # DB backstop is unioned in on every request regardless of what screens
+    # did -- screens plateauing is the designed handoff to those other two
+    # sources, not evidence anything is missing. So this checks
+    # SCREENS_BROKEN_REASONS (see screens.py, which also carries the
+    # reasoning for every reason's inclusion or exclusion) rather than
+    # requiring termination_reason == SCREENS_REASON_COMPLETED the way
+    # SCREENS_CLEAN_REASONS does for that module's own, different, question
+    # ("did upstream itself confirm nothing remains") -- SCREENS_REASON_
+    # PLATEAU_TRUNCATED is the one reason that's unclean by that stricter
+    # question but not broken by this one: Christie's screens grid plateaus
+    # at page 26 of a product_count-implied 56 and still contributes
+    # roughly half of her 1133-ASIN union, and gating completeness on
+    # COMPLETED alone made is_complete permanently unreachable for exactly
+    # the prolific authors this feature exists to serve, forcing them onto
+    # AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS (900s) forever instead of the
+    # default day-long TTL -- up to 96 full walks a day, each hundreds of
+    # upstream requests, strictly worse than not caching them at all.
+    #
     # catalog_clean is True either when catalog ran with no page-fetch
     # errors, wasn't cut short by the deadline, and wasn't left unable to
     # finish slicing what it identified as worth slicing
@@ -593,7 +638,7 @@ async def _walk_author_books(
     # finish clean re-ran the full walk on every single request.
     screens_clean = (
         screen_result is not None
-        and screen_result.termination_reason in SCREENS_CLEAN_REASONS
+        and screen_result.termination_reason not in SCREENS_BROKEN_REASONS
     )
     catalog_clean = (
         (author_name is None and name_resolution_error is None)

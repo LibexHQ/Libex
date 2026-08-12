@@ -97,9 +97,7 @@ services:
       - "${PORT:-3333}:3333"
     environment:
       - DATABASE_URL=postgresql+asyncpg://${DB_USER:-libex}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-libex}
-      - CACHE_ENABLED=${CACHE_ENABLED:-true}
       - CACHE_TTL=${CACHE_TTL:-86400}
-      - DEFAULT_REGION=${DEFAULT_REGION:-us}
       - PORT=${PORT:-3333}
       - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
@@ -211,13 +209,13 @@ ABS will then call `/us/search?title=...&author=...` which returns the `{"matche
 | GET | `/book/{asin}/chapters` | Get chapter information |
 | GET | `/book/sku/{sku}` | Get all region variants of a book by SKU group |
 | GET | `/author/{asin}` | Get author profile |
-| GET | `/author/{asin}/books` | Get all books by author ASIN |
-| GET | `/author/books/{asin}` | Get all books by author ASIN (legacy) |
+| GET | `/author/{asin}/books` | Get all books by author ASIN (legacy) |
+| GET | `/author/books/{asin}` | Get all books by author ASIN |
 | GET | `/author/books` | Get books by author name |
 | GET | `/author` | Search authors by name |
 | GET | `/series/{asin}` | Get series metadata |
-| GET | `/series/{asin}/books` | Get all books in a series |
-| GET | `/series/books/{asin}` | Get all books in a series (legacy) |
+| GET | `/series/{asin}/books` | Get all books in a series (legacy) |
+| GET | `/series/books/{asin}` | Get all books in a series |
 | GET | `/series` | Search series by name |
 | GET | `/narrator/books` | Get books by narrator name |
 | GET | `/search` | Search Audible catalog |
@@ -348,8 +346,6 @@ Copy `.env.example` to `.env` and configure:
 | `DB_NAME` | `libex` | PostgreSQL database name |
 | `DB_USER` | `libex` | PostgreSQL username |
 | `PORT` | `3333` | Host port the API is exposed on |
-| `DEFAULT_REGION` | `us` | Default Audible region |
-| `CACHE_ENABLED` | `true` | Enable or disable the cache |
 | `CACHE_TTL` | `86400` | Cache TTL in seconds (default 24 hours) |
 | `LOG_LEVEL` | `INFO` | Log verbosity — `DEBUG`, `INFO`, `WARNING`, or `ERROR` |
 | `LOG_RETENTION_DAYS` | `7` | Days of rotated logs to keep. `0` = infinite, no rotation |

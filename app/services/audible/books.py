@@ -454,10 +454,28 @@ async def get_books_by_asins(
         if not all_products and not cached_results:
             return []
 
+        # less-data-never-accepted for a partial transient failure: some
+        # chunks succeeding (or use_cache already producing cache hits) used
+        # to skip the DB backstop entirely for transient_failed_asins,
+        # silently omitting whatever was already stored for exactly the
+        # ASINs the failed chunk(s) covered -- a 1500-ASIN author plus one
+        # upstream 503 dropped the ~50 stored books that chunk owned, and
+        # use_cache=True with every chunk failing returned cache hits only.
+        # Scoped to transient_failed_asins alone, never not_found_asins: a
+        # 404 is a confirmed absence, not a retry signal, and must not be
+        # papered over by stale DB data. Runs whenever any chunk failed
+        # transiently, independent of whether all_products or cached_results
+        # already have something, so neither can silently swallow it the way
+        # both used to.
+        db_backstop_results: list[dict[str, Any]] = []
+        if transient_failed_asins:
+            db_backstop_results = await get_books_from_db(session, transient_failed_asins)
+
         normalized = await _normalize_products(all_products, region)
 
-        # Persist to DB and cache in the background
-        persist_books_background(normalized, region)
+        if all_products:
+            # Persist to DB and cache in the background
+            persist_books_background(normalized, region)
 
         logger.info("Requested books from Audible", extra={
             "requested_num": len(fetch_asins),
@@ -465,10 +483,11 @@ async def get_books_by_asins(
             "requested_took": requested_took,
             "not_found_asins": len(not_found_asins),
             "failed_asins": len(transient_failed_asins),
+            "db_backstop_num": len(db_backstop_results),
             "region": region,
         })
 
-        return cached_results + normalized
+        return cached_results + normalized + db_backstop_results
 
     except NotFoundException:
         raise

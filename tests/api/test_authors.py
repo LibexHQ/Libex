@@ -211,6 +211,63 @@ async def test_get_author_books_default_region_is_us(async_client):
         assert mock_books.call_args[0][1] == "us"
 
 
+@pytest.mark.asyncio
+async def test_get_author_books_hydration_passes_cache_flag_and_high_concurrency(async_client):
+    """The hydration call for /author/books/{asin} must carry both
+    use_cache=cache (the same flag discovery was just given, kept a single
+    decision across both halves of the request) and high_concurrency=True
+    (traced to a live production outage -- see the router's own comment).
+    Pinning both together is deliberate: either one reverting alone, while
+    the other stays fixed, is exactly how the original half-wired-flag
+    defect came to exist, and it would leave the suite green if only one
+    of the two were asserted."""
+    with patch("app.api.routes.authors.router.get_author_books", new_callable=AsyncMock) as mock_books, \
+         patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
+        mock_books.return_value = ["B08G9PRS1K"]
+        mock_asins.return_value = [MOCK_BOOK]
+        response = await async_client.get("/author/books/B000APF21M?cache=true")
+
+    assert response.status_code == 200
+    mock_asins.assert_awaited_once()
+    call_args, call_kwargs = mock_asins.call_args
+    assert call_args[0] == ["B08G9PRS1K"]
+    assert call_kwargs["use_cache"] is True
+    assert call_kwargs["high_concurrency"] is True
+
+
+@pytest.mark.asyncio
+async def test_get_author_books_hydration_cache_flag_follows_query_param_false(async_client):
+    """Complement to the above: use_cache must track cache=false too, not
+    just be pinned True by coincidence of the other test's fixture."""
+    with patch("app.api.routes.authors.router.get_author_books", new_callable=AsyncMock) as mock_books, \
+         patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
+        mock_books.return_value = ["B08G9PRS1K"]
+        mock_asins.return_value = [MOCK_BOOK]
+        await async_client.get("/author/books/B000APF21M?cache=false")
+
+    call_kwargs = mock_asins.call_args.kwargs
+    assert call_kwargs["use_cache"] is False
+    assert call_kwargs["high_concurrency"] is True
+
+
+@pytest.mark.asyncio
+async def test_get_author_books_legacy_route_hydration_passes_cache_flag_and_high_concurrency(async_client):
+    """The legacy twin route (/author/{asin}/books) must pass the same two
+    args to the same call -- this is the exact route the fix's own comment
+    calls out as needing the identical pairing, and the one api-routes
+    reported nothing pins at all."""
+    with patch("app.api.routes.authors.router.get_author_books", new_callable=AsyncMock) as mock_books, \
+         patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
+        mock_books.return_value = ["B08G9PRS1K"]
+        mock_asins.return_value = [MOCK_BOOK]
+        response = await async_client.get("/author/B000APF21M/books?cache=true")
+
+    assert response.status_code == 200
+    call_kwargs = mock_asins.call_args.kwargs
+    assert call_kwargs["use_cache"] is True
+    assert call_kwargs["high_concurrency"] is True
+
+
 # ============================================================
 # GET AUTHOR BOOKS BY NAME
 # ============================================================

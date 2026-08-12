@@ -149,6 +149,48 @@ SCREENS_REASON_TRUNCATED = "sections_or_rows_truncated"
 SCREENS_REASON_PLATEAU_TRUNCATED = "plateau_truncated"
 SCREENS_CLEAN_REASONS = frozenset({SCREENS_REASON_COMPLETED})
 
+# get_author_books' own completeness gate (screens_clean in
+# authors/__init__.py) asks a different question than SCREENS_CLEAN_REASONS
+# above: not "did upstream explicitly confirm nothing remains" (COMPLETED
+# alone) but "did this wave fail its own job, or did it hand off to the
+# other three sources the way it was designed to". SCREENS_REASON_
+# PLATEAU_TRUNCATED is deliberately excluded from this set even though it
+# is not a SCREENS_CLEAN_REASON: Christie's grid plateaus at page 26 of a
+# 56-page product_count-implied walk and contributes roughly half of her
+# total ASIN union, and Doyle's plateaus the same way against his own
+# product_count -- for both, upstream is silently repeating the last real
+# page's content byte-identical rather than confirming an end, which is
+# functionally the same "nothing further remains" signal COMPLETED gives,
+# just detected by this walk noticing its own repetition instead of
+# upstream sending a null token (see _fanout_screen_pages' own docstring).
+# Gating completeness on COMPLETED alone made is_complete permanently
+# unreachable for exactly the prolific authors this feature exists to
+# serve, forcing them onto AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS (900s)
+# forever instead of the default day-long TTL -- up to 96 full walks a day,
+# each hundreds of upstream requests through Libex's single exit IP,
+# strictly worse than not caching them at all.
+#
+# SCREENS_REASON_TOKEN_REPEATED stays in this broken set rather than
+# joining PLATEAU_TRUNCATED, even though the sequential fallback walk's own
+# repeat check (see the token-chasing loop below) is mechanistically
+# similar -- noticing a repeat on its own rather than being told by
+# upstream. There is no live measurement on record of it firing against a
+# genuine plateau the way PLATEAU_TRUNCATED's live Christie/Doyle traces
+# exist for; extending the same reclassification to it without that
+# evidence would be guessing from architectural resemblance, not deciding
+# from a measurement the way PLATEAU_TRUNCATED's reclassification was.
+SCREENS_BROKEN_REASONS = frozenset({
+    SCREENS_REASON_TOKEN_REPEATED,
+    SCREENS_REASON_TOKEN_REJECTED,
+    SCREENS_REASON_PAGE_CAP,
+    SCREENS_REASON_ASIN_CAP,
+    SCREENS_REASON_PAGE_ERROR,
+    SCREENS_REASON_NON_DICT_PAGE,
+    SCREENS_REASON_TIME_BUDGET,
+    SCREENS_REASON_GRID_NOT_FOUND,
+    SCREENS_REASON_TRUNCATED,
+})
+
 
 @dataclass
 class _ScreenBooksResult:
@@ -454,8 +496,10 @@ async def _fanout_screen_pages(
     real author's last one does not error or come back empty, it
     PLATEAUS -- returning the last real page's content again,
     byte-identical, forever, while the requested page number keeps
-    climbing (pages 56, 57, and 999 of a real 56-page author all came back
-    identical). So every page's ASIN signature is checked against every
+    climbing (pages 56, 57, and 999 of a 56-page product_count-implied walk
+    all came back identical, even though that author's real content
+    plateaus at page 26 -- see SCREENS_REASON_PLATEAU_TRUNCATED). So every
+    page's ASIN signature is checked against every
     signature already seen this walk (seen_page_signatures, seeded by the
     caller with page 1's own); a repeat means the page immediately before
     it was the true last page the fan-out will ever see new content from.

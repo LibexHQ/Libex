@@ -9,7 +9,7 @@ The DB is used as a fallback when Audible is unavailable.
 
 # Standard library
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 # Third party
 from sqlalchemy.exc import IntegrityError
@@ -38,9 +38,11 @@ from app.db.models import (
 from app.db.session import engine
 
 # Core
+from app.core.config import get_settings
 from app.core.logging import get_logger
 
 logger = get_logger()
+settings = get_settings()
 
 _BackgroundSession = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -754,12 +756,39 @@ def persist_author_books_cache_background(
     but is treated as not-stored for the union, matching cache.get's own
     expired-is-a-miss behavior — this guard does not protect an expired entry.
 
-    ttl_seconds is passed straight through to cache.set: since this write is
-    always a union that can only grow the stored list, never shrink it, a
-    caller who knows this run's own result is incomplete can still write it
-    with a shorter TTL than the default so it refreshes sooner, rather than
-    withholding the write entirely. None keeps cache.set's own default
-    (settings.cache_ttl).
+    The expiry gets the same can-only-grow discipline as the ASIN list: the
+    write keeps whichever is later, the stored row's expires_at or the one
+    this call is asking for, rather than letting a plain overwrite apply
+    the incoming TTL regardless of what's already been earned. That is
+    deliberate, not an oversight of the union guarantee stopping at content:
+    the two callers who actually gate a walk behind this key's TTL —
+    get_author_books' use_cache=True path, and the total-failure fallback
+    inside _walk_author_books itself — only ever reach this row after
+    cache.get already reported a miss, i.e. after the stored expires_at has
+    already passed. Keeping the later expiry costs neither of them anything:
+    there is no case where it makes an already-expired, about-to-be-refreshed
+    entry look fresher than it is. What it does protect is the other,
+    unthrottled caller: get_author_books' default, Audible-first path calls
+    this function on every request regardless of the stored TTL, so a
+    previously-earned 24h window sat behind a row that is still very much
+    live can otherwise be clobbered down to the short, degraded-run TTL by
+    the very next request that happens to hit one bad page out of hundreds —
+    and, since nothing else ever re-lengthens a downgraded entry, that
+    ratchets permanently. Content and trustworthiness window move together:
+    a degraded run's result is provably never worse than what's stored (it's
+    a union, never a shrink), so there is no basis for treating it as less
+    trustworthy either. The cost: an explicitly-cached reader that would
+    otherwise be forced to retry within the short TTL instead waits out the
+    remainder of the earned window — bounded by the union guarantee to
+    "missing very recent additions," never "holding data since superseded."
+
+    ttl_seconds is passed through as the request, not the outcome: since
+    this write is always a union that can only grow the stored list, never
+    shrink it, a caller who knows this run's own result is incomplete can
+    still write it with a shorter TTL than the default so it refreshes
+    sooner, rather than withholding the write entirely — the later-wins rule
+    above is what stops that shorter request from undoing a longer window
+    still in force. None keeps cache.set's own default (settings.cache_ttl).
     """
     from app.services.cache import manager as cache
 
@@ -771,14 +800,21 @@ def persist_author_books_cache_background(
                         select(Cache).where(Cache.key == key).with_for_update()
                     )
                     row = locked.scalar_one_or_none()
-                    stored = row.value if row and row.expires_at > _now() else None
+                    now = _now()
+                    stored = row.value if row and row.expires_at > now else None
                     to_write = asins
                     if stored:
                         incoming_set = set(asins)
                         stored_only = [a for a in stored if a not in incoming_set]
                         if stored_only:
                             to_write = list(asins) + stored_only
-                    await cache.set(session, key, to_write, ttl_seconds=ttl_seconds)
+                    requested_ttl = ttl_seconds if ttl_seconds is not None else settings.cache_ttl
+                    requested_expires_at = now + timedelta(seconds=requested_ttl)
+                    if row is not None and row.expires_at > requested_expires_at:
+                        final_ttl = (row.expires_at - now).total_seconds()
+                    else:
+                        final_ttl = requested_ttl
+                    await cache.set(session, key, to_write, ttl_seconds=final_ttl)
             except Exception as e:
                 logger.warning(f"Background cache persist failed for {key}: {e}")
 

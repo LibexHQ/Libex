@@ -1711,6 +1711,45 @@ async def test_fetch_author_books_by_catalog_sliced_false_when_no_total_results(
     assert result.sliced is False
 
 
+@pytest.mark.asyncio
+async def test_fetch_author_books_by_catalog_preserves_release_date_prefix_despite_completion_order():
+    """The compat-critical -ReleaseDate-first prefix (see
+    _CatalogBooksResult's own docstring) is a FOLD-order guarantee, not a
+    fetch-order one: Phase 1 fires both baseline windows together in one
+    gather, but -ReleaseDate is made to resolve strictly AFTER ReleaseDate
+    here, and the assembled asins list must still open with -ReleaseDate's
+    own ASINs regardless. A fold implementation that (re)derives order from
+    completion instead of from baseline_windows' own fixed list order would
+    pass every other test in this module and still silently emit
+    ReleaseDate's ASINs first under real network jitter -- this is the
+    property that broke silently once already on this branch."""
+    from app.services.audible.authors import _fetch_author_books_by_catalog
+
+    release_date_desc_asins = [f"B0DESC{i:03d}" for i in range(5)]
+    release_date_asc_asins = [f"B0ASC{i:04d}" for i in range(5)]
+
+    async def _get(region, path, params):
+        sort = params["products_sort_by"]
+        if params["page"] != 0:
+            return {"total_results": 5, "products": []}
+        if sort == "-ReleaseDate":
+            await asyncio.sleep(0.03)  # fired first, resolves LAST
+            return {"total_results": 5, "products": [
+                {"asin": a, "authors": [{"asin": "B000AUTHOR"}]} for a in release_date_desc_asins
+            ]}
+        if sort == "ReleaseDate":
+            return {"total_results": 5, "products": [
+                {"asin": a, "authors": [{"asin": "B000AUTHOR"}]} for a in release_date_asc_asins
+            ]}
+        return {"total_results": 0, "products": []}
+
+    with patch("app.services.audible.authors.catalog.audible_get", new=AsyncMock(side_effect=_get)):
+        result = await _fetch_author_books_by_catalog("B000AUTHOR", "Some Author", "us")
+
+    assert result.asins[:5] == release_date_desc_asins
+    assert result.asins[5:10] == release_date_asc_asins
+
+
 # ============================================================
 # CATALOG ADAPTIVE SLICING (Phases 2-4: rank, probe, spend) -- entirely new
 # code this slice added, with no prior test coverage at all.
@@ -1871,6 +1910,103 @@ async def test_fetch_author_books_by_catalog_dry_streak_stops_walk_and_only_payi
             assert params["products_sort_by"] == _CATALOG_CATEGORY_PROBE_SORT
 
     assert mock_get.await_count == 14  # 3 baseline + 7 probe + 4 spend
+
+
+@pytest.mark.asyncio
+async def test_fetch_author_books_by_catalog_page0_alone_meeting_threshold_still_pays():
+    """Phase 3's score is the sum of BOTH tiers -- page-0 yield plus
+    whatever the rest-page tier adds -- matching the docstring's "across
+    both tiers" (see _fetch_author_books_by_catalog's own docstring). This
+    pins the two failure modes a rest-tier-alone score has, neither of
+    which the sibling dry-streak test above actually exercises (every
+    category there either clears the threshold through its rest pages too,
+    or falls short on page 0 alone by a wide enough margin that both
+    formulas agree):
+
+    CATA's page 0 alone carries exactly CATALOG_DRY_WINDOW_MIN_NEW brand-
+    new ASINs, and reports no total_results at all, so
+    _pages_needed_for(None) == 1 and range(1, 1) is empty -- no rest page
+    is ever fetched for it. A rest-tier-alone score reads that as 0 (the
+    before/after diff spans an empty loop) and would judge CATA dry --
+    silently discarding a page 0 that, on its own, already met the bar --
+    despite CATALOG_DRY_STREAK_LIMIT never having a chance to matter here.
+    The two-tier score credits CATA's page-0 yield and correctly pays it.
+
+    CATB is the control: page 0 alone carries only 5 new ASINs (also no
+    total_results, also no rest page), genuinely below the threshold under
+    either formula -- proving this test doesn't just make every category
+    pay, only the one that actually earned it."""
+    from app.services.audible.authors import _fetch_author_books_by_catalog
+    from app.services.audible.authors.catalog import (
+        _CATALOG_CATEGORY_PROBE_SORT,
+        _CATALOG_CATEGORY_SPEND_SORTS,
+        CATALOG_DRY_WINDOW_MIN_NEW,
+    )
+
+    all_cats = [{"id": "CATA", "name": "Cat A"}, {"id": "CATB", "name": "Cat B"}]
+    baseline_products = [
+        {
+            "asin": "B0BASE0001", "authors": [{"asin": "B000AUTHOR"}],
+            "category_ladders": [{"ladder": all_cats}],
+        },
+        {
+            "asin": "B0BASE0002", "authors": [{"asin": "B000AUTHOR"}],
+            "category_ladders": [{"ladder": all_cats[:1]}],
+        },
+    ]
+
+    spend_tags = {"-ReleaseDate": "CAS1", "ReleaseDate": "CAS2", "Title": "CAS3", "Relevance": "CAS4"}
+
+    async def _get(region, path, params):
+        sort = params["products_sort_by"]
+        category_id = params.get("category_id")
+
+        if category_id is None:
+            # Phase 1 baseline. -ReleaseDate plateaus (page 0 == page 1) to
+            # trigger slicing without needing a large total_results claim.
+            if sort == "-ReleaseDate":
+                return {"total_results": 60, "products": baseline_products}
+            return {"products": []}
+
+        if sort == _CATALOG_CATEGORY_PROBE_SORT:
+            if category_id == "CATA":
+                return {"products": _catalog_asin_match_products("CATAP0", CATALOG_DRY_WINDOW_MIN_NEW)}
+            if category_id == "CATB":
+                return {"products": _catalog_asin_match_products("CATBP0", 5)}
+            raise AssertionError(f"unexpected probe category {category_id}")
+
+        if category_id == "CATA" and sort in _CATALOG_CATEGORY_SPEND_SORTS:
+            return {"total_results": 5, "products": _catalog_asin_match_products(spend_tags[sort], 5)}
+
+        raise AssertionError(f"unexpected category-scoped request: {category_id} {sort}")
+
+    mock_get = AsyncMock(side_effect=_get)
+    with patch("app.services.audible.authors.catalog.audible_get", new=mock_get):
+        result = await _fetch_author_books_by_catalog("B000AUTHOR", "Some Author", "us")
+
+    # No call this walk made ever produced an error -- if the fold reached
+    # into the "unexpected category-scoped request" branch above (CATB
+    # wrongly spent, or CATA never probed), that call's exception would
+    # surface here rather than as a raised pytest failure, since it travels
+    # through an asyncio.gather(..., return_exceptions=True).
+    assert result.sort_errors == []
+    assert result.categories_harvested == 2
+    assert result.categories_considered == 2
+    assert result.categories_expanded == 1  # only CATA paid
+
+    # CATA's cheap-tier probe is folded unconditionally regardless of
+    # dry/paying (page-0 data already paid for is never discarded).
+    assert "B0CATAP00000" in result.asins
+    # The discriminating assertion: CATA's Phase 4 spend only ran because
+    # the two-tier score credited its page-0 yield. Under a rest-tier-alone
+    # score this asin is never fetched at all.
+    assert "B0CAS10000" in result.asins
+    # CATB never earned Phase 4 under either formula.
+    assert "B0CATBP00000" in result.asins
+    for call in mock_get.await_args_list:
+        params = call.args[2]
+        if params.get("category_id") == "CATB":
+            assert params["products_sort_by"] == _CATALOG_CATEGORY_PROBE_SORT
 
 
 @pytest.mark.asyncio
@@ -2271,6 +2407,66 @@ async def test_get_author_books_transient_failure_all_empty_raises_not_found():
             await get_author_books("B000AUTHOR", "us", mock_session)
 
 
+@pytest.mark.asyncio
+async def test_get_author_books_releases_session_after_db_backstop_on_common_path():
+    """session is rolled back after wave 1's name resolution (pre-existing)
+    and again after the wave-4 DB-backstop read (added this slice) -- on the
+    common, non-empty-union path this function's own last touch of session
+    is that DB-backstop read, and everything past it (hydration, kicked off
+    by the caller with this same session) must not find a transaction still
+    open. Two rollbacks total: leaving session checked out idle-in-
+    transaction across the entire hydration is exactly the live-measured
+    defect this second rollback fixes (see _walk_author_books' own comment
+    at the DB-backstop read). This is a call-count regression pin, not a
+    transaction-boundary proof -- a mocked session can't demonstrate the
+    pool-starvation consequence itself; that needs a real Postgres
+    connection, out of scope for this unit suite (see integration tests)."""
+    from app.services.audible.authors import get_author_books
+
+    mock_session = AsyncMock()
+    screen_result = _screen_result(["B0SCREEN001"], product_count=1)
+    catalog_result = _catalog_result(["B0NAME00001"], total_results=1)
+
+    with patch("app.services.audible.authors._fetch_author_books_by_screen", new=AsyncMock(return_value=screen_result)), \
+         patch("app.services.audible.authors._resolve_author_name", new=AsyncMock(return_value="Some Author")), \
+         patch("app.services.audible.authors._fetch_author_books_by_catalog", new=AsyncMock(return_value=catalog_result)), \
+         patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
+         patch("app.services.audible.authors.cache.get", return_value=None), \
+         patch("app.services.audible.authors.persist_author_books_cache_background"):
+        result = await get_author_books("B000AUTHOR", "us", mock_session)
+
+    assert result == ["B0NAME00001", "B0SCREEN001"]
+    assert mock_session.rollback.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_get_author_books_releases_session_again_on_empty_union_fallback():
+    """Complement to the common-path test above: when every live source and
+    the DB backstop come back empty, the union-level cache.get fallback
+    issues its own SELECT (autobeginning a fresh transaction on session the
+    same way the DB-backstop read does) -- so this rare branch needs its
+    OWN third rollback, past the two the common path already gets, to avoid
+    leaving that fallback's own transaction open through to the
+    NotFoundException raised right after it. Same call-count-pin caveat as
+    the sibling test above."""
+    from app.services.audible.authors import get_author_books
+    from app.core.exceptions import NotFoundException
+
+    mock_session = AsyncMock()
+    empty_screen = _screen_result([], pages_fetched=0)
+    empty_catalog = _catalog_result([], total_results=0)
+
+    with patch("app.services.audible.authors._fetch_author_books_by_screen", new=AsyncMock(return_value=empty_screen)), \
+         patch("app.services.audible.authors._resolve_author_name", new=AsyncMock(return_value="Frank Herbert")), \
+         patch("app.services.audible.authors._fetch_author_books_by_catalog", new=AsyncMock(return_value=empty_catalog)), \
+         patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
+         patch("app.services.audible.authors.cache.get", return_value=None):
+        with pytest.raises(NotFoundException):
+            await get_author_books("B000AUTHOR", "us", mock_session)
+
+    assert mock_session.rollback.await_count == 3
+
+
 # ============================================================
 # GET AUTHOR BOOKS — union floor (never smaller than catalog alone)
 # ============================================================
@@ -2475,9 +2671,8 @@ async def test_get_author_books_uses_default_ttl_when_screens_and_catalog_both_c
 async def test_get_author_books_persists_cache_when_name_never_resolved():
     """catalog_clean is trivially True when no author name resolved at all
     (author_name is None) -- nothing to search the catalog with is not a
-    degraded catalog outcome, the same distinction the old name_clean gate
-    drew. A clean screens walk alone is enough to persist here, and the
-    catalog wave must never even be scheduled."""
+    degraded catalog outcome. A clean screens walk alone is enough to
+    persist here, and the catalog wave must never even be scheduled."""
     from app.services.audible.authors import get_author_books
 
     mock_session = AsyncMock()
@@ -2582,16 +2777,62 @@ async def test_get_author_books_caches_with_short_ttl_on_truncated_termination()
 
 
 @pytest.mark.asyncio
-async def test_get_author_books_caches_with_short_ttl_on_plateau_truncated_termination():
-    """A screens walk that plateaus (SCREENS_REASON_PLATEAU_TRUNCATED) is
-    unclean the same way a token repeat or a page cap is -- upstream never
-    confirmed the walk saw everything, so it caches with the short degraded
-    TTL rather than the default one."""
+async def test_get_author_books_caches_with_default_ttl_on_plateau_truncated_termination():
+    """A screens walk that plateaus (SCREENS_REASON_PLATEAU_TRUNCATED) earns
+    the DEFAULT day-long TTL, not the short degraded one, even though it is
+    not SCREENS_REASON_COMPLETED. This is a deliberate reversal of the prior
+    behavior: the cached value is the union of screens, catalog, and DB: the
+    catalog wave runs unconditionally on every request regardless of what
+    screens did, and is judged on its own cleanliness by catalog_clean, so a
+    screens-side plateau reports only that this one wave stopped
+    contributing new content -- the designed handoff to the other two
+    sources -- not that the union itself is missing something. Gating
+    completeness on COMPLETED alone made is_complete permanently unreachable
+    for prolific authors whose screens grid plateaus long before pagination
+    stops climbing, forcing them onto the short TTL forever. If this
+    reverts, do not restore the short TTL for this reason without also
+    restoring the pre-fix decision it was reversing -- see SCREENS_
+    BROKEN_REASONS in screens.py, which deliberately excludes
+    PLATEAU_TRUNCATED from the same set SCREENS_CLEAN_REASONS did include
+    it out of."""
     from app.services.audible.authors import get_author_books
 
     mock_session = AsyncMock()
     screen_result = _screen_result(
         ["B0SCREEN001"], termination_reason=SCREENS_REASON_PLATEAU_TRUNCATED,
+    )
+    catalog_result = _catalog_result(["B0NAME00001"], total_results=1)
+
+    with patch("app.services.audible.authors._fetch_author_books_by_screen", new=AsyncMock(return_value=screen_result)), \
+         patch("app.services.audible.authors._resolve_author_name", new=AsyncMock(return_value="Some Author")), \
+         patch("app.services.audible.authors._fetch_author_books_by_catalog", new=AsyncMock(return_value=catalog_result)), \
+         patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
+         patch("app.services.audible.authors.cache.get", return_value=None), \
+         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist:
+        result = await get_author_books("B000AUTHOR", "us", mock_session)
+
+    assert result == ["B0NAME00001", "B0SCREEN001"]
+    mock_persist.assert_called_once()
+    _, persist_kwargs = mock_persist.call_args
+    assert persist_kwargs["ttl_seconds"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_author_books_caches_with_short_ttl_on_screens_page_error_termination():
+    """Unlike a plateau, a genuine screens-side fetch failure
+    (SCREENS_REASON_PAGE_ERROR) is real breakage, not a designed handoff --
+    the wave stopped because a request errored, not because it ran out of
+    new content to report. This must still earn the short degraded TTL,
+    proving the plateau reclassification above did not widen into a blanket
+    'screens is never unclean' change: PAGE_ERROR stays in SCREENS_
+    BROKEN_REASONS precisely because nothing else confirms whatever that
+    failed page would have contributed."""
+    from app.services.audible.authors import get_author_books
+
+    mock_session = AsyncMock()
+    screen_result = _screen_result(
+        ["B0SCREEN001"], termination_reason=SCREENS_REASON_PAGE_ERROR,
+        page_error="AudibleAPIException: upstream 502",
     )
     catalog_result = _catalog_result(["B0NAME00001"], total_results=1)
 
@@ -3062,26 +3303,6 @@ async def test_get_author_books_shortfall_warning_does_not_fire_on_overshoot():
         if c.args[0] == "Audible Author Books union fell short of the claimed total"
     ]
     assert shortfall_calls == []
-
-
-# test_get_author_books_shortfall_band_below_ceiling_still_writes_cache_and_warns
-# was deleted here, not renamed: it pinned a specific arithmetic band under
-# the OLD three-sort optimistic-upper-bound calculation
-# (len(_CATALOG_SORTS) * CATALOG_RESULT_CEILING) -- a claim that required
-# every sort but didn't exceed that product still read ceiling_saturated
-# False even though the union routinely fell short in practice. That banded
-# imperfection has no analog under the new arithmetic: sliced is now a
-# boolean decision (a baseline plateau or total_results simply exceeding
-# CATALOG_RESULT_CEILING), taken before Phase 2-4 run at all, with no
-# multi-sort product and no band to be caught inside. Nothing replaces this
-# exact test because its subject -- the old multi-sort ceiling's own
-# optimism -- no longer exists as a computation. The property that still
-# matters post-rewrite (does `sliced` alone suppress the generic shortfall
-# warning, regardless of degree) is covered instead by
-# test_get_author_books_shortfall_warning_does_not_fire_when_catalog_sliced_but_clean
-# (in the cache-TTL section above), alongside
-# test_get_author_books_shortfall_warning_fires_past_ten_percent_gap above
-# for the unsliced case.
 
 
 @pytest.mark.asyncio

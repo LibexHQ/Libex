@@ -13,37 +13,83 @@ capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 ## [1.11.0]
 
 ### Added
-- **Author book lookups by ASIN now search Audible's catalog directly across
-  three sort orders and stop dropping non-English editions, instead of
-  leaning on one name-matched search plus the author-detail listing.**
-  `/author/books/{asin}` and `/author/{asin}/books` previously unioned a
-  single name-matched catalog search with Audible's author-detail (screens)
-  listing — neither gets close to a prolific author's whole catalog alone.
-  Discovery now walks the catalog across three sort orders, matching each
-  result to the author by Audible's own author ASIN where it's supplied
-  (falling back to name matching only when it isn't), unions that with the
-  screens listing and with whatever Libex already has stored locally, and no
-  longer filters out non-English editions — that filter had been silently
-  dropping roughly 490 of Agatha Christie's ~1138 US titles. Measured in the
-  US store, Christie went from 149 books returned to 1133. The non-English
-  fix also applies to `/author/books?name=`, the name-only lookup used when
-  no ASIN is available. List order for the ASIN endpoints still starts with
-  the same release-date-ordered results as before, so an existing ASIN keeps
-  its position — a re-fetch only ever adds new titles after it. For an
-  unusually large catalog, Audible's own listings still cap how much any one
-  source hands back, so the result can still fall short of an author's true
-  full catalog; it falls short by far less than before, but "returns a lot
-  more" is not the same as "returns everything." Applies to both the primary
-  and legacy path forms of the ASIN endpoint.
+- **Author lookups return dramatically more books, including editions in
+  every language rather than English only.** `/author/books/{asin}`,
+  `/author/{asin}/books`, and the name-only `/author/books?name=` (used
+  when no ASIN is available) previously relied on a single English-only
+  catalog search by the author's resolved name. Discovery now combines
+  several independent sources — Audible's Android author-detail listing,
+  several passes over the standard catalog search, and whatever Libex
+  already has stored for that author — and no longer filters out
+  non-English editions, a filter that had been silently dropping roughly
+  490 of Agatha Christie's ~1138 US titles. Measured in the US store,
+  Christie's result went from 149 books to 1133. A result is matched to the
+  author by Audible's own author id wherever a result carries one, falling
+  back to a name match — which also catches an author Audible sometimes
+  files a book under a second, alias id — only when it doesn't. List order
+  for the ASIN endpoints is still the same release-date order, but an
+  ASIN's *position* in that list is not stable across re-fetches: every
+  book a caller already had is still guaranteed to come back and to stay in
+  the same order relative to the other books it already had, but a
+  re-fetch's newly-discovered titles are interleaved wherever their own
+  release date puts them, not appended after everything already found — so
+  a book that was previously at index 149 can land somewhere else entirely
+  once a fuller result includes titles that release between it and its
+  neighbours. A caller tracking books by ASIN is unaffected; a caller
+  relying on list position is not. Applies to both the primary and legacy
+  path forms of the ASIN endpoint.
+- **A prolific, multi-genre author's catalog is now also searched by
+  category, past a ceiling that turned out not to be about the author at
+  all.** Audible caps how many results any single catalog search can page
+  through at roughly 500, and that cap applies per search, not per author —
+  a different sort order opens a different 500, and scoping the same search
+  to one of the author's own genres opens another 500 again. For an author
+  whose results plateau against that cap, discovery now also searches
+  within whichever categories their own books actually carry. Measured
+  against Arthur Conan Doyle, whose catalog Audible itself reports at
+  roughly 4501 titles, this brings the result to 4164 books — far more
+  complete than a single search could ever reach, but still short of
+  Audible's own count, not exhaustive. It costs nothing for an author who
+  was already under the cap: Christie's already-thorough result above is
+  unchanged, and this never runs at all for a smaller catalog like Brandon
+  Sanderson's roughly 200 titles.
+
+### Changed
+- **Outbound requests to Audible are now bounded, with author-book requests
+  given a much wider allowance than routine background traffic.** There was
+  previously no limit at all on how many outbound Audible requests could be
+  in flight at once, from any source — a live request's own burst (fetching
+  a prolific author's books can mean dozens of requests for one API call)
+  competed directly with everything else, including the seeder's steady
+  background work, for the same connection. Requests are now bounded, and
+  author-book requests draw from a separate, wider lane than routine
+  background traffic; five such requests running at once against a large
+  catalog now finish in about 5.6 seconds combined, and the seeder's own
+  pace is unaffected.
+- **A result that couldn't be confirmed complete for a very large author is
+  now cached briefly instead of not being cached at all, and two requests
+  for the same author arriving at once now share a single lookup instead of
+  each running their own.** The cache write for an author's book list is
+  now always a merge with whatever's already stored, so it can only grow
+  the list, never shrink it — which is what made withholding an incomplete
+  result from the cache unnecessary. A confirmed-complete result still gets
+  the usual full-day cache lifetime; an incomplete one gets fifteen
+  minutes, so it refreshes soon rather than either never being cached or
+  being trusted for a full day.
+- **The app keeps answering other requests, including `/health`, while a
+  large author's book list is being processed.** Turning Audible's raw
+  response into Libex's response shape is real CPU work that used to run
+  inline on the same thread that serves every request; for a big author
+  (well over a thousand books at once) that could occupy the process long
+  enough to stall everything else waiting on it. That work now happens on a
+  separate thread once a batch is large enough to be worth the hop (roughly
+  100+ books at once — every single-book, series, and search lookup, and
+  any modest author, is unaffected). This costs the large request itself a
+  small amount of extra time — a 1500-book batch takes on the order of
+  180ms to process instead of 150ms — in exchange for the rest of the app
+  staying responsive throughout.
 
 ### Fixed
-- **The author-detail (screens) listing was failing outright.** The request
-  to it was missing a header Audible's Android client always sends, so
-  Audible rejected it and the endpoint silently fell back to name search
-  only. That header is now sent, and a slow or degraded fetch is still
-  served in full to the caller but is no longer written into the cache as if
-  it were the complete answer — so a temporary Audible hiccup can no longer
-  leave a permanently short list cached for later `?cache=true` reads.
 - **Fetching the book details behind a listing no longer discards a whole
   request over one bad batch.** Book details come back from Audible in
   batches of 50 ASINs. Those batches used to run one after another, and if
@@ -59,6 +105,61 @@ capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
   is still returned. This also makes fetching a long list of books
   noticeably faster, which matters more now that author lookups can return
   far more books than before.
+- **A batch that still fails after retries no longer drops the books it
+  already had stored just because other batches in the same request
+  succeeded.** The database fallback above already covered a request that
+  failed outright, but when only one batch of fifty ASINs failed
+  transiently while the rest of a large author's books came back fine (or
+  from cache), that batch's ASINs were never checked against the database
+  at all — a single upstream timeout or rate limit inside a request for,
+  say, 1500 books quietly removed the roughly fifty books that batch owned
+  from the response, with nothing to say so. A batch that still fails after
+  retries is now checked against the database regardless of how the rest of
+  the request went, and whatever's already stored for it is returned
+  alongside everything else the request found.
+- **A prolific author's book list can now actually earn the same full-day
+  cache lifetime as everyone else's, and hold onto it.** Two separate
+  defects stood between a very large author and the caching change above.
+  First, the completeness check that decides between the full-day and the
+  fifteen-minute degraded lifetime treated the discovery wave's plateau —
+  paging as far as Audible's own catalog grid goes, the mechanism the
+  change above depends on — as an unconfirmed result on every author it
+  fired for, so an author whose grid plateaus, like Christie or Doyle,
+  could never satisfy "confirmed complete" and sat on the fifteen-minute
+  lifetime permanently instead, forcing up to 96 full re-walks a day, each
+  hundreds of requests to Audible. Second, even a run that did come back
+  complete had its cache write apply its own lifetime outright regardless
+  of what was already stored, so one later request that happened to hit a
+  single failing page out of hundreds could silently shorten an
+  already-earned full-day window back down to fifteen minutes, with
+  nothing to ever lengthen it again. Plateauing is now recognized as this
+  wave's designed handoff to the other two discovery sources rather than a
+  failure, and a cache write now keeps whichever expiry is later — the one
+  already stored or the one the current run is asking for — so a degraded
+  run can never take back time an earlier, complete run had already
+  earned.
+- **A category search that turns up new titles on its first page but
+  nothing further no longer gets misjudged as a dry category.** The
+  category-scoped search added above (see the discovery entry) scores each
+  category by how many new titles it turns up, moving on once several
+  categories in a row add nothing new — but the score only ever counted a
+  category's slower, later pages, not the fast first page fetched to decide
+  whether those later pages were worth requesting at all. A category whose
+  first page alone already held real new titles, with nothing further on
+  the pages after it, was scored as if it had contributed nothing; a
+  category whose first page came back with no result-count at all skipped
+  its later pages entirely by construction, regardless of what that first
+  page held. Both counted as dry, cutting the search short and silently
+  truncating results for exactly the prolific, multi-genre authors this
+  search exists to serve, with no error raised to say so. The score now
+  counts both.
+- **`?cache=true` on an author's book list now applies to the whole
+  request, not just the first half of it.** The ASIN-based author-books
+  endpoints pass the caller's `cache` flag through to discovery, but the
+  hydration step that turns those ASINs into full book records ran live
+  against Audible regardless of that flag — so a caller explicitly asking
+  for a cached result got cached ASINs and then a fully live re-fetch of
+  every one of those books' details. The flag is now honored end to end.
 - **ASIN format validation now rejects trailing garbage.** The validity check
   matched from the start of the string but stopped at the pattern's `$`
   end-anchor, which treats a trailing newline as "end of string" — so a value

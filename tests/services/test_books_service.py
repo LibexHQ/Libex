@@ -4,6 +4,7 @@ Tests normalization and helper functions without hitting Audible.
 """
 
 # Standard library
+import asyncio
 from unittest.mock import AsyncMock, patch
 
 # Third party
@@ -447,6 +448,354 @@ async def test_get_books_writes_to_db_on_success():
          patch("app.services.audible.books.cache.get", return_value=None):
         await get_books_by_asins(["B08G9PRS1K"], "us", mock_session)
         mock_persist.assert_called_once()
+
+
+# ============================================================
+# CACHE-FIRST READ TESTS (use_cache=True, Audible healthy)
+# ============================================================
+# The DB-fallback tests above only exercise cache.get from the except
+# block, when Audible itself is down -- they say nothing about the
+# use_cache=True short-circuit branches (the ones the ASIN author routes
+# now reach for the first time on this branch, see router.py's use_cache
+# wiring). These pin that a cache hit short-circuits Audible entirely
+# (audible_get is never called) and that the value handed back is not
+# merely "a dict" but the SAME normalized shape a live fetch itself
+# would have produced -- the cached value used here is captured from an
+# actual live fetch through the real normalization path, then round-
+# tripped through the cache-hit branch and compared for exact equality,
+# rather than asserting on a hand-built stand-in dict that could drift
+# from what normalization genuinely emits.
+
+@pytest.mark.asyncio
+async def test_get_books_by_asins_single_asin_cache_hit_matches_live_fetch_shape_and_skips_audible():
+    """use_cache=True with exactly one ASIN takes the single-ASIN cache
+    branch (book.py's own first use_cache check). A hit there must return
+    precisely what a live fetch of the same ASIN would have normalized to,
+    and must never touch Audible at all -- asserted on the audible_get mock
+    directly (not on a side_effect exception) so a bug that reaches Audible
+    but still stumbles onto the right answer via the unrelated except-block
+    DB/cache fallback (which also calls cache.get) cannot pass this by
+    accident; that fallback is starved here by leaving get_books_from_db
+    unmocked against a bare AsyncMock session, which raises rather than
+    quietly returning an empty list the way it would with a real DB."""
+    from app.services.audible.books import get_books_by_asins
+
+    asin = "B08G9PRS1K"
+
+    with patch("app.services.audible.books.audible_get", return_value={"product": _hydration_product(asin)}), \
+         patch("app.services.audible.books.persist_books_background"), \
+         patch("app.services.audible.books.cache.get", return_value=None):
+        live_result = await get_books_by_asins([asin], "us", AsyncMock())
+    assert len(live_result) == 1
+    live_dto = live_result[0]
+
+    with patch("app.services.audible.books.audible_get", new_callable=AsyncMock) as mock_audible_get, \
+         patch("app.services.audible.books.cache.get", new=AsyncMock(return_value=live_dto)) as mock_cache_get:
+        cached_result = await get_books_by_asins([asin], "us", AsyncMock(), use_cache=True)
+
+    mock_audible_get.assert_not_called()
+    mock_cache_get.assert_awaited_once()
+    assert cached_result == [live_dto]
+
+
+@pytest.mark.asyncio
+async def test_get_books_by_asins_all_cache_hits_matches_live_fetch_shape_and_skips_audible():
+    """use_cache=True with more than one ASIN takes the batch cache branch
+    -- when every requested ASIN is a hit, fetch_asins ends up empty and
+    the function returns straight from the cache list without ever
+    reaching the chunk fan-out / Audible at all. Same live-fetch-shape
+    parity check and same not-called (rather than side_effect-raises)
+    discriminator as the single-ASIN sibling above, across two ASINs."""
+    from app.services.audible.books import get_books_by_asins
+
+    asins = ["B08G9PRS1K", "B0CACHED02"]
+
+    async def _get(region, path, params):
+        requested = params["asins"].split(",")
+        return {"products": [_hydration_product(a) for a in requested]}
+
+    with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.books.persist_books_background"), \
+         patch("app.services.audible.books.cache.get", return_value=None):
+        live_result = await get_books_by_asins(asins, "us", AsyncMock())
+    assert len(live_result) == 2
+    live_by_asin = {b["asin"]: b for b in live_result}
+
+    async def _cache_get(session, key):
+        for asin, dto in live_by_asin.items():
+            if key.endswith(asin):
+                return dto
+        return None
+
+    with patch("app.services.audible.books.audible_get", new_callable=AsyncMock) as mock_audible_get, \
+         patch("app.services.audible.books.cache.get", new=AsyncMock(side_effect=_cache_get)) as mock_cache_get:
+        cached_result = await get_books_by_asins(asins, "us", AsyncMock(), use_cache=True)
+
+    mock_audible_get.assert_not_called()
+    assert mock_cache_get.await_count == 2
+    assert {b["asin"] for b in cached_result} == set(asins)
+    assert cached_result == [live_by_asin[a] for a in asins]
+
+
+# ============================================================
+# PARALLEL HYDRATION TESTS (get_books_by_asins chunk fan-out)
+# ============================================================
+
+def _hydration_product(asin):
+    """Minimal product shape that survives _normalize_product/_filter_products
+    unscathed -- a real title and a non-placeholder publication_datetime."""
+    return {
+        "asin": asin, "title": f"Book {asin}", "authors": [], "narrators": [],
+        "relationships": [], "product_images": {}, "category_ladders": [],
+        "rating": {}, "publication_datetime": "2021-01-01T00:00:00Z",
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_books_by_asins_preserves_chunk_order_regardless_of_completion_order():
+    """asyncio.gather preserves input order regardless of which chunk's
+    request finishes first -- chunk 1 (50 ASINs) is made to resolve slower
+    than chunk 2 (5 ASINs), but the returned book list must still be in the
+    original requested-ASIN order, not completion order."""
+    from app.services.audible.books import get_books_by_asins
+
+    mock_session = AsyncMock()
+    chunk1_asins = [f"B0CHUNK1{i:02d}" for i in range(50)]
+    chunk2_asins = [f"B0CHNK2{i:03d}" for i in range(5)]
+    all_asins = chunk1_asins + chunk2_asins
+
+    async def _get(region, path, params):
+        asins = params["asins"].split(",")
+        if asins == chunk1_asins:
+            await asyncio.sleep(0.03)  # slower chunk, still must end up first
+        return {"products": [_hydration_product(a) for a in asins]}
+
+    with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.books.persist_books_background"), \
+         patch("app.services.audible.books.cache.get", return_value=None):
+        result = await get_books_by_asins(all_asins, "us", mock_session)
+
+    assert [b["asin"] for b in result] == all_asins
+
+
+@pytest.mark.asyncio
+async def test_get_books_by_asins_not_found_chunk_does_not_discard_other_chunks():
+    """A 404 on one chunk marks only that chunk's ASINs not-found and must
+    not discard results already fetched from other chunks -- the old
+    sequential code discarded every already-fetched chunk on any failure."""
+    from app.services.audible.books import get_books_by_asins
+    from app.core.exceptions import NotFoundException
+
+    mock_session = AsyncMock()
+    good_asins = [f"B0GOOD{i:03d}" for i in range(50)]
+    missing_asin = "B0MISSING1"  # 51st ASIN -> its own single-ASIN chunk
+    all_asins = good_asins + [missing_asin]
+
+    async def _get(region, path, params):
+        if "asins" in params:
+            asins = params["asins"].split(",")
+            return {"products": [_hydration_product(a) for a in asins]}
+        raise NotFoundException()  # the single-ASIN chunk's 404
+
+    with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.books.get_books_from_db", new_callable=AsyncMock) as mock_backstop, \
+         patch("app.services.audible.books.persist_books_background"), \
+         patch("app.services.audible.books.cache.get", return_value=None):
+        result = await get_books_by_asins(all_asins, "us", mock_session)
+
+    assert len(result) == 50
+    assert {b["asin"] for b in result} == set(good_asins)
+    # A confirmed 404 must never fall through to the DB backstop -- that
+    # backstop is scoped to transient_failed_asins alone (see
+    # get_books_by_asins' own comment at the DB-backstop read): a 404 is a
+    # confirmed absence, not a retry signal, and papering over it with
+    # whatever stale data the DB happens to hold would be exactly the kind
+    # of silent, wrong content data-integrity forbids. Asserting the mock
+    # was never called (rather than just checking missing_asin isn't in the
+    # result) is deliberate: with get_books_from_db left unmocked, a real
+    # call here still returns [] against a bare AsyncMock session, so the
+    # weaker assertion would pass whether or not the backstop had actually
+    # fired for this confirmed-404 ASIN -- exactly the kind of gap that let
+    # this branch's own not_found/transient split ship with nothing to
+    # prove it holds.
+    mock_backstop.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_get_books_by_asins_not_found_and_transient_together_backstop_scoped_to_transient_only():
+    """Both buckets populated in the same request -- a 404'd single-ASIN
+    chunk and a separately-failing 50-ASIN transient chunk -- alongside a
+    third, successful 50-ASIN batch (forcing all_products non-empty so the
+    run actually reaches the DB-backstop branch at all, unlike a
+    not-found-only call, which returns early before ever reaching it --
+    see the sibling test above, and note that early return is exactly the
+    gap that let the mutated backstop condition
+    `transient_failed_asins or not_found_asins` pass every pre-existing
+    test in this file, including that sibling, untouched). The DB
+    genuinely has rows for every ASIN in both failed buckets; only the
+    transient ones may be resurrected -- the 404'd one, a confirmed
+    absence, must never appear even though the same DB call would have
+    handed it back if the scoping were wrong."""
+    from app.services.audible.books import get_books_by_asins
+    from app.core.exceptions import NotFoundException
+
+    mock_session = AsyncMock()
+    good_asins = [f"B0GOOD{i:03d}" for i in range(50)]
+    bad_asins = [f"B0BAD{i:03d}" for i in range(50)]  # whole-chunk transient failure
+    missing_asin = "B0MISSING1"  # its own single-ASIN chunk -> 404
+    all_asins = good_asins + bad_asins + [missing_asin]
+    stale_missing_book = {"asin": missing_asin, "title": "Stale, no longer on Audible"}
+    stale_bad_books = [{"asin": a, "title": "From DB backstop"} for a in bad_asins]
+
+    async def _get(region, path, params):
+        if "asins" in params:
+            asins = params["asins"].split(",")
+            if asins == good_asins:
+                return {"products": [_hydration_product(a) for a in asins]}
+            raise RuntimeError("Audible 500")  # the bad_asins batch chunk
+        raise NotFoundException()  # missing_asin's own single-ASIN chunk
+
+    async def _db_backstop(session, asins):
+        assert missing_asin not in asins, "not_found_asins leaked into the DB-backstop call"
+        return [b for b in stale_bad_books + [stale_missing_book] if b["asin"] in asins]
+
+    with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.books.get_books_from_db", new=AsyncMock(side_effect=_db_backstop)) as mock_backstop, \
+         patch("app.services.audible.books.persist_books_background"), \
+         patch("app.services.audible.books.cache.get", return_value=None):
+        result = await get_books_by_asins(all_asins, "us", mock_session)
+
+    mock_backstop.assert_awaited_once_with(mock_session, bad_asins)
+    assert set(bad_asins) <= {b["asin"] for b in result}
+    assert stale_missing_book not in result
+    assert missing_asin not in {b["asin"] for b in result}
+
+
+@pytest.mark.asyncio
+async def test_get_books_by_asins_transient_chunk_failure_is_skipped_not_fatal():
+    """A non-404 exception on one chunk is logged and skipped from the
+    Audible-hydration list; the other chunk's results still come back rather
+    than the whole request failing. The DB backstop scoped to exactly the
+    transiently-failed ASINs is unioned into the return value rather than
+    silently dropped -- the defect data-integrity found this test had
+    LOCKED IN: without mocking get_books_from_db, the call went through to
+    the real function against a bare AsyncMock session and gave no signal
+    either way on whether the backstop fired."""
+    from app.services.audible.books import get_books_by_asins
+
+    mock_session = AsyncMock()
+    good_asins = [f"B0GOOD{i:03d}" for i in range(50)]
+    bad_asin = "B0BADCHUNK"  # single-ASIN chunk that fails transiently
+    all_asins = good_asins + [bad_asin]
+    db_backstop_book = {"asin": bad_asin, "title": "From DB backstop"}
+
+    async def _get(region, path, params):
+        if "asins" in params:
+            asins = params["asins"].split(",")
+            return {"products": [_hydration_product(a) for a in asins]}
+        raise RuntimeError("Audible 500")
+
+    with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.books.persist_books_background"), \
+         patch("app.services.audible.books.get_books_from_db", new_callable=AsyncMock, return_value=[db_backstop_book]) as mock_backstop, \
+         patch("app.services.audible.books.cache.get", return_value=None):
+        result = await get_books_by_asins(all_asins, "us", mock_session)
+
+    mock_backstop.assert_awaited_once_with(mock_session, [bad_asin])
+    assert {b["asin"] for b in result} == set(good_asins) | {bad_asin}
+    assert db_backstop_book in result
+
+
+@pytest.mark.asyncio
+async def test_get_books_by_asins_reraises_when_only_transient_failures_and_nothing_came_back():
+    """When every chunk fails transiently (no 404s) and nothing at all came
+    back, the first transient exception re-raises to preserve the
+    DB-then-cache fallback in the except block below -- this must not
+    silently collapse to an empty-list return instead of falling back."""
+    from app.services.audible.books import get_books_by_asins
+
+    mock_session = AsyncMock()
+    asins = [f"B0BAD{i:03d}" for i in range(60)]  # 2 chunks, both fail transiently
+    db_book = {"asin": asins[0], "title": "From DB"}
+
+    with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=RuntimeError("Audible 500"))), \
+         patch("app.services.audible.books.get_books_from_db", new=AsyncMock(return_value=[db_book])), \
+         patch("app.services.audible.books.cache.get", return_value=None):
+        result = await get_books_by_asins(asins, "us", mock_session)
+
+    assert result == [db_book]
+    mock_session.rollback.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_books_by_asins_partial_shortfall_warning_fires_on_not_found_alone():
+    """The 'Partial hydration shortfall' warning fires when the not-found
+    bucket alone is non-empty, with zero transient failures."""
+    from app.services.audible.books import get_books_by_asins
+    from app.core.exceptions import NotFoundException
+
+    mock_session = AsyncMock()
+    good_asins = [f"B0GOOD{i:03d}" for i in range(50)]
+    missing_asin = "B0MISSING1"
+    all_asins = good_asins + [missing_asin]
+
+    async def _get(region, path, params):
+        if "asins" in params:
+            asins = params["asins"].split(",")
+            return {"products": [_hydration_product(a) for a in asins]}
+        raise NotFoundException()
+
+    with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.books.persist_books_background"), \
+         patch("app.services.audible.books.cache.get", return_value=None), \
+         patch("app.services.audible.books.logger") as mock_logger:
+        await get_books_by_asins(all_asins, "us", mock_session)
+
+    shortfall_calls = [
+        c for c in mock_logger.warning.call_args_list if c.args[0] == "Partial hydration shortfall"
+    ]
+    assert len(shortfall_calls) == 1
+    extra = shortfall_calls[0].kwargs["extra"]
+    assert extra["not_found_asins"] == 1
+    assert extra["failed_asins"] == 0
+
+
+@pytest.mark.asyncio
+async def test_get_books_by_asins_partial_shortfall_warning_fires_on_transient_alone():
+    """The 'Partial hydration shortfall' warning fires when the transient-
+    failure bucket alone is non-empty, with zero not-found ASINs, and the
+    DB backstop scoped to that same transient-failure bucket is still
+    unioned into the result. Same unmocked-get_books_from_db gap as its
+    sibling above: without the mock this gave no real signal on the fix."""
+    from app.services.audible.books import get_books_by_asins
+
+    mock_session = AsyncMock()
+    good_asins = [f"B0GOOD{i:03d}" for i in range(50)]
+    bad_asin = "B0BADCHUNK"
+    all_asins = good_asins + [bad_asin]
+    db_backstop_book = {"asin": bad_asin, "title": "From DB backstop"}
+
+    async def _get(region, path, params):
+        if "asins" in params:
+            asins = params["asins"].split(",")
+            return {"products": [_hydration_product(a) for a in asins]}
+        raise RuntimeError("Audible 500")
+
+    with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.books.persist_books_background"), \
+         patch("app.services.audible.books.get_books_from_db", new_callable=AsyncMock, return_value=[db_backstop_book]), \
+         patch("app.services.audible.books.cache.get", return_value=None), \
+         patch("app.services.audible.books.logger") as mock_logger:
+        result = await get_books_by_asins(all_asins, "us", mock_session)
+
+    shortfall_calls = [
+        c for c in mock_logger.warning.call_args_list if c.args[0] == "Partial hydration shortfall"
+    ]
+    assert len(shortfall_calls) == 1
+    extra = shortfall_calls[0].kwargs["extra"]
+    assert extra["not_found_asins"] == 0
+    assert extra["failed_asins"] == 1
+    assert db_backstop_book in result
 
 
 @pytest.mark.asyncio

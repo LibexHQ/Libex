@@ -34,7 +34,7 @@ ASIN_PATTERN = re.compile(r'^[A-Z0-9]{10}$')
 
 def is_valid_asin(asin: str) -> bool:
     """Validates that a string matches Audible ASIN format."""
-    return bool(ASIN_PATTERN.match(asin.upper()))
+    return bool(ASIN_PATTERN.fullmatch(asin.upper()))
 
 
 # ============================================================

@@ -784,6 +784,43 @@ async def get_author_from_db(session: AsyncSession, asin: str, region: str) -> d
         return None
 
 
+async def get_author_book_asins_from_db(
+    session: AsyncSession, author_asin: str, region: str
+) -> list[str] | None:
+    """
+    Fetches only the book ASINs for an author from the DB — a single-column
+    projection with no relationship loading, for callers that only need the
+    ASIN list (e.g. as a merge input) and would otherwise pay for the fully
+    hydrated rows from get_author_books_from_db and discard everything but
+    the asin. ASINs are returned exactly as stored, uppercase or not; the
+    caller is responsible for canonicalizing case at its merge site.
+
+    Returns `None` if the read itself failed, distinct from an empty list,
+    which means the author genuinely has no stored books — a caller feeding
+    this into an authoritative write must not treat the two as the same
+    thing.
+    """
+    try:
+        result = await session.execute(
+            select(Book.asin)
+            .join(author_book, author_book.c.book_asin == Book.asin)
+            .join(Author, Author.id == author_book.c.author_id)
+            .where(Author.asin == author_asin, Author.region == region)
+            .distinct()
+        )
+        return [row[0] for row in result.fetchall()]
+    except Exception as e:
+        logger.warning(
+            "DB read failed for author book asins",
+            extra={
+                "author_asin": author_asin,
+                "region": region,
+                "error_type": type(e).__name__,
+            },
+        )
+        return None
+
+
 async def get_author_books_from_db(
     session: AsyncSession,
     author_asin: str,

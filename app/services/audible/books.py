@@ -9,7 +9,9 @@ Falls back to DB when Audible is unavailable.
 """
 
 # Standard library
+import asyncio
 import time
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from typing import Any
 
@@ -26,7 +28,7 @@ from app.core.logging import get_logger
 from app.core.utils import strip_html, strip_image_size_suffix
 
 # Services
-from app.services.audible.client import audible_get, REGION_MAP
+from app.services.audible.client import audible_get, author_books_concurrency, REGION_MAP
 from app.services.cache import manager as cache
 from app.services.cache.manager import book_key, chapters_key
 from app.services.db.writer import persist_books_background, persist_track_background, upsert_track
@@ -47,6 +49,23 @@ BOOK_RESPONSE_GROUPS = (
 IMAGE_SIZES = "500,1000,2400,3200"
 
 UNRELEASED_PLACEHOLDER = "2200-01-01T00:00:00Z"
+
+# Below this many products, normalization runs inline on the event loop; at
+# or above it, the whole batch is handed to a single asyncio.to_thread call.
+# Measured (scratchpad benchmark, not part of this repo): a lone product
+# normalizes in ~0.2ms and a 50-ASIN chunk -- the largest a single Audible
+# catalog request ever returns, see the chunking below -- in ~4-5ms, while
+# the to_thread hop itself costs ~0.3-0.5ms of fixed overhead regardless of
+# batch size. Every book/series/search caller (single ASIN up to one chunk)
+# stays under this threshold and keeps its current inline timing exactly.
+# It's only get_author_books' hydration, which accumulates products across
+# many chunks before normalizing once, that can cross it -- the flagged
+# ~1530-product case blocks the loop for ~150ms inline with nothing else
+# able to run in that window, against ~180ms threaded but with the loop free
+# to service other requests throughout. The thread hop is a net wall-clock
+# loss at every size tested; the point is solely to stop a single request
+# from stalling every other connection the process is holding.
+NORMALIZE_THREAD_THRESHOLD = 100
 
 
 # ============================================================
@@ -205,6 +224,34 @@ def _normalize_product(product: dict, region: str) -> dict[str, Any]:
     }
 
 
+async def _normalize_products(products: list[dict], region: str) -> list[dict[str, Any]]:
+    """
+    Normalizes a batch of raw Audible products, offloading the whole batch
+    to a worker thread when it's large enough to be worth the hop (see
+    NORMALIZE_THREAD_THRESHOLD). One thread hop for the entire batch, never
+    one per product -- per-product hops would each pay the hop's own fixed
+    cost on top of the ~0.2ms of work being moved, which loses badly at the
+    hundreds-to-low-thousands sizes this exists for.
+
+    _normalize_product touches only its own arguments and pure helpers
+    (strip_html, strip_image_size_suffix, datetime parsing) -- no DB session,
+    no cache, no shared mutable state, and no read of any ContextVar, so
+    running it on another thread carries no correctness risk. In particular
+    it never reads the author_books_concurrency ContextVar in client.py,
+    which wouldn't propagate into a to_thread worker the way a normal await
+    does -- moot here since nothing in this path looks at it.
+
+    Ordering matches the input list either way (a single list comprehension,
+    run inline or inside one to_thread call), and a malformed product raises
+    out of that comprehension exactly as it always has -- offloading doesn't
+    change which products succeed or fail relative to each other, only which
+    thread does the work.
+    """
+    if len(products) < NORMALIZE_THREAD_THRESHOLD:
+        return [_normalize_product(p, region) for p in products]
+    return await asyncio.to_thread(lambda: [_normalize_product(p, region) for p in products])
+
+
 def _normalize_chapters(data: dict, asin: str) -> dict[str, Any]:
     """Normalizes raw Audible chapter data into AudiMeta's TrackContentDto format."""
     chapter_info = data.get("content_metadata", {}).get("chapter_info", {})
@@ -231,7 +278,17 @@ def _normalize_chapters(data: dict, asin: str) -> dict[str, Any]:
 
 
 def _filter_products(products: list[dict]) -> list[dict]:
-    """Filters out unreleased placeholder products."""
+    """Filters out unreleased placeholder products.
+
+    Also load-bearing for resolving a nonexistent-but-well-formed ASIN to
+    "not found": probed live, Audible's catalog endpoints don't 404 for one
+    of those in either _fetch_chunk branch -- they return 200 with a
+    hollow, titleless stub instead (a bogus single ASIN and a bogus ASIN
+    in a batch request both came back that way; a real ASIN came back
+    fully populated). Dropping anything with no title here is what turns
+    that stub into an empty result rather than a phantom book with every
+    field blank.
+    """
     return [
         p for p in products
         if p.get("title")
@@ -278,11 +335,24 @@ async def get_books_by_asins(
     region: str,
     session: AsyncSession,
     use_cache: bool = False,
+    high_concurrency: bool = False,
 ) -> list[dict[str, Any]]:
     """
     Fetches one or more books by ASIN from Audible.
     Writes results to relational DB and cache.
     Falls back to DB then cache when Audible is unavailable.
+
+    high_concurrency, when True, runs the chunk fan-out below inside
+    author_books_concurrency() (see client.py), drawing from the wider
+    AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT pool instead of the default one.
+    Set only by the author-ASIN routes hydrating get_author_books' own
+    result -- the one path where a single request legitimately fans out to
+    dozens of chunk requests and a live, measured production outage
+    (5 concurrent author lookups 504ing at the fronting proxy's 30s timeout)
+    traced directly back to that fan-out being serialized behind the
+    default pool. Every other caller (single/small ASIN lists from the book,
+    series, and search routes, and the seeder) defaults to False and is
+    unaffected.
     """
     if not asins:
         raise NotFoundException("No ASINs provided")
@@ -315,29 +385,109 @@ async def get_books_by_asins(
     try:
         start = time.monotonic()
         chunks = [fetch_asins[i:i + 50] for i in range(0, len(fetch_asins), 50)]
-        all_products = []
-        for chunk in chunks:
-            products = await _fetch_chunk(chunk, region)
-            all_products.extend(products)
+
+        # Fire every chunk concurrently -- audible_get itself is the throttle
+        # point (a process-wide bound lives there), so nothing here needs to
+        # cap fan-out. return_exceptions=True so a bad chunk can't wipe out
+        # the chunks that already came back; gather still guarantees results
+        # line up with chunks by index regardless of completion order, so
+        # reassembly below stays in the same order the caller passed in.
+        #
+        # nullcontext when high_concurrency is False keeps every other
+        # caller's behavior byte-identical to before this parameter existed
+        # -- the pool draw only changes for the one path that opts in.
+        pool_context = author_books_concurrency() if high_concurrency else nullcontext()
+        with pool_context:
+            results = await asyncio.gather(
+                *(_fetch_chunk(chunk, region) for chunk in chunks),
+                return_exceptions=True,
+            )
 
         requested_took = round((time.monotonic() - start) * 1000, 2)
+
+        all_products: list[dict[str, Any]] = []
+        not_found_asins: list[str] = []
+        transient_failed_asins: list[str] = []
+        transient_errors: list[Exception] = []
+
+        for idx, (chunk, result) in enumerate(zip(chunks, results)):
+            if isinstance(result, NotFoundException):
+                # Only the single-ASIN branch of _fetch_chunk can raise this
+                # at all -- the batch endpoint's own response is always a 200
+                # with a products array, even when every requested ASIN is
+                # unknown, so a batch chunk never surfaces as an exception
+                # here. A nonexistent-but-well-formed ASIN doesn't reach this
+                # branch either way: probed live, Audible returns 200 with a
+                # hollow, titleless stub for one of those in both branches,
+                # and _filter_products (see that function) is what turns that
+                # stub into nothing to add rather than a 404. Whatever does
+                # reach this branch is terminal for that one ASIN regardless,
+                # not a reason to discard everything else that already
+                # succeeded.
+                not_found_asins.extend(chunk)
+                continue
+            if isinstance(result, Exception):
+                transient_failed_asins.extend(chunk)
+                transient_errors.append(result)
+                logger.warning(
+                    f"Hydration chunk {idx + 1}/{len(chunks)} failed for "
+                    f"{len(chunk)} ASINs ({region}): {type(result).__name__}: {result}"
+                )
+                continue
+            all_products.extend(result)
+
+        if not_found_asins or transient_failed_asins:
+            logger.warning("Partial hydration shortfall", extra={
+                "requested_num": len(fetch_asins),
+                "not_found_asins": len(not_found_asins),
+                "failed_asins": len(transient_failed_asins),
+                "region": region,
+            })
+
+        # Every chunk that mattered failed transiently and nothing else came
+        # back -- fall through to the DB/cache fallback below exactly as a
+        # single sequential failure would have. A pure not-found (no transient
+        # errors) does NOT take this path: 404 is terminal, not a retry signal.
+        if transient_failed_asins and not all_products and not cached_results:
+            raise transient_errors[0]
 
         if not all_products and not cached_results:
             return []
 
-        normalized = [_normalize_product(p, region) for p in all_products]
+        # less-data-never-accepted for a partial transient failure: some
+        # chunks succeeding (or use_cache already producing cache hits) used
+        # to skip the DB backstop entirely for transient_failed_asins,
+        # silently omitting whatever was already stored for exactly the
+        # ASINs the failed chunk(s) covered -- a 1500-ASIN author plus one
+        # upstream 503 dropped the ~50 stored books that chunk owned, and
+        # use_cache=True with every chunk failing returned cache hits only.
+        # Scoped to transient_failed_asins alone, never not_found_asins: a
+        # 404 is a confirmed absence, not a retry signal, and must not be
+        # papered over by stale DB data. Runs whenever any chunk failed
+        # transiently, independent of whether all_products or cached_results
+        # already have something, so neither can silently swallow it the way
+        # both used to.
+        db_backstop_results: list[dict[str, Any]] = []
+        if transient_failed_asins:
+            db_backstop_results = await get_books_from_db(session, transient_failed_asins)
 
-        # Persist to DB and cache in the background
-        persist_books_background(normalized, region)
+        normalized = await _normalize_products(all_products, region)
+
+        if all_products:
+            # Persist to DB and cache in the background
+            persist_books_background(normalized, region)
 
         logger.info("Requested books from Audible", extra={
             "requested_num": len(fetch_asins),
             "cache_hits": len(cached_results),
             "requested_took": requested_took,
+            "not_found_asins": len(not_found_asins),
+            "failed_asins": len(transient_failed_asins),
+            "db_backstop_num": len(db_backstop_results),
             "region": region,
         })
 
-        return cached_results + normalized
+        return cached_results + normalized + db_backstop_results
 
     except NotFoundException:
         raise

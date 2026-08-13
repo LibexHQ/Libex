@@ -18,9 +18,19 @@ class NotFoundException(LibexException):
 
 
 class AudibleAPIException(LibexException):
-    """Raised when the Audible API returns an unexpected response."""
-    def __init__(self, message: str = "Audible API error"):
+    """Raised when the Audible API returns an unexpected response.
+
+    `status_code` is always 502 — it is what Libex returns to its own callers
+    and is part of the AudiMeta-compatible response surface, so it never
+    carries the upstream value. `upstream_status` is what Audible itself
+    reported, kept separately so callers can distinguish a permanent 4xx from
+    a transient failure. It is `None` when there was no HTTP response at all
+    (timeouts, connection errors), and that absence is itself meaningful: no
+    status means the failure could not have been a deliberate rejection.
+    """
+    def __init__(self, message: str = "Audible API error", upstream_status: int | None = None):
         super().__init__(message, status_code=502)
+        self.upstream_status = upstream_status
 
 
 class CacheException(LibexException):

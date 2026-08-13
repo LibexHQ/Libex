@@ -4,6 +4,7 @@ Ensures exceptions carry correct status codes and messages.
 """
 
 # Third party
+import pytest
 
 # Local
 from app.core.exceptions import (
@@ -61,6 +62,30 @@ def test_audible_api_exception_default_message():
     """AudibleAPIException has default message."""
     exc = AudibleAPIException()
     assert exc.message == "Audible API error"
+
+
+def test_audible_api_exception_upstream_status_defaults_to_none():
+    """upstream_status defaults to None when the caller doesn't pass one --
+    the backfill relies on this default meaning 'no HTTP response happened'
+    (a timeout or connection error), not 'unknown'."""
+    exc = AudibleAPIException()
+    assert exc.upstream_status is None
+
+
+def test_audible_api_exception_stores_passed_upstream_status():
+    """A passed upstream_status is stored as-is."""
+    exc = AudibleAPIException("bad request", upstream_status=400)
+    assert exc.upstream_status == 400
+
+
+@pytest.mark.parametrize("upstream_status", [None, 400, 404, 429, 500, 503])
+def test_audible_api_exception_status_code_stays_502_regardless_of_upstream_status(upstream_status):
+    """status_code is always 502 -- Libex's own client-facing surface --
+    no matter what upstream_status carries. This is the guard against
+    collapsing the two fields into one, which would leak Audible's raw
+    status (e.g. 400) back to Libex's own callers."""
+    exc = AudibleAPIException("error", upstream_status=upstream_status)
+    assert exc.status_code == 502
 
 
 def test_cache_exception_status_code():

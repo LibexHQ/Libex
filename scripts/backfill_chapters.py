@@ -21,9 +21,33 @@ Design notes:
   confirmed by cross-region probing. Retrying them would waste requests, never
   drain the queue, and falsely trip the error back-off. So a 404 is marked
   checked and counted as "not found", NOT as an error.
-- Only real transient failures (500s, timeouts, network errors) count as errors
-  and drive the back-off — that's the actual signature of the exit IP being
-  throttled.
+- A confirmed-permanent non-404 status is terminal too, the same way: currently
+  just 400, since that's the only one actually observed — the same ~43 ASINs
+  answered 400 on every cycle across six days of production logs, the set
+  growing monotonically (2 to 43) and never clearing on retry. client.py's
+  AudibleAPIException carries the real upstream HTTP status
+  (`upstream_status`; `None` for a timeout or connection failure, which never
+  reached Audible at all), so this script marks a permanent status checked and
+  counts it as "permanent" rather than looping it forever as a generic error.
+- The rolling back-off window counts every failure that plausibly means the
+  exit IP itself is in trouble: a 429, a 5xx, a timeout or connection failure
+  (the latter two arrive as `upstream_status is None`), and a 401/403. 401/403
+  is deliberately left off the *permanent* list — Libex sends no Authorization
+  header, so an anonymous call getting a 401/403 is far more likely a real IP
+  or proxy block than a fact about that ASIN, and marking the ASIN checked
+  would permanently lose it once the block clears — and that exact same
+  reasoning is why it DOES feed the back-off window: it's the
+  plausible-IP-trouble case the window exists to catch. Checked directly
+  against the real API rather than assumed: `GET /1.0/library` with no
+  credentials returns 403 "Request could not be authenticated" — an
+  account/session-level rejection, not a per-title one — while genuine
+  per-ASIN restrictions surface as a descriptive 400 instead (confirmed live
+  for the ASINs this queue actually produces one for: "is a non_audio asset
+  with contentDeliveryType:Bundle"). Excluded from the window: confirmed
+  per-record facts (a 404, a confirmed-permanent status like 400), and any
+  failure that never became an `AudibleAPIException` at all, so there is no
+  `upstream_status` to classify — a 200 whose body failed to parse, a local
+  write error. Pausing fixes none of those.
 - Rate is a small random delay per request (averaging ~1/s, never bursting) plus
   a macro on/off schedule (~12h active, then a random pause), so the traffic
   isn't mechanically uniform.
@@ -59,7 +83,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.db.models import Book, Track
 
 # Core
-from app.core.exceptions import NotFoundException
+from app.core.exceptions import AudibleAPIException, NotFoundException
 from app.core.logging import get_logger, setup_logging
 
 # Services
@@ -101,8 +125,10 @@ PAUSE_MAX_HOURS = _env_float("BACKFILL_PAUSE_MAX_HOURS", 11.0)
 # not a rate knob).
 CHUNK_SIZE = _env_int("BACKFILL_CHUNK_SIZE", 500)
 
-# back-off: if the last WINDOW attempts had more than THRESHOLD real errors
-# (NOT 404s), the exit IP is probably being throttled — pause hard for COOLDOWN.
+# back-off: if the last WINDOW attempts had more than THRESHOLD failures where
+# pausing is a plausible remedy (NOT 404s, NOT a confirmed-permanent status
+# like 400 — see _is_backoff_signal), the exit IP is probably being
+# throttled — pause hard for COOLDOWN.
 ERROR_WINDOW = _env_int("BACKFILL_ERROR_WINDOW", 50)
 ERROR_THRESHOLD = _env_int("BACKFILL_ERROR_THRESHOLD", 25)
 ERROR_COOLDOWN = _env_float("BACKFILL_ERROR_COOLDOWN", 1800.0)  # 30 min
@@ -188,19 +214,56 @@ class _Outcome:
     STORED = "stored"        # chapters fetched and saved
     NONE = "none"            # resolved but Audible exposes no chapters
     NOT_FOUND = "not_found"  # 404 — record has no fetchable chapters anywhere (terminal)
-    ERROR = "error"          # transient failure (500/timeout/network) — retry later
+    PERMANENT = "permanent"  # confirmed-permanent non-404 status (currently just 400) — terminal
+    ERROR = "error"          # unresolved failure; retried, and counts toward the plain error total
 
 
-async def _process_one(session: AsyncSession, asin: str, region: str) -> str:
+# Non-404 upstream statuses treated as a permanent fact about the specific
+# record rather than a failure worth retrying. Limited to 400 — see the
+# module docstring above for the evidence (six days of production logs, the
+# ~43-ASIN set, and the live-confirmed "non_audio asset with
+# contentDeliveryType:Bundle" message). 410 would belong here too if Audible
+# ever returned it for this endpoint, but there's zero evidence of that, so
+# it isn't added speculatively. 401/403 are deliberately NOT here — see
+# _is_backoff_signal and the module docstring for why they're kept
+# retryable instead.
+_PERMANENT_UPSTREAM_STATUSES = {400}
+
+
+def _is_backoff_signal(upstream_status: int | None) -> bool:
+    """True for every failure that plausibly means the exit IP itself is in
+    trouble, rather than a fact about the specific ASIN: no response at all
+    (a timeout or connection failure, which arrives as upstream_status is
+    None), a 429, a 5xx, or a 401/403. The 401/403 case was checked against
+    the real API rather than assumed: GET /1.0/library with no credentials
+    returns 403 "Request could not be authenticated" — an account/session-
+    level rejection, not a per-title one — while every per-ASIN restriction
+    found instead surfaces as a descriptive 400 (see
+    _PERMANENT_UPSTREAM_STATUSES). So a 401/403 here is exactly the class of
+    failure this window exists to catch, not a per-record fact to exclude
+    from it. Excluded: confirmed per-record facts (404, and any status in
+    _PERMANENT_UPSTREAM_STATUSES) — those never reach this function at all,
+    since _process_one returns before calling it for those cases."""
+    if upstream_status is None or upstream_status in (401, 403, 429):
+        return True
+    return 500 <= upstream_status < 600
+
+
+async def _process_one(session: AsyncSession, asin: str, region: str) -> tuple[str, bool]:
     """
     Fetches and stores one book's chapters.
 
     Outcomes:
-    - STORED / NONE / NOT_FOUND: the book is marked checked and leaves the queue.
-      NONE and NOT_FOUND both mean "nothing to store" (empty vs. 404) but are
-      counted separately for visibility. Neither is an error.
-    - ERROR: a transient failure (Audible 500, timeout, network). NOT marked, so
-      it's retried on a later pass, and it DOES count toward the error back-off.
+    - STORED / NONE / NOT_FOUND / PERMANENT: the book is marked checked and
+      leaves the queue. These mean, respectively: chapters saved; resolved
+      with none; a 404; a confirmed-permanent non-404 status (see
+      _PERMANENT_UPSTREAM_STATUSES). None of these count as an error.
+    - ERROR: an unresolved failure. Left unmarked so it's retried on a later
+      pass, and always counts toward the plain error total.
+
+    Returns (outcome, is_backoff_signal) — the second element is only ever
+    True alongside ERROR, and only when _is_backoff_signal says pausing the
+    whole run is a plausible remedy for this particular failure.
     """
     try:
         data = await audible_get(region, CHAPTERS_PATH.format(asin=asin), CHAPTERS_PARAMS)
@@ -209,28 +272,39 @@ async def _process_one(session: AsyncSession, asin: str, region: str) -> str:
         # all regions for the ISBN-keyed class). Mark it and move on; do not retry
         # and do not treat as an error.
         await _mark_checked(session, asin)
-        return _Outcome.NOT_FOUND
-    except Exception as e:
-        # transient (AudibleAPIException: 500/timeout/network). Leave unmarked for
-        # retry; this is what should drive the back-off.
+        return _Outcome.NOT_FOUND, False
+    except AudibleAPIException as e:
+        if e.upstream_status in _PERMANENT_UPSTREAM_STATUSES:
+            # Confirmed permanent per-ASIN fact — see _PERMANENT_UPSTREAM_STATUSES.
+            # Mark it and move on exactly like a 404: no retry, not an error.
+            await _mark_checked(session, asin)
+            return _Outcome.PERMANENT, False
         logger.warning(f"Backfill: fetch error for {asin} ({region}): {type(e).__name__}: {e}")
-        return _Outcome.ERROR
+        return _Outcome.ERROR, _is_backoff_signal(e.upstream_status)
+    except Exception as e:
+        # Never became an AudibleAPIException, so there is no upstream_status
+        # to classify (audible_get returned 200 and the body failed to parse,
+        # a bug, etc.) — always retried, but never a back-off signal, since
+        # pausing the crawl fixes nothing about it.
+        logger.warning(f"Backfill: fetch error for {asin} ({region}): {type(e).__name__}: {e}")
+        return _Outcome.ERROR, False
 
     # Resolved, but no chapters present.
     if not data.get("content_metadata", {}).get("chapter_info"):
         await _mark_checked(session, asin)
-        return _Outcome.NONE
+        return _Outcome.NONE, False
 
     try:
         chapters = _normalize_chapters(data, asin)
         await _store_chapters(session, asin, chapters)
         await _mark_checked(session, asin)
-        return _Outcome.STORED
+        return _Outcome.STORED, False
     except Exception as e:
-        # write failure — leave unmarked so we retry.
+        # write failure — leave unmarked so we retry. Not a back-off signal
+        # either: a local write failure says nothing about the exit IP.
         logger.warning(f"Backfill: store failed for {asin}: {type(e).__name__}: {e}")
         await session.rollback()
-        return _Outcome.ERROR
+        return _Outcome.ERROR, False
 
 
 # --- the run ---------------------------------------------------------------
@@ -256,8 +330,10 @@ async def _run(limit: int | None) -> None:
     signal.signal(signal.SIGTERM, stopper.request)
     signal.signal(signal.SIGINT, stopper.request)
 
-    processed = stored = none = not_found = errors = 0
-    recent_errors: list[bool] = []  # rolling window of "was this attempt a real error"
+    processed = stored = none = not_found = permanent = errors = 0
+    # rolling window of "does this attempt's failure make pausing a plausible
+    # remedy" — NOT "was this attempt a failure"; see _is_backoff_signal.
+    recent_backoff_signals: list[bool] = []
     active_until = time.monotonic() + ACTIVE_HOURS * 3600
 
     try:
@@ -288,25 +364,32 @@ async def _run(limit: int | None) -> None:
                     if stopper.stopping:
                         break
 
-                    outcome = await _process_one(session, asin, region)
+                    outcome, is_backoff_signal = await _process_one(session, asin, region)
                     processed += 1
-                    is_error = outcome == _Outcome.ERROR
                     if outcome == _Outcome.STORED:
                         stored += 1
                     elif outcome == _Outcome.NONE:
                         none += 1
                     elif outcome == _Outcome.NOT_FOUND:
                         not_found += 1
-                    elif is_error:
+                    elif outcome == _Outcome.PERMANENT:
+                        permanent += 1
+                    elif outcome == _Outcome.ERROR:
                         errors += 1
 
-                    # rolling error window for back-off (404s do NOT count)
-                    recent_errors.append(is_error)
-                    if len(recent_errors) > ERROR_WINDOW:
-                        recent_errors.pop(0)
+                    # rolling back-off window — only failures pausing could
+                    # plausibly fix enter it; see _is_backoff_signal. A 404, a
+                    # confirmed-permanent status (e.g. 400), and a failure
+                    # that never became an AudibleAPIException (a parse or
+                    # local write error) all leave this False; everything
+                    # that did become one is classified by _is_backoff_signal.
+                    recent_backoff_signals.append(is_backoff_signal)
+                    if len(recent_backoff_signals) > ERROR_WINDOW:
+                        recent_backoff_signals.pop(0)
 
                     if processed % PROGRESS_EVERY == 0:
-                        rate = (sum(recent_errors) / len(recent_errors) * 100) if recent_errors else 0
+                        signals = recent_backoff_signals
+                        rate = (sum(signals) / len(signals) * 100) if signals else 0
                         logger.info(
                             "Backfill: progress",
                             extra={
@@ -314,23 +397,27 @@ async def _run(limit: int | None) -> None:
                                 "stored": stored,
                                 "no_chapters": none,
                                 "not_found": not_found,
+                                "permanent": permanent,
                                 "errors": errors,
-                                "recent_error_rate": f"{rate:.0f}%",
+                                "recent_backoff_signal_rate": f"{rate:.0f}%",
                             },
                         )
 
-                    # back-off: too many recent REAL errors => IP probably throttled
+                    # back-off: pause once the window is dominated by failures
+                    # pausing could plausibly fix. This observes a rate, it
+                    # doesn't diagnose a cause — see _is_backoff_signal for
+                    # exactly which failures are eligible.
                     if (
-                        len(recent_errors) >= ERROR_WINDOW
-                        and sum(recent_errors) >= ERROR_THRESHOLD
+                        len(recent_backoff_signals) >= ERROR_WINDOW
+                        and sum(recent_backoff_signals) >= ERROR_THRESHOLD
                     ):
                         logger.error(
-                            f"Backfill: {sum(recent_errors)}/{len(recent_errors)} recent "
-                            f"requests errored — pausing {ERROR_COOLDOWN / 60:.0f}m (exit IP "
-                            f"may be throttled)"
+                            f"Backfill: {sum(recent_backoff_signals)}/{len(recent_backoff_signals)} "
+                            f"recent requests hit a pause-worthy failure — "
+                            f"pausing {ERROR_COOLDOWN / 60:.0f}m"
                         )
                         await _interruptible_sleep(ERROR_COOLDOWN, stopper)
-                        recent_errors.clear()
+                        recent_backoff_signals.clear()
                         if stopper.stopping:
                             break
 
@@ -345,6 +432,7 @@ async def _run(limit: int | None) -> None:
                 "stored": stored,
                 "no_chapters": none,
                 "not_found": not_found,
+                "permanent": permanent,
                 "errors": errors,
             },
         )

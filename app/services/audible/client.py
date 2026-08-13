@@ -490,5 +490,6 @@ async def audible_get(
                 continue
 
         raise AudibleAPIException(
-            f"Audible API returned {response.status_code} for {url}"
+            f"Audible API returned {response.status_code} for {url}",
+            upstream_status=response.status_code,
         )

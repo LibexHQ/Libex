@@ -393,12 +393,16 @@ async def test_audible_get_exhausts_retries_and_raises():
 
     with patch("httpx.AsyncClient.get", new=get_mock), \
          patch("asyncio.sleep", new=AsyncMock()) as mock_sleep:
-        with pytest.raises(AudibleAPIException):
+        with pytest.raises(AudibleAPIException) as exc:
             await audible_get("us", "/1.0/catalog/products", {"page": 0})
 
     assert get_mock.await_count == AUDIBLE_MAX_ATTEMPTS
     # sleeps once between every pair of attempts, never after the last one
     assert mock_sleep.await_count == AUDIBLE_MAX_ATTEMPTS - 1
+    # the final raise still carries the real upstream status, even though it
+    # was reached via retry exhaustion rather than an immediate non-retryable
+    # response -- the backfill's back-off classification depends on this.
+    assert exc.value.upstream_status == 429
 
 
 @pytest.mark.asyncio
@@ -435,11 +439,15 @@ async def test_audible_get_other_4xx_not_retried():
 
     with patch("httpx.AsyncClient.get", new=get_mock), \
          patch("asyncio.sleep", new=AsyncMock()) as mock_sleep:
-        with pytest.raises(AudibleAPIException):
+        with pytest.raises(AudibleAPIException) as exc:
             await audible_get("us", "/1.0/catalog/products", {"page": 0})
 
     assert get_mock.await_count == 1
     mock_sleep.assert_not_called()
+    # this is the one call site that has a real response -- upstream_status
+    # must carry the actual Audible status, not the default None, or the
+    # backfill can never tell a permanent 400 apart from a dead connection.
+    assert exc.value.upstream_status == 400
 
 
 @pytest.mark.asyncio
@@ -456,11 +464,16 @@ async def test_audible_get_timeout_not_retried():
 
     with patch("httpx.AsyncClient.get", new=get_mock), \
          patch("asyncio.sleep", new=AsyncMock()) as mock_sleep:
-        with pytest.raises(AudibleAPIException):
+        with pytest.raises(AudibleAPIException) as exc:
             await audible_get("us", "/1.0/catalog/products", {"page": 0})
 
     assert get_mock.await_count == 1
     mock_sleep.assert_not_called()
+    # no HTTP response ever happened -- upstream_status must stay None, not
+    # some stand-in value, since the backfill treats None as "could not have
+    # been a deliberate per-ASIN rejection" and this is the load-bearing case
+    # for that distinction.
+    assert exc.value.upstream_status is None
 
 
 @pytest.mark.asyncio
@@ -476,11 +489,14 @@ async def test_audible_get_request_error_not_retried():
 
     with patch("httpx.AsyncClient.get", new=get_mock), \
          patch("asyncio.sleep", new=AsyncMock()) as mock_sleep:
-        with pytest.raises(AudibleAPIException):
+        with pytest.raises(AudibleAPIException) as exc:
             await audible_get("us", "/1.0/catalog/products", {"page": 0})
 
     assert get_mock.await_count == 1
     mock_sleep.assert_not_called()
+    # same load-bearing None as the timeout case: a connection failure never
+    # reached Audible, so there is no upstream status to carry.
+    assert exc.value.upstream_status is None
 
 
 @pytest.mark.asyncio

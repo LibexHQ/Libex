@@ -20,6 +20,17 @@ capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
   counting those would overstate what Libex actually holds. The README's
   stats badges gain a matching "Books with Chapters" badge.
 
+### Changed
+- **`/db/stats` is now cached for 300 seconds.** The endpoint previously ran
+  a full, unqualified table count for every stat on every request — public,
+  unauthenticated, and hit continuously by shields.io on every README render
+  — and the new `booksWithChapters` count above would have added a fifth. A
+  caller polling the endpoint may now see counts that don't change for up to
+  five minutes; the counts themselves are still exact, never estimated. A
+  cache read failure falls back to running the live counts, and a cache
+  write failure never fails the request — either way the endpoint degrades
+  to its old always-live behaviour rather than erroring.
+
 ## [1.11.0]
 
 ### Added

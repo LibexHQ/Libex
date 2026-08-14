@@ -140,12 +140,21 @@ SCREENS_REASON_TRUNCATED = "sections_or_rows_truncated"
 # past the true last one via a minted token does not error or come back
 # empty -- it PLATEAUS, returning the last real page's content again,
 # byte-identical, forever (Christie page 30 of a 56-page product_count-
-# implied walk repeats page 26's real content). A walk that stops on a
+# implied walk repeats page 26's real content). product_count is not the
+# culprit: Christie's grid-reported 1116 agrees with the catalog
+# endpoint's total_results (1138), audible.com's own "over 1,000
+# results", and Libex's own cross-source union (~1133). The plateau is
+# instead a server-side clamp on the underlying result window at offset
+# 500 -- at the screens grid's fixed 20 rows/page that lands on page 26
+# regardless of how many pages product_count implies exist beyond it
+# (best-supported reading; every page-size lever is inert at 20, so a
+# 26-page or 520-item cap would look identical, and no catalog in the
+# 501-519 range has turned up to tell them apart). A walk that stops on a
 # repeated signature has NOT been told by upstream that nothing further
-# remains -- product_count itself overstated the real catalog by more
-# than 2x for Christie -- so this is scored unclean, distinct from
-# SCREENS_REASON_COMPLETED, even though the walk correctly stops rather
-# than looping on repeated content forever.
+# remains -- real titles product_count already accounted for sit
+# uncollected on the far side of that window -- so this is scored
+# unclean, distinct from SCREENS_REASON_COMPLETED, even though the walk
+# correctly stops rather than looping on repeated content forever.
 SCREENS_REASON_PLATEAU_TRUNCATED = "plateau_truncated"
 SCREENS_CLEAN_REASONS = frozenset({SCREENS_REASON_COMPLETED})
 
@@ -159,15 +168,17 @@ SCREENS_CLEAN_REASONS = frozenset({SCREENS_REASON_COMPLETED})
 # 56-page product_count-implied walk and contributes roughly half of her
 # total ASIN union, and Doyle's plateaus the same way against his own
 # product_count -- for both, upstream is silently repeating the last real
-# page's content byte-identical rather than confirming an end, which is
-# functionally the same "nothing further remains" signal COMPLETED gives,
-# just detected by this walk noticing its own repetition instead of
-# upstream sending a null token (see _fanout_screen_pages' own docstring).
-# Gating completeness on COMPLETED alone made is_complete permanently
-# unreachable for exactly the prolific authors this feature exists to
-# serve, forcing them onto AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS (900s)
-# forever instead of the default day-long TTL -- up to 96 full walks a day,
-# each hundreds of upstream requests through Libex's single exit IP,
+# page's content byte-identical rather than confirming an end. Unlike
+# COMPLETED, that plateau is not upstream confirming nothing further
+# remains -- it is this walk hitting a server-side window clamp (see
+# SCREENS_REASON_PLATEAU_TRUNCATED's own comment) with real titles still
+# unretrieved beyond it -- but it is just as unavoidable for these authors
+# as a genuine end would be, since nothing this walk can do reaches past
+# that window. Gating completeness on COMPLETED alone made is_complete
+# permanently unreachable for exactly the prolific authors this feature
+# exists to serve, forcing them onto AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS
+# (900s) forever instead of the default day-long TTL -- up to 96 full walks
+# a day, each hundreds of upstream requests through Libex's single exit IP,
 # strictly worse than not caching them at all.
 #
 # SCREENS_REASON_TOKEN_REPEATED stays in this broken set rather than
@@ -493,8 +504,8 @@ async def _fanout_screen_pages(
 
     total_pages, computed by the caller from product_count, is never
     trusted as an exact upper bound: probed live, requesting a page past a
-    real author's last one does not error or come back empty, it
-    PLATEAUS -- returning the last real page's content again,
+    real author's last retrievable one does not error or come back empty,
+    it PLATEAUS -- returning the last real page's content again,
     byte-identical, forever, while the requested page number keeps
     climbing (pages 56, 57, and 999 of a 56-page product_count-implied walk
     all came back identical, even though that author's real content
@@ -506,13 +517,18 @@ async def _fanout_screen_pages(
     Unlike a null continuation token (a genuine upstream confirmation that
     nothing remains -- the same signal a real 404 gives the sequential
     walk), a repeated signature is this walk noticing it has started
-    plateauing on its own, not upstream telling it so: product_count is
-    exactly what fed total_pages here, and it overstated Christie's real
-    catalog by more than 2x. So a repeat is scored SCREENS_REASON_
-    PLATEAU_TRUNCATED -- unclean, distinct from SCREENS_REASON_COMPLETED --
-    even though the walk still correctly stops there rather than looping
-    on repeated content up to total_pages. Nothing from the repeating page
-    onward is kept either way.
+    plateauing on its own, not upstream telling it so: product_count
+    itself is not overstated -- Christie's 1116 is corroborated by the
+    catalog endpoint's total_results (1138), audible.com's own listing,
+    and Libex's own cross-source union (~1133) -- the plateau is instead
+    Audible clamping the underlying result window at offset 500
+    server-side, which at the grid's fixed 20 rows/page lands on page 26
+    regardless of how many pages total_pages says should still follow. So
+    a repeat is scored SCREENS_REASON_PLATEAU_TRUNCATED -- unclean,
+    distinct from SCREENS_REASON_COMPLETED -- even though the walk still
+    correctly stops there rather than looping on repeated content up to
+    total_pages. Nothing from the repeating page onward is kept either
+    way.
 
     Reassembly is always strict page-index order, never completion order:
     asyncio.gather preserves input order regardless of which request
@@ -650,8 +666,9 @@ async def _fetch_author_books_by_screen(
       SCREENS_FANOUT_CONCURRENCY, via _fanout_screen_pages -- see that
       function's docstring for why this is a correctness fix (the
       underlying list drifts under a slow sequential walk) and not merely
-      a speed one, and for how it still detects and stops at the real end
-      of the catalog even when product_count overstates it.
+      a speed one, and for how it still detects and stops at the real
+      retrievable end of the catalog even when product_count implies more
+      pages exist beyond Audible's own result-window clamp.
     - Otherwise (product_count missing, zero, or implying only page 1 is
       needed), the walk falls back to the original behavior: paginating
       via the opaque continuation token, one page at a time, until it
@@ -819,15 +836,20 @@ async def _fetch_author_books_by_screen(
 
     # No warning here compares len(asins) against product_count as a
     # shortfall signal: probed live, Christie's grid-section product_count
-    # claims 1116 while the grid itself plateaus at 520 real ASINs --
-    # product_count over-claims by more than 2x, so a magnitude computed
-    # against it would be noise, not signal, on exactly the prolific
-    # authors this walk cares most about getting right. termination_reason
-    # already carries the meaningful distinction such a comparison would
-    # be trying to surface (SCREENS_REASON_PLATEAU_TRUNCATED vs
-    # SCREENS_REASON_COMPLETED vs every other unclean reason), and
-    # product_count is still included below for anyone reading the log who
-    # wants to eyeball it themselves.
+    # claims 1116, which is exact -- it agrees with the catalog endpoint's
+    # total_results (1138), audible.com's own "over 1,000 results", and
+    # Libex's own cross-source union (~1133) -- while the grid itself
+    # plateaus at roughly half that many real ASINs, walled off by
+    # Audible's own server-side clamp on the result window (see
+    # SCREENS_REASON_PLATEAU_TRUNCATED), not by anything wrong with
+    # product_count. A magnitude computed against it on a plateaued walk
+    # would therefore be expected and structural rather than a genuine
+    # shortfall signal, on exactly the prolific authors this walk cares
+    # most about getting right. termination_reason already carries the
+    # meaningful distinction such a comparison would be trying to surface
+    # (SCREENS_REASON_PLATEAU_TRUNCATED vs SCREENS_REASON_COMPLETED vs
+    # every other unclean reason), and product_count is still included
+    # below for anyone reading the log who wants to eyeball it themselves.
     if unclean:
         logger.warning("Audible Author Books screen ended without confirmed completion", extra={
             "author_asin": asin,

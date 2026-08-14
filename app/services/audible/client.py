@@ -118,11 +118,12 @@ AUDIBLE_CONCURRENCY_LIMIT = 10
 # A second, wider pool reserved for exactly one caller: a live author-books
 # request's own discovery-and-hydration fan-out (screens + catalog walk in
 # authors/, then get_books_by_asins hydrating the result), entered via
-# author_books_concurrency() below. That workload is a fundamentally
-# different shape from the sustained one above -- one user request fires a
-# bounded, self-terminating burst (well under 100 total calls even for the
-# largest known real catalog, capped by the screens plateau and
-# CATALOG_RESULT_CEILING well short of that -- see screens.py and
+# author_books_concurrency() below. That workload is a fundamentally different
+# shape from the sustained one above -- one user request fires a bounded,
+# self-terminating burst (measured locally, same session: 179 requests for
+# Christie, 651 for Conan Doyle -- several times more than "well under 100"
+# once assumed here, but still capped by the screens plateau and
+# CATALOG_RESULT_CEILING rather than open-ended -- see screens.py and
 # catalog.py) and then stops, driven by real user traffic Libex's own
 # hard-noes already forbid amplifying, not a standing crawl. Reusing
 # AUDIBLE_CONCURRENCY_LIMIT for it was the actual bug behind a live, measured
@@ -251,9 +252,11 @@ def _current_audible_semaphore() -> asyncio.Semaphore:
 # exactly the hidden cross-pool contention the two-pool split exists to
 # avoid. Keeping every connection up to that sum alive -- instead of the
 # smaller default keepalive pool -- means a fan-out that reuses the same
-# shared client across dozens of sequential requests (a prolific-author walk
-# is ~60-90) gets a reused, already-negotiated connection almost every time
-# instead of paying a fresh TCP+TLS handshake per call.
+# shared client across dozens to hundreds of sequential requests (measured:
+# 179 for Christie, 651 for Conan Doyle -- see
+# AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT's own docstring) gets a reused,
+# already-negotiated connection almost every time instead of paying a fresh
+# TCP+TLS handshake per call.
 _AUDIBLE_POOL_LIMITS = httpx.Limits(
     max_connections=AUDIBLE_CONCURRENCY_LIMIT + AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT,
     max_keepalive_connections=AUDIBLE_CONCURRENCY_LIMIT + AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT,

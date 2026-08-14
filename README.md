@@ -186,10 +186,9 @@ including your real IP, which is outside Libex's control. Axiom and Cloudflare
 receive this data only to provide those services; we don't sell your data or
 hand it to anyone else.
 
-**One exception, stated plainly:** the interactive API docs at `/docs` and
-`/redoc` load assets from `cdn.jsdelivr.net`, `fonts.googleapis.com` and
-`fastapi.tiangolo.com`. Opening those pages in a browser sends your real IP to
-those third parties. This does not affect API clients, only the docs pages.
+**The API docs are served locally.** The interactive docs at `/docs` and
+`/redoc` are rendered from assets Libex ships, at pinned and checksum-verified
+versions — not from a CDN. Opening them contacts nothing but Libex.
 
 **If you self-host:**
 Logging is completely optional. Leave `AXIOM_TOKEN` empty and Libex logs to

@@ -32,6 +32,18 @@ capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 - **No API response changed.** This affects only what the server writes about
   a request, never what it returns.
 
+- **The interactive API docs are served from local assets.** `/docs` and
+  `/redoc` previously had the browser fetch Swagger UI and ReDoc from
+  `cdn.jsdelivr.net`, a favicon from `fastapi.tiangolo.com`, and — hardcoded
+  into ReDoc's own template with no way to override it — a stylesheet from
+  `fonts.googleapis.com`, so opening the docs sent a visitor's real IP address
+  to three third parties. Those assets are now fetched at build time at pinned,
+  checksum-verified versions and served by Libex itself, and the ReDoc page is
+  rendered from a template of our own that uses the system font stack. Loading
+  the docs now contacts nothing but Libex. Pinning also closes a standing
+  supply-chain exposure: the previous URLs tracked floating major tags, so a
+  visitor's browser executed whatever the CDN resolved them to that day.
+
 ### Added
 - **`PRIVACY.md`**, the first privacy policy for the public instance, linked
   from the README. It states what is recorded and what is not, names Axiom and

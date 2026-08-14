@@ -1,12 +1,15 @@
 # Standard library
 from contextlib import asynccontextmanager
+from pathlib import Path
 import asyncio
 
 # Third party
 from alembic import command
 from alembic.config import Config
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 
 # Core
@@ -142,7 +145,72 @@ app = FastAPI(
     # Hardcoding the new host here would send a self-hoster's "Try it out" requests and
     # generated SDKs at the public instance instead of their own.
     servers=[{"url": migration_notice.new_host}] if migration_notice is not None else None,
+    # The interactive docs are served from assets Libex ships, not from a CDN
+    # -- see the custom /docs and /redoc routes below. Disabling the built-in
+    # routes here is what frees those paths for them.
+    docs_url=None,
+    redoc_url=None,
 )
+
+# ============================================================
+# DOCS (self-hosted assets)
+# ============================================================
+
+# FastAPI's defaults have the browser fetch Swagger UI and ReDoc from
+# cdn.jsdelivr.net, a favicon from fastapi.tiangolo.com, and -- hardcoded into
+# ReDoc's own HTML template, with no parameter to override it -- a stylesheet
+# from fonts.googleapis.com. Opening the docs therefore sent a visitor's real
+# IP address to three third parties. Libex records nothing that identifies a
+# caller, and that has to hold for the pages it serves and not only for the
+# lines it writes, so the assets are served from here instead.
+#
+# scripts/fetch_docs_assets.sh pulls them at build time against pinned
+# versions and checksums. If it has not been run, these files are absent and
+# the docs render unstyled -- obvious, local, and harmless, which is a better
+# failure than silently falling back to the CDN.
+_STATIC_DIR = Path(__file__).resolve().parent / "static"
+app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
+_FAVICON = "/static/favicon.svg"
+
+
+@app.get("/docs", include_in_schema=False)
+async def swagger_ui() -> HTMLResponse:
+    return get_swagger_ui_html(
+        openapi_url=app.openapi_url,
+        title=f"{app.title} - Swagger UI",
+        swagger_js_url="/static/docs/swagger-ui-bundle.js",
+        swagger_css_url="/static/docs/swagger-ui.css",
+        swagger_favicon_url=_FAVICON,
+    )
+
+
+@app.get("/redoc", include_in_schema=False)
+async def redoc() -> HTMLResponse:
+    # Hand-written rather than get_redoc_html(), which hardcodes a
+    # fonts.googleapis.com stylesheet that no argument can remove. The font
+    # stack below is the system one, so nothing is fetched to render this.
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html>
+  <head>
+    <title>{app.title} - ReDoc</title>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="shortcut icon" href="{_FAVICON}">
+    <style>
+      body {{
+        margin: 0;
+        padding: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                     "Helvetica Neue", Arial, sans-serif;
+      }}
+    </style>
+  </head>
+  <body>
+    <redoc spec-url="{app.openapi_url}"></redoc>
+    <script src="/static/docs/redoc.standalone.js"></script>
+  </body>
+</html>""")
 
 # ============================================================
 # EXCEPTION HANDLERS

@@ -157,3 +157,24 @@ async def test_caller_authored_query_is_redacted_in_the_record(caplog):
 @pytest.mark.asyncio
 async def test_health_is_not_logged(caplog):
     assert await _request(caplog, "/health") == []
+
+
+# ============================================================
+# SELF-HOSTED DOCS ASSETS
+# ============================================================
+
+# FastAPI's defaults have the browser fetch Swagger UI and ReDoc from these,
+# which would send a docs visitor's real IP address to each of them.
+_THIRD_PARTY_ASSET_HOSTS = ["cdn.jsdelivr.net", "fonts.googleapis.com", "fastapi.tiangolo.com"]
+
+
+@pytest.mark.parametrize("path", ["/docs", "/redoc"])
+def test_docs_pages_reference_no_third_party_hosts(client, path):
+    body = client.get(path).text
+    referenced = [h for h in _THIRD_PARTY_ASSET_HOSTS if h in body]
+    assert referenced == [], f"{path} would send a visitor's IP to {referenced}"
+
+
+@pytest.mark.parametrize("path", ["/docs", "/redoc"])
+def test_docs_pages_render(client, path):
+    assert client.get(path).status_code == 200

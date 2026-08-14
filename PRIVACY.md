@@ -228,14 +228,7 @@ Audible does *not* receive is anything about you: the outbound request carries
 Libex's own fixed headers and comes from the server's IP address. Your IP,
 your user agent and your host header are never forwarded.
 
-**cdn.jsdelivr.net, fonts.googleapis.com and fastapi.tiangolo.com** — but only
-if you open the API documentation in a browser. `/docs` loads Swagger UI from
-jsDelivr; `/redoc` loads ReDoc from jsDelivr and a font from Google Fonts;
-both load a favicon from `fastapi.tiangolo.com`. Loading those assets sends
-your browser's full IP address and user agent to those third parties, exactly
-as any third-party asset on any web page does. This is the framework's default
-behaviour and I haven't changed it. **Machine clients calling the API are not
-affected** — this only happens if you visit the docs pages in a browser.
+The interactive API documentation at `/docs` and `/redoc` is rendered from files Libex serves itself, at pinned and checksum-verified versions. Loading those pages contacts no third party — no CDN, no font service, no external favicon.
 
 **Nobody else.** I don't sell log data, share it, trade it, or hand it to
 advertisers, data brokers or anyone else. The parties above have it because

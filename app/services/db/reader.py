@@ -20,6 +20,7 @@ from app.db.models import Book, Author, Narrator, Series, Track, Genre, CatalogG
 
 # Services
 from app.services.audible.client import REGION_MAP
+from app.services.cache import manager as cache
 from app.services.sorting import apply_sort, BOOK_SORT_FIELDS, NARRATOR_SORT_FIELDS
 from app.services.db.filtering import apply_book_filters, apply_narrator_filters
 
@@ -1252,23 +1253,70 @@ async def get_track_from_db(session: AsyncSession, asin: str) -> dict[str, Any] 
 # STATS READER
 # ============================================================
 
+
+# Public, unauthenticated, and hit continuously by shields.io on every README
+# render. Stats change continuously as the seeder writes, so a short TTL trades
+# a few minutes of badge staleness for skipping five full-table scans on most
+# requests.
+STATS_CACHE_TTL_SECONDS = 300
+
+# The exact key set a cached stats entry must have. Guards against a cached
+# value written by older code silently rendering zero for a stat added later:
+# a hit whose keys don't match this set is treated as a miss and recomputed,
+# rather than served as-is with StatsResponse's per-field `= 0` default
+# papering over the gap.
+_STAT_KEYS = frozenset({"books", "authors", "narrators", "series", "booksWithChapters"})
+
+
 async def get_db_stats(session: AsyncSession) -> dict[str, int]:
-    """Returns counts of books, authors, narrators, and series in the local DB."""
+    """
+    Returns counts of books, authors, narrators, series, and books with stored
+    chapter data in the local DB. booksWithChapters counts rows in the tracks
+    table (one per book that actually has chapters stored), not books that have
+    merely been checked — checked includes ISBN-keyed records and bundle ASINs
+    that will never have chapters, which would overstate what Libex holds.
+
+    Cached for STATS_CACHE_TTL_SECONDS; a cache miss falls back to the live
+    query, and so does a cache error — but a cache error at the database level
+    leaves the session's transaction aborted, so it must be rolled back before
+    the live query can run on the same session, and a cache write failure
+    never fails the request.
+    """
+    key = cache.stats_key()
+    try:
+        cached = await cache.get(session, key)
+        if cached is not None and set(cached) == _STAT_KEYS:
+            return cached
+    except Exception as e:
+        logger.warning(f"Cache read failed for stats: {e}")
+        await session.rollback()
+
     try:
         books = await session.execute(select(func.count()).select_from(Book))
         authors = await session.execute(select(func.count()).select_from(Author))
         narrators = await session.execute(select(func.count()).select_from(Narrator))
         series = await session.execute(select(func.count()).select_from(Series))
+        books_with_chapters = await session.execute(
+            select(func.count()).select_from(Track)
+        )
 
-        return {
+        stats = {
             "books": books.scalar_one(),
             "authors": authors.scalar_one(),
             "narrators": narrators.scalar_one(),
             "series": series.scalar_one(),
+            "booksWithChapters": books_with_chapters.scalar_one(),
         }
     except Exception as e:
         logger.warning(f"DB read failed for stats: {e}")
-        return {"books": 0, "authors": 0, "narrators": 0, "series": 0}
+        return {"books": 0, "authors": 0, "narrators": 0, "series": 0, "booksWithChapters": 0}
+
+    try:
+        await cache.set(session, key, stats, ttl_seconds=STATS_CACHE_TTL_SECONDS)
+    except Exception as e:
+        logger.warning(f"Cache write failed for stats: {e}")
+
+    return stats
 
 
 async def get_stored_genres(

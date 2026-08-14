@@ -10,6 +10,16 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.12.0]
+
+### Added
+- **`/db/stats` reports a fifth count, `booksWithChapters`.** It counts books
+  that actually have chapter data stored, not books that have merely been
+  checked against Audible for chapters — a checked book can still be an
+  ISBN-keyed record or a bundle ASIN that will never have chapters, and
+  counting those would overstate what Libex actually holds. The README's
+  stats badges gain a matching "Books with Chapters" badge.
+
 ## [1.11.0]
 
 ### Added

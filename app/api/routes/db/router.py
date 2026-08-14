@@ -58,13 +58,14 @@ class StatsResponse(BaseModel):
     authors: int = 0
     narrators: int = 0
     series: int = 0
+    booksWithChapters: int = 0
 
 
 @router.get("/stats", response_model=StatsResponse)
 async def get_stats(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, int]:
-    """Get counts of books, authors, narrators, and series in the local DB."""
+    """Get counts of books, authors, narrators, series, and books with chapters in the local DB."""
     return await get_db_stats(session)
 
 

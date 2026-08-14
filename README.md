@@ -11,6 +11,7 @@
 [![Authors](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats&query=%24.authors&label=Authors&color=teal)](https://libexdb.com/db/stats)
 [![Narrators](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats&query=%24.narrators&label=Narrators&color=blue)](https://libexdb.com/db/stats)
 [![Series](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats&query=%24.series&label=Series&color=purple)](https://libexdb.com/db/stats)
+[![Books with Chapters](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats&query=%24.booksWithChapters&label=Books%20with%20Chapters&color=yellow)](https://libexdb.com/db/stats)
 
 Open, unrestricted Audible metadata API for the audiobook automation community.
 
@@ -235,7 +236,7 @@ ABS will then call `/us/search?title=...&author=...` which returns the `{"matche
 | GET | `/db/vvab` | Get all virtual voice audiobooks (AI-narrated) from local DB |
 | GET | `/db/new-releases` | Get recently released books from local DB, newest first |
 | GET | `/db/coming-soon` | Get upcoming books from local DB, soonest first |
-| GET | `/db/stats` | Get counts of books, authors, narrators, and series in local DB |
+| GET | `/db/stats` | Get counts of books, authors, narrators, series, and books with chapters in local DB |
 | GET | `/db/author/{asin}` | Get author from local DB |
 | GET | `/db/author/{asin}/books` | Get author's books from local DB |
 | GET | `/db/narrator` | Search narrators by name from local DB |
@@ -346,7 +347,7 @@ Copy `.env.example` to `.env` and configure:
 | `DB_NAME` | `libex` | PostgreSQL database name |
 | `DB_USER` | `libex` | PostgreSQL username |
 | `PORT` | `3333` | Host port the API is exposed on |
-| `CACHE_TTL` | `86400` | Cache TTL in seconds (default 24 hours) |
+| `CACHE_TTL` | `86400` | Default cache TTL in seconds (24 hours); some endpoints use their own TTL |
 | `LOG_LEVEL` | `INFO` | Log verbosity — `DEBUG`, `INFO`, `WARNING`, or `ERROR` |
 | `LOG_RETENTION_DAYS` | `7` | Days of rotated logs to keep. `0` = infinite, no rotation |
 | `AXIOM_TOKEN` | — | Axiom API token (optional — leave blank for stdout only) |
@@ -379,7 +380,7 @@ Libex is API-compatible with AudiMeta. To migrate:
 - Libex uses PostgreSQL as both a persistent library and a cache — no Redis required
 - Every book, author, series, narrator, and genre ever requested is stored in a full relational schema and survives cache expiry indefinitely
 - The local library powers the `/db/book` and `/book/sku/{sku}` endpoints and serves as an automatic fallback when Audible is unavailable
-- Cache entries expire after `CACHE_TTL` seconds (default 24 hours); expired entries are purged automatically
+- Cache TTL varies by what is cached, defaulting to `CACHE_TTL` seconds (default 24 hours) unless an endpoint sets its own; expired entries are purged automatically
 - Logs directory: `./logs` (relative to your compose file) — Libex writes a rotating log file to `./logs/libex.log` on the host
 - Log rotation is daily. `LOG_RETENTION_DAYS=7` keeps 7 days of backups. Set to `0` for infinite retention with no rotation
 - **Database seeder:** Set `SEEDER_ENABLED=true` to activate the background seeder. It expands the local DB so the `/db/*` endpoints have more to return, and runs as two independent workers:

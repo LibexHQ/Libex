@@ -3,8 +3,24 @@ Cache manager.
 Provides get/set/delete operations against the Postgres cache table.
 
 DESIGN PHILOSOPHY: Audible-first.
-Cache is a fallback only. Services call Audible first,
-store results here, and fall back to cache on Audible failure.
+The write is never gated behind a read flag: every successful Audible fetch
+is stored here unconditionally, on the same path regardless of how the read
+side is being used. That is what keeps the cache populated for the moment
+it is actually needed — an Audible outage — and it must stay that way.
+
+The read side defaults to fallback-only for Audible-backed keys: a service
+calls Audible first and only reads its cache entry after Audible fails, so
+a stale cache is never served while Audible itself is healthy. A caller may
+opt a given Audible-backed key into reading cache-first instead, via its own
+`use_cache` parameter (e.g. `get_author`, `get_books_by_asins`) — that is a
+per-call-site choice, not a property of the key.
+
+Some values read cache-first unconditionally, with no flag either way,
+because fallback-only would be the wrong default for them rather than a
+stricter one: date-derived scans like new releases and coming soon, where
+the result is valid until the next UTC midnight regardless of Audible's
+health, and DB-sourced values like the stats key, which have no upstream to
+be authoritative over and no outage to fall back from in the first place.
 """
 
 # Standard library
@@ -72,6 +88,10 @@ def new_releases_key(region: str, days: int, category: str | None = None) -> str
 
 def coming_soon_key(region: str, days: int, category: str | None = None) -> str:
     return f"coming_soon:{region}:{days}:{category or 'all'}"
+
+
+def stats_key() -> str:
+    return "db_stats"
 
 
 # ============================================================

@@ -39,13 +39,18 @@ REGION_ENUM = Enum(
 
 class Cache(Base):
     """
-    Cache table for Audible API responses.
-    Key format: {type}:{region}:{identifier}
-    Examples:
+    Cache table for Audible API responses and Libex-internal derived values.
+    Region-varying data keys as {type}:{region}:{identifier} — region is not
+    optional there, since the same identifier can hold a different value per
+    region:
         book:us:B08G9PRS1K
         author:uk:B000APF21M
         series:us:B08G9PRS1K
         search:us:dune+frank+herbert
+
+    A value with nothing that varies by region or identifier, like the local
+    DB stats snapshot, keys on its bare type name instead:
+        db_stats
     """
 
     __tablename__ = "cache"

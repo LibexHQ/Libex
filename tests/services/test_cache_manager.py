@@ -13,6 +13,7 @@ from app.services.cache.manager import (
     author_key,
     series_key,
     search_key,
+    stats_key,
     chapters_key,
     author_books_key,
     series_books_key,
@@ -56,6 +57,11 @@ def test_author_books_key_format():
 def test_series_books_key_format():
     """Series books cache key has correct format."""
     assert series_books_key("B000SERIES", "us") == "series_books:us:B000SERIES"
+
+
+def test_stats_key_format():
+    """Stats cache key has correct format."""
+    assert stats_key() == "db_stats"
 
 
 def test_search_key_normalizes_case():

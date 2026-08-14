@@ -89,8 +89,12 @@ async def search(
 
         products = _filter_products(data.get("products", []))
 
+        # search_params carries the caller's own title/author/narrator text,
+        # so only its keys are logged, never its values. Which fields a
+        # consumer searched on is the operational question; what they typed
+        # into them is not Libex's to keep.
         logger.info("Requested Audible Search", extra={
-            "search_params": search_params,
+            "search_fields": sorted(search_params),
             "search_took": search_took,
             "region": region,
             "results": len(products),
@@ -148,8 +152,13 @@ async def quick_search(
                 if asin:
                     asins.append(asin)
 
+        # Deliberately no "keywords" field. It is verbatim caller-authored
+        # text, and Libex records nothing that identifies a caller or reveals
+        # what they were looking for. The length is kept instead: it is enough
+        # to correlate a slow or empty search with the size of the query that
+        # produced it, without keeping the query.
         logger.info("Requested Audible Quick Search", extra={
-            "keywords": keywords,
+            "keywords_length": len(keywords),
             "search_took": search_took,
             "region": region,
             "suggestions_found": len(asins),
@@ -166,10 +175,14 @@ async def quick_search(
                 parsed_author = segments[0]
                 parsed_title = segments[-1]
 
+                # Same rule as above: keywords, parsed_author and
+                # parsed_title are all the caller's own words and none of them
+                # is logged. What matters operationally is that this fallback
+                # fired at all and how the parser split the query, so the
+                # segment count is kept and the segments are not.
                 logger.info("Quick search compound fallback", extra={
-                    "keywords": keywords,
-                    "parsed_author": parsed_author,
-                    "parsed_title": parsed_title,
+                    "keywords_length": len(keywords),
+                    "segments_found": len(segments),
                     "region": region,
                 })
 

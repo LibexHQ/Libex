@@ -6,6 +6,7 @@ CORS and request validation.
 # Standard library
 import re
 import time
+import urllib.parse
 import uuid
 
 # Third party
@@ -55,6 +56,60 @@ def valid_region(
 # HTTP LOGGING
 # ============================================================
 
+# Query params whose values are safe to log: region selectors, pagination,
+# sort order, and catalogue facets. Every one of them describes HOW a caller
+# asked, never WHAT they typed. Anything absent from this set is treated as
+# caller-authored text and has its value replaced before the line is written.
+#
+# An allowlist rather than a denylist, deliberately. A denylist leaks every
+# param added after it was written, silently and by default, and the failure
+# is invisible until someone reads the logs. This fails closed instead: a new
+# param is redacted until someone decides otherwise.
+_SAFE_QUERY_PARAMS = frozenset({
+    "region", "book_region", "cache", "limit", "page", "sort", "order",
+    "flat", "depth", "days", "source", "products_sort_by",
+    "category", "genre", "book_format", "language", "plan_name",
+    "explicit", "has_pdf", "is_vvab", "whisper_sync",
+    "audiobooks_produced", "cultural_heritage", "gender",
+    "longer_than", "shorter_than", "rating_better_than", "rating_worse_than",
+})
+
+# Deliberately free of characters urlencode would escape -- "<redacted>"
+# comes back as "%3Credacted%3E", which is unreadable in exactly the logs
+# this field exists to make readable.
+_REDACTED = "REDACTED"
+
+
+def _redact_query(raw_query: str) -> str:
+    """
+    Replaces the value of every non-allowlisted query param, keeping the key.
+
+    Libex logs the query string because the path alone cannot answer which
+    params consumers actually use -- but on the search and name-lookup routes
+    that string is whatever a person typed, and Libex deliberately records
+    nothing that identifies a caller or reveals what they were looking for.
+    Keeping the key and dropping the value preserves the operational answer
+    ("this route was called with name=") without keeping the content.
+
+    Malformed input returns the empty string rather than raising. This runs on
+    every request against an attacker-controlled URL, and losing the query
+    field on one log line beats losing the request -- and beats falling back
+    to the raw string, which would leak exactly what this exists to withhold.
+    """
+    if not raw_query:
+        return ""
+
+    try:
+        pairs = urllib.parse.parse_qsl(raw_query, keep_blank_values=True)
+    except (ValueError, UnicodeDecodeError):
+        return ""
+
+    return urllib.parse.urlencode([
+        (key, value if key in _SAFE_QUERY_PARAMS else _REDACTED)
+        for key, value in pairs
+    ])
+
+
 class LoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         request_id = str(uuid.uuid4())
@@ -65,11 +120,17 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         if request.url.path == "/health":
             return response
 
-        ip = (
-            request.headers.get("CF-Connecting-IP")
-            or request.headers.get("x-real-ip")
-            or (request.client.host if request.client else None)
-        )
+        # No client address is read here, from any header or from the
+        # connection. Libex does not record who called it -- not in full, not
+        # truncated, not hashed. Every field below describes the request, not
+        # the requester, which is what keeps per-endpoint failure rates and
+        # latency visible while leaving nothing that identifies a caller.
+        #
+        # The user agent stays because it names client SOFTWARE, not a person
+        # -- it is how a spike gets traced to a particular consumer version.
+        # With no address logged alongside it, it cannot be tied back to an
+        # individual, so removing it on privacy grounds would blind the
+        # monitoring for nothing.
         user_agent = request.headers.get("user-agent", "")
         # The only signal, once both libex.lostcartographer.xyz and libexdb.com serve
         # the same container, that tells old-host traffic apart from new-host traffic.
@@ -81,13 +142,14 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                 "method": request.method,
                 "url": request.url.path,
                 # Path alone cannot answer which parameters consumers actually
-                # use. No secret travels this way -- the internal routes
-                # authenticate on an Authorization header, not a query param.
-                "query": request.url.query,
+                # use. Values are allowlisted -- see _redact_query -- so this
+                # answers that without keeping what a caller typed. No secret
+                # travels this way either: the internal routes authenticate on
+                # an Authorization header, not a query param.
+                "query": _redact_query(request.url.query),
                 "status": response.status_code,
                 "userAgent": user_agent,
                 "took": took,
-                "ip": ip,
                 "host": host,
             },
         )

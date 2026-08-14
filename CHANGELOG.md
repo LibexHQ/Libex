@@ -10,6 +10,36 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.13.0]
+
+### Changed
+- **Libex no longer records anything that identifies a caller.** The client IP
+  address is not logged in any form — not in full, not truncated, not hashed.
+  It is read from no header and from no connection. Query parameter values are
+  now allowlisted before a log line is written: structural options (`region`,
+  `limit`, `page`, `sort`, and the catalogue filters) keep their values, while
+  anything a caller typed (`name`, `keywords`, `title`, `author`) has its value
+  replaced with `REDACTED`, leaving only the fact that the parameter was used.
+  The search service no longer logs search text either — its two log lines now
+  record the length of a query and which fields were searched on, not their
+  contents. An allowlist rather than a blocklist, deliberately: a blocklist
+  leaks every parameter added after it was written, silently and by default.
+- **Per-endpoint observability is unchanged.** Method, path, status, duration,
+  user agent and host header are all still logged, so failure rates and
+  latency remain visible per endpoint. The user agent stays because it names
+  client software rather than a person, and with no address recorded beside it
+  there is nothing to tie it back to an individual.
+- **No API response changed.** This affects only what the server writes about
+  a request, never what it returns.
+
+### Added
+- **`PRIVACY.md`**, the first privacy policy for the public instance, linked
+  from the README. It states what is recorded and what is not, names Axiom and
+  Cloudflare as the third parties that see requests, and is honest about the
+  limits — Cloudflare still sees real addresses, the interactive docs pages
+  load assets from third-party CDNs, and an unhandled error still logs its own
+  message, which can contain text a caller sent.
+
 ## [1.12.0]
 
 ### Added

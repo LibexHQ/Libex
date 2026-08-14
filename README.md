@@ -8,7 +8,7 @@
 [![Docker Hub](https://img.shields.io/badge/docker%20hub-sunbrolynk%2Flibex-blue)](https://hub.docker.com/r/sunbrolynk/libex)
 
 [![Books](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats&query=%24.books&label=Books&color=orange)](https://libexdb.com/db/stats)
-[![Books with Chapters](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats&query=%24.booksWithChapters&label=Books%20with%20Chapters&color=yellow)](https://libexdb.com/db/stats)
+[![Books with Chapters](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats&query=%24.booksWithChapters&label=Books%20with%20Chapters&color=b5179e)](https://libexdb.com/db/stats)
 [![Authors](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats&query=%24.authors&label=Authors&color=teal)](https://libexdb.com/db/stats)
 [![Narrators](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats&query=%24.narrators&label=Narrators&color=blue)](https://libexdb.com/db/stats)
 [![Series](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats&query=%24.series&label=Series&color=purple)](https://libexdb.com/db/stats)

@@ -23,6 +23,7 @@ from app.services.db.reader import (
     get_series_books_from_db,
     search_series_from_db,
     get_track_from_db,
+    get_db_stats,
 )
 
 
@@ -660,3 +661,253 @@ async def test_get_track_from_db_returns_none_on_exception():
     session.execute = AsyncMock(side_effect=Exception("DB error"))
     result = await get_track_from_db(session, "B08G9PRS1K")
     assert result is None
+
+
+# ============================================================
+# get_db_stats
+# ============================================================
+
+
+def _stats_count_result(count: int) -> MagicMock:
+    result = MagicMock()
+    result.scalar_one.return_value = count
+    return result
+
+
+def _cache_miss_result() -> MagicMock:
+    """Mimics cache.get's underlying select finding no live row."""
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = None
+    return result
+
+
+class _TransactionAbortingSession:
+    """
+    Models Postgres's real transaction-abort semantics for the cache-error
+    path: once a statement raises inside a transaction, Postgres aborts that
+    transaction and every later statement fails too — with
+    InFailedSQLTransactionError — until rollback() actually runs. A plain
+    AsyncMock side_effect queue doesn't model this: queued results come back
+    regardless of whether the handler ever calls rollback(), which would let
+    a test pass even if the rollback() call were deleted from product code.
+    Measured live: an un-rolled-back cache-read error returns all zeros to
+    the public stats endpoint, not the live counts.
+    """
+
+    def __init__(self, first_error: Exception, live_results: list):
+        self._first_error = first_error
+        self._live_results = list(live_results)
+        self._first_call_made = False
+        self._aborted = False
+        self.rollback_called = False
+
+    async def execute(self, *args, **kwargs):
+        if not self._first_call_made:
+            self._first_call_made = True
+            self._aborted = True
+            raise self._first_error
+        if self._aborted:
+            raise Exception(
+                "current transaction is aborted, commands ignored until end of transaction block"
+            )
+        return self._live_results.pop(0)
+
+    async def rollback(self):
+        self.rollback_called = True
+        self._aborted = False
+
+    async def commit(self):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_returns_counts_for_all_five_metrics():
+    """Maps each of the five count queries to its own response key, in order."""
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=[
+        _cache_miss_result(),      # cache read (miss)
+        _stats_count_result(150),  # books
+        _stats_count_result(42),   # authors
+        _stats_count_result(85),   # narrators
+        _stats_count_result(18),   # series
+        _stats_count_result(7),    # booksWithChapters
+        MagicMock(),                # cache write
+    ])
+
+    result = await get_db_stats(session)
+
+    assert result == {
+        "books": 150,
+        "authors": 42,
+        "narrators": 85,
+        "series": 18,
+        "booksWithChapters": 7,
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_books_with_chapters_counts_tracks_table():
+    """
+    booksWithChapters must be a count of the tracks table — one row per book
+    that actually has chapter data stored. A count of
+    Book.chapters_checked_at IS NOT NULL is a different, larger population
+    (it includes books that were checked and found to have no chapters, e.g.
+    ISBN-keyed records that 404 and bundle ASINs that will never have
+    chapters) and would overstate what Libex holds, so the underlying query
+    must target the tracks table rather than filter the books table.
+    """
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=[
+        _cache_miss_result(),
+        _stats_count_result(150),
+        _stats_count_result(42),
+        _stats_count_result(85),
+        _stats_count_result(18),
+        _stats_count_result(7),
+        MagicMock(),
+    ])
+
+    await get_db_stats(session)
+
+    # Index 5: cache-read miss (0), then books/authors/narrators/series (1-4),
+    # then booksWithChapters (5), before the cache write.
+    books_with_chapters_stmt = session.execute.call_args_list[5][0][0]
+    froms = books_with_chapters_stmt.get_final_froms()
+    assert [f.name for f in froms] == ["tracks"]
+    assert "chapters_checked_at" not in str(books_with_chapters_stmt).lower()
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_fallback_on_exception_includes_books_with_chapters():
+    """
+    The literal fallback dict returned on DB error must carry every
+    StatsResponse key. A key missing here degrades the all-zeros fallback
+    into a response the caller can no longer treat as complete.
+    """
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=Exception("DB error"))
+
+    result = await get_db_stats(session)
+
+    assert result == {
+        "books": 0,
+        "authors": 0,
+        "narrators": 0,
+        "series": 0,
+        "booksWithChapters": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_returns_cached_value_without_querying_counts():
+    """A fresh, key-complete cache hit skips all five count queries."""
+    session = AsyncMock()
+    cached = {
+        "books": 150,
+        "authors": 42,
+        "narrators": 85,
+        "series": 18,
+        "booksWithChapters": 7,
+    }
+    hit = MagicMock()
+    hit.scalar_one_or_none.return_value = MagicMock(value=cached)
+    session.execute = AsyncMock(return_value=hit)
+
+    result = await get_db_stats(session)
+
+    assert result == cached
+    assert session.execute.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_stale_cache_shape_is_treated_as_miss():
+    """
+    A cached entry missing a key (e.g. written before a new stat existed)
+    must not be served as-is — StatsResponse's per-field `= 0` default would
+    silently render zero for the missing stat on a public badge. It's treated
+    as a miss and the live counts are recomputed instead.
+    """
+    session = AsyncMock()
+    stale_cached = {"books": 150, "authors": 42, "narrators": 85, "series": 18}
+    hit = MagicMock()
+    hit.scalar_one_or_none.return_value = MagicMock(value=stale_cached)
+
+    session.execute = AsyncMock(side_effect=[
+        hit,
+        _stats_count_result(150),
+        _stats_count_result(42),
+        _stats_count_result(85),
+        _stats_count_result(18),
+        _stats_count_result(7),
+        MagicMock(),
+    ])
+
+    result = await get_db_stats(session)
+
+    assert result == {
+        "books": 150,
+        "authors": 42,
+        "narrators": 85,
+        "series": 18,
+        "booksWithChapters": 7,
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_cache_read_error_falls_back_to_live_query():
+    """
+    A cache read failure must not fail the request — falls back to live
+    counts. Uses _TransactionAbortingSession rather than a plain AsyncMock
+    side_effect queue: the queue would let this pass even without the
+    handler's rollback() call, since queued results come back regardless of
+    transaction state. Here, every execute() after the cache-read error
+    keeps raising until rollback() actually runs, so the test can only pass
+    if get_db_stats really rolls back before issuing the live queries.
+    """
+    session = _TransactionAbortingSession(
+        first_error=Exception("cache unavailable"),
+        live_results=[
+            _stats_count_result(150),
+            _stats_count_result(42),
+            _stats_count_result(85),
+            _stats_count_result(18),
+            _stats_count_result(7),
+            MagicMock(),
+        ],
+    )
+
+    result = await get_db_stats(session)
+
+    assert result == {
+        "books": 150,
+        "authors": 42,
+        "narrators": 85,
+        "series": 18,
+        "booksWithChapters": 7,
+    }
+    assert session.rollback_called is True
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_cache_write_error_still_returns_live_counts():
+    """A cache write failure must not fail the request — the live result still returns."""
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=[
+        _cache_miss_result(),
+        _stats_count_result(150),
+        _stats_count_result(42),
+        _stats_count_result(85),
+        _stats_count_result(18),
+        _stats_count_result(7),
+        Exception("cache write unavailable"),
+    ])
+
+    result = await get_db_stats(session)
+
+    assert result == {
+        "books": 150,
+        "authors": 42,
+        "narrators": 85,
+        "series": 18,
+        "booksWithChapters": 7,
+    }

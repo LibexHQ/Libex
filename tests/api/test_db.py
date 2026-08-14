@@ -124,35 +124,58 @@ READER_PATH = "app.api.routes.db.router.search_books_from_db"
 async def test_get_db_stats_returns_200(async_client):
     """Returns 200 with stats."""
     with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock:
-        mock.return_value = {"books": 150, "authors": 42, "narrators": 85, "series": 18}
+        mock.return_value = {
+            "books": 150, "authors": 42, "narrators": 85, "series": 18, "booksWithChapters": 7,
+        }
         response = await async_client.get("/db/stats")
         assert response.status_code == 200
 
 
 @pytest.mark.asyncio
 async def test_get_db_stats_returns_all_fields(async_client):
-    """Returns books, authors, narrators, and series counts."""
+    """Returns books, authors, narrators, series, and booksWithChapters counts."""
     with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock:
-        mock.return_value = {"books": 150, "authors": 42, "narrators": 85, "series": 18}
+        mock.return_value = {
+            "books": 150, "authors": 42, "narrators": 85, "series": 18, "booksWithChapters": 7,
+        }
         response = await async_client.get("/db/stats")
         data = response.json()
         assert data["books"] == 150
         assert data["authors"] == 42
         assert data["narrators"] == 85
         assert data["series"] == 18
+        assert data["booksWithChapters"] == 7
 
 
 @pytest.mark.asyncio
 async def test_get_db_stats_returns_zeros_on_empty_db(async_client):
     """Returns zero counts when DB is empty."""
     with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock:
-        mock.return_value = {"books": 0, "authors": 0, "narrators": 0, "series": 0}
+        mock.return_value = {
+            "books": 0, "authors": 0, "narrators": 0, "series": 0, "booksWithChapters": 0,
+        }
         response = await async_client.get("/db/stats")
         data = response.json()
         assert data["books"] == 0
         assert data["authors"] == 0
         assert data["narrators"] == 0
         assert data["series"] == 0
+        assert data["booksWithChapters"] == 0
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_missing_books_with_chapters_from_service_defaults_to_zero(async_client):
+    """
+    StatsResponse.booksWithChapters has a default, so a service dict that
+    omits the key (e.g. an older fallback) still validates instead of 500ing
+    — documents the current additive-field behavior rather than asserting a
+    guarantee that a future non-default field would need to uphold.
+    """
+    with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock:
+        mock.return_value = {"books": 150, "authors": 42, "narrators": 85, "series": 18}
+        response = await async_client.get("/db/stats")
+        assert response.status_code == 200
+        assert response.json()["booksWithChapters"] == 0
 
 
 # ============================================================

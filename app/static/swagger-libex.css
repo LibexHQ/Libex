@@ -1,0 +1,43 @@
+/*
+ * Libex's Swagger UI skin.
+ *
+ * Swagger UI ignores `info.x-logo` -- that key is ReDoc's extension -- so on
+ * this page the logo has to come from CSS. get_swagger_ui_html takes the
+ * stylesheet as an argument, so owning the sheet needs no fork of the page
+ * around it: a hand-written template stops tracking the upstream one and has
+ * to be re-reconciled with it by hand from then on.
+ *
+ * The vendored sheet is pulled in rather than replaced, and importing it adds
+ * no third-party request: it holds no external url() at all, every one of its
+ * asset references being an inline data: URI. What @import does cost is a
+ * round trip -- the vendored sheet is not fetched until this one has been
+ * fetched and parsed, and both block the first paint.
+ *
+ * Every URL below is same-origin and relative. Opening /docs must contact
+ * nothing but Libex, which is the whole reason these assets are served from
+ * here at all.
+ */
+
+@import url("/static/docs/swagger-ui.css");
+
+/*
+ * .info is the block holding the API title and description; the logo goes
+ * above it because FastAPI renders Swagger UI's BaseLayout, which emits no
+ * topbar element to put a logo in.
+ *
+ * A background rather than an <img> because there is nowhere to put one
+ * without forking the page, and nothing is lost: the mark is decorative, and
+ * the title it sits above already names the API in text.
+ *
+ * logo.png is the dark-on-light artwork, which is the pairing for Swagger
+ * UI's light theme. It is 900x357, so `contain` against this height draws it
+ * about 202px wide in an 80px band -- a mark a little over twice the height of
+ * the 36px title.
+ */
+.swagger-ui .info::before {
+  content: "";
+  display: block;
+  height: 80px;
+  margin-bottom: 1.25rem;
+  background: url("/static/logo.png") left center / contain no-repeat;
+}

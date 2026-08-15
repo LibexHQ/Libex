@@ -175,7 +175,10 @@ app = FastAPI(
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
-_FAVICON = "/static/favicon.svg"
+# The logo mark, square-padded, at 32px rather than the conventional 16: the
+# mark is three elements and 16px renders them as mush, while browsers take the
+# 32 for retina and downscale it for standard displays.
+_FAVICON = "/static/favicon.png"
 
 # ReDoc renders the logo from `info.x-logo` in the OpenAPI document itself, and
 # FastAPI exposes no constructor argument for it, so the document has to be
@@ -223,11 +226,17 @@ async def swagger_ui() -> HTMLResponse:
     # bump that does mount the badge cannot quietly reintroduce the request.
     # Belt and braces rather than a fix: None serialises to JS null, which the
     # option accepts and the badge's own guard reads as "no validator".
+    #
+    # Swagger UI ignores the `info.x-logo` key ReDoc takes its logo from, so on
+    # this page the logo is placed by CSS instead. The stylesheet is an argument
+    # to this function, which is what lets Libex own one without forking the
+    # page around it; it @imports the fetched swagger-ui.css, so the bundle is
+    # still styled by the sheet that shipped with it.
     return get_swagger_ui_html(
         openapi_url=app.openapi_url,
         title=f"{app.title} - Swagger UI",
         swagger_js_url="/static/docs/swagger-ui-bundle.js",
-        swagger_css_url="/static/docs/swagger-ui.css",
+        swagger_css_url="/static/swagger-libex.css",
         swagger_favicon_url=_FAVICON,
         swagger_ui_parameters={"validatorUrl": None},
     )

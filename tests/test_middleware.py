@@ -18,7 +18,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 # Local
-from app.main import app as libex_app
+from app.main import _FAVICON, app as libex_app
 
 # Core
 from app.core.middleware import (
@@ -562,6 +562,39 @@ _ASSET_URL = re.compile(r'(?:src|href)="([^"]+)"')
 _FETCH_SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "fetch_docs_assets.sh"
 _DEST_FILE = re.compile(r'"\$DEST/([^"]+)"')
 
+# What a stylesheet makes a browser fetch by itself. Both forms of @import are
+# matched, because a sheet that dropped the url() wrapper would still pull the
+# file in and would otherwise read here as a sheet that imports nothing.
+_CSS_IMPORT = re.compile(r'@import\s+(?:url\()?["\']([^"\']+)["\']')
+_CSS_URL = re.compile(r'url\(\s*["\']?([^"\')]+)["\']?\s*\)')
+
+# The first eight bytes of every PNG. StaticFiles types the response from the
+# file extension and never looks inside, so a placeholder or an unresolved
+# pointer is served as 200 image/png exactly like the real artwork.
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+
+def _libex_stylesheets(client, path):
+    """The stylesheets a docs page links that Libex commits itself, as
+    (url, text) pairs.
+
+    Sheets under /static/docs are excluded rather than skipped on 404: that
+    directory is gitignored and populated at build time, so it is absent on a
+    fresh checkout and in CI, and opening one would test what the runner
+    happens to have on disk. Everything else under /static is committed, so a
+    404 there is the failure being looked for and not a reason to pass.
+    """
+    urls = [
+        url for url in _ASSET_URL.findall(client.get(path).text)
+        if url.endswith(".css") and not url.startswith("/static/docs/")
+    ]
+    sheets = []
+    for url in urls:
+        response = client.get(url)
+        assert response.status_code == 200, f"{path} links {url}, which does not resolve"
+        sheets.append((url, response.text))
+    return sheets
+
 
 @pytest.mark.parametrize("path", ["/docs", "/redoc"])
 def test_docs_pages_reference_only_same_origin_urls(client, path):
@@ -586,6 +619,12 @@ def test_docs_pages_load_the_files_the_build_fetches(client, path, expected):
     otherwise, because the page still returns 200 and still names no third
     party while loading nothing.
 
+    The chain now spans two artefacts on /docs. get_swagger_ui_html takes one
+    stylesheet URL, so pointing it at Libex's own skin means the vendored
+    sheet is reached through that skin's @import rather than named by the page
+    -- and a browser fetches it either way. Following the link is what keeps
+    this test asserting the contract instead of the spelling of it.
+
     Deliberately not asserting those URLs return 200. The directory is
     gitignored and populated at build time, so it is absent on a fresh
     checkout and in CI -- a status check here would test what the runner
@@ -594,13 +633,81 @@ def test_docs_pages_load_the_files_the_build_fetches(client, path, expected):
     fetched = set(_DEST_FILE.findall(_FETCH_SCRIPT.read_text()))
     assert expected <= fetched, f"fetch_docs_assets.sh no longer produces {expected - fetched}"
 
-    body = client.get(path).text
+    reached = set(_ASSET_URL.findall(client.get(path).text))
+    for _, text in _libex_stylesheets(client, path):
+        reached |= set(_CSS_IMPORT.findall(text))
+
     for name in expected:
-        assert f"/static/docs/{name}" in body
+        assert f"/static/docs/{name}" in reached, f"{path} never reaches {name}"
+
+
+def test_docs_stylesheets_reference_no_third_party_hosts(client):
+    """
+    The pages themselves are checked above, and cannot see this: a stylesheet
+    is fetched by the browser and then acts on its own, so a single absolute
+    url() inside one sends a visitor's IP somewhere the page never named.
+    Libex publishes that opening the docs contacts nothing but Libex, and that
+    claim now spans a file the page-level checks only link to.
+
+    data: URIs are same-origin by construction -- they are the bytes, not a
+    request -- and are how the vendored sheet carries its own four assets.
+    """
+    sheets = [sheet for path in ("/docs", "/redoc") for sheet in _libex_stylesheets(client, path)]
+    assert sheets, "the docs pages link no stylesheet Libex serves itself"
+
+    for url, text in sheets:
+        referenced = _CSS_URL.findall(text) + _CSS_IMPORT.findall(text)
+        external = [
+            ref for ref in referenced
+            if not ref.startswith("data:") and (not ref.startswith("/") or ref.startswith("//"))
+        ]
+        assert external == [], f"{url} would send a visitor's IP to {external}"
+
+
+def test_swagger_page_reaches_its_logo(client):
+    """
+    Swagger UI ignores the info.x-logo key ReDoc renders its logo from, so on
+    /docs the mark is placed by a stylesheet instead -- which means nothing in
+    the OpenAPI document guards it and a rename shows up only as a blank space
+    in a visitor's browser.
+
+    Deliberately blind to how it is placed: no rule text, no dimensions, no
+    which-file, so a restyle or a swap to the dark artwork is not a failure.
+    What is asserted is the join a restyle must not break -- the sheet /docs
+    links references an image Libex serves, and that image is really there.
+    """
+    images = {
+        ref
+        for _, text in _libex_stylesheets(client, "/docs")
+        for ref in _CSS_URL.findall(text)
+        # Same-origin non-stylesheets: the data: URIs and any absolute URL
+        # belong to the check above, and a second failure there reads as a
+        # missing logo when it is nothing of the kind.
+        if ref.startswith("/") and not ref.startswith("//") and not ref.endswith(".css")
+    }
+    assert images, "/docs links no stylesheet that references an image -- where is the logo?"
+
+    for url in images:
+        response = client.get(url)
+        assert response.status_code == 200, f"/docs styles in {url}, which does not resolve"
+        assert response.headers["content-type"].startswith("image/")
+        if url.endswith(".png"):
+            assert response.content[:8] == _PNG_MAGIC
 
 
 def test_static_mount_serves_the_committed_favicon(client):
-    """The favicon is committed, so unlike the fetched assets it must resolve."""
-    response = client.get("/static/favicon.svg")
+    """The favicon is committed, so unlike the fetched assets it must resolve.
+    Fetched by the URL the app hands the pages, so repointing the constant at
+    a path nothing serves fails here rather than in a browser's tab strip."""
+    response = client.get(_FAVICON)
     assert response.status_code == 200
-    assert "<svg" in response.text
+    assert response.headers["content-type"] == "image/png"
+    assert response.content[:8] == _PNG_MAGIC
+
+
+@pytest.mark.parametrize("path", ["/docs", "/redoc"])
+def test_docs_pages_reference_the_committed_favicon(client, path):
+    """Both pages take their icon from the same constant, so both are checked:
+    an icon wired into one page and left off the other is a difference nobody
+    notices from the page that has it."""
+    assert f'href="{_FAVICON}"' in client.get(path).text

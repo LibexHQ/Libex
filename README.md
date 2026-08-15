@@ -192,8 +192,8 @@ receive this data only to provide those services; we don't sell your data or
 hand it to anyone else.
 
 **The API docs are served locally.** The interactive docs at `/docs` and
-`/redoc` are rendered from assets Libex ships, at pinned and checksum-verified
-versions — not from a CDN. Opening them contacts nothing but Libex.
+`/redoc` are rendered from assets Libex ships — not from a CDN. Opening them
+contacts nothing but Libex.
 
 **If you self-host:**
 Logging is completely optional. Leave `AXIOM_TOKEN` empty and Libex logs to

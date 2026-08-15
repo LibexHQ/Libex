@@ -10,6 +10,47 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.13.2]
+
+### Changed
+- **The Swagger UI page carries the logo too.** `/docs` previously showed none:
+  the OpenAPI document names one, but that key is ReDoc's, so the artwork added
+  in 1.13.1 appeared on `/redoc` and nowhere else. It now sits above the title
+  on `/docs` as well, placed by a stylesheet Libex serves itself rather than by
+  any change to the page. That stylesheet pulls in the Swagger UI sheet the
+  build already fetches rather than replacing it, so the bundle is still styled
+  by the CSS that shipped with it and nothing outside Libex is contacted; the
+  cost is one extra round trip, because a browser cannot begin fetching the
+  second sheet until it has read the first, and both hold up the first paint.
+- **Both documentation pages take a new browser-tab icon.** The old one was a
+  placeholder — a plain drawn letter with no relation to Libex's artwork — and
+  it is replaced by the mark from the logo, padded square, at 32 pixels rather
+  than the conventional 16 because the mark is three elements and renders as
+  mush at 16. `/docs` and `/redoc` take it from the same place, so neither page
+  can quietly end up with a different icon from the other. The old icon's URL
+  is gone with it: `/static/favicon.svg` now returns 404. Nothing else in Libex
+  referenced it and it only existed from 1.13.0, but anything that linked it
+  directly wants `/static/favicon.png` instead. No endpoint moved, no response
+  shape or field changed, and no status code changed anywhere else.
+
+### Fixed
+- **The privacy policy and the README no longer claim every documentation
+  asset is checksum-verified.** Both said the files behind `/docs` and `/redoc`
+  are served "at pinned and checksum-verified versions". That was true while
+  all of them came from the build-time fetch, and stopped being true once Libex
+  began committing artwork of its own. Of the seven files served from
+  `/static`, three are the Swagger UI and ReDoc bundles, which the image build
+  downloads at a pinned version and refuses to ship unless the recorded hash
+  matches — and four are Libex's own: the two logo variants, the icon and the
+  stylesheet above, committed to the repository, with no upstream version to
+  pin and no checksum to verify. `PRIVACY.md` now describes the two groups
+  separately, provenance being its subject; the README drops the claim instead,
+  because the question it answers there is narrower — whether opening the docs
+  hands a visitor to a third party — and the answer to that was and remains no.
+  `PRIVACY.md` also corrects a second line that told self-hosters there is
+  "nothing to serve" without running the asset-fetch script; what is missing
+  without it is the downloaded bundles, the rest being in the checkout already.
+
 ## [1.13.1]
 
 ### Added

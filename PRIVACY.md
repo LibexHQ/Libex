@@ -307,7 +307,11 @@ your user agent and your host header are never forwarded.
 
 **Nobody, for the documentation pages.** The interactive API documentation at
 `/docs` and `/redoc` is rendered from files Libex serves itself, from
-`/static`, at pinned and checksum-verified versions. Opening those pages
+`/static`. Some of them are Libex's own — the stylesheet, the logo, the
+favicon — and are committed to the repository, where anyone who clones it can
+see exactly what they are. The rest are the Swagger UI and ReDoc bundles,
+which the image build downloads once at pinned versions and checks against a
+recorded checksum that has to match or the build fails. Opening those pages
 contacts no third party: no CDN, no font service, no external favicon, and no
 logo fetched from the documentation tool's own vendor as it renders. The pages
 do contain ordinary links out — an attribution link, specification URLs — and
@@ -423,8 +427,8 @@ What carries over to your instance:
 - The `/docs` and `/redoc` pages are served from your own copy of the assets
   as well, so nobody who opens them on your instance contacts a third party
   either. That depends on `scripts/fetch_docs_assets.sh` having run, which the
-  Docker build does for you; without it there is nothing to serve and both
-  pages come up blank rather than quietly falling back to a CDN.
+  Docker build does for you; without it the downloaded bundles are missing
+  and both pages come up blank rather than quietly falling back to a CDN.
 
 If you expose your instance to other people, this document isn't yours to
 point them at — you're the one who decides what you log and who you ship it

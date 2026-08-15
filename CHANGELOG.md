@@ -10,6 +10,25 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.13.3]
+
+### Fixed
+- **The Swagger UI page no longer prints Libex's name twice.** The logo put on
+  `/docs` in 1.13.2 is a wordmark, and the heading beneath it spells the name
+  out again, so since that release the page has read "Libex" directly under a
+  picture of the word "Libex". That heading's text is now collapsed to nothing,
+  and the version badges beside it are re-seated: they carried a five-pixel
+  lift, tuned to sit against a full-size title, which with the title gone only
+  pulled them out of their own line and tightened the gap under the logo. The
+  badges — the API version and `OAS 3.1` — and the link to `/openapi.json` are
+  all still shown, and so is the name itself to anything reading the page
+  aloud. The text is collapsed rather than removed or hidden, so it is still
+  announced; that matters because the logo carries no text alternative of its
+  own, being a background image, which leaves the heading as where the name
+  lives for anything not reading the picture. `/redoc` is untouched, and the
+  change is confined to a stylesheet Libex serves for that one page: no
+  endpoint, response shape, field or status code moved anywhere.
+
 ## [1.13.2]
 
 ### Changed

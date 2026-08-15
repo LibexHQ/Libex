@@ -26,13 +26,12 @@
  * topbar element to put a logo in.
  *
  * A background rather than an <img> because there is nowhere to put one
- * without forking the page, and nothing is lost: the mark is decorative, and
- * the title it sits above already names the API in text.
+ * without forking the page, and nothing is lost: the h2 below still carries
+ * the name in text for anything that cannot see the image.
  *
  * logo.png is the dark-on-light artwork, which is the pairing for Swagger
  * UI's light theme. It is 900x357, so `contain` against this height draws it
- * about 202px wide in an 80px band -- a mark a little over twice the height of
- * the 36px title.
+ * about 202px wide in an 80px band.
  */
 .swagger-ui .info::before {
   content: "";
@@ -40,4 +39,25 @@
   height: 80px;
   margin-bottom: 1.25rem;
   background: url("/static/logo.png") left center / contain no-repeat;
+}
+
+/*
+ * The logo is the wordmark, so the h2 under it printed "Libex" a second time.
+ * Collapsed rather than hidden: the version badges declare their own
+ * font-size, on both the `small` and its `pre`, so they are untouched, and the
+ * name stays in the accessibility tree -- font-size is not display:none -- so
+ * it is still announced. Nothing else announces it: the logo is a background
+ * image and has no alt text.
+ */
+.swagger-ui .info .title {
+  font-size: 0;
+}
+
+/*
+ * The badges are nudged up 5px, an offset tuned against the 36px title they
+ * used to sit beside. With no title there, it only lifts them out of their own
+ * line box -- tightening the gap under the logo, stranding 5px below them.
+ */
+.swagger-ui .info .title small {
+  top: 0;
 }

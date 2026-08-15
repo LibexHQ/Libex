@@ -10,6 +10,31 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.13.1]
+
+### Added
+- **The API docs carry Libex's own logo.** The OpenAPI document now names one
+  in `info.x-logo`, which is where ReDoc looks for it, so `/redoc` draws it at
+  the top of its sidebar where the page previously showed nothing. The Swagger
+  UI page at `/docs` is unchanged — it has no equivalent. The artwork is served
+  from `/static`, the same path the docs assets already use, and both variants
+  are committed to the repository rather than fetched during the image build,
+  so a self-hosted instance has them with nothing extra to run and no new build
+  step. The docs are pinned to the dark-on-light artwork, which is the one that
+  reads against ReDoc's near-white sidebar; the page cannot pick between the
+  two files on the visitor's colour scheme the way the README does.
+
+### Changed
+- **The README leads with the logo in place of its title.** The `# Libex`
+  heading the artwork duplicated is gone, so the page now starts at its section
+  headings, and it switches to a light-on-dark version of the logo for anyone
+  reading with a dark colour scheme. Nothing in the repository linked to the
+  old heading's anchor, but an outside link to it will no longer resolve.
+- **No endpoint's response changed.** `info.x-logo` is an extension on the
+  OpenAPI document's info object — the description of the API rather than
+  anything it returns — and no field, response shape or status code moved
+  anywhere else.
+
 ## [1.13.0]
 
 ### Added

@@ -1,6 +1,7 @@
 # Standard library
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 import asyncio
 
 # Third party
@@ -175,6 +176,40 @@ _STATIC_DIR = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
 _FAVICON = "/static/favicon.svg"
+
+# ReDoc renders the logo from `info.x-logo` in the OpenAPI document itself, and
+# FastAPI exposes no constructor argument for it, so the document has to be
+# reached after it is built.
+#
+# The usual recipe for that re-derives the whole document with get_openapi(),
+# which means restating every argument the FastAPI() call above passes. Miss one
+# and the served spec loses it with nothing to show for it: drop `servers` and
+# the public instance's spec stops naming the new host, so during a migration
+# "Try it out" and generated SDKs fire at whichever host served the spec —
+# including the one being retired; drop `openapi_tags` and every tag
+# description empties. Adding the key to the document FastAPI already built
+# cannot lose anything, because it never re-derives it.
+#
+# Delegating to the original method also keeps FastAPI's cache: that method
+# populates app.openapi_schema on first call and returns the same dict every
+# time after, so the document is built once rather than per request, and the
+# key is added to the object that is cached.
+#
+# The logo `info.x-logo` names is Libex's own: logo.png is the dark-on-light
+# artwork, which is the one that reads against ReDoc's near-white (#fafafa)
+# sidebar. The bundle has no prefers-color-scheme handling, so ReDoc cannot
+# select between the two files the way the README's <picture> does — this one
+# is pinned regardless of the visitor's theme.
+_fastapi_openapi = app.openapi
+
+
+def _openapi_with_logo() -> dict[str, Any]:
+    schema = _fastapi_openapi()
+    schema["info"]["x-logo"] = {"url": "/static/logo.png", "altText": "Libex"}
+    return schema
+
+
+app.openapi = _openapi_with_logo
 
 
 @app.get("/docs", include_in_schema=False)

@@ -10,6 +10,122 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.13.0]
+
+### Changed
+- **Libex no longer records anything that identifies a caller.** The client IP
+  address is not logged in any form — not in full, not truncated, not hashed.
+  It is read from no header and from no connection. The query string is now
+  rebuilt before a log line is written rather than recorded as it arrived.
+  Structural options — `region`, `limit`, `page`, `sort` and the catalogue
+  filters — keep their values, because they describe how a caller asked
+  rather than what they typed. Every other parameter Libex recognises keeps
+  its name and has its value replaced with `REDACTED`, so a line still shows
+  that `name=` or `keywords=` was used without showing the contents. That
+  covers anything a caller typed — `name`, `keywords`, `title`, `author`,
+  `narrator`, `publisher`, `query`, `search` — and, because the rule is an
+  allowlist and not a judgement call, it covers identifiers too: a bulk
+  `asins` list passed as a query parameter is redacted along with everything
+  else, so the request line no longer says which books were asked for. One
+  line elsewhere still does, deliberately: when Audible is unreachable and
+  Libex falls back to its own database, the warning recording that fallback
+  lists the ASINs the request asked for, so which books an outage affected
+  stays answerable. Those are catalogue identifiers checked against a strict
+  ten-character format before they reach that code, so they cannot carry
+  anything a caller typed. A parameter name Libex does not recognise is
+  dropped whole — neither the name nor the value is written — and the line
+  carries a single
+  `_unrecognised` count in their place. Names get dropped rather than
+  redacted because an unrecognised one is usually not a parameter name at
+  all: an unencoded `&` inside something typed splits it mid-value and lands
+  the remainder in name position, and a query string containing no `=`
+  arrives as one long name. A structural parameter is also redacted, rather
+  than kept, when its value runs past 64 characters or contains anything
+  beyond letters, digits, spaces and simple punctuation — notably `;` and
+  `=`, which is how a second query would be smuggled inside a value that is
+  otherwise allowed to be logged. The search service no longer logs search
+  text either — its log lines now record how long a query was, how many parts
+  a compound query split into, and which fields were searched on, never their
+  contents. An allowlist rather than a blocklist, deliberately: a blocklist
+  leaks every parameter added after it was written, silently and by default.
+- **The lookup routes stopped logging caller text behind the request line
+  too.** Asking for an author's books by name previously wrote the name that
+  was typed into the log line for the successful call, and again into the
+  warning raised when a page of that lookup failed — a warning the background
+  seeder raises too, so its lines lose the name as well, the two being
+  indistinguishable at the point it is written. Three database-read
+  warnings — narrator search, a narrator's books, and series search — quoted
+  the name that had been searched for. None of them do now. Every operational
+  field is kept, including the underlying error text on the failures, so
+  diagnosing those routes is no harder: how many books were found, how many
+  pages were fetched, how long it took, and which region. An author's name is
+  still logged where it was resolved from an ASIN rather than typed by a
+  caller, because at that point it is catalogue data and not something anyone
+  sent.
+- **Database errors no longer print the values a query was run with.** Taking
+  the searched-for name out of those warning messages was not enough on its
+  own: a failed statement's exception text carries the values the statement was
+  run with, so a search that timed out re-emitted what the caller typed through
+  the error itself even though the message beside it had been cleaned. The
+  database engine now suppresses that rendering for every statement, including
+  ones not yet written. Anyone running their own instance will see the
+  difference: a database error now reads `[SQL parameters hidden due to
+  hide_parameters=True]` where the values used to appear. The driver's own
+  message and the full statement are still logged, so a failure is still
+  diagnosable down to the query that caused it — only the literal values are
+  gone. The same switch covers `DATABASE_ECHO`, which when turned on had been
+  printing the values of every successful query, not only failing ones.
+- **Per-endpoint observability is unchanged.** Method, path, status, duration,
+  user agent and host header are all still logged, so failure rates and
+  latency remain visible per endpoint. The user agent stays because it names
+  client software rather than a person, and with no address recorded beside it
+  there is nothing to tie it back to an individual. The fields themselves did
+  change, though, so anyone querying their own logs should expect it: `ip` is
+  gone entirely, and the search lines carry a length, a part count and a list
+  of field names where they used to carry `keywords`, `search_params` and the
+  parsed segments.
+- **No API response changed.** This affects only what the server writes about
+  a request, never what it returns.
+- **The interactive API docs are served from local assets.** `/docs` and
+  `/redoc` previously had the browser fetch Swagger UI and ReDoc from
+  `cdn.jsdelivr.net`, a favicon from `fastapi.tiangolo.com`, and — on the
+  ReDoc page only — a web font stylesheet from `fonts.googleapis.com`, so
+  opening the docs sent a visitor's real IP address to three third parties.
+  Those assets are now fetched at build time at pinned, checksum-verified
+  versions and served by Libex itself, and the ReDoc page is rendered with its
+  web font stylesheet switched off, so it uses fonts already on the machine.
+  A fourth recipient outlived all of that: the ReDoc bundle asks the browser
+  for a logo from `cdn.redoc.ly` as it draws the page, so serving the file
+  unmodified would still have handed Redocly the address of everyone who
+  opened `/redoc`. That URL is now rewritten to an inlined transparent pixel
+  as the file is fetched, and the build fails outright if the reference is not
+  found exactly once beforehand or if any reference to that host survives
+  afterwards. Redocly's attribution link and its "API docs by Redocly" text
+  are deliberately left intact. Loading the docs now contacts nothing but
+  Libex. Pinning also closes a standing
+  supply-chain exposure: the previous URLs tracked floating major tags, so a
+  visitor's browser executed whatever the CDN resolved them to that day.
+  Serving them adds one new path, `/static`, which is where those files and
+  the favicon are now published; no existing endpoint moved or changed.
+- **Self-hosters have one new build step.** The docs assets are fetched during
+  the image build and are deliberately not committed to the repository, so a
+  normal Docker build picks them up with nothing to do — and fails outright if
+  a checksum doesn't match, rather than shipping a substituted file. Running
+  from a local checkout instead, `scripts/fetch_docs_assets.sh` has to be run
+  once by hand; without it `/docs` and `/redoc` return an empty page, because
+  the scripts that draw them are the files that weren't fetched. Nothing else
+  about the instance is affected, and the docs still contact no third party
+  either way.
+
+### Added
+- **`PRIVACY.md`**, the first privacy policy for the public instance, linked
+  from the README. It states what is recorded and what is not, names every
+  party that sees a request — Cloudflare, Axiom, Audible and the operator of
+  the server — and is honest about the limits: Cloudflare still sees real
+  addresses, an unhandled error still logs its own message, which can contain
+  text a caller sent, and the database-fallback warning still lists the ASINs
+  a request asked for.
+
 ## [1.12.0]
 
 ### Added

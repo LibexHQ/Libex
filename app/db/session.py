@@ -21,9 +21,20 @@ settings = get_settings()
 # left idle-in-transaction (e.g. holding a lock across a slow network await),
 # which would otherwise pin the xmin horizon and block autovacuum on a
 # 1.1M-row, write-heavy table.
+# hide_parameters keeps caller-supplied search text out of the logs. Every
+# search filter is a bound parameter, and SQLAlchemy renders a statement's
+# bound parameters into str() on any StatementError -- which every DBAPIError,
+# OperationalError and DataError is a subclass of. So a query that times out
+# against the 30s statement_timeout above, or fails for any other reason, would
+# otherwise print what the caller typed as part of the exception text, no matter
+# how carefully the surrounding log message avoids it. This suppresses that
+# rendering for every statement, including ones not yet written. The compiled
+# SQL and the driver's own message are still logged, so a failure is still
+# diagnosable down to the statement that caused it; only the literal values go.
 engine = create_async_engine(
     settings.database_url,
     echo=settings.database_echo,
+    hide_parameters=True,
     pool_pre_ping=True,
     pool_size=20,
     max_overflow=20,

@@ -216,3 +216,6 @@ audible.apk
 apk-work/
 libex_snapshot.txt
 scrapers/
+
+# Fetched at build time by scripts/fetch_docs_assets.sh, never vendored.
+app/static/docs/

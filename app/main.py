@@ -1,12 +1,15 @@
 # Standard library
 from contextlib import asynccontextmanager
+from pathlib import Path
 import asyncio
 
 # Third party
 from alembic import command
 from alembic.config import Config
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 
 # Core
@@ -142,7 +145,73 @@ app = FastAPI(
     # Hardcoding the new host here would send a self-hoster's "Try it out" requests and
     # generated SDKs at the public instance instead of their own.
     servers=[{"url": migration_notice.new_host}] if migration_notice is not None else None,
+    # The interactive docs are served from assets Libex ships, not from a CDN
+    # -- see the custom /docs and /redoc routes below. Disabling the built-in
+    # routes here is what frees those paths for them.
+    docs_url=None,
+    redoc_url=None,
 )
+
+# ============================================================
+# DOCS (self-hosted assets)
+# ============================================================
+
+# FastAPI's defaults have the browser fetch Swagger UI and ReDoc from
+# cdn.jsdelivr.net, a favicon from fastapi.tiangolo.com, and -- ReDoc's
+# template only, and only while with_google_fonts is left at its default --
+# a stylesheet from fonts.googleapis.com. Opening the docs therefore sent a
+# visitor's real IP address to three third parties. Libex records nothing that
+# identifies a caller, and that has to hold for the pages it serves and not
+# only for the lines it writes, so the assets are served from here instead.
+#
+# scripts/fetch_docs_assets.sh pulls them at build time against pinned
+# versions and checksums, and neuters the logo the ReDoc bundle would
+# otherwise fetch from Redocly as it renders. If it has not been run, both
+# pages come up completely blank rather than merely unstyled: each template is
+# an empty container plus a script tag, so a missing bundle leaves nothing to
+# mount. That failure is total and local, which is still preferable to a
+# silent fallback to the CDN that looks like it worked.
+_STATIC_DIR = Path(__file__).resolve().parent / "static"
+app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
+_FAVICON = "/static/favicon.svg"
+
+
+@app.get("/docs", include_in_schema=False)
+async def swagger_ui() -> HTMLResponse:
+    # Swagger UI's own default for validatorUrl is validator.swagger.io, and
+    # FastAPI does not override it; the OnlineValidatorBadge that reads it would
+    # have the visitor's browser fetch that host. Nothing reaches it from the
+    # pinned bundle -- the badge is registered in the component map but never
+    # retrieved from it, so it never mounts and the default sits inert. Setting
+    # it to null anyway closes the vector by construction, so a later version
+    # bump that does mount the badge cannot quietly reintroduce the request.
+    # Belt and braces rather than a fix: None serialises to JS null, which the
+    # option accepts and the badge's own guard reads as "no validator".
+    return get_swagger_ui_html(
+        openapi_url=app.openapi_url,
+        title=f"{app.title} - Swagger UI",
+        swagger_js_url="/static/docs/swagger-ui-bundle.js",
+        swagger_css_url="/static/docs/swagger-ui.css",
+        swagger_favicon_url=_FAVICON,
+        swagger_ui_parameters={"validatorUrl": None},
+    )
+
+
+@app.get("/redoc", include_in_schema=False)
+async def redoc() -> HTMLResponse:
+    # with_google_fonts=False is what makes every URL in the emitted page
+    # same-origin; the other three are pointed at Libex by the arguments above
+    # it. Upstream's template is used rather than a local copy so its
+    # <noscript> notice keeps reaching visitors who would otherwise be handed a
+    # blank page with no explanation.
+    return get_redoc_html(
+        openapi_url=app.openapi_url,
+        title=f"{app.title} - ReDoc",
+        redoc_js_url="/static/docs/redoc.standalone.js",
+        redoc_favicon_url=_FAVICON,
+        with_google_fonts=False,
+    )
 
 # ============================================================
 # EXCEPTION HANDLERS

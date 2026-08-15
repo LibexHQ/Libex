@@ -145,27 +145,60 @@ networks:
 
 ## Logging & Privacy
 
-The public instance uses [Axiom](https://axiom.co) for structured request logging. This is disclosed transparently.
+**Libex does not record who calls it.** No IP address is logged — not in full,
+not truncated, not hashed — and no header or connection detail that would
+identify a caller is written anywhere. Search text is stripped from the log
+lines Libex writes about a request, with one exception noted below. See
+[PRIVACY.md](PRIVACY.md) for the full policy.
+
+The public instance uses [Axiom](https://axiom.co) for structured request
+logging, so that broken endpoints and failing deploys are visible. This is
+disclosed transparently.
 
 **What is logged:**
-- Request path and parameters (e.g. which ASIN was requested, which region)
-- Response time and status code
-- IP address
-- User agent
+- Request method, path, and status code
+- Response time
+- Query parameters — **names and values are allowlisted.** Structural params
+  (`region`, `limit`, `page`, `sort`, filters) keep their values; anything a
+  caller typed (`name`, `keywords`, `title`, `author`) keeps its name and loses
+  its value to `REDACTED`; a name Libex doesn't recognise is dropped from the
+  line entirely
+- User agent — this names client *software*, not a person, and with no address
+  logged beside it there is nothing to tie it back to an individual
 - Cache hit/miss
-- Errors and exceptions
+- Errors and exceptions. An unhandled error logs its message so a broken deploy
+  can be diagnosed; if a message was built from something you sent, that text
+  appears in that one line
 
 **What is NOT logged:**
-- Any personally identifiable information beyond the above
+- Your IP address, in any form
+- Anything you typed into a search, apart from the error case above
+- Cookies, trackers, or fingerprinting of any kind — Libex sets none
 
 **Why we log:**
-Logging helps us understand how Libex is being used, identify broken endpoints, debug errors, and improve the service. Without visibility into what's failing, we can't fix it.
+To see which endpoints are failing and how fast they respond. Without
+per-endpoint visibility, a bad release breaks things silently. None of that
+requires knowing who you are.
 
 **Who can see the logs:**
-Only the instance maintainer has access to the Axiom dataset. Logs are retained for 30 days and then automatically deleted by Axiom. No logs are shared with third parties.
+Only the instance maintainer has access to the Axiom dataset. Logs are retained
+for 30 days and then automatically deleted by Axiom. The public instance also
+sits behind Cloudflare, which sees every request in order to terminate TLS —
+including your real IP, which is outside Libex's control. Axiom and Cloudflare
+receive this data only to provide those services; we don't sell your data or
+hand it to anyone else.
+
+**The API docs are served locally.** The interactive docs at `/docs` and
+`/redoc` are rendered from assets Libex ships, at pinned and checksum-verified
+versions — not from a CDN. Opening them contacts nothing but Libex.
 
 **If you self-host:**
-Logging is completely optional. Leave `AXIOM_TOKEN` empty and Libex logs to stdout and a rotating file only — nothing leaves your server. Logs print at `LOG_LEVEL` (default `INFO`); set it to `DEBUG` for more detail when troubleshooting. Warnings and errors go to stderr, everything else to stdout, and structured context (counts, IDs) is appended to each line so you can see what a task actually did.
+Logging is completely optional. Leave `AXIOM_TOKEN` empty and Libex logs to
+stdout and a rotating file only — nothing leaves your server. Logs print at
+`LOG_LEVEL` (default `INFO`); set it to `DEBUG` for more detail when
+troubleshooting. Warnings and errors go to stderr, everything else to stdout,
+and structured context (counts, IDs) is appended to each line so you can see
+what a task actually did.
 
 ---
 

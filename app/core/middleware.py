@@ -6,6 +6,8 @@ CORS and request validation.
 # Standard library
 import re
 import time
+import unicodedata
+import urllib.parse
 import uuid
 
 # Third party
@@ -55,6 +57,168 @@ def valid_region(
 # HTTP LOGGING
 # ============================================================
 
+# Query params whose values may be logged verbatim: region selectors,
+# pagination, sort order, and catalogue facets. Every one of them describes HOW
+# a caller asked, never WHAT they typed. Membership is necessary but not
+# sufficient -- the value must also pass _is_safe_value, and one that does not is
+# replaced by the sentinel with its key kept, exactly like a param that is
+# known but not listed here. A key in neither set is dropped whole, pair and
+# all; see _KNOWN_QUERY_PARAMS.
+#
+# An allowlist rather than a denylist, deliberately. A denylist leaks every
+# param added after it was written, silently and by default, and the failure
+# is invisible until someone reads the logs. This fails closed instead, in both
+# directions: nothing reaches the log line until it is listed, here for its
+# value and below for its key.
+_SAFE_QUERY_PARAMS = frozenset({
+    "region", "book_region", "cache", "limit", "page", "sort", "order",
+    "flat", "depth", "days", "source", "products_sort_by",
+    "category", "genre", "book_format", "language", "plan_name",
+    "explicit", "has_pdf", "is_vvab", "whisper_sync",
+    "audiobooks_produced", "cultural_heritage", "gender",
+    "longer_than", "shorter_than", "rating_better_than", "rating_worse_than",
+})
+
+# Every query param name a Libex route accepts. The keys above, plus the ones
+# whose value is caller-authored and so is replaced while the key is kept.
+#
+# A key is written to the log only if it appears here, because a key matching
+# no route param is not a param name at all -- it is caller text that reached
+# key position. That happens without any hostile intent: an unencoded "&" in
+# something typed splits mid-value ("title=Salt&Pepper" parses as title=Salt
+# plus a bare "Pepper" key), and a query string carrying no "=" becomes one
+# bare key holding the whole typed string. Unrecognised keys are dropped, not
+# redacted in place -- see _redact_query.
+#
+# Written out rather than derived from the router, since deriving it would
+# have this module import the app that installs it. Drift fails closed: a
+# param added to a route and not added here is dropped from the log line,
+# never leaked into it.
+_KNOWN_QUERY_PARAMS = _SAFE_QUERY_PARAMS | frozenset({
+    "asins", "author", "author_name", "content_delivery_type", "content_type",
+    "copyright", "description", "is_buyable", "is_listenable", "isbn",
+    "keywords", "name", "narrator", "publisher", "query", "search",
+    "series_name", "subtitle", "summary", "title",
+})
+
+# Deliberately free of characters urlencode would escape -- "<redacted>"
+# comes back as "%3Credacted%3E", which is unreadable in exactly the logs
+# this field exists to make readable.
+_REDACTED = "REDACTED"
+
+# Reports that unrecognised params were present without keeping any of their
+# text. Leads with an underscore, which no route param does, and a caller
+# sending it is itself unrecognised and counted like any other, so the marker
+# only ever appears with a count Libex produced.
+_UNRECOGNISED = "_unrecognised"
+
+# An allowlisted key earns its value logged verbatim only if that value looks
+# like the short token these params take -- a region code, a number, an enum, a
+# facet name in any language.
+#
+# Judged by Unicode category rather than by a list of permitted characters,
+# because the vocabulary being judged is Audible's and it grows without notice.
+# A literal list has to be extended for every taxonomy a marketplace adds, and
+# the character it misses next is region-specific and invisible from a US test
+# run. Measured across all eleven live taxonomies, an ASCII-shaped rule lost
+# 83% of top-level genre names in us/uk/ca/au/in to "&" alone, all 402 jp names
+# built on "・", the fr and it names spelled with U+2019 instead of the ASCII
+# apostrophe, and every Devanagari, Tamil and Thai name whose letters carry a
+# combining mark -- those redact on their letters, with no punctuation in them
+# at all. Letters, marks, numbers, punctuation, symbols and spaces are what a
+# catalogue name is made of in every script, so that is what the rule names.
+_SAFE_VALUE_CATEGORIES = frozenset({
+    "Lu", "Ll", "Lt", "Lm", "Lo",              # letters, every script
+    "Mn", "Mc", "Me",                          # combining marks
+    "Nd", "Nl", "No",                          # numbers
+    "Pc", "Pd", "Ps", "Pe", "Pi", "Pf", "Po",  # punctuation
+    "Sc", "Sk", "Sm", "So",                    # symbols
+    "Zs",                                      # spaces, ASCII and ideographic
+})
+
+# Excluded by name from the punctuation and symbol categories above, because
+# they are how a whole second query rides inside one value: in "?region=us;
+# Jane+Doe" the whole of "us;Jane Doe" is one param to parse_qsl, which has not
+# split on ";" since CVE-2021-23336, so without this the typed name is logged
+# verbatim.
+_UNSAFE_VALUE_CHARS = frozenset(";=")
+
+# The categories the set above leaves out are left out deliberately: the
+# control and format categories, which is where CR, LF, NUL and U+0085 live,
+# and the line and paragraph separators U+2028 and U+2029. None of them belongs
+# in a catalogue name, and any of them would put part of a value on a log line
+# of its own. urlencode percent-encodes them downstream regardless; the
+# guarantee is held here as well rather than borrowed from a later caller.
+
+# The longest of 6,787 genre names measured across the eleven marketplaces is
+# 62 characters, so the bound costs no real vocabulary. It counts decoded
+# characters rather than bytes, so a name in a multi-byte script is not charged
+# for its encoding.
+_MAX_VALUE_LENGTH = 64
+
+
+def _is_safe_value(value: str) -> bool:
+    """True if a value is short catalogue vocabulary rather than caller text."""
+    if len(value) > _MAX_VALUE_LENGTH:
+        return False
+    return all(
+        ch not in _UNSAFE_VALUE_CHARS
+        and unicodedata.category(ch) in _SAFE_VALUE_CATEGORIES
+        for ch in value
+    )
+
+
+def _redact_query(raw_query: str) -> str:
+    """
+    Reduces a query string to the parts that describe how a caller asked.
+
+    Libex logs the query string because the path alone cannot answer which
+    params consumers actually use -- but on the search and name-lookup routes
+    that string is whatever a person typed, and Libex deliberately records
+    nothing that identifies a caller and nothing a caller typed. Keeping a
+    recognised key and dropping its value preserves the operational answer
+    ("this route was called with name=") without keeping the content.
+
+    A key Libex does not recognise is caller text rather than a param name, so
+    there is no form of it worth keeping: the pair goes, and only a count of
+    how many went is reported, which still tells an operator that unexpected
+    params arrived.
+
+    Nothing here raises, whatever the URL contains. Losing the query field on
+    one log line beats losing the request, and beats falling back to the raw
+    string, which would leak exactly what this exists to withhold. No input
+    tested reaches that fallback -- parse_qsl does not raise without strict
+    parsing -- and it stays because the cost of being wrong about that is the
+    leak itself.
+    """
+    if not raw_query:
+        return ""
+
+    try:
+        logged = []
+        unrecognised = 0
+
+        for key, value in urllib.parse.parse_qsl(raw_query, keep_blank_values=True):
+            if key not in _KNOWN_QUERY_PARAMS:
+                unrecognised += 1
+                continue
+            logged.append((key, _logged_value(key, value)))
+
+        if unrecognised:
+            logged.append((_UNRECOGNISED, str(unrecognised)))
+
+        return urllib.parse.urlencode(logged)
+    except (ValueError, UnicodeDecodeError):
+        return ""
+
+
+def _logged_value(key: str, value: str) -> str:
+    """Returns an allowlisted key's value if it is safe to log, else the sentinel."""
+    if key in _SAFE_QUERY_PARAMS and _is_safe_value(value):
+        return value
+    return _REDACTED
+
+
 class LoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         request_id = str(uuid.uuid4())
@@ -65,11 +229,17 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         if request.url.path == "/health":
             return response
 
-        ip = (
-            request.headers.get("CF-Connecting-IP")
-            or request.headers.get("x-real-ip")
-            or (request.client.host if request.client else None)
-        )
+        # No client address is read here, from any header or from the
+        # connection. Libex does not record who called it -- not in full, not
+        # truncated, not hashed. Every field below describes the request, not
+        # the requester, which is what keeps per-endpoint failure rates and
+        # latency visible while leaving nothing that identifies a caller.
+        #
+        # The user agent stays because it names client SOFTWARE, not a person
+        # -- it is how a spike gets traced to a particular consumer version.
+        # With no address logged alongside it, it cannot be tied back to an
+        # individual, so removing it on privacy grounds would blind the
+        # monitoring for nothing.
         user_agent = request.headers.get("user-agent", "")
         # The only signal, once both libex.lostcartographer.xyz and libexdb.com serve
         # the same container, that tells old-host traffic apart from new-host traffic.
@@ -81,13 +251,14 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                 "method": request.method,
                 "url": request.url.path,
                 # Path alone cannot answer which parameters consumers actually
-                # use. No secret travels this way -- the internal routes
-                # authenticate on an Authorization header, not a query param.
-                "query": request.url.query,
+                # use. Values are allowlisted -- see _redact_query -- so this
+                # answers that without keeping what a caller typed. No secret
+                # travels this way either: the internal routes authenticate on
+                # an Authorization header, not a query param.
+                "query": _redact_query(request.url.query),
                 "status": response.status_code,
                 "userAgent": user_agent,
                 "took": took,
-                "ip": ip,
                 "host": host,
             },
         )

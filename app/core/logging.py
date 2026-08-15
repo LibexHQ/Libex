@@ -230,8 +230,28 @@ def _resolve_level(settings) -> int:
     return level if isinstance(level, int) else logging.INFO
 
 
+# httpx logs "HTTP Request: GET <url>" at INFO, with the full URL and its query
+# string. Libex forwards a caller's search text to Audible in exactly those
+# query strings, so at INFO that logger prints the keywords, title, author and
+# narrator someone typed -- the content the rest of this codebase goes to some
+# length never to record. httpcore is muted with it: it logs connection and
+# stream trace at DEBUG, which turns on with LOG_LEVEL=DEBUG and is noise Libex
+# has no use for either way.
+#
+# Muted explicitly because the alternative is luck. Nothing today attaches a
+# handler to the root logger or calls basicConfig, so those records are
+# currently discarded at the root's default WARNING -- an accident of
+# configuration that ends the moment anyone adds a root handler or passes
+# --log-config to uvicorn, with no sign that it did. A level set on the logger
+# itself does not depend on who else configures logging.
+_MUTED_THIRD_PARTY_LOGGERS = ("httpx", "httpcore")
+
+
 def setup_logging() -> logging.Logger:
     settings = get_settings()
+
+    for name in _MUTED_THIRD_PARTY_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
 
     logger = logging.getLogger("libex")
     logger.setLevel(_resolve_level(settings))

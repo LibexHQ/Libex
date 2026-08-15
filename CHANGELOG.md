@@ -12,6 +12,15 @@ capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
 ## [1.13.0]
 
+### Added
+- **`PRIVACY.md`**, the first privacy policy for the public instance, linked
+  from the README. It states what is recorded and what is not, names every
+  party that sees a request — Cloudflare, Axiom, Audible and the operator of
+  the server — and is honest about the limits: Cloudflare still sees real
+  addresses, an unhandled error still logs its own message, which can contain
+  text a caller sent, and the database-fallback warning still lists the ASINs
+  a request asked for.
+
 ### Changed
 - **Libex no longer records anything that identifies a caller.** The client IP
   address is not logged in any form — not in full, not truncated, not hashed.
@@ -26,28 +35,43 @@ capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
   `narrator`, `publisher`, `query`, `search` — and, because the rule is an
   allowlist and not a judgement call, it covers identifiers too: a bulk
   `asins` list passed as a query parameter is redacted along with everything
-  else, so the request line no longer says which books were asked for. One
-  line elsewhere still does, deliberately: when Audible is unreachable and
-  Libex falls back to its own database, the warning recording that fallback
-  lists the ASINs the request asked for, so which books an outage affected
-  stays answerable. Those are catalogue identifiers checked against a strict
-  ten-character format before they reach that code, so they cannot carry
-  anything a caller typed. A parameter name Libex does not recognise is
-  dropped whole — neither the name nor the value is written — and the line
-  carries a single
-  `_unrecognised` count in their place. Names get dropped rather than
-  redacted because an unrecognised one is usually not a parameter name at
-  all: an unencoded `&` inside something typed splits it mid-value and lands
-  the remainder in name position, and a query string containing no `=`
-  arrives as one long name. A structural parameter is also redacted, rather
-  than kept, when its value runs past 64 characters or contains anything
-  beyond letters, digits, spaces and simple punctuation — notably `;` and
-  `=`, which is how a second query would be smuggled inside a value that is
-  otherwise allowed to be logged. The search service no longer logs search
-  text either — its log lines now record how long a query was, how many parts
-  a compound query split into, and which fields were searched on, never their
-  contents. An allowlist rather than a blocklist, deliberately: a blocklist
-  leaks every parameter added after it was written, silently and by default.
+  else, so the request line no longer says which books were asked for. The
+  database-fallback path still says so, deliberately: when Audible is
+  unreachable and Libex falls back to its own database, the warning recording
+  that fallback lists the ASINs the request asked for, and so does the
+  warning raised if that database read then fails as well, so which books an
+  outage affected stays answerable. Those are catalogue identifiers checked
+  against a strict ten-character format before they reach that code, so they
+  cannot carry anything a caller typed. A parameter name Libex does not
+  recognise is dropped whole — neither the name nor the value is written —
+  and the line carries a single `_unrecognised` count in their place. Names
+  get dropped rather than redacted because an unrecognised one is usually not
+  a parameter name at all: an unencoded `&` inside something typed splits it
+  mid-value and lands the remainder in name position, and a query string
+  containing no `=` arrives as one long name. A structural parameter is also
+  redacted, rather than kept, when its value runs past 64 characters or
+  contains a character that has no place in a catalogue facet. What belongs
+  there is judged by Unicode category rather than by a list of permitted
+  characters, so a facet name survives whatever script it is written in:
+  letters in any alphabet, the combining marks those letters carry, numbers,
+  punctuation, symbols and spaces are all kept. That is what keeps the `&` in
+  an English genre name, the middle dot in a Japanese one, the curly
+  apostrophe in a French or Italian one and the vowel signs in a Hindi one
+  out of the redaction — a list of allowed characters would have had to be
+  extended for every taxonomy a marketplace adds, and the one it missed next
+  would have been invisible from a US test run. The 64-character bound counts
+  characters rather than bytes, so a name in a multi-byte script is not
+  charged for its encoding; measured across all eleven marketplaces, the
+  longest of 6,787 genre names is 62 characters. Two characters are excluded
+  by name, `;` and `=`, which is how a second query would be smuggled inside
+  a value that is otherwise allowed to be logged, and the control, format and
+  line-separator characters are excluded too, since any of them would put
+  part of a value on a log line of its own. The search service no longer logs
+  search text either — its log lines now record how long a query was, how
+  many parts a compound query split into, and which fields were searched on,
+  never their contents. An allowlist rather than a blocklist, deliberately: a
+  blocklist leaks every parameter added after it was written, silently and by
+  default.
 - **The lookup routes stopped logging caller text behind the request line
   too.** Asking for an author's books by name previously wrote the name that
   was typed into the log line for the successful call, and again into the
@@ -75,6 +99,20 @@ capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
   diagnosable down to the query that caused it — only the literal values are
   gone. The same switch covers `DATABASE_ECHO`, which when turned on had been
   printing the values of every successful query, not only failing ones.
+- **The HTTP client's own request logging is muted, so it cannot start
+  printing search text later.** Libex forwards a caller's search terms to
+  Audible inside the request URL, and `httpx` logs every request URL it
+  makes — query string and all — at info level. Nothing was routing those
+  records anywhere: Libex attaches its handlers to its own logger and never
+  to the root one, so on any normal instance those lines were discarded and
+  no search text was ever written by them. That was an accident of how
+  logging happened to be configured rather than a decision, and it would have
+  ended the moment anyone attached a handler to the root logger or started
+  the server with their own `--log-config` — with no code change and no sign
+  that it had happened. `httpx` and `httpcore` are now held at warning level
+  explicitly, so those records are never emitted no matter who else
+  configures logging. Anyone self-hosting who had wired up a root handler to
+  capture those per-request client lines will no longer see them.
 - **Per-endpoint observability is unchanged.** Method, path, status, duration,
   user agent and host header are all still logged, so failure rates and
   latency remain visible per endpoint. The user agent stays because it names
@@ -101,12 +139,18 @@ capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
   as the file is fetched, and the build fails outright if the reference is not
   found exactly once beforehand or if any reference to that host survives
   afterwards. Redocly's attribution link and its "API docs by Redocly" text
-  are deliberately left intact. Loading the docs now contacts nothing but
-  Libex. Pinning also closes a standing
-  supply-chain exposure: the previous URLs tracked floating major tags, so a
-  visitor's browser executed whatever the CDN resolved them to that day.
-  Serving them adds one new path, `/static`, which is where those files and
-  the favicon are now published; no existing endpoint moved or changed.
+  are deliberately left intact. The Swagger UI page also turns off its
+  spec-validator badge by name. Swagger UI's own default points that badge at
+  `validator.swagger.io`, and the badge is not mounted in the pinned bundle,
+  so nothing was ever sent there — but that was a property of the version
+  being served rather than of how Libex configures it, and a later bundle
+  that did mount the badge would have reintroduced the request with nothing
+  to catch it. Loading the docs now contacts nothing but Libex. Pinning also
+  closes a standing supply-chain exposure: the previous URLs tracked floating
+  major tags, so a visitor's browser executed whatever the CDN resolved them
+  to that day. Serving them adds one new path, `/static`, which is where
+  those files and the favicon are now published; no existing endpoint moved
+  or changed.
 - **Self-hosters have one new build step.** The docs assets are fetched during
   the image build and are deliberately not committed to the repository, so a
   normal Docker build picks them up with nothing to do — and fails outright if
@@ -116,15 +160,6 @@ capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
   the scripts that draw them are the files that weren't fetched. Nothing else
   about the instance is affected, and the docs still contact no third party
   either way.
-
-### Added
-- **`PRIVACY.md`**, the first privacy policy for the public instance, linked
-  from the README. It states what is recorded and what is not, names every
-  party that sees a request — Cloudflare, Axiom, Audible and the operator of
-  the server — and is honest about the limits: Cloudflare still sees real
-  addresses, an unhandled error still logs its own message, which can contain
-  text a caller sent, and the database-fallback warning still lists the ASINs
-  a request asked for.
 
 ## [1.12.0]
 

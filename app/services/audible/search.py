@@ -153,9 +153,9 @@ async def quick_search(
                     asins.append(asin)
 
         # Deliberately no "keywords" field. It is verbatim caller-authored
-        # text, and Libex records nothing that identifies a caller or reveals
-        # what they were looking for. The length is kept instead: it is enough
-        # to correlate a slow or empty search with the size of the query that
+        # text, and Libex records nothing that identifies a caller and nothing
+        # a caller typed. The length is kept instead: it is enough to
+        # correlate a slow or empty search with the size of the query that
         # produced it, without keeping the query.
         logger.info("Requested Audible Quick Search", extra={
             "keywords_length": len(keywords),

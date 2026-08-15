@@ -147,8 +147,9 @@ networks:
 
 **Libex does not record who calls it.** No IP address is logged — not in full,
 not truncated, not hashed — and no header or connection detail that would
-identify a caller is written anywhere. Search text is stripped before any log
-line is written. See [PRIVACY.md](PRIVACY.md) for the full policy.
+identify a caller is written anywhere. Search text is stripped from the log
+lines Libex writes about a request, with one exception noted below. See
+[PRIVACY.md](PRIVACY.md) for the full policy.
 
 The public instance uses [Axiom](https://axiom.co) for structured request
 logging, so that broken endpoints and failing deploys are visible. This is
@@ -157,10 +158,11 @@ disclosed transparently.
 **What is logged:**
 - Request method, path, and status code
 - Response time
-- Query parameters — **values are allowlisted.** Structural params (`region`,
-  `limit`, `page`, `sort`, filters) keep their values; anything a caller typed
-  (`name`, `keywords`, `title`, `author`) has its value replaced with
-  `REDACTED`, leaving only the fact that the param was used
+- Query parameters — **names and values are allowlisted.** Structural params
+  (`region`, `limit`, `page`, `sort`, filters) keep their values; anything a
+  caller typed (`name`, `keywords`, `title`, `author`) keeps its name and loses
+  its value to `REDACTED`; a name Libex doesn't recognise is dropped from the
+  line entirely
 - User agent — this names client *software*, not a person, and with no address
   logged beside it there is nothing to tie it back to an individual
 - Cache hit/miss
@@ -170,7 +172,7 @@ disclosed transparently.
 
 **What is NOT logged:**
 - Your IP address, in any form
-- Anything you typed into a search
+- Anything you typed into a search, apart from the error case above
 - Cookies, trackers, or fingerprinting of any kind — Libex sets none
 
 **Why we log:**

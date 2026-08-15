@@ -232,10 +232,15 @@ async def _fetch_author_books_by_name_detailed(
         stop = False
         for page, result in zip(batch_pages, results):
             if isinstance(result, BaseException):
+                # No "author_name" field here either: this walk is reached
+                # both from the seeder, where name is a stored catalogue
+                # value, and from the by-name route, where it is whatever a
+                # caller typed. The two are indistinguishable at this point,
+                # so the identifying value is never written and the failure
+                # is reported by where and how it failed instead.
                 logger.warning(
                     "Audible Author Books by-name page fetch failed, keeping partial harvest",
                     extra={
-                        "author_name": name,
                         "region": region,
                         "page": page,
                         "asins_collected": len(asins),

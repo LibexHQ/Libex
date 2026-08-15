@@ -755,8 +755,13 @@ async def get_author_books_by_name(
         if not asins:
             raise NotFoundException(f"No books found for author name: {name}")
 
+        # Deliberately no "author_name" field: on this route the name is
+        # verbatim caller-authored text, not catalogue data resolved from an
+        # ASIN, and Libex records nothing that identifies a caller and nothing
+        # a caller typed. Nothing stands in for it -- unlike a search query,
+        # whose length correlates with how it performed, an author name's
+        # length explains nothing the page count below does not already.
         logger.info("Requested Audible Author Books By Name", extra={
-            "author_name": name,
             "author_book_num": len(asins),
             "pages_fetched": pages_fetched,
             "author_book_took": author_book_took,

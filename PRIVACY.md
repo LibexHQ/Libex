@@ -50,17 +50,20 @@ rather not raise in public, the email published in
 
 On every request that isn't `/health`, the public instance writes one log line
 containing: the method, the path, the response status, how long it took, your
-user agent, the host header you used, and the query parameter *names* with
-their values allowlisted — structural options like `region` and `limit` keep
-their values, and anything you typed is replaced with `REDACTED`.
+user agent, the host header you used, and the *names* of the query parameters
+you sent. Parameter values are allowlisted — structural options like `region`
+and `limit` keep their values, anything you typed is replaced with `REDACTED`,
+and a parameter name Libex doesn't recognise is thrown away rather than
+written down.
 
 **No IP address. Nothing you searched for. No cookie, no identifier, nothing
 that links one of your requests to another.**
 
-Those lines go to the container's stdout, to a rotating file on the server,
-and to **Axiom**, a third-party log service. **Cloudflare** sits in front of
-the public instance, terminates TLS, and keeps its own logs — including your
-real address — which I don't control and can't reach.
+Those lines go to the container's stdout — warnings and errors to stderr — to
+a rotating file on the server, and to **Axiom**, a third-party log service.
+**Cloudflare** sits in front of the public instance, terminates TLS, and keeps
+its own logs — including your real address — which I don't control and can't
+reach.
 
 The point of logging at all is to see which endpoints are failing and how
 slow they are, so a bad release doesn't break things quietly. None of that
@@ -76,8 +79,8 @@ One log line per request, built in `LoggingMiddleware.dispatch`:
 |---|---|---|
 | `userAgent` | Your `User-Agent` header verbatim, e.g. `Audiobookshelf/2.x` or `python-httpx/0.27`. | Tells me which client software is calling. This is how I know who a change will break, and it's what I used to check that real consumers still worked when the public instance moved to a new hostname. |
 | `method` | `GET`. | Completeness. |
-| `url` | The path only, e.g. `/author/books`. | Which endpoints are used and which are failing. |
-| `query` | Query parameter names, with **values allowlisted** — structural params keep their values, anything you typed is replaced with `REDACTED`. See [below](#what-you-type-is-not-recorded-either). | The path alone can't tell me which parameters consumers actually use, which is what I need in order to know what I can safely change. |
+| `url` | The path, and nothing after it — e.g. `/author/books`, or `/book/B01234567` where the book's identifier is part of the path itself. A path matching no route at all is still recorded as you sent it. | Which endpoints are used and which are failing. |
+| `query` | The names of the query parameters you sent, with **values allowlisted** — structural params keep their values, anything you typed is replaced with `REDACTED`, and a name Libex doesn't recognise is dropped and counted rather than written down. See [below](#what-you-type-is-not-recorded-either). | The path alone can't tell me which parameters consumers actually use, which is what I need in order to know what I can safely change. |
 | `status` | The HTTP status returned. | Finding what's broken. |
 | `took` | How long the request took, in milliseconds. | Performance. |
 | `host` | The `Host` header — which of the two hostnames you used. | The only way to tell old-host traffic from new-host traffic while both addresses serve the same container during the move to `libexdb.com`. |
@@ -87,37 +90,63 @@ One log line per request, built in `LoggingMiddleware.dispatch`:
 Uptime monitors don't fill the logs.
 
 **The API documentation pages are logged like anything else.** `/docs`,
-`/redoc` and `/openapi.json` are ordinary requests and produce ordinary log
-lines. They also load assets from other people's servers — see
+`/redoc`, `/openapi.json`, and the files under `/static` that those pages
+load, are ordinary requests and produce ordinary log lines. What they don't do
+is reach anyone else — see
 [Who else sees your requests](#who-else-sees-your-requests).
 
 ### What happens to a search you type
 
-This is the part most people won't expect, so it gets its own heading.
+This is the part people most reasonably assume the worst about, so it gets its
+own heading.
 
 On a lookup like `/book/B01234567?region=us`, the query string is an
 identifier for a book. Nothing personal.
 
-On a search, it isn't. `/author/books?name=`, `/search?title=`, `/search?author=`,
-`/quick-search?keywords=` and the rest all carry **free text that you typed**,
-and it is written into the log verbatim. Search endpoints also produce a
-*second* log line from inside the search service itself, recording the search
-terms as their own fields (`search_params`, `keywords`, `author_name`, and on
-one fallback path the author and title parsed out of a compound query).
+On a search it is different. `/author/books?name=`, `/search?title=`,
+`/search?author=` and `/quick-search?keywords=` all carry **free text that you
+typed**. None of that text is written to a log.
 
-A search box is a search box: whatever you put in it is what gets recorded.
-I don't attempt to filter, redact or classify that text, and I'd rather tell
-you that than let you assume otherwise.
+The request line keeps the parameter's name and replaces its value with
+`REDACTED`. If something you typed contained an `&`, the part after it arrives
+looking like a parameter name of its own rather than a value — so anything
+Libex doesn't recognise as one of its own parameter names is discarded along
+with its text and replaced by a bare count, `_unrecognised=1`.
+
+The search code writes a line of its own, and it follows the same rule. That
+line records which fields were searched on, how many characters long a
+quick-search query was, how a compound query split into segments, how long
+Audible took and how many results came back. The text itself is in none of
+them. A length is kept because a slow or empty search is worth correlating
+with the size of the query that produced it — it doesn't tell me, or anyone
+reading the logs later, what was typed.
+
+Audible does receive what you typed, because there is no way to answer a
+search without asking it. That is a different thing from Libex recording it,
+and it's covered under
+[Who else sees your requests](#who-else-sees-your-requests).
 
 ### The other log lines
 
 Libex writes plenty of other log lines that have nothing to do with you:
-cache hits and misses keyed by ASIN and region, how long an Audible call
-took, how many books a background job found, startup and shutdown messages.
-Those describe Libex's own work on Audible's catalogue, and none of them
-carry your IP, your user agent or any identifier tied to your request.
+cache hits and misses keyed by ASIN and region, database writes naming the
+book, author or series just fetched, how long an Audible call took, how many
+books a background job found, startup and shutdown messages. Those describe
+Libex's own work on Audible's catalogue. The names in them came back from
+Audible; they are catalogue data, not anything a caller typed. None of those
+lines carry your IP, your user agent or any identifier tied to your request.
 
-The one exception worth naming: if a request causes an unexpected error, the
+One of them does record what a request asked for, and it's worth naming
+rather than leaving to be discovered. When Audible is unreachable and Libex
+falls back to its own database, the warning recording that fallback lists the
+ASINs that request asked for. An ASIN is a catalogue identifier — ten
+characters, checked against that format before it ever reaches this code, so
+it can't carry typed text — and the line carries nothing about who asked for
+them. It exists so that "which books did the outage affect" is answerable at
+all. The request line itself doesn't keep them: `asins` isn't on the value
+allowlist, so there it reads `asins=REDACTED`.
+
+The other exception worth naming: if a request causes an unexpected error, the
 error line and its stack trace can include whatever triggered it — and if
 what triggered it was text you sent, that text can end up in the error line
 too. That's not deliberate collection, but it's a real path by which your
@@ -136,6 +165,15 @@ This is a deliberate step back from something that was working: a map of where
 requests came from, built from those addresses. It was interesting and it is
 not worth what it costs, so it was removed and the map with it.
 
+**It isn't retroactive, and that matters more than the sentence above.** The
+version running before the release that removed this did log the full address.
+Records it already wrote still contain the address they captured, because
+nothing goes back and rewrites a log. They expire on the schedules under
+[How long it's kept](#how-long-its-kept) — up to 30 days in Axiom, and the
+rotating file's own shorter window on the server — and until they do, they are
+the only thing in Libex's logs that could be matched to a caller. From the
+release onward, no new line has an address in it.
+
 **Cloudflare still sees your real address**, because it terminates TLS for the
 public instance. That is outside Libex's control and I'm not going to pretend
 otherwise — see [Who else sees your requests](#who-else-sees-your-requests).
@@ -145,27 +183,52 @@ otherwise — see [Who else sees your requests](#who-else-sees-your-requests).
 ### What you type is not recorded either
 
 Query parameters are logged so I can see which options consumers actually use.
-The values are allowlisted, not filtered:
+What survives is decided by an allowlist, and it decides the names as well as
+the values:
 
-- **Kept** — structural parameters. `region`, `limit`, `page`, `sort`,
-  `order`, and the catalogue filters. These describe *how* a request was made.
-- **Replaced with `REDACTED`** — everything else, including `name`,
-  `keywords`, `title`, `author`. These are what a person typed.
+- **Kept with its value** — structural parameters: `region`, `limit`, `page`,
+  `sort`, `order`, and the catalogue filters. These describe *how* a request
+  was made. The value still has to look like the short token those parameters
+  take — if it runs past 64 characters, or contains a `;` or an `=`, which is
+  how a second query would be smuggled inside one value, it's redacted like
+  anything else.
+- **Kept as a bare name, value replaced with `REDACTED`** — the parameters
+  Libex knows about but whose values it doesn't keep: `name`, `keywords`,
+  `title`, `author`, `narrator` and the rest of what a person types, and
+  `asins`, whose value is a list of catalogue identifiers that the request
+  line doesn't hold on to either.
+- **Dropped entirely** — everything else. A name Libex doesn't recognise
+  isn't one of its parameter names, which means it is your text sitting where
+  a name should be. That happens with no ill intent at all: an `&` inside
+  something you typed splits it in two, and a query string with no `=` in it
+  arrives as one long name and no value. Those are discarded outright and
+  replaced by a count — `_unrecognised=2` — which tells me unexpected
+  parameters turned up without keeping a character of them.
 
-The parameter's name survives, so a log line records that a search happened
-and which field it searched on. What was searched for does not survive.
+So a log line records that a search happened and which field it searched on.
+What was searched for does not survive.
 
 It is an allowlist rather than a blocklist on purpose. A blocklist leaks every
 parameter added after it was written, silently, and nobody notices until
-someone reads the logs. An allowlist redacts anything unclassified by default,
-so the failure mode is a missing value rather than a leaked one.
+someone reads the logs. An allowlist withholds anything unclassified by
+default, so the failure mode is a missing value rather than a leaked one — and
+the same holds for the names, so a parameter added to a route but forgotten
+here disappears from the logs instead of leaking into them.
 
-**One honest exception.** When something breaks in a way nobody anticipated,
-the error is logged with its message so it can be diagnosed. If that message
-was built from something you sent, that text is in that one line. Removing it
-would mean not knowing why a release broke, which is the thing this logging
-exists for. It is an exceptional path, not routine collection, and those lines
-age out with everything else.
+**One honest exception, and its limit.** When something breaks in a way nobody
+anticipated, the error is logged with its message so it can be diagnosed. If
+that message happens to have been built from something you sent, that text is
+in that one line. Removing it would mean not knowing why a release broke,
+which is the thing this logging exists for.
+
+The limit is the important half. This covers an error message that
+*incidentally* carries your text — a library exception that quotes back the
+URL it was handed, say. It is not cover for writing your text into a log line
+on purpose and calling the result an error. Lines that did that, naming a
+searched-for author, narrator or series, have been found and removed; that is
+treated as a defect to fix, not an exception to claim. The genuine case is an
+exceptional path rather than routine collection, and those lines age out with
+everything else.
 
 ---
 
@@ -211,7 +274,8 @@ handling of that data matters to you, Cloudflare's own privacy documentation
 is the authority, not this page.
 
 **Axiom** receives the log records described above — every field in that
-table, including the query string and therefore including your search text.
+table, and nothing that isn't in it. What it holds describes requests, not
+requesters: no address, and nothing you typed.
 Axiom is a hosted log service; it stores and indexes those records so I can
 query them. I'm the only person I've given access to that dataset — but Axiom
 is the company storing it, on its own infrastructure, under its own policies.
@@ -228,7 +292,13 @@ Audible does *not* receive is anything about you: the outbound request carries
 Libex's own fixed headers and comes from the server's IP address. Your IP,
 your user agent and your host header are never forwarded.
 
-The interactive API documentation at `/docs` and `/redoc` is rendered from files Libex serves itself, at pinned and checksum-verified versions. Loading those pages contacts no third party — no CDN, no font service, no external favicon.
+**Nobody, for the documentation pages.** The interactive API documentation at
+`/docs` and `/redoc` is rendered from files Libex serves itself, from
+`/static`, at pinned and checksum-verified versions. Opening those pages
+contacts no third party: no CDN, no font service, no external favicon, and no
+logo fetched from the documentation tool's own vendor as it renders. The pages
+do contain ordinary links out — an attribution link, specification URLs — and
+those reach nobody unless you choose to click one.
 
 **Nobody else.** I don't sell log data, share it, trade it, or hand it to
 advertisers, data brokers or anyone else. The parties above have it because
@@ -248,12 +318,16 @@ source.
 configuration on the host, not by Libex.
 
 **Axiom** expires records according to the retention configured on the dataset
-in Axiom's own console. That is not a line of code and it is not in this
-repository, so it is not something you can check by reading the source, and it
-is not something I'm going to state here as though it were.
+in Axiom's own console, and **that is set to 30 days** — after 30 days Axiom
+deletes the records.
 
-The maintainer has confirmed that dataset is set to **30 days**, after which
-Axiom deletes the records. The README states the same figure.
+I'm stating that as the person who set it, which is a different kind of claim
+from everything above it and worth flagging as such. It is not a line of code
+and it is not in this repository: nothing in the source enforces it, no test
+checks it, and it could be changed in a browser tab without a single commit
+appearing in the history. So it isn't something you can verify the way you can
+verify the fields in the table above. What I can commit to is that if that
+setting changes, this page changes with it.
 
 **Cloudflare's retention** is Cloudflare's, and I have no visibility into it.
 
@@ -268,9 +342,11 @@ into in a service with no accounts.
 
 **The problem, stated once.** There is no identifier in Libex's logs that
 belongs to you — not a weak one, not a shared one, none. No address is
-recorded, nothing you typed is recorded, and nothing links one of your
-requests to another. There is no login you could use to prove which lines were
-yours, and no line that is yours in the first place.
+recorded, nothing you typed is recorded on any routine path, and nothing links
+one of your requests to another. There is no login you could use to prove
+which lines were yours, and no line that is yours in the first place. The one
+way your text can land in a log anyway — an error message that carried it
+without meaning to — is covered under deletion below.
 
 That isn't an evasion. It's the direct consequence of collecting nothing, and
 it cuts both ways: it is also the reason I could not build a profile of you if
@@ -278,14 +354,23 @@ I wanted to.
 
 **Access — what I can do:** nothing, and for a good reason. There is no field
 in any log line that could be matched to you. Even if you told me your IP
-address it would not help, because that address was never written down. What a
-log line about your request looks like is described exactly by the table
-above — that is the complete and honest answer to an access request here.
+address it would not help, because no line written since addresses were removed
+has one in it. What a log line about your request looks like is described
+exactly by the table above — that is the complete and honest answer to an
+access request here. For records written before that release, see the note
+under deletion.
 
 **Deletion — what I can do:** there is nothing identifying to delete. No
 record in the logs is attributable to you, so there is no set of rows that
 constitutes "your data" to remove. Records age out on the retention schedule
 regardless.
+
+One limit on that, in time rather than in kind: records written *before* the
+release that stopped logging addresses still carry the address they captured,
+so for as long as they survive there is something in the logs that could be
+matched to a caller. I'm not going to promise selective removal from a hosted
+log store whose internals aren't mine — what I can tell you is that nothing new
+is being written that way, and the old records expire on the schedule above.
 
 If you believe something identifying about you has ended up in a log anyway —
 an unhandled error that captured text you sent, most plausibly — tell me and I
@@ -322,8 +407,11 @@ What carries over to your instance:
 - Your instance still calls Audible's API to answer requests, from your
   server's IP address. Search terms go to Audible; nothing about your users
   does.
-- The `/docs` and `/redoc` pages still load assets from jsDelivr and Google
-  Fonts for anyone who opens them in a browser.
+- The `/docs` and `/redoc` pages are served from your own copy of the assets
+  as well, so nobody who opens them on your instance contacts a third party
+  either. That depends on `scripts/fetch_docs_assets.sh` having run, which the
+  Docker build does for you; without it there is nothing to serve and both
+  pages come up blank rather than quietly falling back to a CDN.
 
 If you expose your instance to other people, this document isn't yours to
 point them at — you're the one who decides what you log and who you ship it

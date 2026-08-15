@@ -260,3 +260,100 @@ def test_setup_logging_with_axiom_token_attaches_queue_handler(monkeypatch):
     logger = logging_module.setup_logging()
 
     assert any(isinstance(h, _DroppingQueueHandler) for h in logger.handlers)
+
+
+# ============================================================
+# Third-party request loggers
+# ============================================================
+
+# httpx logs "HTTP Request: GET <url>" at INFO with the full query string, and
+# Libex forwards a caller's search text to Audible in exactly those query
+# strings. Muting httpx is therefore a privacy control, not noise management,
+# and it is one that currently looks unnecessary: nothing attaches a handler to
+# the root logger, so those records are discarded at the root's default WARNING
+# whether the mute is there or not. That is the reason it is worth a test --
+# delete the mute and every check that reads the logs still passes, right up
+# until someone adds a root handler or passes --log-config to uvicorn.
+
+
+@pytest.fixture
+def _unmuted_third_party_loggers():
+    """
+    Clears the mute before each test and restores it after.
+
+    app.main calls setup_logging() at import time, so httpx is already muted
+    before any test runs. Without this, every assertion below would pass on
+    that import side effect alone and would keep passing with the mute deleted
+    from setup_logging entirely.
+    """
+    names = logging_module._MUTED_THIRD_PARTY_LOGGERS
+    saved = {name: logging.getLogger(name).level for name in names}
+    for name in names:
+        logging.getLogger(name).setLevel(logging.NOTSET)
+    yield
+    for name, level in saved.items():
+        logging.getLogger(name).setLevel(level)
+
+
+@pytest.mark.parametrize("name", ["httpx", "httpcore"])
+def test_setup_logging_mutes_the_third_party_request_loggers(monkeypatch, _unmuted_third_party_loggers, name):
+    monkeypatch.setattr(logging_module, "get_settings", lambda: _fake_settings())
+
+    logging_module.setup_logging()
+
+    assert logging.getLogger(name).level == logging.WARNING
+
+
+def test_the_mute_survives_a_setup_logging_call_that_returns_early(monkeypatch, _unmuted_third_party_loggers):
+    """
+    setup_logging returns early once the libex logger already has handlers, so
+    the mute is applied before that return rather than after it. Pinned because
+    the difference is invisible in the ordinary case and total in the one that
+    matters: a second call is exactly what a re-entrant startup or a test that
+    reconfigures logging makes, and after a reconfiguration that resets the
+    third-party levels, the early return is the only path left to restore them.
+    """
+    monkeypatch.setattr(logging_module, "get_settings", lambda: _fake_settings())
+    logging_module.setup_logging()
+    assert logging.getLogger("libex").handlers, "the early-return branch was never armed"
+
+    for name in logging_module._MUTED_THIRD_PARTY_LOGGERS:
+        logging.getLogger(name).setLevel(logging.NOTSET)
+    logging_module.setup_logging()
+
+    for name in logging_module._MUTED_THIRD_PARTY_LOGGERS:
+        assert logging.getLogger(name).level == logging.WARNING
+
+
+def test_a_forwarded_search_url_never_reaches_a_root_handler(monkeypatch, _unmuted_third_party_loggers, caplog):
+    """
+    The behaviour, not the level: with a handler attached at the root and INFO
+    enabled there -- the configuration that turns the accident above into a
+    real leak -- the keywords Libex forwarded to Audible still do not appear.
+
+    caplog is that root handler. The level is set on the root only, never on
+    httpx, since setting it on httpx is what the code under test is supposed to
+    be deciding.
+    """
+    monkeypatch.setattr(logging_module, "get_settings", lambda: _fake_settings())
+    logging_module.setup_logging()
+
+    with caplog.at_level(logging.INFO):
+        logging.getLogger("httpx").info(
+            'HTTP Request: GET https://api.audible.com/1.0/catalog/products'
+            '?keywords=Jane+Doe+memoir "HTTP/1.1 200 OK"'
+        )
+
+    assert "Jane" not in caplog.text
+    assert "keywords" not in caplog.text
+
+
+def test_the_mute_keeps_a_real_http_failure_visible(monkeypatch, _unmuted_third_party_loggers, caplog):
+    """WARNING and above still get through -- the mute costs no diagnostics."""
+    monkeypatch.setattr(logging_module, "get_settings", lambda: _fake_settings())
+    logging_module.setup_logging()
+
+    with caplog.at_level(logging.WARNING):
+        logging.getLogger("httpx").warning("connection pool exhausted")
+
+    assert "connection pool exhausted" in caplog.text

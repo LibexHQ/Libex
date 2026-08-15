@@ -974,7 +974,14 @@ async def search_narrators_from_db(
         narrators = result.scalars().all()
         return [_narrator_to_dict(n) for n in narrators]
     except Exception as e:
-        logger.warning(f"DB read failed for narrator search '{name}': {e}")
+        # The searched-for name is the caller's own text and is never written
+        # to a log -- neither by this message, which omits it, nor through the
+        # exception, which would otherwise carry it: the name is a bound
+        # parameter of the statement above, and a StatementError renders its
+        # bound parameters into str(). The engine sets hide_parameters=True to
+        # suppress that; see app/db/session.py. The operation is still named
+        # here, so the failure remains attributable to this endpoint.
+        logger.warning(f"DB read failed for narrator search: {e}")
         return []
 
 
@@ -1066,7 +1073,11 @@ async def get_narrator_books_from_db(
             results.append(_book_to_dict(book, positions))
         return results
     except Exception as e:
-        logger.warning(f"DB read failed for narrator books '{name}': {e}")
+        # Narrator name and every book filter applied above arrive from the
+        # query string, and all of them stay out of the log for the same reason
+        # as the narrator search above: absent from this message, and kept out
+        # of the exception text by hide_parameters on the engine.
+        logger.warning(f"DB read failed for narrator books: {e}")
         return []
 
 
@@ -1118,7 +1129,12 @@ async def search_series_from_db(session: AsyncSession, name: str) -> list[dict[s
             for s in series_list
         ]
     except Exception as e:
-        logger.warning(f"DB search failed for series '{name}': {e}")
+        # Series name is caller-supplied search text and is not logged: it is
+        # not in this message, and hide_parameters on the engine keeps it out
+        # of the exception text, where it would otherwise appear as a bound
+        # parameter. Which name was searched for matters less than knowing that
+        # this lookup is the one that failed.
+        logger.warning(f"DB search failed for series: {e}")
         return []
 
 

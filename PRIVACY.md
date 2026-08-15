@@ -136,17 +136,30 @@ Libex's own work on Audible's catalogue. The names in them came back from
 Audible; they are catalogue data, not anything a caller typed. None of those
 lines carry your IP, your user agent or any identifier tied to your request.
 
-One of them does record what a request asked for, and it's worth naming
-rather than leaving to be discovered. When Audible is unreachable and Libex
-falls back to its own database, the warning recording that fallback lists the
-ASINs that request asked for. An ASIN is a catalogue identifier — ten
-characters, checked against that format before it ever reaches this code, so
-it can't carry typed text — and the line carries nothing about who asked for
-them. It exists so that "which books did the outage affect" is answerable at
-all. The request line itself doesn't keep them: `asins` isn't on the value
-allowlist, so there it reads `asins=REDACTED`.
+Two of them do record what a request asked for, and they're worth naming
+rather than leaving to be discovered. Both belong to the bulk lookup
+`/books?asins=`, which is the one place the request line deliberately withholds
+what was asked for: `asins` isn't on the value allowlist, so there it reads
+`asins=REDACTED`.
 
-The other exception worth naming: if a request causes an unexpected error, the
+The first is the fallback itself. When Audible is unreachable and Libex falls
+back to its own database, the warning recording that fallback lists the ASINs
+that request asked for. The second is the database read behind it: if that read
+fails as well, it writes a warning of its own naming the same ASINs — and it
+does the same on the other path into that read, the one that fills in from the
+database when only part of an Audible call failed. Keeping them is what makes
+"which books did that outage affect" answerable at all, and the second line is
+what keeps it answerable when the fallback is what broke.
+
+An ASIN is a catalogue identifier — ten characters, letters and digits only,
+checked against exactly that format before it ever reaches this code, so it
+can't carry text you typed. Neither line carries anything about who asked.
+
+Where an ASIN is part of the path instead — `/book/B01234567` and the like —
+database warnings name it too, but that discloses nothing further: the request
+line already records the path in its `url` field, as the table above says.
+
+One further exception worth naming: if a request causes an unexpected error, the
 error line and its stack trace can include whatever triggered it — and if
 what triggered it was text you sent, that text can end up in the error line
 too. That's not deliberate collection, but it's a real path by which your

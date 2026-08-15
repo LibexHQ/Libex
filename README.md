@@ -1,6 +1,9 @@
 <div align="center">
 
-# Libex
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="app/static/logo-dark.png">
+  <img src="app/static/logo.png" alt="Libex" width="400">
+</picture>
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Tests](https://github.com/LibexHQ/Libex/actions/workflows/tests.yml/badge.svg)](https://github.com/LibexHQ/Libex/actions/workflows/tests.yml)

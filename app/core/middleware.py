@@ -219,6 +219,26 @@ def _logged_value(key: str, value: str) -> str:
     return _REDACTED
 
 
+# /health builds a small dict and returns it -- no database, no cache, no
+# outbound call, nothing in it that can be slow on its own. So its duration
+# measures the event loop rather than the endpoint, and a value at or above
+# this one means the loop could not get back to a handler that does no work.
+#
+# Logging every hit was considered and rejected: the container healthcheck
+# alone polls every 30s -- ~2880 lines a day that say nothing -- and external
+# uptime monitoring polls on top of it. A threshold keeps a healthy process at
+# zero lines for this path while producing exactly the lines an outage needs,
+# which is why the field set below is a duration and little else -- there is no
+# caller input to describe.
+#
+# One second, not a value tuned to the 30s the reverse proxy gives up at. The
+# useful signal starts far below the point any caller notices: a /health that
+# took two seconds is the same starvation as one that took twenty, seen
+# earlier. It also sits well above any benign scheduling jitter or GC pause on
+# a loop that is keeping up, so sitting this low costs no false lines.
+_SLOW_HEALTH_MS = 1000.0
+
+
 class LoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         request_id = str(uuid.uuid4())
@@ -227,6 +247,25 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         took = round((time.monotonic() - start) * 1000, 2)
 
         if request.url.path == "/health":
+            if took >= _SLOW_HEALTH_MS:
+                # WARNING rather than INFO: the line only exists at all when
+                # the value is already abnormal, and it has to be findable
+                # without knowing to filter a duration field. It is not an
+                # ERROR -- the check itself succeeded, and what it reports is a
+                # process under strain rather than a failure.
+                #
+                # Nothing caller-derived is available to record here and none is
+                # sought: /health takes no input, so there is no query worth
+                # keeping, and the same rule as below applies regardless -- this
+                # describes the request, never the requester.
+                logger.warning(
+                    "Health check slow",
+                    extra={
+                        "url": request.url.path,
+                        "status": response.status_code,
+                        "took": took,
+                    },
+                )
             return response
 
         # No client address is read here, from any header or from the

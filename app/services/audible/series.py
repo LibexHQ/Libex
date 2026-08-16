@@ -129,6 +129,27 @@ async def get_series_books(
     """
     if use_cache:
         cached = await cache.get(session, series_books_key(asin, region))
+        # A connection is held for work, not for a request. The read above
+        # autobegins a transaction on session, and a READ COMMITTED
+        # transaction advertises backend_xmin and can become the cluster's
+        # oldest xmin even when it has only ever read -- measured on
+        # PostgreSQL 16.14 -- holding the xmin horizon against autovacuum
+        # until it ends.
+        #
+        # Released before the hit is returned, not after the miss check,
+        # because the hit is the longer window of the two: the series routes
+        # hand this same session straight to get_books_by_asins, so a hit
+        # returned with the read's transaction still open would hold it
+        # across the entire hydration fan-out for every book in the series,
+        # not just across the one fetch below.
+        #
+        # Nothing after this point depends on transaction state established
+        # before it: cached is a plain already-materialized value, the fetch
+        # below touches session not at all (persist_cache_background runs on
+        # its own session), and the cache read in the failure branch opens
+        # its own transaction on its next statement, which SQLAlchemy
+        # re-acquires transparently.
+        await session.rollback()
         if cached:
             return cached
 

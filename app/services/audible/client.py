@@ -101,18 +101,60 @@ def get_region_headers(region: str) -> dict[str, str]:
 # (NAME_SEARCH_CONCURRENCY, SCREENS_FANOUT_CONCURRENCY in authors.py), but
 # those only bound one walk at a time -- two simultaneous requests for a
 # large author already double the in-flight count, and nothing upstream of
-# this module caps the total across every walk running at once. Libex
-# reaches Audible from an IP shared with the live seeder, and that IP has
-# already been throttled into a VPN rotation once. audible_get is the one
-# place every outbound Audible call passes through, so the bound lives here,
-# process-wide, instead of at any individual call site: a per-call-site
-# limit only expresses how eagerly that one walk wants to go, never what the
-# shared IP can take at once across all of them.
+# this module caps the total across every walk running at once. audible_get
+# is the one place every outbound Audible call passes through, so the bound
+# lives here, process-wide, instead of at any individual call site: a
+# per-call-site limit only expresses how eagerly that one walk wants to go,
+# never what one event loop and one exit IP carry across all of them at
+# once.
 #
-# This is the pool every call uses by default, including the seeder's own
-# continuous, unattended background work -- the workload that actually
-# caused the VPN rotation, since it runs sustained and unsupervised for as
-# long as the process is up. It stays exactly where the incident left it.
+# This is the pool every call uses by default. That includes the seeder's
+# continuous, unattended background work -- the workload that once got
+# Libex's exit IP throttled into a VPN rotation, since it runs sustained and
+# unsupervised for as long as the process is up -- and it also includes
+# every bulk route: GET /books takes up to 1000 ASINs (books/router.py),
+# hydrating them as 20 concurrent 50-ASIN chunks, and /author/books?name=,
+# /series/{asin} and /search fan out the same way. Only the author-ASIN
+# path opts out, into the wider pool below.
+#
+# 10 IS A PER-PROCESS FAN-OUT WIDTH, not a share of a deployment-wide
+# budget, and that distinction is why it is a flat literal. The number has
+# two unrelated jobs -- it is a slice of what a shared exit IP tolerates at
+# once, which is divisible, and it is the width one live request's own
+# chunked fan-out passes through, which is not. Sizing it on the first job
+# alone breaks the second: a 1000-ASIN /books call is 20 concurrent
+# audible_get calls, two rounds at 10 permits and ten rounds at 2, against
+# a fronting proxy that times out at 30s.
+#
+# So dividing this constant by the uvicorn worker count is not available as
+# a way to hold a budget. It is the same defect as the outage documented
+# under AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT below -- a gate narrower
+# than a single request's own fan-out, serialising that fan-out into rounds
+# until it 504s at the proxy -- and it lands harder: those 504s were
+# measured on a 10-wide gate, while a divided figure is 2 at four workers
+# and 1 at six.
+#
+# The deployment-wide total is therefore WEB_CONCURRENCY x (10 + 25), both
+# pools being per-process; at six workers, 210. A concurrency ladder run
+# against Audible at 10, 25, 50, 100, 125, 150, 175, 200 and 250 in flight
+# returned 1122 requests and 1122 HTTP 200 -- zero 429, zero 5xx, zero
+# transport errors. No ceiling was found: the run stopped at its own
+# request budget, not at any signal from Audible, and an uncontended canary
+# fired before and after every burst never trended, so the path was in the
+# same state after 250 in flight as before 10. 210 sits at 84% of the
+# largest figure measured clean.
+#
+# THE CAVEAT THAT LIMITS WHAT THAT BUYS: the ladder ran on the DIRECT path.
+# Production reaches Audible through the AirVPN proxy, whose exit IP is
+# shared with strangers and whose own headroom is unmeasured. 250 is a real
+# number on a real path -- just not the path that runs.
+#
+# The latency rise the ladder did show inside a burst is Libex's own, not
+# Audible's: at 150 concurrent, process CPU was 81.6% of wall and the event
+# loop sat blocked >50ms for 50.7% of wall, on 0.93 MB/s -- one loop doing
+# TLS decrypt and gunzip. That cost is per event loop and so tracks this
+# constant rather than the worker count; each worker runs its own loop with
+# its own permits and pays its own share.
 AUDIBLE_CONCURRENCY_LIMIT = 10
 
 # A second, wider pool reserved for exactly one caller: a live author-books
@@ -163,6 +205,43 @@ AUDIBLE_CONCURRENCY_LIMIT = 10
 # latency gain no measurement here can resolve is a bad trade. None of it
 # was measured through the production proxy, so none of it constrains
 # behaviour on that path.
+#
+# The worker count divides neither pool. What sizes this one is a per-loop
+# constraint -- a single walk's own fan-out has to fit through it -- and
+# dividing it is exactly the change that produced the 504s described above,
+# so it is not available as a way to make room. The same argument, applied
+# to a 1000-ASIN /books call's own fan-out, is what keeps
+# AUDIBLE_CONCURRENCY_LIMIT above a flat literal; see its comment. What
+# bounds this pool instead is the measured throttle-free band: 30, 60 and
+# 100 in flight each drew zero throttled responses here, and the ladder
+# recorded under AUDIBLE_CONCURRENCY_LIMIT reached 250 clean.
+#
+# The worst case counts BOTH pools in every worker, since both are
+# per-process: WEB_CONCURRENCY x (25 + 10), or 210 at six workers, reached
+# only when every worker takes a prolific author in the same moment. 210 is
+# 84% of that ladder's top rung, so the worst case is a point inside the
+# measured band rather than an extrapolation past it. Two things keep that
+# from being reassurance on its own. The ladder ran on the direct path, not
+# through the production proxy whose shared exit IP is what actually
+# carries this traffic, and no run at any width has produced an onset
+# gradient to read a real limit off -- 250 is the largest number tried, not
+# an observed edge.
+#
+# What carries the worker count regardless is that 210 is a burst and the
+# incident was not. The VPN rotation came from the seeder's sustained,
+# unattended crawl, and the seeder runs on the default pool alone at its
+# own steady 10 per process; the peak needs a prolific-author walk in every
+# worker at once to appear at all. Since neither pool divides, the worker
+# count is the only dial that moves that peak, which is what makes it the
+# figure to weigh against a shared exit IP -- not either constant on its
+# own.
+#
+# Halving this constant to 12-13 to buy room back lands in the regime the
+# 504s came from, a gate narrower than a single walk's own fan-out, and
+# pushes more walks past AUTHOR_BOOKS_TIME_BUDGET_SECONDS into
+# truncated_by_deadline, which caches degraded for 900s and so brings those
+# authors back for a re-walk sooner -- more outbound requests from the
+# narrower gate, not fewer.
 AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT = 25
 
 # asyncio.Semaphore binds its internal waiter state to whichever event loop
@@ -260,9 +339,13 @@ def _current_audible_semaphore() -> asyncio.Semaphore:
 # ============================================================
 
 # The two semaphores together guarantee at most AUDIBLE_CONCURRENCY_LIMIT +
-# AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT calls are ever in flight across both
-# pools at once, so the shared client's own connection pool is sized to match
-# that sum rather than httpx's defaults (100 / 20) or either semaphore alone:
+# AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT calls -- 35 -- are ever in flight
+# FROM THIS PROCESS across both pools at once. Both are per-process, so the
+# deployment total is that sum times the worker count, which is the 210
+# worked out under AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT. Sizing from the
+# sum keeps this tracking whatever those two constants become, so the shared
+# client's own connection pool is sized to match that sum rather than
+# httpx's defaults (100 / 20) or either semaphore alone:
 # capping it at just one pool's limit would let that pool's own connections
 # fill the shared client's ceiling and leave the other pool queuing on a free
 # connection despite still having permits free on its own semaphore --

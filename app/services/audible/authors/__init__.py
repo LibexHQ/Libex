@@ -206,6 +206,22 @@ async def get_author(
     """
     if use_cache:
         cached = await cache.get(session, author_key(asin, region))
+        # Same reason as the two rollbacks in _walk_author_books below: a
+        # connection is held for work, not for a request. The read above
+        # autobegins a transaction on session, and a READ COMMITTED
+        # transaction advertises backend_xmin and can become the cluster's
+        # oldest xmin even when it has only ever read -- measured on
+        # PostgreSQL 16.14 -- holding the xmin horizon against autovacuum
+        # until it ends. Nothing between here and the contributors fetch
+        # below needs it open, and that fetch queues against the process-wide
+        # pool in client.py rather than going out immediately.
+        #
+        # Nothing after this point depends on transaction state established
+        # before it: cached is a plain already-materialized value, and the DB
+        # and cache reads in the failure branch each open their own
+        # transaction on their next statement, which SQLAlchemy re-acquires
+        # transparently.
+        await session.rollback()
         if cached:
             return cached
 
@@ -266,7 +282,9 @@ async def get_author_books(
     its exception) instead of starting a second one. A follower's session
     contributes nothing to the leader's walk, so it's released with a
     rollback before the wait rather than held idle-in-transaction against
-    the pool for however long the leader's walk still has to run.
+    the pool for however long the leader's walk still has to run. A
+    follower's wait is also shielded, so a follower that goes away takes
+    nothing with it -- see the two awaits below for why only one of them is.
     """
     if use_cache:
         cached = await cache.get(session, author_books_key(asin, region))
@@ -277,11 +295,48 @@ async def get_author_books(
     leader = _author_books_inflight.get(inflight_key)
     if leader is not None:
         await session.rollback()
-        return await leader
+        # Shielded, and it has to be. Unlike Go's singleflight -- whose
+        # leader runs in a goroutine no waiter can reach -- ours runs in a
+        # Task every awaiter holds directly, and a plain `await leader`
+        # does not insulate it: cancelling the awaiting coroutine cancels
+        # the awaited Task too. So without this, one follower arriving deep
+        # into a prolific author's walk and then being cancelled -- by a
+        # graceful shutdown, or by any wait_for later wrapped above this --
+        # would cancel that walk for the leader and for every other
+        # follower attached to it, discarding hundreds of upstream requests
+        # already paid for. shield() is the documented insulation for
+        # exactly this, and leaves a departing follower costing nothing but
+        # its own place in the queue. Cancellation still travels the other
+        # way by design: if the leader's task is itself cancelled, shield
+        # propagates that to every follower, which is correct -- there is no
+        # longer a result coming for them to wait on.
+        return await asyncio.shield(leader)
 
     task = asyncio.ensure_future(_walk_author_books(asin, region, session))
     _author_books_inflight[inflight_key] = task
     try:
+        # Deliberately NOT shielded, unlike the follower await above, and
+        # the asymmetry is the point rather than an oversight. _walk_author_books
+        # runs on THIS request's session -- the one get_session's `async
+        # with` closes the moment this coroutine unwinds. A shielded leader
+        # would leave the walk querying that session afterwards, and that
+        # does not fail loudly enough to notice: measured against this
+        # engine, a session used after its context manager exited silently
+        # checks a fresh connection out of the pool and autobegins on it,
+        # with nothing left to check it back in and only SQLAlchemy's
+        # garbage-collector warning as a trace. Every cancelled leader
+        # would strand a connection from a pool shared with the seeder and
+        # every background writer. So a cancelled leader takes its walk
+        # with it; the followers lose it too, but nothing is left running
+        # against a session no one owns. Surviving a leader's cancellation
+        # would need the walk to hold a session of its own instead of
+        # borrowing the caller's, which is a different change from this one.
+        #
+        # Keeping this await unshielded is also what keeps the eviction
+        # below correct as written: the leader coroutine and the task end
+        # together, so popping the key here can never leave a live walk
+        # unreachable in the map, nor evict a key that still has a running
+        # task behind it.
         return await task
     finally:
         # Cleared on every exit, success or exception, so a single failed

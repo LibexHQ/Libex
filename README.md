@@ -103,6 +103,7 @@ services:
       - DATABASE_URL=postgresql+asyncpg://${DB_USER:-libex}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-libex}
       - CACHE_TTL=${CACHE_TTL:-86400}
       - PORT=${PORT:-3333}
+      - WEB_CONCURRENCY=${WEB_CONCURRENCY:-6}
       - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
@@ -124,6 +125,7 @@ services:
     image: postgres:16-alpine
     container_name: libex-postgres
     restart: unless-stopped
+    command: ["postgres", "-c", "max_connections=200"]
     ports:
       - "5432:5432"
     environment:
@@ -169,6 +171,9 @@ disclosed transparently.
 - User agent — this names client *software*, not a person, and with no address
   logged beside it there is nothing to tie it back to an individual
 - Cache hit/miss
+- The process id of the worker that handled the request — a number belonging to
+  the server, identical for every request that worker serves, and unrelated to
+  who sent any of them
 - Errors and exceptions. An unhandled error logs its message so a broken deploy
   can be diagnosed; if a message was built from something you sent, that text
   appears in that one line
@@ -383,6 +388,7 @@ Copy `.env.example` to `.env` and configure:
 | `DB_NAME` | `libex` | PostgreSQL database name |
 | `DB_USER` | `libex` | PostgreSQL username |
 | `PORT` | `3333` | Host port the API is exposed on |
+| `WEB_CONCURRENCY` | `6` | Number of API worker processes. `1` restores single-process behaviour. Keep it at `1` while `SEEDER_ENABLED=true`. Each worker carries its own outbound concurrency budget to Audible rather than a share of one, so raising this multiplies what Libex has in flight there. More is not free, and only your own connection can tell you what it tolerates |
 | `CACHE_TTL` | `86400` | Default cache TTL in seconds (24 hours); some endpoints use their own TTL |
 | `LOG_LEVEL` | `INFO` | Log verbosity — `DEBUG`, `INFO`, `WARNING`, or `ERROR` |
 | `LOG_RETENTION_DAYS` | `7` | Days of rotated logs to keep. `0` = infinite, no rotation |
@@ -425,6 +431,8 @@ Libex is API-compatible with AudiMeta. To migrate:
   - **Upcoming refresh** (optional, `SEEDER_REFRESH_ENABLED`, default off) re-fetches pre-orders you already have as their release date nears, since details like the date, cover, narrator, and runtime firm up over time. It refreshes more often the closer a book gets — roughly yearly when far out, down to daily inside the last two weeks — and leaves already-released books alone. Runs as a second phase of the new-releases worker.
 
   Both workers share the same enable flag, regions, and rate limit. They run independently and rate-limit themselves to one Audible request per `SEEDER_REQUEST_DELAY` seconds (default 1.0). Configure `SEEDER_REGIONS` to seed multiple markets (e.g. `us,uk,de`)
+
+  Set `WEB_CONCURRENCY=1` while the seeder is enabled. The seeder starts in every API worker process and nothing coordinates them, so the default six workers walk the same books six times over — sustained, unattended traffic from your IP for no extra coverage
 - **VPN proxy:** Set `AUDIBLE_PROXY_URL` to route outbound Audible API requests through a proxy. Only Audible requests are affected — API serving, database connections, and logging are completely unaffected. This is especially useful when running the seeder to avoid IP-based rate limiting. Any HTTP, HTTPS, or SOCKS5 proxy works. The compose file creates a `libex-proxy` Docker network automatically — connect your VPN proxy container to it, then set `AUDIBLE_PROXY_URL` to point at the proxy. Leave `AUDIBLE_PROXY_URL` blank to disable
 
 ---

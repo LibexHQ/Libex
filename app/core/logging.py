@@ -6,9 +6,19 @@ import logging.handlers
 import os
 import queue
 import sys
+import time
 
 # Local
 from app.core.config import get_settings
+
+# Standard library - optional, Unix only. Grouped with the other conditional
+# imports rather than above, so the unconditional imports stay at the top.
+fcntl = None
+
+try:
+    import fcntl  # type: ignore
+except ImportError:
+    pass
 
 # Third party - optional
 Client = None
@@ -23,11 +33,18 @@ except ImportError:
 
 # Standard LogRecord attributes — anything on a record that isn't one of these
 # was passed in via `extra=` and is worth surfacing in the logs.
+#
+# 'asctime' is listed even though a LogRecord is not born with it. Formatter
+# .format() attaches it to the record while rendering, before ContextFormatter
+# gets to read the extras, so it arrives looking exactly like a field a caller
+# passed in. Left out, every line carrying any extra ends with a second copy of
+# the timestamp it already starts with, and every Axiom event gains a string
+# duplicating its own _time.
 _STANDARD_RECORD_FIELDS = {
     'name', 'msg', 'args', 'levelname', 'levelno', 'pathname', 'filename',
     'module', 'exc_info', 'exc_text', 'stack_info', 'lineno', 'funcName',
     'created', 'msecs', 'relativeCreated', 'thread', 'threadName',
-    'processName', 'process', 'message', 'taskName',
+    'processName', 'process', 'message', 'taskName', 'asctime',
 }
 
 
@@ -70,6 +87,100 @@ class MaxLevelFilter(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         return record.levelno <= self.max_level
+
+
+def _rotation_lock_path(base_filename: str) -> str:
+    """
+    Returns the lock file guarding rotation of base_filename.
+
+    Deliberately not base_filename + a suffix. TimedRotatingFileHandler's
+    getFilesToDelete() collects every name beginning with "libex.log." and
+    keeps the ones whose remainder parses as its date suffix, so a lock file
+    sharing that prefix sits inside the retention scan and relies on never
+    matching the date pattern to escape being counted or deleted. A leading
+    dot puts it outside the prefix entirely, under any `when` setting.
+    """
+    directory, name = os.path.split(base_filename)
+    return os.path.join(directory, f".{name}.rotate.lock")
+
+
+class MultiProcessTimedRotatingFileHandler(logging.handlers.TimedRotatingFileHandler):
+    """
+    A TimedRotatingFileHandler that survives more than one process writing to
+    the same file.
+
+    The stock handler does not, and it fails silently. Each process reaches
+    the rollover time on its own clock and renames the log out from under the
+    others. The first wins; every later one hits the "already rolled over"
+    early return in doRollover(), which leaves it holding an open descriptor
+    on the file that was just renamed and leaves its rolloverAt in the past.
+    It carries on appending to the previous day's file. When retention later
+    deletes that file, the descriptor stays valid and the writes land on an
+    inode nothing can open again, so the lines are simply gone. Nothing
+    raises, and nothing appears on any stream.
+
+    Measured against the stock handler: two processes logging 40 lines each
+    against backupCount=1 ended with 49 of the 80 unrecoverable and no error
+    reported anywhere.
+
+    Two things fix it. Rotation is serialised across processes with an flock,
+    so exactly one process performs the rename; afterwards every process
+    reopens the base name and repairs its rolloverAt, so the ones that did not
+    rotate return to the live file instead of the renamed one.
+
+    Only rotation takes the lock, never emit(). Records are appended to a file
+    opened O_APPEND, where the kernel already makes each write atomic, and
+    locking per record would put a syscall pair in front of every line on the
+    caller's thread -- which for this application is the event loop itself.
+    """
+
+    def doRollover(self) -> None:
+        lock_fd = None
+        if fcntl is not None:
+            try:
+                lock_fd = os.open(
+                    _rotation_lock_path(self.baseFilename),
+                    os.O_CREAT | os.O_RDWR,
+                    0o644,
+                )
+            except OSError:
+                # Nothing to escalate: without the lock this is exactly as
+                # safe as the stock handler, which is what would have run
+                # here anyway. The reopen below still recovers the common case.
+                lock_fd = None
+        try:
+            if lock_fd is not None:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            super().doRollover()
+            self._reclaim_base_file()
+        finally:
+            if lock_fd is not None:
+                # flock is released by the kernel when the descriptor closes,
+                # so a process killed mid-rotation cannot strand the lock.
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                os.close(lock_fd)
+
+    def _reclaim_base_file(self) -> None:
+        """
+        Puts this handler back onto the live log file after a rollover.
+
+        Unconditional, because from here the two cases are indistinguishable
+        and the cost is one extra open per rotation: the process that rotated
+        is already on the new file, the process that did not is on the renamed
+        one, and reopening both is cheaper than working out which this is.
+
+        rolloverAt is repaired for a sharper reason. The early return skips
+        the recomputation, leaving the time in the past, and shouldRollover()
+        would then fire on every subsequent record -- turning a once-a-day
+        lock into one taken per log line.
+        """
+        if not self.delay:
+            if self.stream:
+                self.stream.close()
+            self.stream = self._open()
+        now = int(time.time())
+        if self.rolloverAt <= now:
+            self.rolloverAt = self.computeRollover(now)
 
 
 # axiom_py's sync Client (0.10.0) has no timeout argument anywhere in its
@@ -146,6 +257,12 @@ class DirectAxiomHandler(logging.Handler):
                 "level": record.levelname,
                 "message": record.getMessage(),
                 "logger": record.name,
+                # Which worker emitted this. Axiom is where these records are
+                # actually queried, so without it a multi-worker deployment
+                # cannot tell one process repeatedly in trouble from several
+                # occasionally in trouble -- the two look identical once the
+                # lines are merged into one dataset.
+                "pid": record.process,
                 **_extra_fields(record),
             }
             self.client.ingest_events(dataset=self.dataset, events=[event])
@@ -259,8 +376,19 @@ def setup_logging() -> logging.Logger:
     if logger.handlers:
         return logger
 
+    # The pid, not the process name: it is the identifier every other view of
+    # this server reports -- ps, the container logs, and uvicorn's own
+    # "Started server process [N]" line -- so a log line here cross-references
+    # against all three directly. processName does tell uvicorn's workers apart
+    # (they arrive as SpawnProcess-1, SpawnProcess-2, ...), but that ordinal is
+    # bookkeeping internal to one process tree, and nothing outside it reports
+    # the same value to match against.
+    #
+    # It describes the server process and never the caller. The value is
+    # identical for every request a given worker handles and changes only when
+    # the process restarts, so it says nothing about who sent anything.
     formatter = ContextFormatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        "%(asctime)s - %(name)s - %(levelname)s - pid=%(process)d - %(message)s"
     )
 
     # Stdout handler — INFO and below (DEBUG, INFO). Warnings and errors are
@@ -285,9 +413,12 @@ def setup_logging() -> logging.Logger:
         log_file = os.path.join(log_dir, "libex.log")
 
         if settings.log_retention_days == 0:
+            # No rotation to coordinate, so the plain handler is already
+            # multi-process safe here: every process appends to one never
+            # renamed file, and O_APPEND makes each write atomic.
             file_handler: logging.Handler = logging.FileHandler(log_file)
         else:
-            file_handler = logging.handlers.TimedRotatingFileHandler(
+            file_handler = MultiProcessTimedRotatingFileHandler(
                 log_file,
                 when="midnight",
                 backupCount=settings.log_retention_days,

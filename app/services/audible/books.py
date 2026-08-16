@@ -389,6 +389,29 @@ async def get_books_by_asins(
         if not fetch_asins:
             return cached_results
 
+    # A connection is held for work, not for a request. Either cache read
+    # above autobegins a transaction on session, and a READ COMMITTED
+    # transaction advertises backend_xmin and can become the cluster's oldest
+    # xmin even when it has only ever read -- measured on PostgreSQL 16.14 --
+    # holding the xmin horizon against autovacuum until it ends. Held across
+    # the fan-out below, that window is whatever Audible takes: the chunk
+    # requests are unbounded in time and queue against the process-wide pool
+    # in client.py, so a bulk request at the route's 1000-ASIN cap is 20
+    # chunks draining through a handful of permits in successive waves, with
+    # nothing between the cache read and the last chunk that needs a
+    # transaction open. Released here, before any of it.
+    #
+    # One placement covers every path into the fan-out. With use_cache False
+    # neither read ran, session is still lazy and holds no connection, and
+    # rollback with no transaction in progress is a pass-through that touches
+    # neither the session nor the pool. Nothing after this point depends on
+    # transaction state established before it: both reads return plain
+    # already-materialized values into cached_results, and the two later
+    # session users -- the DB backstop for transiently failed chunks, and the
+    # outage fallback in the except branch -- each open their own transaction
+    # on their next statement, which SQLAlchemy re-acquires transparently.
+    await session.rollback()
+
     try:
         start = time.monotonic()
         chunks = [fetch_asins[i:i + 50] for i in range(0, len(fetch_asins), 50)]

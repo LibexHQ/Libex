@@ -21,6 +21,7 @@ from app.services.audible.books import (
     _filter_products,
     _parse_release_date,
 )
+from app.services.cache.manager import book_key
 
 
 # ============================================================
@@ -416,7 +417,11 @@ async def test_get_books_falls_back_to_db_when_audible_fails():
 
 @pytest.mark.asyncio
 async def test_get_books_falls_back_to_cache_when_db_empty():
-    """Falls back to cache when Audible is down and DB has no results."""
+    """Falls back to cache when Audible is down and DB has no results.
+
+    The outage fallback reads the cache in one batched lookup keyed by
+    cache key, so the stand-in returns {book_key: value} rather than a
+    bare value -- a miss is the key's absence from that dict."""
     from app.services.audible.books import get_books_by_asins
 
     mock_session = AsyncMock()
@@ -424,10 +429,50 @@ async def test_get_books_falls_back_to_cache_when_db_empty():
 
     with patch("app.services.audible.books.audible_get", side_effect=Exception("Audible down")), \
          patch("app.services.audible.books.get_books_from_db", new_callable=AsyncMock, return_value=[]), \
-         patch("app.services.audible.books.cache.get", return_value=cached_book):
+         patch("app.services.audible.books.cache.get_many",
+               return_value={book_key("B08G9PRS1K", "us"): cached_book}):
         result = await get_books_by_asins(["B08G9PRS1K"], "us", mock_session)
         assert len(result) == 1
         assert result[0]["title"] == "Dune (cached)"
+
+
+@pytest.mark.asyncio
+async def test_get_books_outage_cache_fallback_reads_all_misses_in_one_lookup():
+    """The outage fallback reads the cache for every miss in ONE batched
+    lookup, and keeps the hits in requested order while dropping the ASINs
+    that were not cached.
+
+    The single-ASIN fallback test above cannot see the batching -- one ASIN
+    is one lookup either way. This one is the guard for it, and the path is
+    worth guarding precisely because of when it runs: Audible is down and
+    the DB has nothing, so a per-ASIN loop would fire one query per ASIN
+    against a database already carrying the whole outage's traffic. The
+    bulk book route's 1000-ASIN cap is not the ceiling on that count: this
+    fallback runs on any Audible failure whatever use_cache was, and the
+    author routes reach it with a whole unbounded catalogue -- thousands
+    of ASINs."""
+    from app.services.audible.books import get_books_by_asins
+
+    mock_session = AsyncMock()
+    asins = ["B08G9PRS1K", "B0MISSING1", "B0CACHED03"]
+    hits = {
+        book_key("B08G9PRS1K", "us"): {"asin": "B08G9PRS1K", "title": "Dune (cached)"},
+        book_key("B0CACHED03", "us"): {"asin": "B0CACHED03", "title": "Elantris (cached)"},
+    }
+
+    async def _get_many(session, keys):
+        return {key: hits[key] for key in keys if key in hits}
+
+    with patch("app.services.audible.books.audible_get", side_effect=Exception("Audible down")), \
+         patch("app.services.audible.books.get_books_from_db", new_callable=AsyncMock, return_value=[]), \
+         patch("app.services.audible.books.cache.get_many",
+               new=AsyncMock(side_effect=_get_many)) as mock_cache_get_many:
+        result = await get_books_by_asins(asins, "us", mock_session)
+
+    assert mock_cache_get_many.await_count == 1
+    assert mock_cache_get_many.await_args.args[1] == [book_key(a, "us") for a in asins]
+    assert [b["asin"] for b in result] == ["B08G9PRS1K", "B0CACHED03"]
+    assert [b["title"] for b in result] == ["Dune (cached)", "Elantris (cached)"]
 
 
 @pytest.mark.asyncio
@@ -453,8 +498,8 @@ async def test_get_books_writes_to_db_on_success():
 # ============================================================
 # CACHE-FIRST READ TESTS (use_cache=True, Audible healthy)
 # ============================================================
-# The DB-fallback tests above only exercise cache.get from the except
-# block, when Audible itself is down -- they say nothing about the
+# The DB-fallback tests above only exercise the except block's cache
+# read, when Audible itself is down -- they say nothing about the
 # use_cache=True short-circuit branches (the ones the ASIN author routes
 # now reach for the first time on this branch, see router.py's use_cache
 # wiring). These pin that a cache hit short-circuits Audible entirely
@@ -474,7 +519,7 @@ async def test_get_books_by_asins_single_asin_cache_hit_matches_live_fetch_shape
     and must never touch Audible at all -- asserted on the audible_get mock
     directly (not on a side_effect exception) so a bug that reaches Audible
     but still stumbles onto the right answer via the unrelated except-block
-    DB/cache fallback (which also calls cache.get) cannot pass this by
+    DB/cache fallback (which also reads the cache) cannot pass this by
     accident; that fallback is starved here by leaving get_books_from_db
     unmocked against a bare AsyncMock session, which raises rather than
     quietly returning an empty list the way it would with a real DB."""
@@ -505,7 +550,15 @@ async def test_get_books_by_asins_all_cache_hits_matches_live_fetch_shape_and_sk
     the function returns straight from the cache list without ever
     reaching the chunk fan-out / Audible at all. Same live-fetch-shape
     parity check and same not-called (rather than side_effect-raises)
-    discriminator as the single-ASIN sibling above, across two ASINs."""
+    discriminator as the single-ASIN sibling above, across two ASINs.
+
+    The await_count == 1 assertion below is load-bearing, not incidental
+    bookkeeping: the branch looks up the whole ASIN list in ONE batched
+    cache call, and that count is the only thing in the suite that fails
+    if it reverts to a per-ASIN lookup. Two ASINs would then be two awaits
+    and 1000 ASINs 1000 of them -- the N+1 this branch exists to remove,
+    restored silently with every other assertion here still green. The
+    count is the behaviour under test."""
     from app.services.audible.books import get_books_by_asins
 
     asins = ["B08G9PRS1K", "B0CACHED02"]
@@ -521,18 +574,21 @@ async def test_get_books_by_asins_all_cache_hits_matches_live_fetch_shape_and_sk
     assert len(live_result) == 2
     live_by_asin = {b["asin"]: b for b in live_result}
 
-    async def _cache_get(session, key):
-        for asin, dto in live_by_asin.items():
-            if key.endswith(asin):
-                return dto
-        return None
+    # The batch getter returns only the keys that hit, keyed by cache key,
+    # so the stand-in is built the same way the real one answers.
+    hits = {book_key(asin, "us"): dto for asin, dto in live_by_asin.items()}
+
+    async def _cache_get_many(session, keys):
+        return {key: hits[key] for key in keys if key in hits}
 
     with patch("app.services.audible.books.audible_get", new_callable=AsyncMock) as mock_audible_get, \
-         patch("app.services.audible.books.cache.get", new=AsyncMock(side_effect=_cache_get)) as mock_cache_get:
+         patch("app.services.audible.books.cache.get_many",
+               new=AsyncMock(side_effect=_cache_get_many)) as mock_cache_get_many:
         cached_result = await get_books_by_asins(asins, "us", AsyncMock(), use_cache=True)
 
     mock_audible_get.assert_not_called()
-    assert mock_cache_get.await_count == 2
+    assert mock_cache_get_many.await_count == 1
+    assert mock_cache_get_many.await_args.args[1] == [book_key(a, "us") for a in asins]
     assert {b["asin"] for b in cached_result} == set(asins)
     assert cached_result == [live_by_asin[a] for a in asins]
 

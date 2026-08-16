@@ -15,6 +15,7 @@ import pytest
 from app.services.db.reader import (
     _book_to_dict,
     _audible_link,
+    _get_series_positions_batch,
     get_book_from_db,
     get_books_from_db,
     get_author_from_db,
@@ -911,3 +912,79 @@ async def test_get_db_stats_cache_write_error_still_returns_live_counts():
         "series": 18,
         "booksWithChapters": 7,
     }
+
+
+# ============================================================
+# _get_series_positions_batch — chunked IN query
+# ============================================================
+# The batch reads series positions for every book its caller holds, and
+# get_author_books_from_db applies no limit, so the ASIN list is as long as
+# a stored catalogue. asyncpg refuses a statement carrying more than 32767
+# bind parameters, so the list is chunked at 5000 -- the same ceiling the
+# seeder's _get_missing_asins uses, pinned in test_seeder_new_releases.py.
+# What a mocked session can show is the statements that were sent, which is
+# exactly where this failure lives: an oversized IN list raises before it
+# returns a row.
+
+def _positions_session():
+    """A session whose every execute answers with no rows, so what a test
+    reads back is the statements sent rather than the result built."""
+    session = AsyncMock()
+
+    def _execute(_stmt):
+        result = MagicMock()
+        result.fetchall.return_value = []
+        return result
+
+    session.execute = AsyncMock(side_effect=_execute)
+    return session
+
+
+def _executed_asin_chunks(session):
+    """The ASIN list bound into each statement, one entry per execute call."""
+    return [
+        call.args[0].whereclause.right.value
+        for call in session.execute.call_args_list
+    ]
+
+
+@pytest.mark.asyncio
+async def test_series_positions_batch_fires_no_query_for_no_books():
+    """An empty book list short-circuits: an IN () query would cost a round
+    trip to answer nothing, and every author with no stored books takes
+    this path."""
+    session = _positions_session()
+
+    assert await _get_series_positions_batch(session, []) == {}
+    session.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_series_positions_batch_sends_one_statement_at_the_chunk_ceiling():
+    """5000 ASINs is the chunk size, so they still travel as one statement.
+    Chunking that started early would cost the batch its whole point --
+    this function exists to replace one query per book."""
+    session = _positions_session()
+
+    await _get_series_positions_batch(session, [f"B{i:09d}" for i in range(5000)])
+
+    assert [len(chunk) for chunk in _executed_asin_chunks(session)] == [5000]
+
+
+@pytest.mark.asyncio
+async def test_series_positions_batch_splits_the_list_one_past_the_ceiling():
+    """One ASIN past the ceiling is two statements, split 5000 then 1. The
+    boundary is the assertion: a huge list asserting merely 'more than one
+    statement' passes against a chunk size of 2 and against one of 30000,
+    and the second of those still exceeds the bind-parameter cap. The
+    concatenation check proves the chunking splits the list rather than
+    dropping part of it -- a lost ASIN reads downstream as a book with no
+    series rather than as an error."""
+    asins = [f"B{i:09d}" for i in range(5001)]
+    session = _positions_session()
+
+    await _get_series_positions_batch(session, asins)
+
+    chunks = _executed_asin_chunks(session)
+    assert [len(chunk) for chunk in chunks] == [5000, 1]
+    assert [asin for chunk in chunks for asin in chunk] == asins

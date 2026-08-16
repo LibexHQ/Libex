@@ -12,12 +12,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 # Third party
 import pytest
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 # Local
 from app.core.config import get_settings
+from app.db.models import Book
 from app.services.db.writer import (
+    _PERSIST_CHUNK_SIZE,
+    _longer_wins,
     upsert_author,
+    upsert_book,
     reconcile_genres,
     persist_author_books_cache_background,
 )
@@ -156,8 +161,8 @@ async def test_upsert_author_upgrade_race_condition_returns_id():
 
 
 @pytest.mark.asyncio
-async def test_upsert_author_upgrade_race_condition_calls_rollback():
-    """IntegrityError during upgrade triggers session rollback."""
+async def test_upsert_author_upgrade_race_condition_rolls_back_to_savepoint():
+    """IntegrityError during upgrade rolls the failed UPDATE back to its SAVEPOINT."""
     session = _session(
         _scalar(None),
         _scalar(42),
@@ -168,7 +173,29 @@ async def test_upsert_author_upgrade_race_condition_calls_rollback():
         "name": "Vince Flynn",
         "region": "us",
     })
-    session.rollback.assert_called_once()
+    session.begin_nested.return_value.rollback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_upsert_author_upgrade_race_condition_spares_the_transaction():
+    """
+    Losing the upgrade race undoes the failed UPDATE and nothing else. A
+    session-wide rollback here would discard whatever else the caller has
+    written in the same transaction — a batched book persist writes fifty
+    books before it commits — and would do it silently, since the race is
+    swallowed and never reaches the caller.
+    """
+    session = _session(
+        _scalar(None),
+        _scalar(42),
+        IntegrityError("duplicate", {}, Exception()),
+    )
+    await upsert_author(session, {
+        "asin": "B000APHM1K",
+        "name": "Vince Flynn",
+        "region": "us",
+    })
+    session.rollback.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -319,13 +346,14 @@ async def test_upsert_author_upgrade_lookup_still_filters_null_asin():
 # ============================================================
 # A partial unique index on (name, region) WHERE asin IS NULL means a concurrent
 # insert of the same null-asin author conflicts instead of duplicating. The
-# insert path catches that, rolls back, and returns the row the winner inserted.
+# insert path catches that, rolls the INSERT back to its own SAVEPOINT, and
+# returns the row the winner inserted.
 
 @pytest.mark.asyncio
 async def test_upsert_author_null_asin_insert_conflict_returns_winner_id():
     """
-    When the null-asin insert hits the partial-index conflict, it rolls back and
-    returns the id of the row the concurrent winner inserted.
+    When the null-asin insert hits the partial-index conflict, it undoes the
+    INSERT and returns the id of the row the concurrent winner inserted.
     """
     session = _session(
         _scalar(None),                               # initial lookup: no row yet
@@ -341,8 +369,8 @@ async def test_upsert_author_null_asin_insert_conflict_returns_winner_id():
 
 
 @pytest.mark.asyncio
-async def test_upsert_author_null_asin_insert_conflict_calls_rollback():
-    """A conflict on the null-asin insert triggers a session rollback."""
+async def test_upsert_author_null_asin_insert_conflict_rolls_back_to_savepoint():
+    """A conflict on the null-asin insert rolls that INSERT back to its SAVEPOINT."""
     session = _session(
         _scalar(None),
         IntegrityError("duplicate", {}, Exception()),
@@ -353,7 +381,26 @@ async def test_upsert_author_null_asin_insert_conflict_calls_rollback():
         "name": "Racey Author",
         "region": "us",
     })
-    session.rollback.assert_awaited_once()
+    session.begin_nested.return_value.rollback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_upsert_author_null_asin_insert_conflict_spares_the_transaction():
+    """
+    Same guarantee as the upgrade path: the loser of the insert race undoes
+    its own INSERT and leaves the rest of the caller's transaction standing.
+    """
+    session = _session(
+        _scalar(None),
+        IntegrityError("duplicate", {}, Exception()),
+        _scalar(42),
+    )
+    await upsert_author(session, {
+        "asin": None,
+        "name": "Racey Author",
+        "region": "us",
+    })
+    session.rollback.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -722,3 +769,215 @@ async def test_persist_author_books_cache_background_no_stored_row_uses_requeste
     mock_set.assert_awaited_once()
     written_ttl = mock_set.await_args.kwargs["ttl_seconds"]
     assert written_ttl == 900
+
+
+# ============================================================
+# _longer_wins — THE NULL-LENGTH TRAP
+# ============================================================
+# length(NULL) is NULL and every comparison against NULL is NULL rather than
+# false, so a length-vs-length test alone silently resolves to its ELSE branch
+# whenever the stored value is NULL. These check the compiled SQL carries the
+# guards that stop that; the behaviour they produce against real Postgres is
+# proved end to end in tests/integration/test_db_longer_wins.py.
+
+def _longer_wins_sql(new_value="incoming text") -> str:
+    """Compiles _longer_wins against a real text column for substring checks."""
+    return _compiled(select(_longer_wins(new_value, Book.summary)))
+
+
+def test_longer_wins_floors_the_stored_length_so_null_can_be_filled():
+    """The stored side is floored to a sentinel: without it, a NULL stored
+    value makes the comparison NULL, the CASE takes ELSE, and the column can
+    never be filled by any later value however long."""
+    sql = _longer_wins_sql()
+    assert "COALESCE(LENGTH(BOOKS.SUMMARY), -1)" in sql
+
+
+def test_longer_wins_floors_the_incoming_length_too():
+    """The incoming side is floored by the same sentinel, so a NULL incoming
+    value measures as absent and loses to anything stored rather than making
+    the comparison NULL by a different route."""
+    sql = _longer_wins_sql()
+    assert "COALESCE(LENGTH(NULLIF(BTRIM(" in sql
+    assert "), -1) >" in sql
+
+
+def test_longer_wins_measures_the_incoming_value_content_free_trimmed():
+    """An incoming empty or whitespace-only value is measured as absent, so it
+    cannot displace a stored NULL. It carries no more information than NULL
+    and would make a never-answered column look like a blank-answered one."""
+    sql = _longer_wins_sql("   ")
+    assert "NULLIF(BTRIM('   '), '')" in sql
+
+
+def test_longer_wins_writes_the_incoming_value_untrimmed():
+    """Only the measurement is trimmed. The value written is the value
+    received, so real text keeps whatever spacing Audible sent."""
+    sql = _longer_wins_sql("  padded real text  ")
+    assert "THEN '  PADDED REAL TEXT  '" in sql
+
+
+def test_longer_wins_keeps_the_existing_column_in_the_else_branch():
+    """The fallback is still the stored column, so losing the comparison for
+    any reason keeps what is already held rather than writing NULL."""
+    assert "ELSE BOOKS.SUMMARY" in _longer_wins_sql()
+
+
+@pytest.mark.parametrize("column", ["DESCRIPTION", "SUMMARY"])
+def test_upsert_book_uses_the_guarded_comparison_for_its_text_columns(column):
+    """Both of the book columns merged by length carry the guards, so neither
+    can be pinned NULL by its first write."""
+    session = _session(*[MagicMock() for _ in range(4)])
+    asyncio.run(upsert_book(session, {
+        "asin": "B0BEXAMPLE",
+        "title": "Example",
+        "region": "us",
+        "description": "a description",
+        "summary": "a summary",
+    }))
+    sql = _compiled(session.execute.call_args_list[0].args[0])
+    guarded = f"COALESCE(LENGTH(BOOKS.{column}), -1)"
+    assert guarded in sql
+
+
+# ============================================================
+# persist_books_background — CHUNK BOUNDARIES
+# ============================================================
+# The batched persist slices its book list into transactions of
+# _PERSIST_CHUNK_SIZE. _persist_book_chunk is mocked out here so the slicing
+# itself is what is measured -- what each chunk then does with a real
+# database, including the replay after a lost transaction, is proved in
+# tests/integration/test_persist_book_chunk.py.
+
+async def _captured_chunks(books, region="us"):
+    """
+    Drives persist_books_background to completion and returns the chunks it
+    handed to _persist_book_chunk, in order.
+
+    create_task is intercepted and its coroutine awaited directly, so the
+    slicing runs under the test rather than detached. The chunk lists are
+    copied on capture: they are slices of the caller's list, and holding the
+    live objects would let a later mutation rewrite what an earlier call is
+    asserted to have received. The semaphore is replaced per call because the
+    module-global binds to whichever event loop first uses it and each test
+    gets its own.
+    """
+    from app.services.db.writer import persist_books_background
+
+    captured_chunks = []
+    captured_regions = []
+
+    async def _record(session, chunk, chunk_region):
+        captured_chunks.append(list(chunk))
+        captured_regions.append(chunk_region)
+
+    captured = {}
+
+    def _fake_create_task(coro):
+        captured["coro"] = coro
+        return MagicMock()
+
+    with patch("app.services.db.writer._BackgroundSession", return_value=_FakeSessionCM(AsyncMock())), \
+         patch("app.services.db.writer._bg_write_semaphore", asyncio.Semaphore(2)), \
+         patch("app.services.db.writer.asyncio.create_task", side_effect=_fake_create_task), \
+         patch("app.services.db.writer._persist_book_chunk", side_effect=_record):
+        persist_books_background(books, region)
+        await captured["coro"]
+
+    return captured_chunks, captured_regions
+
+
+def _books(count, start=0):
+    """count books with distinct ASINs, so a chunk's contents can be checked
+    and not merely its length."""
+    return [{"asin": f"B0BOOK{i:05d}", "title": f"Book {i}"} for i in range(start, start + count)]
+
+
+@pytest.mark.asyncio
+async def test_persist_books_background_splits_an_exact_multiple_evenly():
+    """A list that is an exact multiple of the chunk size produces full
+    chunks and no trailing empty one. An empty final chunk would reach
+    Postgres as an INSERT with no rows on the cache write."""
+    chunks, _ = await _captured_chunks(_books(_PERSIST_CHUNK_SIZE * 2))
+
+    assert [len(c) for c in chunks] == [_PERSIST_CHUNK_SIZE, _PERSIST_CHUNK_SIZE]
+
+
+@pytest.mark.asyncio
+async def test_persist_books_background_carries_one_book_over_the_boundary():
+    """One book past an exact multiple gets its own chunk rather than being
+    dropped off the end -- the off-by-one that loses the tail of a prolific
+    author's catalogue silently, since every other book still persists."""
+    chunks, _ = await _captured_chunks(_books(_PERSIST_CHUNK_SIZE + 1))
+
+    assert [len(c) for c in chunks] == [_PERSIST_CHUNK_SIZE, 1]
+
+
+@pytest.mark.asyncio
+async def test_persist_books_background_keeps_one_short_list_in_a_single_chunk():
+    """One book under the size stays a single chunk, so the common case of a
+    request smaller than the chunk size pays exactly one transaction."""
+    chunks, _ = await _captured_chunks(_books(_PERSIST_CHUNK_SIZE - 1))
+
+    assert [len(c) for c in chunks] == [_PERSIST_CHUNK_SIZE - 1]
+
+
+@pytest.mark.asyncio
+async def test_persist_books_background_writes_nothing_for_an_empty_list():
+    """No books means no chunk at all, not one empty chunk."""
+    chunks, _ = await _captured_chunks([])
+
+    assert chunks == []
+
+
+@pytest.mark.asyncio
+async def test_persist_books_background_writes_nothing_when_no_book_has_an_asin():
+    """A list whose books are all unusable collapses to no chunks, the same
+    as an empty list -- the ASIN filter runs before the slicing, so an empty
+    chunk cannot be produced by filtering either."""
+    chunks, _ = await _captured_chunks([{"title": "No ASIN"}, {"asin": None, "title": "Null"}])
+
+    assert chunks == []
+
+
+@pytest.mark.asyncio
+async def test_persist_books_background_chunks_cover_every_book_exactly_once():
+    """The chunks reassemble into the original list, in order: nothing
+    duplicated across a boundary and nothing skipped at one. Chunk lengths
+    alone cannot see a slice that repeated or lost a book while still
+    totalling correctly."""
+    books = _books(_PERSIST_CHUNK_SIZE * 2 + 7)
+
+    chunks, _ = await _captured_chunks(books)
+
+    assert [book for chunk in chunks for book in chunk] == books
+
+
+@pytest.mark.asyncio
+async def test_persist_books_background_chunks_only_the_books_with_asins():
+    """Books without an ASIN are filtered before the slicing, so they neither
+    reach a chunk nor take up room in one. Chunking the unfiltered list would
+    leave chunks that are short by however many were unusable."""
+    books = _books(3) + [{"title": "No ASIN"}] + _books(2, start=3)
+
+    chunks, _ = await _captured_chunks(books)
+
+    assert [book for chunk in chunks for book in chunk] == _books(5)
+
+
+@pytest.mark.asyncio
+async def test_persist_books_background_passes_the_region_to_every_chunk():
+    """Every chunk is written for the region the caller asked for. A chunk
+    that lost it would key its cache entries under the wrong marketplace, and
+    book ASINs are region-specific, so the entry would answer for a book that
+    region does not have."""
+    _, regions = await _captured_chunks(_books(_PERSIST_CHUNK_SIZE + 1), region="de")
+
+    assert regions == ["de", "de"]
+
+
+def test_persist_chunk_size_matches_the_audible_fetch_chunk():
+    """The chunk size is 50 because that is the largest ASIN list a single
+    Audible request takes. The two are coupled by intent rather than by a
+    shared constant, which is the only reason it is pinned here."""
+    assert _PERSIST_CHUNK_SIZE == 50

@@ -119,6 +119,68 @@ async def get(session: AsyncSession, key: str) -> Any | None:
     return entry.value
 
 
+async def get_many(session: AsyncSession, keys: list[str]) -> dict[str, Any]:
+    """
+    Retrieves many cached values, one query per 5000 keys, as {key: value}.
+
+    Only live entries appear in the result: a key that is absent, or present
+    but expired, is simply not in the returned dict, so `result.get(key)`
+    yields None for exactly the keys `get` would have returned None for. The
+    expiry predicate is the same one `get` uses, evaluated once for the whole
+    batch rather than once per key -- a single point in time across the batch,
+    where a per-key loop over `get` drifts its own `now` forward as it goes
+    and can call the same entry live at the top of a list and expired at the
+    bottom. `now` is taken before the first chunk for that reason, so the
+    batch stays one instant however many chunks it takes.
+
+    Exists because a per-ASIN loop over `get` costs one database round trip
+    per key. Duplicate keys are collapsed before the query; the caller reads
+    values back by key, so a repeated key resolves to the same entry.
+
+    One aggregate log line for the whole call instead of `get`'s per-key
+    hit/miss pair: at a thousand keys the per-key form buries every other
+    line in the log for that request.
+
+    Chunked at 5000, the size reader._get_series_positions_batch and the
+    seeder use against the same ceiling -- one bind per key against asyncpg's
+    32,767 bind parameters, the limit that broke purge_expired (see below).
+    The key list is not bounded by the bulk book route's 1000-ASIN cap. Both
+    call sites are in get_books_by_asins, and the author routes reach it with
+    a whole author catalogue: get_author_books applies no limit of its own,
+    and the largest measured author is 4164 books. The fallback site is what
+    settles the size question -- it sits inside that function's outage
+    handler and runs on any Audible failure whether or not `use_cache` was
+    asked for, so a default `cache=false` author request is precisely the one
+    that arrives here with thousands of keys. Unchunked, a large enough list
+    would raise from inside the handler whose whole job is to degrade
+    gracefully, turning an Audible outage into a 500 where the per-key loop
+    merely ran slowly.
+    """
+    if not keys:
+        return {}
+
+    unique_keys = list(dict.fromkeys(keys))
+    now = datetime.now(timezone.utc)
+
+    hits: dict[str, Any] = {}
+    for i in range(0, len(unique_keys), 5000):
+        chunk = unique_keys[i:i + 5000]
+        result = await session.execute(
+            select(Cache.key, Cache.value).where(
+                Cache.key.in_(chunk),
+                Cache.expires_at > now,
+            )
+        )
+        hits.update({row.key: row.value for row in result})
+
+    logger.info("Cache batch lookup", extra={
+        "requested": len(unique_keys),
+        "hits": len(hits),
+        "misses": len(unique_keys) - len(hits),
+    })
+    return hits
+
+
 async def set(
     session: AsyncSession,
     key: str,

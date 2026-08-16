@@ -60,19 +60,25 @@ _bg_write_semaphore = asyncio.Semaphore(2)
 #
 # Two things bound it from above, and neither shows in the tradeoff above.
 # Subtransactions: upsert_author opens a SAVEPOINT for each asin-less author it
-# inserts and each null-asin row it upgrades, so one chunk's transaction holds
-# up to _PERSIST_CHUNK_SIZE x new-authors-per-book of them. Two such authors a
-# book fill Postgres's 64-entry per-backend subxid cache at 32 books and pass it
-# at 33, after which snapshots taken while the transaction is open carry the
-# suboverflowed flag and other backends resolve subtransaction visibility
-# through the pg_subtrans SLRU rather than the cache. Bind parameters:
-# _cache_set_many puts four per entry into one INSERT against asyncpg's 32,767,
-# so a chunk of 8192 raises before the commit — nothing is lost, since
-# _persist_book_chunk replays the chunk book by book, but it discards the batch
-# it just wrote and lands on the per-book path the batching exists to avoid.
-# The two sit differently at 50: the INSERT binds 200 parameters and is two
-# orders of magnitude clear, while a cold chunk already passes the subxid cache
-# and pays the SLRU lookups — a throughput cost, not a limit, and only on a cold
+# inserts and each null-asin row it upgrades, and both branches sit behind a
+# SELECT that runs first, so a repeat author is found by that SELECT against the
+# transaction's own uncommitted insert and opens none. A chunk therefore holds
+# one savepoint per distinct author in it that is new or still null-asin, not
+# one per book: fifty books of a prolific author's catalog open about one, while
+# a batch of unrelated new books opens one for every author it carries.
+# Postgres's 64-entry per-backend subxid cache takes 65 distinct unseen authors
+# in a single chunk to cross — two of them a book fills it at 32 books and
+# passes it at 33 — after which snapshots taken while the transaction is open
+# carry the suboverflowed flag and other backends resolve subtransaction
+# visibility through the pg_subtrans SLRU rather than the cache. Bind
+# parameters: _cache_set_many puts four per entry into one INSERT against
+# asyncpg's 32,767, so a chunk of 8192 raises before the commit — nothing is
+# lost, since _persist_book_chunk replays the chunk book by book, but it
+# discards the batch it just wrote and lands on the per-book path the batching
+# exists to avoid. The two sit differently at 50: the INSERT binds 200
+# parameters and is two orders of magnitude clear, while the subxid cache holds
+# for a catalog chunk and a wide enough mix of unseen authors passes it. Passing
+# it costs SLRU lookups — a throughput cost, not a limit, and only on a cold
 # catalog, since re-writing the same books finds the authors stored and opens no
 # savepoints. Only the bind ceiling is a hard stop on raising the constant.
 _PERSIST_CHUNK_SIZE = 50

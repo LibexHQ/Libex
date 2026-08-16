@@ -67,12 +67,13 @@ logger = get_logger()
 # wall clock. The actual fix is client.py's AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT
 # pool (entered below via author_books_concurrency) -- see that constant's
 # own docstring for the measurements: raising the effective in-flight limit
-# from 10 to 25-30 for this call path cut wall clock roughly in half to a
-# third in every case measured, both single-request and 5-concurrent, which
-# is what actually keeps a full, untruncated result inside the proxy's
-# window rather than needing to return less than what Audible has. This
-# 45s deadline remains underneath that as a backstop against a genuinely
-# pathological walk, not the mechanism the outage fix relies on.
+# from 10 to 25-30 for this call path more than halved wall clock in the
+# 5-concurrent case (12.71s at 10 vs 5.77s at 30) -- the case that produced
+# the outage, and the only one the measurements resolve clear of their own
+# run-to-run noise. That is what keeps a full, untruncated result inside the
+# proxy's window rather than needing to return less than what Audible has.
+# This 45s deadline remains underneath that as a backstop against a
+# genuinely pathological walk, not the mechanism the outage fix relies on.
 AUTHOR_BOOKS_TIME_BUDGET_SECONDS = 45.0
 
 # TTL for an author-books cache write that did not reach a confirmed-clean,

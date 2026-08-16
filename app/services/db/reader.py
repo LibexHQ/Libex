@@ -48,6 +48,39 @@ async def _get_series_positions(session: AsyncSession, book_asin: str) -> dict[s
     return {row[0]: row[1] for row in result.fetchall()}
 
 
+async def _get_series_positions_batch(
+    session: AsyncSession, book_asins: list[str]
+) -> dict[str, dict[str, str | None]]:
+    """Returns {book_asin: {series_asin: position}} for many books at once.
+
+    The batched form of _get_series_positions, for callers holding many books at
+    once: one round trip for the batch instead of one per book. A book with
+    no series rows is simply absent from the outer dict, so callers substitute
+    an empty dict — exactly what _get_series_positions returns for that book.
+    """
+    positions: dict[str, dict[str, str | None]] = {}
+    if not book_asins:
+        return positions
+
+    # Postgres caps a single statement at 32767 bind parameters, so the IN list
+    # is chunked at the size the seeder already uses for the same reason. An
+    # author's stored catalogue can run to thousands of books and the caller
+    # below applies no LIMIT, so the list is not bounded by a page size.
+    for i in range(0, len(book_asins), 5000):
+        chunk = book_asins[i:i + 5000]
+        result = await session.execute(
+            select(
+                book_series.c.book_asin,
+                book_series.c.series_asin,
+                book_series.c.position,
+            )
+            .where(book_series.c.book_asin.in_(chunk))
+        )
+        for book_asin, series_asin, position in result.fetchall():
+            positions.setdefault(book_asin, {})[series_asin] = position
+    return positions
+
+
 def _book_to_dict(book: Book, series_positions: dict[str, str | None]) -> dict[str, Any]:
     """Converts a Book ORM object to the same dict format as _normalize_product."""
     release_date = None
@@ -902,9 +935,16 @@ async def get_author_books_from_db(
         stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
         result = await session.execute(stmt)
         books = result.scalars().all()
+        # This read has no LIMIT — the result is the author's entire stored
+        # catalogue, which for a prolific author is thousands of rows. Series
+        # positions are fetched for all of them in one statement rather than
+        # one per book; the ordering apply_sort established above is untouched.
+        positions_by_asin = await _get_series_positions_batch(
+            session, [book.asin for book in books]
+        )
         results = []
         for book in books:
-            positions = await _get_series_positions(session, book.asin)
+            positions = positions_by_asin.get(book.asin, {})
             results.append(_book_to_dict(book, positions))
         return results
     except Exception as e:

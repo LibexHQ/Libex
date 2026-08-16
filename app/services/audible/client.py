@@ -133,19 +133,36 @@ AUDIBLE_CONCURRENCY_LIMIT = 10
 # wall clock -- inside 2s of that same timeout.
 #
 # Measured directly against Audible (bypassing the production proxy, so
-# these are relative, not absolute, numbers -- see authors/__init__.py's own
-# note on this) across Conan Doyle and Christie, single and 5-concurrent:
-# raising the effective limit from 10 to 30 cut wall clock roughly in half to
-# a third in every case (a single Doyle discovery+hydration run: 5.03s at 10
-# vs 3.56s at 30; 5 concurrent mixed requests: 12.71s at 10 vs 5.77s at 30),
-# with zero throttled responses observed at 30, 60, or even 100 in flight --
-# and returns past 30 were flat or worse, not further improvement, so
-# headroom past ~30 buys nothing measurable while opening more simultaneous
-# connections against a shared IP that has already been throttled once on a
-# different workload. 25 is chosen a step below that measured plateau, not
-# at it, since the measurement was taken without the production proxy's own
-# real behavior in the loop and deserves a live check there before being
-# trusted at the ceiling this measured.
+# these are relative, not absolute, numbers) across Conan Doyle and
+# Christie: 5 concurrent mixed requests ran 12.71s at 10 vs 5.77s at 30,
+# which is exactly the case this pool exists for -- five walks sharing a
+# 10-permit gate queue behind each other. Zero throttled responses were
+# observed at 30, 60, or even 100 in flight, and that reproduces exactly on
+# re-measurement.
+#
+# What does not hold is any claim about where a useful ceiling sits. Two
+# runs of one identical configuration measured 5.537s and 3.992s, so a
+# single walk varies ~40% run to run at a fixed setting -- a 1.545s band
+# that sits entirely inside, and covers ~84% of, the 1.85s spread across 25,
+# 30, 50, 75 and 100 permits (3.69-5.54s). Nothing in that range is
+# distinguishable from noise, and a single-request comparison (5.03s at 10
+# vs 3.56s at 30) differs by 1.47s, narrower than that same 1.545s band, so
+# it does not resolve a ceiling either.
+#
+# 25 therefore stands on cost, not on a measured upstream plateau. New
+# connections opened per walk are at most the permit count, and in practice
+# sit at it (25 permits -> 25, 100 -> 96), so every extra permit is one
+# more handshake on any walk that starts cold -- cheap on a direct path, a
+# full CONNECT+TLS through the production proxy, against a shared IP already
+# throttled once on a different workload. Each also costs event-loop CPU
+# that climbs monotonically for identical work: 0.84s at 25, 1.56s at 50,
+# 3.72s at 100, where the loop sat blocked 3.44s of 5.16s wall. That cost is
+# transport work -- TLS decrypt and gunzip of 50-product pages interleaving
+# across streams -- not parsing, which measured 0.11s decode plus 0.08s
+# normalization throughout. More handshakes and more blocked loop time for a
+# latency gain no measurement here can resolve is a bad trade. None of it
+# was measured through the production proxy, so none of it constrains
+# behaviour on that path.
 AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT = 25
 
 # asyncio.Semaphore binds its internal waiter state to whichever event loop
@@ -257,9 +274,30 @@ def _current_audible_semaphore() -> asyncio.Semaphore:
 # AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT's own docstring) gets a reused,
 # already-negotiated connection almost every time instead of paying a fresh
 # TCP+TLS handshake per call.
+#
+# keepalive_expiry overrides httpx's 5.0s default because the waste this
+# pool exists to avoid falls between walks, not inside one: new connections
+# opened per walk are at most the permit count, so nothing goes idle for
+# five seconds while a 4-5s walk is running. The next request pays instead
+# -- arriving more than five seconds after the last Audible traffic, it
+# finds an empty pool and re-handshakes once per permit its limit allows,
+# 25 CONNECT+TLS for an author-books walk. That count is environment
+# independent; only the price per handshake moves, and through the
+# production proxy each one is a full CONNECT+TLS. 120s is the longest idle
+# gap measured to still be reused end to end, probed against Audible on a
+# direct path with no proxy configured (gaps of 1, 6, 20, 30, 60 and 120s
+# all reused a live connection; at the 5.0s default a 6s gap discarded the
+# whole pool), and it sits there rather than higher because holding a socket
+# past the far end's own idle limit only hands out connections it has
+# already closed -- 120s is what was observed, anything beyond it is an
+# assumption. On the production path the far end holding the idle tunnel is
+# the proxy rather than Audible, and the proxy's own idle tolerance was
+# never probed, so 120s is a direct-path measurement carried over, not a
+# production-verified ceiling.
 _AUDIBLE_POOL_LIMITS = httpx.Limits(
     max_connections=AUDIBLE_CONCURRENCY_LIMIT + AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT,
     max_keepalive_connections=AUDIBLE_CONCURRENCY_LIMIT + AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT,
+    keepalive_expiry=120.0,
 )
 
 # audible_get is called from three different lifetimes -- request handlers,

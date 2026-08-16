@@ -50,6 +50,33 @@ _BackgroundSession = async_sessionmaker(engine, expire_on_commit=False)
 # API's DB connection pool. At most 2 background persist tasks write at once.
 _bg_write_semaphore = asyncio.Semaphore(2)
 
+# Books written per transaction by the batched background persist. Matched to
+# the size of the 50-ASIN chunk the books service already fetches Audible in.
+# Small enough that the row locks a chunk holds are released promptly for the
+# seeder and for concurrent requests touching the same authors, genres and
+# narrators, and that replaying a chunk after a lost transaction is cheap;
+# large enough that persisting a prolific author's 1000-book catalog costs 20
+# commits instead of 2000.
+#
+# Two things bound it from above, and neither shows in the tradeoff above.
+# Subtransactions: upsert_author opens a SAVEPOINT for each asin-less author it
+# inserts and each null-asin row it upgrades, so one chunk's transaction holds
+# up to _PERSIST_CHUNK_SIZE x new-authors-per-book of them. Two such authors a
+# book fill Postgres's 64-entry per-backend subxid cache at 32 books and pass it
+# at 33, after which snapshots taken while the transaction is open carry the
+# suboverflowed flag and other backends resolve subtransaction visibility
+# through the pg_subtrans SLRU rather than the cache. Bind parameters:
+# _cache_set_many puts four per entry into one INSERT against asyncpg's 32,767,
+# so a chunk of 8192 raises before the commit — nothing is lost, since
+# _persist_book_chunk replays the chunk book by book, but it discards the batch
+# it just wrote and lands on the per-book path the batching exists to avoid.
+# The two sit differently at 50: the INSERT binds 200 parameters and is two
+# orders of magnitude clear, while a cold chunk already passes the subxid cache
+# and pays the SLRU lookups — a throughput cost, not a limit, and only on a cold
+# catalog, since re-writing the same books finds the authors stored and opens no
+# savepoints. Only the bind ceiling is a hard stop on raising the constant.
+_PERSIST_CHUNK_SIZE = 50
+
 
 # ============================================================
 # HELPERS
@@ -75,9 +102,28 @@ def _coalesce(new_value, existing_col):
 
 
 def _longer_wins(new_value, existing_col):
-    """Returns new_value if it is longer than the existing value, otherwise keeps existing."""
+    """
+    Keeps whichever value carries more text, so a later, richer Audible
+    response replaces a thinner stored one and never the reverse.
+
+    Both lengths are floored to a sentinel rather than compared directly,
+    because length(NULL) is NULL and a comparison against NULL is NULL, not
+    false. A bare length(new) > length(existing) therefore falls to the ELSE
+    branch whenever the stored value is NULL, and pins that NULL permanently:
+    no incoming description, however long, could fill a column that was first
+    written empty.
+
+    An incoming value that is empty or entirely whitespace measures as absent,
+    so it cannot displace a stored NULL. It carries no more information than
+    NULL does, and writing it would make a column Audible has never answered
+    indistinguishable from one it answered blank. Only the measurement is
+    trimmed — the value written is the value received, verbatim.
+    """
+    absent = -1
+    new_length = func.coalesce(func.length(func.nullif(func.btrim(new_value), "")), absent)
+    existing_length = func.coalesce(func.length(existing_col), absent)
     return case(
-        (func.length(new_value) > func.length(existing_col), new_value),
+        (new_length > existing_length, new_value),
         else_=existing_col,
     )
 
@@ -231,6 +277,14 @@ async def upsert_author(session: AsyncSession, author: dict) -> int | None:
         null_id = null_result.scalar_one_or_none()
 
         if null_id:
+            # The UPDATE runs inside a SAVEPOINT so that losing the race undoes
+            # only this statement. session.rollback() discards the whole
+            # transaction, which is harmless when this function is the only
+            # writer in it and silently destructive when it is not: a batched
+            # persist writes many books per transaction, and a bare rollback
+            # here would throw away every book already written alongside this
+            # one, without raising anything for the caller to notice.
+            nested = await session.begin_nested()
             try:
                 await session.execute(
                     update(Author)
@@ -242,11 +296,12 @@ async def upsert_author(session: AsyncSession, author: dict) -> int | None:
                         updated_at=_now(),
                     )
                 )
+                await nested.commit()
             except (IntegrityError, AsyncpgUniqueViolation):
                 # A concurrent request upgraded between our SELECT and UPDATE.
-                # The data is correct — roll back the failed statement and
-                # return the existing id.
-                await session.rollback()
+                # The data is correct — undo the failed statement and return
+                # the existing id.
+                await nested.rollback()
             return null_id
 
         # No null-asin row — standard upsert on the unique constraint.
@@ -287,7 +342,10 @@ async def upsert_author(session: AsyncSession, author: dict) -> int | None:
         # Insert a fresh null-asin row. A partial unique index on
         # (name, region) WHERE asin IS NULL means a concurrent insert of the
         # same author now conflicts instead of quietly duplicating — catch it,
-        # roll back, and return the row the winner inserted.
+        # undo just the INSERT, and return the row the winner inserted. Same
+        # SAVEPOINT reasoning as the upgrade path above: the loser of the race
+        # must not take the caller's other work down with it.
+        nested = await session.begin_nested()
         try:
             result = await session.execute(
                 insert(Author).values(
@@ -302,9 +360,10 @@ async def upsert_author(session: AsyncSession, author: dict) -> int | None:
                 ).returning(Author.id)
             )
             row = result.fetchone()
+            await nested.commit()
             return row[0] if row else None
         except (IntegrityError, AsyncpgUniqueViolation):
-            await session.rollback()
+            await nested.rollback()
             winner = await session.execute(
                 select(Author.id).where(
                     Author.name == a_name,
@@ -325,10 +384,174 @@ async def upsert_author(session: AsyncSession, author: dict) -> int | None:
 # BOOK WRITER
 # ============================================================
 
+async def _write_book(session: AsyncSession, data: dict) -> None:
+    """
+    Issues every statement for one book — the book row plus its genre,
+    narrator, series and author relationships — and nothing else.
+
+    Owns no transaction: it neither commits nor rolls back, so the caller
+    decides whether one book or fifty share a transaction. Every statement is
+    an idempotent upsert, which is what lets a caller whose transaction was
+    lost replay the same books without double-counting anything.
+
+    Existing non-null values are never overwritten with null. Pivot
+    relationships (genres, narrators, authors) are additive — never shrink.
+    Series position is kept current via upsert.
+    """
+    asin = data["asin"]
+    release_date = _parse_release_date_for_db(data.get("releaseDate"))
+
+    stmt = insert(Book).values(
+        asin=asin,
+        title=data.get("title", ""),
+        subtitle=data.get("subtitle"),
+        region=data.get("region"),
+        description=data.get("description"),
+        summary=data.get("summary"),
+        publisher=data.get("publisher"),
+        copyright=data.get("copyright"),
+        isbn=data.get("isbn"),
+        language=data.get("language"),
+        rating=data.get("rating"),
+        release_date=release_date,
+        length_minutes=data.get("lengthMinutes"),
+        explicit=_to_bool(data.get("explicit")),
+        whisper_sync=_to_bool(data.get("whisperSync")),
+        has_pdf=_to_bool(data.get("hasPdf")),
+        image=data.get("imageUrl"),
+        book_format=data.get("bookFormat"),
+        content_type=data.get("contentType"),
+        content_delivery_type=data.get("contentDeliveryType"),
+        episode_number=data.get("episodeNumber"),
+        episode_type=data.get("episodeType"),
+        sku=data.get("sku"),
+        sku_group=data.get("skuGroup"),
+        is_listenable=_to_bool(data.get("isListenable"), True),
+        is_buyable=_to_bool(data.get("isBuyable"), True),
+        plans=cast(data.get("plans"), JSONB),
+        created_at=_now(),
+        updated_at=_now(),
+    ).on_conflict_do_update(
+        index_elements=["asin"],
+        set_={
+            "title": _coalesce(data.get("title"), Book.title),
+            "subtitle": _coalesce(data.get("subtitle"), Book.subtitle),
+            "region": Book.region,
+            "description": _longer_wins(data.get("description"), Book.description),
+            "summary": _longer_wins(data.get("summary"), Book.summary),
+            "publisher": _coalesce(data.get("publisher"), Book.publisher),
+            "copyright": _coalesce(data.get("copyright"), Book.copyright),
+            "isbn": _coalesce(data.get("isbn"), Book.isbn),
+            "language": _coalesce(data.get("language"), Book.language),
+            "rating": _coalesce(data.get("rating"), Book.rating),
+            "release_date": _coalesce(release_date, Book.release_date),
+            "length_minutes": _coalesce(data.get("lengthMinutes"), Book.length_minutes),
+            "explicit": _to_bool(data.get("explicit", False)),
+            "whisper_sync": _to_bool(data.get("whisperSync", False)),
+            "has_pdf": _to_bool(data.get("hasPdf", False)),
+            "image": _coalesce(data.get("imageUrl"), Book.image),
+            "book_format": _coalesce(data.get("bookFormat"), Book.book_format),
+            "content_type": _coalesce(data.get("contentType"), Book.content_type),
+            "content_delivery_type": _coalesce(data.get("contentDeliveryType"), Book.content_delivery_type),
+            "episode_number": _coalesce(data.get("episodeNumber"), Book.episode_number),
+            "episode_type": _coalesce(data.get("episodeType"), Book.episode_type),
+            "sku": _coalesce(data.get("sku"), Book.sku),
+            "sku_group": _coalesce(data.get("skuGroup"), Book.sku_group),
+            "is_listenable": _to_bool(data.get("isListenable", True)),
+            "is_buyable": _to_bool(data.get("isBuyable", True)),
+            "plans": _coalesce(cast(data.get("plans"), JSONB), Book.plans),
+            "updated_at": _now(),
+        },
+    )
+    await session.execute(stmt)
+
+    # Genres — batch upsert entities, then batch insert pivots
+    genre_asins = []
+    for genre in data.get("genres", []):
+        g_asin = genre.get("asin")
+        g_name = genre.get("name")
+        if g_asin and g_name:
+            genre_asins.append(g_asin)
+    if genre_asins:
+        genre_values = [
+            {"asin": g["asin"], "name": g["name"], "type": g.get("type", "Tags"), "created_at": _now(), "updated_at": _now()}
+            for g in data["genres"] if g.get("asin") and g.get("name")
+        ]
+        await session.execute(
+            insert(Genre).values(genre_values).on_conflict_do_nothing()
+        )
+        await session.execute(
+            insert(book_genre).values([
+                {"book_asin": asin, "genre_asin": ga} for ga in genre_asins
+            ]).on_conflict_do_nothing()
+        )
+
+    # Narrators — batch upsert entities, then batch insert pivots
+    narrator_names = [n.get("name", "").strip() for n in data.get("narrators", []) if n.get("name", "").strip()]
+    if narrator_names:
+        await session.execute(
+            insert(Narrator).values([
+                {"name": name, "created_at": _now(), "updated_at": _now()}
+                for name in narrator_names
+            ]).on_conflict_do_nothing()
+        )
+        await session.execute(
+            insert(book_narrator).values([
+                {"book_asin": asin, "narrator_name": name} for name in narrator_names
+            ]).on_conflict_do_nothing()
+        )
+
+    # Series — position kept current via upsert (usually 1-2, kept individual)
+    for s in data.get("series", []):
+        s_asin = await upsert_series(session, s)
+        if s_asin:
+            await session.execute(
+                insert(book_series).values(
+                    book_asin=asin,
+                    series_asin=s_asin,
+                    position=s.get("position"),
+                ).on_conflict_do_update(
+                    index_elements=["book_asin", "series_asin"],
+                    set_={"position": _coalesce(s.get("position"), book_series.c.position)},
+                )
+            )
+
+    # Authors — kept individual (complex null-asin upgrade logic)
+    author_ids = []
+    for author_data in data.get("authors", []):
+        author_id = await upsert_author(session, author_data)
+        if author_id:
+            author_ids.append(author_id)
+    if author_ids:
+        await session.execute(
+            insert(author_book).values([
+                {"author_id": aid, "book_asin": asin} for aid in author_ids
+            ]).on_conflict_do_nothing()
+        )
+
+    # Derived series authors — batch the cross product
+    series_author_values = []
+    for s in data.get("series", []):
+        s_asin = s.get("asin")
+        if s_asin:
+            for author_id in author_ids:
+                series_author_values.append({"series_asin": s_asin, "author_id": author_id})
+    if series_author_values:
+        await session.execute(
+            insert(series_author).values(series_author_values).on_conflict_do_nothing()
+        )
+
+
 async def upsert_book(session: AsyncSession, data: dict) -> None:
     """
-    Upserts a book and all its relationships to the relational DB.
-    Called after every successful Audible fetch.
+    Upserts a book and all its relationships to the relational DB, in a
+    transaction of its own.
+
+    The single-book entry point, and the per-book replay path for a chunk whose
+    shared transaction was lost: it wraps _write_book in a commit of its own and
+    swallows the failure, so one bad book costs only itself. The batched persist
+    calls _write_book directly on its normal path.
+
     Existing non-null values are never overwritten with null.
     Pivot relationships (genres, narrators, authors) are additive — never shrink.
     Series position is kept current via upsert.
@@ -338,148 +561,7 @@ async def upsert_book(session: AsyncSession, data: dict) -> None:
         return
 
     try:
-        release_date = _parse_release_date_for_db(data.get("releaseDate"))
-
-        stmt = insert(Book).values(
-            asin=asin,
-            title=data.get("title", ""),
-            subtitle=data.get("subtitle"),
-            region=data.get("region"),
-            description=data.get("description"),
-            summary=data.get("summary"),
-            publisher=data.get("publisher"),
-            copyright=data.get("copyright"),
-            isbn=data.get("isbn"),
-            language=data.get("language"),
-            rating=data.get("rating"),
-            release_date=release_date,
-            length_minutes=data.get("lengthMinutes"),
-            explicit=_to_bool(data.get("explicit")),
-            whisper_sync=_to_bool(data.get("whisperSync")),
-            has_pdf=_to_bool(data.get("hasPdf")),
-            image=data.get("imageUrl"),
-            book_format=data.get("bookFormat"),
-            content_type=data.get("contentType"),
-            content_delivery_type=data.get("contentDeliveryType"),
-            episode_number=data.get("episodeNumber"),
-            episode_type=data.get("episodeType"),
-            sku=data.get("sku"),
-            sku_group=data.get("skuGroup"),
-            is_listenable=_to_bool(data.get("isListenable"), True),
-            is_buyable=_to_bool(data.get("isBuyable"), True),
-            plans=cast(data.get("plans"), JSONB),
-            created_at=_now(),
-            updated_at=_now(),
-        ).on_conflict_do_update(
-            index_elements=["asin"],
-            set_={
-                "title": _coalesce(data.get("title"), Book.title),
-                "subtitle": _coalesce(data.get("subtitle"), Book.subtitle),
-                "region": Book.region,
-                "description": _longer_wins(data.get("description"), Book.description),
-                "summary": _longer_wins(data.get("summary"), Book.summary),
-                "publisher": _coalesce(data.get("publisher"), Book.publisher),
-                "copyright": _coalesce(data.get("copyright"), Book.copyright),
-                "isbn": _coalesce(data.get("isbn"), Book.isbn),
-                "language": _coalesce(data.get("language"), Book.language),
-                "rating": _coalesce(data.get("rating"), Book.rating),
-                "release_date": _coalesce(release_date, Book.release_date),
-                "length_minutes": _coalesce(data.get("lengthMinutes"), Book.length_minutes),
-                "explicit": _to_bool(data.get("explicit", False)),
-                "whisper_sync": _to_bool(data.get("whisperSync", False)),
-                "has_pdf": _to_bool(data.get("hasPdf", False)),
-                "image": _coalesce(data.get("imageUrl"), Book.image),
-                "book_format": _coalesce(data.get("bookFormat"), Book.book_format),
-                "content_type": _coalesce(data.get("contentType"), Book.content_type),
-                "content_delivery_type": _coalesce(data.get("contentDeliveryType"), Book.content_delivery_type),
-                "episode_number": _coalesce(data.get("episodeNumber"), Book.episode_number),
-                "episode_type": _coalesce(data.get("episodeType"), Book.episode_type),
-                "sku": _coalesce(data.get("sku"), Book.sku),
-                "sku_group": _coalesce(data.get("skuGroup"), Book.sku_group),
-                "is_listenable": _to_bool(data.get("isListenable", True)),
-                "is_buyable": _to_bool(data.get("isBuyable", True)),
-                "plans": _coalesce(cast(data.get("plans"), JSONB), Book.plans),
-                "updated_at": _now(),
-            },
-        )
-        await session.execute(stmt)
-
-        # Genres — batch upsert entities, then batch insert pivots
-        genre_asins = []
-        for genre in data.get("genres", []):
-            g_asin = genre.get("asin")
-            g_name = genre.get("name")
-            if g_asin and g_name:
-                genre_asins.append(g_asin)
-        if genre_asins:
-            genre_values = [
-                {"asin": g["asin"], "name": g["name"], "type": g.get("type", "Tags"), "created_at": _now(), "updated_at": _now()}
-                for g in data["genres"] if g.get("asin") and g.get("name")
-            ]
-            await session.execute(
-                insert(Genre).values(genre_values).on_conflict_do_nothing()
-            )
-            await session.execute(
-                insert(book_genre).values([
-                    {"book_asin": asin, "genre_asin": ga} for ga in genre_asins
-                ]).on_conflict_do_nothing()
-            )
-
-        # Narrators — batch upsert entities, then batch insert pivots
-        narrator_names = [n.get("name", "").strip() for n in data.get("narrators", []) if n.get("name", "").strip()]
-        if narrator_names:
-            await session.execute(
-                insert(Narrator).values([
-                    {"name": name, "created_at": _now(), "updated_at": _now()}
-                    for name in narrator_names
-                ]).on_conflict_do_nothing()
-            )
-            await session.execute(
-                insert(book_narrator).values([
-                    {"book_asin": asin, "narrator_name": name} for name in narrator_names
-                ]).on_conflict_do_nothing()
-            )
-
-        # Series — position kept current via upsert (usually 1-2, kept individual)
-        for s in data.get("series", []):
-            s_asin = await upsert_series(session, s)
-            if s_asin:
-                await session.execute(
-                    insert(book_series).values(
-                        book_asin=asin,
-                        series_asin=s_asin,
-                        position=s.get("position"),
-                    ).on_conflict_do_update(
-                        index_elements=["book_asin", "series_asin"],
-                        set_={"position": _coalesce(s.get("position"), book_series.c.position)},
-                    )
-                )
-
-        # Authors — kept individual (complex null-asin upgrade logic)
-        author_ids = []
-        for author_data in data.get("authors", []):
-            author_id = await upsert_author(session, author_data)
-            if author_id:
-                author_ids.append(author_id)
-        if author_ids:
-            await session.execute(
-                insert(author_book).values([
-                    {"author_id": aid, "book_asin": asin} for aid in author_ids
-                ]).on_conflict_do_nothing()
-            )
-
-        # Derived series authors — batch the cross product
-        series_author_values = []
-        for s in data.get("series", []):
-            s_asin = s.get("asin")
-            if s_asin:
-                for author_id in author_ids:
-                    series_author_values.append({"series_asin": s_asin, "author_id": author_id})
-        if series_author_values:
-            await session.execute(
-                insert(series_author).values(series_author_values).on_conflict_do_nothing()
-            )
-
+        await _write_book(session, data)
         await session.commit()
         logger.info(f"DB write: book {asin}")
 
@@ -639,19 +721,129 @@ def persist_book_background(book: dict, region: str) -> None:
     asyncio.create_task(_persist())
 
 
-def persist_books_background(books: list[dict], region: str) -> None:
-    """Fires a single background task to write multiple books to DB and cache."""
+async def _cache_set_many(
+    session: AsyncSession,
+    entries: list[tuple[str, dict]],
+    ttl_seconds: int | None = None,
+) -> None:
+    """
+    Writes many cache entries in one statement and does not commit — the
+    caller's transaction owns that.
+
+    Same row shape, same TTL rule, and the same last-write-wins upsert as
+    cache.set. What it does not do is spend a commit per key, which is the
+    only reason it exists: the batched book persist would otherwise pay one
+    transaction per cached book on top of one per written book. It takes a
+    single `now` for the whole batch rather than letting it drift key by key,
+    matching cache.get_many's single point in time across a batch.
+
+    ttl_seconds carries cache.set's signature rather than fixing the default,
+    because TTL in Libex is a property of the value and not of the key: the
+    date-derived scans expire at UTC midnight, the stats key has its own
+    constant, and an incomplete author catalogue is deliberately stored for
+    less time than a complete one. A batch primitive that could only write the
+    default would silently promote any of those to the full TTL the first time
+    someone batched them, which for the degraded-catalogue case means serving
+    known-incomplete data as though it were whole.
+
+    Duplicate keys are collapsed last-wins before the statement is built:
+    Postgres rejects an ON CONFLICT DO UPDATE that would touch the same row
+    twice within one INSERT, and last-wins is exactly what a per-key loop over
+    those same duplicates would have left stored.
+
+    Unchunked, where cache.get_many is chunked: the row shape binds four
+    parameters per entry into a single INSERT, so 8192 entries reach asyncpg's
+    32,767 cap. The one caller is the batched book persist, bounded by
+    _PERSIST_CHUNK_SIZE at 50 entries and 200 binds. A caller passing a list it
+    does not bound is what puts a chunk loop here.
+    """
+    if not entries:
+        return
+
+    ttl = ttl_seconds if ttl_seconds is not None else settings.cache_ttl
+    now = _now()
+    expires_at = now + timedelta(seconds=ttl)
+    deduped = dict(entries)
+
+    stmt = insert(Cache).values([
+        {"key": key, "value": value, "created_at": now, "expires_at": expires_at}
+        for key, value in deduped.items()
+    ])
+    await session.execute(
+        stmt.on_conflict_do_update(
+            index_elements=["key"],
+            set_={
+                "value": stmt.excluded.value,
+                "created_at": stmt.excluded.created_at,
+                "expires_at": stmt.excluded.expires_at,
+            },
+        )
+    )
+    logger.info("Cache set batch", extra={
+        "entries": len(deduped),
+        "ttl": ttl,
+    })
+
+
+async def _persist_book_chunk(session: AsyncSession, chunk: list[dict], region: str) -> None:
+    """
+    Writes one chunk of books and their cache entries in a single transaction.
+
+    If anything takes that transaction down — a deadlock against the seeder, a
+    dropped connection, one book carrying data the schema rejects — the chunk
+    is replayed a book at a time down the per-book-commit path, so no book that
+    a per-book write would have stored is lost by having been batched with a
+    book that failed. Replay is safe because every statement involved is an
+    idempotent upsert: books already written before the abort are simply
+    written again to the same values, and _coalesce and _longer_wins reach the
+    same result applied twice as applied once.
+
+    A book whose own write fails still gets its cache entry on the replay
+    path — the two stores fail independently.
+    """
     from app.services.cache import manager as cache
     from app.services.cache.manager import book_key
 
+    try:
+        for book in chunk:
+            await _write_book(session, book)
+        await _cache_set_many(session, [(book_key(b["asin"], region), b) for b in chunk])
+        await session.commit()
+        logger.info(f"DB write: {len(chunk)} books")
+        return
+    except Exception as e:
+        logger.warning(
+            f"DB write failed for a chunk of {len(chunk)} books, replaying individually: {e}"
+        )
+        await session.rollback()
+
+    for book in chunk:
+        await upsert_book(session, book)
+        await cache.set(session, book_key(book["asin"], region), book)
+
+
+def persist_books_background(books: list[dict], region: str) -> None:
+    """
+    Fires a single background task to write multiple books to DB and cache.
+
+    Writes in transactions of _PERSIST_CHUNK_SIZE books rather than one
+    transaction per book. A prolific author's catalog runs past a thousand
+    books, and committing per book — twice per book, once for the row and
+    again for its cache entry — costs thousands of separate transactions for
+    it; the commits, not the statements, are the cost. For what partial
+    progress survives a failure, see _persist_book_chunk.
+    """
     async def _persist():
         async with _bg_write_semaphore:
             try:
                 async with _BackgroundSession() as session:
-                    for book in books:
-                        if book.get("asin"):
-                            await upsert_book(session, book)
-                            await cache.set(session, book_key(book["asin"], region), book)
+                    persistable = [b for b in books if b.get("asin")]
+                    for start in range(0, len(persistable), _PERSIST_CHUNK_SIZE):
+                        await _persist_book_chunk(
+                            session,
+                            persistable[start:start + _PERSIST_CHUNK_SIZE],
+                            region,
+                        )
             except Exception as e:
                 logger.warning(f"Background persist failed for book batch: {e}")
 

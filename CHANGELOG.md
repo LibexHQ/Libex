@@ -10,6 +10,98 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.13.4]
+
+### Changed
+- **Libex now holds a connection to Audible open for two minutes between
+  requests instead of five seconds.** Libex keeps a pool of connections to
+  Audible so that a burst of outbound calls — fetching a prolific author's
+  books can mean dozens — reuses an already-negotiated connection rather than
+  setting up a new one each time. The HTTP library discards an idle connection
+  after five seconds by default, and that is shorter than the gap *between*
+  requests rather than the gap inside one: a lookup arriving more than five
+  seconds after the last Audible traffic found the pool empty and negotiated a
+  connection from scratch for every call it was allowed to have in flight at
+  once, which for one author's books is twenty-five. Two minutes is the longest
+  idle gap measured to still find a live connection waiting at Audible's end —
+  gaps of one, six, twenty, thirty, sixty and a hundred and twenty seconds all
+  reused one, where at the old five-second default a six-second gap discarded
+  the entire pool — and the value sits there rather than higher because holding
+  a connection past the far end's own idle limit only produces ones it has
+  already closed. What this avoids is setup work, not lookup work: no endpoint,
+  response shape, field or status code moved, and no request returns different
+  data than it did before. The saving was not resolvable above run-to-run
+  variation when measured on a direct path to Audible, and it has not been
+  measured on the public instance, whose outbound traffic takes a longer route
+  where setting up a connection costs considerably more. Expect it to help most
+  where it was hardest to measure, and treat the gain as expected rather than
+  demonstrated.
+- **Libex now writes a batch of freshly fetched books to its database in far
+  fewer transactions.** After a bulk lookup, Libex stores what it fetched in
+  the background. It did that one book at a time and committed twice for each
+  — once for the book, once for its cached copy — so putting away a prolific
+  author's thousand-book catalog meant two thousand separate transactions.
+  Books are now written fifty to a transaction with their cached copies
+  alongside them in the same one, which for that catalog is twenty commits
+  rather than two thousand. Two places that settle a race between simultaneous
+  writes of the same author used to abandon the entire transaction in order to
+  undo a single failed statement; they now undo just that statement, which is
+  what makes it safe for fifty books to share one. What survives a failure is
+  unchanged: if a transaction is lost — a lock conflict with the seeder, a
+  dropped connection, one book carrying data the database rejects — that group
+  of fifty is written again one book at a time down the original path, so no
+  book is lost by having been grouped with a book that failed. Every write
+  involved is an upsert, so replaying one already stored writes it to the same
+  values. This is background work throughout: no request returns different
+  data, and none returns at a different time.
+- **A bulk book request checks its cache in one lookup instead of one per
+  ASIN.** Asking for many ASINs at once made a separate database query for
+  every ASIN before deciding which of them still had to be fetched from
+  Audible, and the endpoint accepts up to a thousand in a single request — a
+  thousand queries before any work began, and a thousand more on the path that
+  falls back to the cache when Audible cannot be reached. Both now ask once
+  for the whole list. The same entries count as hits: one that is absent or
+  expired is a miss exactly as before, except that expiry is now judged at a
+  single instant for the whole request rather than a fractionally later one
+  for each ASIN in turn, so a request can no longer treat an entry as live
+  near the front of its list and expired near the back.
+- **An author's stored catalog is read with one query for its series positions
+  rather than one per book.** When Libex answers a request for an author's
+  books from its own database, it looked up each book's position within its
+  series separately — one query per book, across a catalog that has no page
+  limit and for a prolific author runs to thousands of rows. Those positions
+  are now fetched for the whole catalog at once. The books, their order, and
+  their contents are identical. This covers that one path only: the other
+  endpoints that list books out of the database still look up series positions
+  a book at a time, and are unchanged here.
+
+### Fixed
+- **A description or summary that was missing the first time Libex saw a
+  record could never be filled in afterwards.** Libex keeps whichever version
+  of a description carries more text, so that a later, richer answer from
+  Audible replaces a thinner stored one. The comparison deciding that was
+  written so that measuring a stored value which was already null produced
+  neither a yes nor a no but nothing at all, and the rule then fell through to
+  keeping what was there. The effect was that a book description or summary,
+  an author description, or a series description that was null when the record
+  was first stored stayed null permanently: no later answer, however long,
+  could displace it, because the emptiness was itself what made the comparison
+  unanswerable. Those fields now compare correctly and fill on the next write.
+  This governed what Libex had stored, and so what it returned whenever it
+  answered out of its own database rather than passing on a live answer from
+  Audible. Nothing is backfilled by this release — a record that reads null
+  today stays null until Audible is next asked about it and returns text,
+  which for most records means the next lookup or the next pass of the seeder.
+- **A value made only of spaces could overwrite stored text.** Because the
+  rule above keeps whichever value is longer, an incoming description
+  consisting of nothing but whitespace won whenever it happened to be longer
+  than what was stored — ten spaces replacing a six-character description, and
+  reading back as those ten spaces. An incoming value is now measured with its
+  surrounding whitespace ignored, so one that is empty or entirely whitespace
+  counts as absent and cannot displace anything. Only the measurement is
+  trimmed: a value that does win is stored exactly as Audible sent it,
+  spacing included.
+
 ## [1.13.3]
 
 ### Fixed
@@ -787,6 +879,19 @@ Initial stable release — anonymous, public, drop-in AudiMeta-compatible
 Audible metadata API. Book, author, series, narrator, and search endpoints;
 local DB query surface; Postgres-backed cache; background seeder.
 
+[1.13.4]: https://github.com/LibexHQ/Libex/releases/tag/v1.13.4
+[1.13.3]: https://github.com/LibexHQ/Libex/releases/tag/v1.13.3
+[1.13.2]: https://github.com/LibexHQ/Libex/releases/tag/v1.13.2
+[1.13.1]: https://github.com/LibexHQ/Libex/releases/tag/v1.13.1
+[1.13.0]: https://github.com/LibexHQ/Libex/releases/tag/v1.13.0
+[1.12.0]: https://github.com/LibexHQ/Libex/releases/tag/v1.12.0
+[1.11.0]: https://github.com/LibexHQ/Libex/releases/tag/v1.11.0
+[1.10.5]: https://github.com/LibexHQ/Libex/releases/tag/v1.10.5
+[1.10.1]: https://github.com/LibexHQ/Libex/releases/tag/v1.10.1
+[1.10.0]: https://github.com/LibexHQ/Libex/releases/tag/v1.10.0
+[1.9.0]: https://github.com/LibexHQ/Libex/releases/tag/v1.9.0
+[1.8.0]: https://github.com/LibexHQ/Libex/releases/tag/v1.8.0
+[1.7.0]: https://github.com/LibexHQ/Libex/releases/tag/v1.7.0
 [1.6.0]: https://github.com/LibexHQ/Libex/releases/tag/v1.6.0
 [1.5.0]: https://github.com/LibexHQ/Libex/releases/tag/v1.5.0
 [1.4.0]: https://github.com/LibexHQ/Libex/releases/tag/v1.4.0

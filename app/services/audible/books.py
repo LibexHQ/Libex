@@ -365,14 +365,21 @@ async def get_books_by_asins(
         if cached:
             return [cached]
 
-    # Batch cache: check each ASIN, only fetch misses from Audible
+    # Batch cache: one lookup for the whole list, only fetch misses from
+    # Audible. Reading the keys back in unique_asins order keeps cached_results
+    # in the caller's order: that is the entire response on the all-hits early
+    # return below, and its leading segment on every other return, each of
+    # which concatenates it ahead of the freshly-fetched and backstop results
+    # rather than reordering it.
     cached_results: list[dict[str, Any]] = []
     fetch_asins = unique_asins
     if use_cache and len(unique_asins) > 1:
+        keys = [book_key(a, region) for a in unique_asins]
+        hits = await cache.get_many(session, keys)
         cached_results = []
         fetch_asins = []
-        for asin in unique_asins:
-            hit = await cache.get(session, book_key(asin, region))
+        for asin, key in zip(unique_asins, keys):
+            hit = hits.get(key)
             if hit:
                 cached_results.append(hit)
             else:
@@ -501,10 +508,13 @@ async def get_books_by_asins(
         if db_results:
             return cached_results + db_results
 
-        # Fall back to cache for the misses
+        # Fall back to cache for the misses -- one lookup, same as the
+        # pre-fetch check above, and read back in fetch_asins order.
         fallback_results = []
-        for asin in fetch_asins:
-            hit = await cache.get(session, book_key(asin, region))
+        fallback_keys = [book_key(a, region) for a in fetch_asins]
+        fallback_hits = await cache.get_many(session, fallback_keys)
+        for key in fallback_keys:
+            hit = fallback_hits.get(key)
             if hit:
                 fallback_results.append(hit)
         if fallback_results or cached_results:

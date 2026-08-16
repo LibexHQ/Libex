@@ -50,11 +50,15 @@ rather not raise in public, the email published in
 
 On every request that isn't `/health`, the public instance writes one log line
 containing: the method, the path, the response status, how long it took, your
-user agent, the host header you used, and the *names* of the query parameters
-you sent. Parameter values are allowlisted — structural options like `region`
-and `limit` keep their values, anything you typed is replaced with `REDACTED`,
-and a parameter name Libex doesn't recognise is thrown away rather than
-written down.
+user agent, the host header you used, the number of the server process that
+handled it, and the *names* of the query parameters you sent. Parameter values
+are allowlisted — structural options like `region` and `limit` keep their
+values, anything you typed is replaced with `REDACTED`, and a parameter name
+Libex doesn't recognise is thrown away rather than written down.
+
+`/health` writes nothing at all, unless the check itself took more than a
+second — then it writes one warning holding a duration, a status and the word
+`/health`, and nothing else.
 
 **No IP address. Nothing you searched for. No cookie, no identifier, nothing
 that links one of your requests to another.**
@@ -85,9 +89,27 @@ One log line per request, built in `LoggingMiddleware.dispatch`:
 | `took` | How long the request took, in milliseconds. | Performance. |
 | `host` | The `Host` header — which of the two hostnames you used. | The only way to tell old-host traffic from new-host traffic while both addresses serve the same container during the move to `libexdb.com`. |
 | `request_id` | A random UUID generated for that one request. | Gives a log entry something to be referred to by. It is not derived from anything about you, is not returned to you, is not reused, and is not attached to any other line — it identifies a log entry, not a person and not a session. |
+| `pid` | The number the operating system gave the worker process that handled the request, e.g. `pid=14`. | The API runs as several worker processes. When one of them gets into trouble, this is the only thing that tells me whether it's one process failing over and over or several failing occasionally — once the lines are pooled together the two look identical. It's a number belonging to my server: the same on every request that worker handles, changed only when the process restarts, and which worker takes a request is the kernel's choice, not yours. |
 
-**`/health` is not logged at all.** It returns before any of the above happens.
-Uptime monitors don't fill the logs.
+`pid` is the one field in that table that isn't added by the middleware. It's
+stamped on by the logging setup in `app/core/logging.py`, which means it's on
+**every** line Libex writes — the request lines, the background-job lines, the
+startup messages, all of them — and on every record shipped to Axiom. It is
+listed here rather than left to be discovered because a field that turns up in
+the logs and appears in no disclosure is exactly the thing this page exists to
+prevent, whether or not it says anything about a person. This one doesn't.
+
+**`/health` is almost never logged.** It returns before any of the above
+happens, so an uptime monitor hitting it every minute produces nothing at all.
+
+The one exception is slowness. If the check takes longer than a second, one
+warning is written recording the path (`/health`), the status it returned, and
+how long it took — and nothing else. No user agent, no host header, no query
+string. `/health` takes no input in the first place, and if you tack a query
+string onto it anyway, the bare path is still all that gets written down.
+The line exists because that endpoint does no work of its own, so when it is
+slow the number is measuring my server being in trouble rather than anything
+about the request that found it. A healthy day still produces none of these.
 
 **The API documentation pages are logged like anything else.** `/docs`,
 `/redoc`, `/openapi.json`, and the files under `/static` that those pages
@@ -258,8 +280,11 @@ Stated plainly, because the absences matter as much as the list above:
   no fingerprinting. Axiom is the only third party Libex ships log records to.
 - **No cross-request identifier.** Nothing persists between your requests and
   nothing links two of them together. There is no address, no cookie, no
-  session, no fingerprint — two requests from you are indistinguishable from
-  two requests by strangers.
+  session, no fingerprint. The one value that does repeat across lines is the
+  worker `pid` described above, and it can't do that job: it's shared by every
+  request that worker handled, from everyone, so two lines carrying the same
+  one is not evidence they came from the same person. It says which of my
+  processes was on duty, not who was calling.
 - **No request bodies.** Every public endpoint is a `GET` and none of them
   accept a body.
 - **No `Authorization` header, no `Referer`, no `Cookie` header.** Only the
@@ -286,9 +311,11 @@ delete them, and nothing in Libex's code affects them. If Cloudflare's
 handling of that data matters to you, Cloudflare's own privacy documentation
 is the authority, not this page.
 
-**Axiom** receives the log records described above — every field in that
-table, and nothing that isn't in it. What it holds describes requests, not
-requesters: no address, and nothing you typed.
+**Axiom** receives the log records described above. An event there carries the
+fields in that table, plus the things every log line has anyway: a timestamp,
+the level, which part of Libex wrote it, the message text, and the worker
+`pid`. Nothing outside that list is sent. What it holds describes requests,
+not requesters: no address, and nothing you typed.
 Axiom is a hosted log service; it stores and indexes those records so I can
 query them. I'm the only person I've given access to that dataset — but Axiom
 is the company storing it, on its own infrastructure, under its own policies.
@@ -416,7 +443,11 @@ What carries over to your instance:
 - There is no switch that turns the stdout or file logging off. If you don't
   want request lines recorded at all, raise `LOG_LEVEL` to `WARNING` or
   `ERROR` — the per-request line is logged at `INFO`, so a higher level drops
-  it everywhere, including Axiom. `LOG_RETENTION_DAYS` controls how many days
+  it everywhere, including Axiom. Warnings and errors still get written: the
+  slow-`/health` line survives a raised level, and so does the error case
+  above, which is the one that can carry text a caller sent. Raising the level
+  is not a way to guarantee that never lands in your logs.
+  `LOG_RETENTION_DAYS` controls how many days
   of rotated files are kept, and `0` means keep them forever rather than
   keep none.
 - **There is no Cloudflare unless you put one there.** The public instance's

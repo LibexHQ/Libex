@@ -4127,6 +4127,141 @@ async def test_get_author_books_leader_failure_propagates_to_followers_and_clear
 
 
 @pytest.mark.asyncio
+async def test_get_author_books_cancelled_follower_does_not_kill_the_shared_walk():
+    """A follower that goes away -- cancelled by a graceful shutdown, or by
+    any wait_for wrapped above it -- must take nothing with it.
+
+    The shared walk runs in a Task that every awaiter holds a reference to,
+    which is exactly what a goroutine-based single-flight never exposes: a
+    plain `await` on that task hands the awaiter's own cancellation straight
+    into it, cancelling the walk for the leader and every other follower
+    attached. The follower wait is shielded to prevent that. This cancels a
+    real awaiter mid-walk and inspects the shared task rather than asserting
+    the shield is present, because only the former can tell the two apart.
+    """
+    from app.services.audible.authors import get_author_books, _author_books_inflight
+
+    call_count = 0
+    walk_completed = False
+    release = asyncio.Event()
+
+    async def _slow_walk(asin, region, session):
+        nonlocal call_count, walk_completed
+        call_count += 1
+        await release.wait()
+        walk_completed = True
+        return ["B0SURVIVED1"]
+
+    sessions = [AsyncMock() for _ in range(3)]
+
+    with patch("app.services.audible.authors._walk_author_books", new=_slow_walk):
+        callers = [
+            asyncio.ensure_future(get_author_books("B000AUTHOR", "us", s))
+            for s in sessions
+        ]
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+        # First caller scheduled is the leader; the other two are followers
+        # waiting on its task, which is the object under test here.
+        shared = _author_books_inflight[("B000AUTHOR", "us")]
+        assert call_count == 1
+        assert not shared.done()
+
+        # Cancel one follower and let the cancellation actually be
+        # delivered -- a test that calls cancel() without yielding to the
+        # loop afterwards proves nothing, because nothing has run yet.
+        callers[1].cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await callers[1]
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+        # The load-bearing assertions: the departing follower left the
+        # shared walk running rather than cancelling it out from under
+        # everyone still waiting.
+        assert not shared.cancelled()
+        assert not shared.done()
+
+        release.set()
+        assert await callers[0] == ["B0SURVIVED1"]
+        assert await callers[2] == ["B0SURVIVED1"]
+
+    # The walk reached its own end rather than merely surviving the moment
+    # of cancellation, and still only ever ran once.
+    assert walk_completed is True
+    assert call_count == 1
+    assert ("B000AUTHOR", "us") not in _author_books_inflight
+
+
+@pytest.mark.asyncio
+async def test_get_author_books_cancelled_leader_ends_the_shared_walk_and_clears_inflight_entry():
+    """The other half of the deliberate asymmetry: the follower wait is
+    shielded, the leader's own await is not, so a cancelled leader ends the
+    walk instead of orphaning it.
+
+    _walk_author_books runs on the leader's own request-scoped session, so a
+    walk that outlived its leader would be querying a session FastAPI's
+    dependency has already closed -- which does not fail loudly, it silently
+    checks a fresh connection out of the pool and autobegins on it with
+    nothing left to check it back in. Followers are cancelled along with it
+    rather than left waiting on a result that will never arrive, and the
+    inflight entry is cleared so the next caller starts a clean walk instead
+    of attaching to a dead one.
+    """
+    from app.services.audible.authors import get_author_books, _author_books_inflight
+
+    call_count = 0
+    walk_completed = False
+    release = asyncio.Event()
+
+    async def _slow_walk(asin, region, session):
+        nonlocal call_count, walk_completed
+        call_count += 1
+        await release.wait()
+        walk_completed = True
+        return ["B0NEVERSEEN"]
+
+    sessions = [AsyncMock() for _ in range(3)]
+
+    with patch("app.services.audible.authors._walk_author_books", new=_slow_walk):
+        callers = [
+            asyncio.ensure_future(get_author_books("B000AUTHOR", "us", s))
+            for s in sessions
+        ]
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+        shared = _author_books_inflight[("B000AUTHOR", "us")]
+        assert call_count == 1
+
+        callers[0].cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await callers[0]
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+        assert shared.cancelled()
+        for follower in callers[1:]:
+            with pytest.raises(asyncio.CancelledError):
+                await follower
+
+    assert walk_completed is False
+    assert call_count == 1
+    assert ("B000AUTHOR", "us") not in _author_books_inflight
+
+    # And the key is genuinely reusable afterwards, not merely absent from
+    # the dict -- a stale entry here would be worse than the bug above.
+    async def _recovers(asin, region, session):
+        return ["B0RECOVERED2"]
+
+    with patch("app.services.audible.authors._walk_author_books", new=_recovers):
+        recovered = await get_author_books("B000AUTHOR", "us", AsyncMock())
+
+    assert recovered == ["B0RECOVERED2"]
+
+
+@pytest.mark.asyncio
 async def test_fetch_author_books_by_screen_every_warning_line_carries_author_asin():
     """Restores the coverage of the deleted test of the same name (removed
     in the commit that dropped _fetch_author_books_by_screen's own

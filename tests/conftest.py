@@ -15,16 +15,6 @@ from httpx import AsyncClient, ASGITransport
 from app.main import app
 
 
-@pytest.fixture(scope="session", autouse=True)
-def mock_alembic_upgrade():
-    """Skip real migrations during tests. Lifespan startup runs alembic upgrade
-    against the configured DATABASE_URL; CI has no Postgres, and unit tests
-    shouldn't depend on one. Patching at the import location in app.main
-    keeps lifespan itself exercised."""
-    with patch("app.main.command.upgrade"):
-        yield
-
-
 @pytest.fixture(autouse=True)
 def block_network_sockets(request):
     """

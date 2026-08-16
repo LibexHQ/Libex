@@ -5,8 +5,6 @@ from typing import Any
 import asyncio
 
 # Third party
-from alembic import command
-from alembic.config import Config
 from fastapi import FastAPI, Request
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -78,13 +76,14 @@ openapi_tags = [
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
-    try:
-        alembic_cfg = Config("alembic.ini")
-        await asyncio.to_thread(command.upgrade, alembic_cfg, "head")
-        logger.info("Database migrations applied")
-    except Exception as e:
-        logger.warning(f"Database unavailable on startup: {e}")
+    # Startup. Migrations are not run here: the container entrypoint applies
+    # them once, before it execs uvicorn. Lifespan runs once per worker
+    # process, and alembic takes no lock of its own, so running the upgrade
+    # from here would have every worker race the same DDL — with the losers
+    # failing on already-applied statements. Nothing below assumes the schema
+    # is current: a start against an unmigrated or unreachable database still
+    # boots and serves, and the failure surfaces per request rather than
+    # aborting startup.
     logger.info(f"Libex {settings.app_version} starting up")
 
     # Warn about any retired env vars still set (never crashes)

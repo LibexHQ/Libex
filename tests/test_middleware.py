@@ -7,6 +7,7 @@ operational fields a deploy is monitored by survive intact.
 """
 
 # Standard library
+import asyncio
 import logging
 import re
 import urllib.parse
@@ -21,10 +22,12 @@ from httpx import ASGITransport, AsyncClient
 from app.main import _FAVICON, app as libex_app
 
 # Core
+from app.core import middleware
 from app.core.middleware import (
     _redact_query,
     _KNOWN_QUERY_PARAMS,
     _SAFE_QUERY_PARAMS,
+    _SLOW_HEALTH_MS,
     LoggingMiddleware,
 )
 
@@ -532,6 +535,129 @@ async def test_unrecognised_query_key_never_reaches_the_record(caplog):
 @pytest.mark.asyncio
 async def test_health_is_not_logged(caplog):
     assert await _request(caplog, "/health") == []
+
+
+# ============================================================
+# THE SLOW-/health LINE
+# ============================================================
+
+# /health is the one path that logs on a threshold rather than on every hit:
+# it does no I/O, so its duration measures the event loop, and a healthy
+# process must stay silent while a starved one says so. These tests hold both
+# halves of that -- a fast check emits nothing at all, and a slow one emits
+# exactly one findable line carrying nothing a caller supplied.
+
+
+class _StepClock:
+    """Stands in for the `time` module, handing out fixed monotonic readings.
+
+    dispatch reads the clock twice per request, so a pair of readings fixes
+    the measured duration exactly. That lets the shipped threshold itself be
+    tested at both sides of its boundary, and an outage-length /health be
+    reproduced, without the suite waiting out either.
+    """
+
+    def __init__(self, *readings):
+        self._readings = list(readings)
+
+    def monotonic(self) -> float:
+        return self._readings.pop(0)
+
+
+async def _libex_records(caplog, path="/health", headers=None):
+    """Every record the app logger emitted for one request — not just the
+    "Request completed" ones, so "nothing at all" can actually be asserted."""
+    transport = ASGITransport(app=_app_with_logging(), client=("1.2.3.4", 1234))
+    with caplog.at_level(logging.INFO):
+        async with AsyncClient(transport=transport, base_url="http://t") as ac:
+            await ac.get(path, headers=headers or {})
+    return [r for r in caplog.records if r.name == "libex"]
+
+
+@pytest.mark.asyncio
+async def test_a_fast_health_check_logs_nothing_at_all(caplog):
+    """The whole reason for the threshold: a healthy day costs zero lines."""
+    assert await _libex_records(caplog) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("elapsed_seconds", [0.0, 0.5, 0.999])
+async def test_health_below_the_threshold_stays_silent(caplog, monkeypatch, elapsed_seconds):
+    monkeypatch.setattr(middleware, "time", _StepClock(0.0, elapsed_seconds))
+    assert await _libex_records(caplog) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("elapsed_seconds, expected_took", [
+    (1.0, 1000.0),      # the boundary itself, which the threshold includes
+    (2.0, 2000.0),      # already starvation, long before a caller notices
+    (20.0, 20000.0),    # the observed outage latency, which is the point
+])
+async def test_a_slow_health_check_is_logged_once(caplog, monkeypatch, elapsed_seconds, expected_took):
+    monkeypatch.setattr(middleware, "time", _StepClock(0.0, elapsed_seconds))
+
+    records = await _libex_records(caplog)
+
+    assert [r.getMessage() for r in records] == ["Health check slow"]
+    record = records[0]
+    assert record.levelno == logging.WARNING
+    assert record.took == expected_took
+    assert record.url == "/health"
+    assert record.status == 200
+
+
+@pytest.mark.asyncio
+async def test_the_slow_health_line_describes_the_request_only(caplog, monkeypatch):
+    """Same guard as the request line above, applied to the new one: a caller
+    can reach it, so a caller must not be visible in it."""
+    monkeypatch.setattr(middleware, "time", _StepClock(0.0, 20.0))
+
+    records = await _libex_records(
+        caplog,
+        path="/health?name=Some+Person",
+        headers={"CF-Connecting-IP": "203.0.113.5", "user-agent": "SomeConsumer/9.9"},
+    )
+
+    assert len(records) == 1
+    serialised = str(records[0].__dict__)
+    for caller_derived in ("203.0.113.5", "1.2.3.4", "Some Person", "Some+Person", "SomeConsumer"):
+        assert caller_derived not in serialised
+
+
+def _app_with_slow_health(delay_seconds):
+    app = FastAPI()
+    app.add_middleware(LoggingMiddleware)
+
+    @app.get("/health")
+    async def health():
+        await asyncio.sleep(delay_seconds)
+        return {"ok": True}
+
+    return app
+
+
+@pytest.mark.asyncio
+async def test_a_real_delay_crosses_the_real_comparison(caplog, monkeypatch):
+    """No faked clock anywhere: a genuine delay, measured by the real
+    monotonic clock, against the real comparison. Only the threshold is
+    lowered, so the suite need not spend a second proving a second."""
+    monkeypatch.setattr(middleware, "_SLOW_HEALTH_MS", 20.0)
+    transport = ASGITransport(app=_app_with_slow_health(0.05), client=("1.2.3.4", 1234))
+
+    with caplog.at_level(logging.INFO):
+        async with AsyncClient(transport=transport, base_url="http://t") as ac:
+            await ac.get("/health")
+
+    records = [r for r in caplog.records if r.name == "libex"]
+    assert [r.getMessage() for r in records] == ["Health check slow"]
+    assert records[0].took >= 20.0
+
+
+def test_the_shipped_threshold_is_one_second():
+    """Pins the value the tests above exercise against the value that ships:
+    zero lines on a healthy day, and lines well before the 30s a reverse proxy
+    gives up at."""
+    assert _SLOW_HEALTH_MS == 1000.0
 
 
 # ============================================================

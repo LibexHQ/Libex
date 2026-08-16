@@ -11,6 +11,28 @@ services:
       - CACHE_TTL=${CACHE_TTL:-86400}
       - DEFAULT_REGION=${DEFAULT_REGION:-us}
       - PORT=${PORT:-3333}
+      # The only place the worker count is set. The image's CMD passes no
+      # --workers, which is what keeps it the only place; adding that flag would
+      # set the count without setting this, and the two would drift silently.
+      #
+      # More than one worker routes around a blocked event loop -- the kernel
+      # hands new connections to whichever child is still calling accept().
+      # It does NOT recover one: uvicorn's liveness probe is answered by a
+      # daemon thread, so a wedged worker keeps replying and is never replaced.
+      #
+      # Both Audible concurrency limits in services/audible/client.py are
+      # per-process and neither is divided, so this number multiplies their sum:
+      # 6 x (10 + 25) = 210 in flight at worst. A ladder measured 250 clean --
+      # but on a direct path, not through the proxy this deployment leaves by,
+      # whose shared exit has never been measured. Do not raise this without
+      # running that ladder through the proxy first, and do not make room by
+      # dividing the per-process limits: 10 is also one request's fan-out width.
+      #
+      # Set to 1 to restore single-process behaviour with no rebuild.
+      # MUST be 1 while SEEDER_ENABLED is true -- the seeder loop starts in
+      # every worker and nothing claims the entities it walks, so six workers
+      # walk the same ones six times over.
+      - WEB_CONCURRENCY=${WEB_CONCURRENCY:-6}
       - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
@@ -32,6 +54,39 @@ services:
     image: postgres:16-alpine
     container_name: libex-postgres
     restart: unless-stopped
+    # Raised from the image default of 100 because the API is now six worker
+    # processes, each holding its own SQLAlchemy pool. app/db/session.py sizes
+    # that pool at pool_size 10 + max_overflow 10, so six workers can hold 120
+    # connections at full stretch. PostgreSQL 16 keeps superuser_reserved_
+    # connections (default 3) back from max_connections and reserved_
+    # connections (default 0) on top, so the default 100 leaves 97 for the
+    # libex role -- 120 does not fit in that at all, which is what makes this
+    # setting load-bearing rather than precautionary. 200 leaves 197 usable, so
+    # 120 fits with 77 spare for psql, a backup, or an operator diagnosing why
+    # it is at 120 in the first place.
+    #
+    # The same arithmetic in reverse is what a WEB_CONCURRENCY=1 deployment
+    # should know: 10 + 10 is sized so that six processes fit, so one process
+    # holds 20 connections rather than the 120 that six do. Ample for a single
+    # process, and the README points seeder users at WEB_CONCURRENCY=1 -- but a
+    # deployment that wants more headroom than 20 raises pool_size/max_overflow
+    # in app/db/session.py, not anything here. pool_timeout (30s) does not move
+    # with the worker count either way.
+    #
+    # Measured on this exact image (16.14), not estimated: the fixed cost of
+    # the extra 100 slots is 5MB of shared memory at startup -- shared_memory_
+    # size reports 143MB at max_connections=100 and 148MB at 200, with
+    # shared_buffers unchanged. The slots are potential, not resident; a
+    # backend costs about 2.4MB only once something actually connects
+    # (measured: 6 backends at 34MB, 106 backends at 276MB for the whole
+    # container). Libex's own ceiling of 120 held connections is past both
+    # measured points, so extrapolating that slope puts it near 310MB of
+    # Postgres on a 51GB host -- projected, not measured.
+    #
+    # Set here rather than in postgresql.conf on the volume so the value ships
+    # through the image pipeline with the arithmetic that justifies it, instead
+    # of living only on the server where nothing in the repo records it.
+    command: ["postgres", "-c", "max_connections=200"]
     ports:
       - "5432:5432"
     environment:

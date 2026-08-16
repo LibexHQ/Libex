@@ -22,10 +22,24 @@ COPY . .
 RUN sh scripts/fetch_docs_assets.sh
 
 RUN mkdir -p /app/logs \
+    && chmod +x /app/docker-entrypoint.sh \
     && useradd -m -u 1000 libex \
     && chown -R libex:libex /app
 USER libex
 
 EXPOSE 3333
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "3333"]
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
+
+# No --workers flag, deliberately. The worker count is set in exactly one place,
+# WEB_CONCURRENCY in docker-compose.yml, and uvicorn reads that variable only
+# when --workers is absent. A flag here would not sit alongside it, it would
+# silently beat it -- the running count baked into the image while compose,
+# Portainer and every figure derived by hand still read the variable.
+#
+# --no-access-log is a privacy control, not a noise control. uvicorn's access
+# formatter appends the query string verbatim, so without it every request
+# writes a stdout line carrying the raw title=, author= and name= text a caller
+# typed -- the values _redact_query strips from Libex's own line, which
+# LoggingMiddleware already records with the query redacted.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "3333", "--no-access-log"]

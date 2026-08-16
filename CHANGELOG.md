@@ -10,6 +10,228 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.14.0]
+
+Nothing here changes the API itself: no endpoint, parameter, response shape,
+field or status code moved, and every request returns exactly what it did
+before. What changed is how Libex runs, what it logs, how much of the machine
+it asks for, and — the part worth reading before upgrading if you share an
+outbound address — how much it asks of Audible at once.
+
+### Added
+- **Libex can now serve requests from several worker processes instead of
+  one.** A new `WEB_CONCURRENCY` setting controls how many, and the bundled
+  compose file sets it to `6`; `1` restores the previous single-process
+  behaviour exactly, from the stack's environment alone with no rebuild. This
+  answers a specific fault. Libex handles every request on a single event
+  loop, and when one request held that loop long enough, everything behind it
+  waited. `/health` showed it most plainly: it reads no database, no cache and
+  nothing over the network, so it has nothing of its own to be slow about, and
+  it was seen taking more than twenty seconds — past the thirty the reverse
+  proxy in front of it waits before giving up. Both public hostnames were
+  reported down in the same moment while the container stayed up and was never
+  restarted, and it recurred day after day. With more than one worker, all of
+  them accept from the same listening socket, so a worker whose loop is
+  blocked stops accepting and the others take the new connections.
+
+  **What this does not do is prevent that, or recover from it.** Requests
+  already accepted by a blocked worker hang exactly as they did before, and
+  nothing brings that worker back: the supervisor asks each worker whether it
+  is alive on a separate thread which goes on answering while the loop is
+  stuck, so a wedged worker is never replaced, and the container's health
+  check is answered by whichever worker is still healthy. The underlying fault
+  happens at the same rate it always did. Fewer callers meet it.
+
+  Raising this above `6` is not free, and neither is leaving it there: the
+  worker count multiplies what Libex can have in flight at Audible, so read
+  the note on outbound requests below before you upgrade. Leave it at `1`
+  while the seeder is
+  enabled: the seeder starts inside every worker and nothing coordinates them,
+  so six workers walk the same books six times, which is sustained unattended
+  traffic from your address for no extra coverage.
+
+  Both the worker count and the raised Postgres connection limit it needs live
+  in the bundled compose file. If you run Libex's image from a stack or
+  compose file of your own, upgrading gives you neither until you set them
+  there: the image passes no worker count of its own, so an unset
+  `WEB_CONCURRENCY` means one worker and everything below reads as it did
+  before.
+
+- **Every log line and Axiom event now records the process id of the worker
+  that produced it.** With one process this was noise; with several it is the
+  only way to tell one worker repeatedly in trouble from several occasionally
+  in trouble, which are indistinguishable once the lines are merged. The value
+  belongs to the server, is identical for every request a given worker
+  handles, and says nothing about who sent any of them. Anything parsing the
+  plain-text logs should note where it sits: lines now read
+  `... - INFO - pid=7 - Request completed` where they previously ran straight
+  from the level into the message.
+
+- **A slow `/health` now logs a warning.** `/health` was not logged at all, on
+  the reasoning that a check a minute is a day of lines saying nothing. But
+  because it does no work of its own, how long it takes is a direct reading of
+  whether the event loop is keeping up, and that reading was being discarded.
+  A single line is now written at warning level when a health check takes a
+  second or longer — high enough above ordinary scheduling jitter to cost no
+  false lines, and far below the point at which any caller notices, so a
+  healthy process still logs nothing for this path. The line carries the path,
+  the status and the duration and nothing else — no user agent, no host header,
+  no query string: `/health` takes no input, so there is nothing a caller
+  supplied to record.
+
+### Changed
+- **Schema migrations now run once before the workers start, rather than
+  during application startup.** They are applied by the container's entry
+  point, immediately before the server is started. Application startup ran
+  them previously, which was safe while there was one process and would not
+  have been with six: startup runs once in every worker, and alembic
+  serialises nothing of its own — the installed version issues no advisory
+  lock, no table lock and no locking select anywhere — so six workers would
+  have raced the same schema changes, with the losers failing on objects the
+  winner had already created. Behaviour on failure is deliberately unchanged:
+  a start against a database that is not reachable yet still boots and serves
+  rather than restart-looping. The one visible difference is where that
+  failure is reported — it now appears on the container's own output instead
+  of in Libex's log stream.
+
+- **Each worker holds half as many database connections, and the bundled
+  Postgres is configured for more of them.** The pool is per process, so six
+  workers each holding the previous twenty plus twenty of overflow would have
+  wanted two hundred and forty. Each process now holds at most ten plus ten,
+  which is a hundred and twenty across six workers, and the bundled compose
+  file starts Postgres with `max_connections=200` instead of leaning on the
+  image default of 100. That raise is load-bearing rather than precautionary:
+  after the slots PostgreSQL holds back for superusers, the default 100 leaves
+  97 for Libex's own role, which a hundred and twenty does not fit inside at
+  all, while 200 leaves 197 and fits it with seventy-seven to spare. If you
+  run a single worker this is a straight halving — twenty connections where
+  you had forty — which is ample for one process but worth knowing if you had
+  tuned anything around the old figure. If you raise `WEB_CONCURRENCY`, or
+  point Libex at a Postgres you configure yourself, raise the connection limit
+  alongside it.
+
+- **Libex can now have six times as many requests in flight to Audible as it
+  could before.** This is the consequence of the worker count that is worth
+  weighing before upgrading, and the one you cannot see from the outside.
+  Libex bounds its own outbound traffic with two limits: ten concurrent
+  requests on the general pool every lookup uses — a figure settled by an
+  incident in which sustained traffic from a shared address drew throttling —
+  and twenty-five on a wider pool reserved for a single author-books
+  request's own fan-out. A call takes
+  one or the other and never both, so one process holds at most thirty-five at
+  once. Both limits live inside a process and neither is divided by the worker
+  count, so what actually reaches Audible is thirty-five multiplied by it:
+  thirty-five before this release, two hundred and ten at the default of six.
+  If you reach Audible from an address you share with anyone — a VPN exit, an
+  office, anything behind NAT — that is the number this release changes, and
+  `WEB_CONCURRENCY` is the only setting that moves it.
+
+  Neither limit is divided among the workers, deliberately. Ten is not only a
+  share of what a shared address will take; it is also the width one request's
+  own fan-out has to pass through. A thousand-ASIN `/books` lookup goes out as
+  twenty chunks, which is two rounds at ten permits and ten rounds at two, and
+  a gate narrower than a single request's fan-out is exactly what produced
+  measured gateway timeouts here before. Holding the deployment-wide total
+  flat as workers are added would have meant paying that price again.
+
+  Two hundred and ten is a worst case rather than a working level: it needs
+  every worker to be walking a prolific author's catalog in the same moment.
+  What that worst case was weighed against: a ladder of
+  10, 25, 50, 100, 125, 150, 175, 200 and 250 concurrent requests to Audible
+  returned 1122 responses to 1122 requests, every one of them a 200 — no
+  throttling, no server errors, no transport failures — and found no ceiling,
+  because the run stopped at its own request budget rather than at anything
+  Audible did. Two hundred and ten is 84% of the largest figure tried.
+  **That ladder ran on a direct path to Audible, not through the proxy the
+  public instance actually leaves by**, whose exit address is shared with
+  strangers and whose own headroom has never been measured. So the number is
+  bounded by a measurement taken on a different path from the one that runs,
+  and 250 is the largest figure tried rather than an observed limit. If your
+  own outbound path is one you share, treat six as a figure to lower rather
+  than a floor.
+
+### Fixed
+- **What a caller searched for is no longer written to the container's
+  output.** The web server Libex runs on keeps an access log of its own, one
+  line per request, and Libex had left it switched on. That line carried the
+  query string exactly as it arrived, so `title=`, `keywords=`, `name=` and
+  anything else a caller typed appeared in full — beside Libex's own line for
+  the same request, where those values are replaced with `REDACTED`. The work
+  in 1.13.0 that stopped Libex recording anything a caller typed rebuilt
+  Libex's own line and did not touch this one. The access log is now switched
+  off at the source, so the text is never assembled rather than assembled and
+  thrown away, and it cannot be turned back on from the environment. Anything
+  reading those lines out of your container's output will stop finding them:
+  Libex's own request line, which records the method, path, status and
+  duration with the query redacted, is what remains.
+
+  Two things bound what this exposed, and both matter for judging whether it
+  affected you. That line went to the container's standard output only: it was
+  never written to Libex's log file and was never shipped to Axiom or any
+  other service, so its reach is whatever collects your container's output —
+  for the public instance, the server's own logs and nothing beyond them. And
+  the address on it was the host that opened the connection, which behind a
+  reverse proxy is the proxy rather than the caller, and is what the public
+  instance recorded. A deployment that has configured the server to trust a
+  forwarded address is the exception: on that setup the line carried callers'
+  real addresses beside their search terms.
+
+- **A lookup no longer holds a database connection open while it waits on
+  Audible.** Three paths — a bulk book lookup, a series lookup, and fetching
+  an author — read from the database first and then went out to Audible with
+  the transaction that read opened still in progress. The connection was
+  unavailable to anything else for the whole of that wait, which is bounded by
+  Audible rather than by Libex: a lookup at the thousand-ASIN limit is twenty
+  batches draining through a fixed number of permits. Each worker holds twenty
+  connections, so enough of those at once and other requests queued for one
+  and gave up after thirty seconds, and any single wait that ran past a minute
+  had the database close that connection underneath the request, failing
+  whatever database work it had left to do. It also kept an open read
+  transaction on the database for that time, which pins the point autovacuum
+  can clean up to and so held cleanup off a large, write-heavy table. Each of
+  those paths now finishes with the database before it starts waiting on the
+  network, and takes a connection again when it next needs one. What comes
+  back is identical.
+
+- **Rotating the log file no longer loses lines when more than one process is
+  writing to it.** The standard rotating handler does not survive multiple
+  writers, and it fails without saying so: each process reaches the rollover
+  moment on its own clock, the first renames the file, and every later one
+  takes an early exit that leaves it holding an open handle on the file that
+  was just renamed and its next rollover time already in the past. It carries
+  on appending to the previous day's file, and once retention deletes that
+  file the writes land where nothing can open them again. Nothing raises and
+  nothing appears on any stream. Rotation is now serialised across processes
+  with a lock file, and every process returns to the live file afterwards.
+  Nobody running Libex before this release lost anything to it, because there
+  was only ever one writer; it is fixed here because that is no longer true.
+  `LOG_RETENTION_DAYS=0` turns rotation off entirely and was already safe,
+  since every process simply appends to one file that is never renamed.
+
+- **Log lines carrying structured detail no longer print the timestamp
+  twice.** Libex renders a line's structured fields inline after the message.
+  The timestamp is attached to a line while it is being rendered, which left
+  it indistinguishable from a field passed in by the code doing the logging,
+  so every line that carried any structured detail at all ended with a second
+  copy of the timestamp it already began with — and every Axiom event gained a
+  string field duplicating its own event time. This predates everything above
+  and affected the plain-text and Axiom output alike.
+
+- **A departing request could cancel an author's catalog walk for everyone
+  else waiting on it.** When several requests ask for the same author's books
+  at once, one of them performs the walk and the rest wait on its result
+  rather than starting their own. That wait was direct, and cancelling a
+  coroutine which is awaiting a task cancels the task as well — so a waiting
+  request that went away, through a shutdown or a timeout wrapped around it,
+  took the shared walk down with it and discarded everything already fetched,
+  for itself and for every other request attached to it. A waiting request is
+  now insulated and costs nothing but its own place in the queue when it
+  leaves. Cancellation still travels the other way by design: if the request
+  performing the walk is itself cancelled, the walk ends and the waiters end
+  with it, because that walk runs on that request's own database session and
+  leaving it running against a session nobody owns would strand a connection
+  from a pool shared with the seeder and every background writer.
+
 ## [1.13.4]
 
 ### Changed
@@ -879,6 +1101,7 @@ Initial stable release — anonymous, public, drop-in AudiMeta-compatible
 Audible metadata API. Book, author, series, narrator, and search endpoints;
 local DB query surface; Postgres-backed cache; background seeder.
 
+[1.14.0]: https://github.com/LibexHQ/Libex/releases/tag/v1.14.0
 [1.13.4]: https://github.com/LibexHQ/Libex/releases/tag/v1.13.4
 [1.13.3]: https://github.com/LibexHQ/Libex/releases/tag/v1.13.3
 [1.13.2]: https://github.com/LibexHQ/Libex/releases/tag/v1.13.2

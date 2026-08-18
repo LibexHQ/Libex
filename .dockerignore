@@ -20,7 +20,9 @@
 # operating doc, .venv, .git, scrapers/ and the 2.1GB apk-work/ into the
 # image.
 #
-# The admitted set below is `git ls-files` at the top level, minus tests/.
+# The admitted set below is `git ls-files` at the top level, minus tests/
+# and the CI-only tooling files -- requirements-tooling.txt and its lock
+# are installed by the workflow, never by the image.
 *
 
 !.env.example

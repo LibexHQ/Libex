@@ -14,7 +14,9 @@ jobs:
         with:
           python-version: '3.12'
           cache: 'pip'
-          cache-dependency-path: requirements-dev.lock
+          cache-dependency-path: |
+            requirements-dev.lock
+            requirements-tooling.lock
       # The dev lock, not the application one: the test runners live there now,
       # so that they are not in requirements.lock and therefore not in the
       # published image. The dev lock is a strict superset of the application
@@ -58,8 +60,15 @@ jobs:
           "$RUNNER_TEMP/tooling/bin/pip-audit" -r requirements.lock
           "$RUNNER_TEMP/tooling/bin/pip-audit" -r requirements-dev.lock
           "$RUNNER_TEMP/tooling/bin/pip-audit" -r requirements-tooling.lock
+      # --ignore as well as -m: the dev lock carries testcontainers, and
+      # tests/integration/conftest.py starts its container at MODULE IMPORT
+      # rather than in a fixture, so deselecting by marker still pays for a
+      # real postgres:16 and the full migration chain during collection --
+      # for zero selected tests. Ignoring the directory keeps collection out
+      # of it entirely. Every file under tests/integration/ is fully
+      # integration-marked, so this selects exactly what the marker did.
       - name: Run unit tests
-        run: pytest tests/ -v -m "not integration"
+        run: pytest tests/ -v -m "not integration" --ignore=tests/integration
 
   integration:
     runs-on: ubuntu-latest

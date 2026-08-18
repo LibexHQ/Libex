@@ -10,9 +10,15 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
-## [1.14.1]
+## [1.15.0]
 
 ### Security
+- **A locally built image no longer copies the whole working directory into
+  itself.** There was no `.dockerignore`, so `COPY . .` swept in whatever
+  happened to sit beside the source — including `.env`. Published images were
+  never affected, because CI builds from a clean checkout where those files do
+  not exist, but that was luck rather than design. The build now admits only
+  what the image actually needs.
 - **Every dependency in the published image is now pinned and cryptographically
   verified at install time.** The image and CI previously installed from a list
   that pinned Libex's own direct dependencies by version but left everything
@@ -30,7 +36,7 @@ capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
   they — and the packages they pull in — were installed into the image that
   runs in production, which has no tests to run. They now live with the rest
   of the development tooling and are installed only where tests actually
-  execute. Seven packages left the image; nothing the application imports at
+  execute. Six packages left the image; nothing the application imports at
   runtime changed.
 - **The tools CI uses to lint and audit are now pinned and verified too, and
   run isolated from the application.** The audit tool in particular was

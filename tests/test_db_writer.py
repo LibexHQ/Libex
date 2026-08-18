@@ -18,13 +18,16 @@ from sqlalchemy.exc import IntegrityError
 # Local
 from app.core.config import get_settings
 from app.db.models import Book
-from app.services.db.writer import (
+from app.services.db.persist_queue import (
     _PERSIST_CHUNK_SIZE,
+    persist_author_books_cache_background,
+)
+from app.services.db.writer import (
+    _BOOK_UPSERT,
     _longer_wins,
     upsert_author,
     upsert_book,
     reconcile_genres,
-    persist_author_books_cache_background,
 )
 
 settings = get_settings()
@@ -593,16 +596,14 @@ async def _run_persist_author_books_cache_background(
         captured["coro"] = coro
         return MagicMock()
 
-    # A fresh semaphore scoped to this call, not the module-global one: the
-    # global is bound lazily to whichever event loop first uses it, and
-    # pytest-asyncio hands each test function its own loop, so sharing the
-    # module-global across tests would raise on the second test to reach it.
-    with patch("app.services.db.writer._BackgroundSession", return_value=_FakeSessionCM(mock_session)), \
-         patch("app.services.db.writer._bg_write_semaphore", asyncio.Semaphore(2)), \
-         patch("app.services.db.writer.asyncio.create_task", side_effect=_fake_create_task), \
+    # No semaphore patch: the module keys its semaphore to the running event
+    # loop and rebuilds it whenever that loop changes, and pytest-asyncio hands
+    # each test function its own loop, so every test already gets a fresh one.
+    with patch("app.services.db.persist_queue._BackgroundSession", return_value=_FakeSessionCM(mock_session)), \
+         patch("app.services.db.persist_queue.asyncio.create_task", side_effect=_fake_create_task), \
          patch("app.services.cache.manager.set", new=AsyncMock()) as mock_set:
         if frozen_now is not None:
-            with patch("app.services.db.writer._now", return_value=frozen_now):
+            with patch("app.services.db.persist_queue._now", return_value=frozen_now):
                 persist_author_books_cache_background(key, asins, ttl_seconds=ttl_seconds)
                 await captured["coro"]
         else:
@@ -841,6 +842,30 @@ def test_upsert_book_uses_the_guarded_comparison_for_its_text_columns(column):
 
 
 # ============================================================
+# THE BOOK UPSERT — NO RETURNING CLAUSE
+# ============================================================
+
+def test_the_book_upsert_carries_no_returning_clause():
+    """
+    A RETURNING clause on this statement turns on SQLAlchemy's
+    use_insertmanyvalues, which rewrites the executemany into batched
+    multi-row VALUES groups — and one INSERT ... ON CONFLICT DO UPDATE may not
+    affect the same row twice, so a chunk carrying the same ASIN twice (an
+    author walk pages a catalog whose sort window shifts under it) raises
+    cardinality_violation and drops all fifty books to the per-book replay
+    path the batching exists to avoid.
+
+    Pinned here rather than left to the integration test that writes a
+    duplicate ASIN, because that test would not catch it: the shared bind
+    parameters in the set_ clause defeat the rewrite by themselves, so a
+    stray returning() would only silently cost the executemany. The absence
+    of the clause is the guard that survives the set_ being rewritten, and
+    the only place it is visible is the statement itself.
+    """
+    assert "RETURNING" not in _compiled(_BOOK_UPSERT)
+
+
+# ============================================================
 # persist_books_background — CHUNK BOUNDARIES
 # ============================================================
 # The batched persist slices its book list into transactions of
@@ -858,16 +883,15 @@ async def _captured_chunks(books, region="us"):
     slicing runs under the test rather than detached. The chunk lists are
     copied on capture: they are slices of the caller's list, and holding the
     live objects would let a later mutation rewrite what an earlier call is
-    asserted to have received. The semaphore is replaced per call because the
-    module-global binds to whichever event loop first uses it and each test
-    gets its own.
+    asserted to have received. Each chunk opens its own session, so there is
+    none to hand in here.
     """
-    from app.services.db.writer import persist_books_background
+    from app.services.db.persist_queue import persist_books_background
 
     captured_chunks = []
     captured_regions = []
 
-    async def _record(session, chunk, chunk_region):
+    async def _record(chunk, chunk_region):
         captured_chunks.append(list(chunk))
         captured_regions.append(chunk_region)
 
@@ -877,10 +901,8 @@ async def _captured_chunks(books, region="us"):
         captured["coro"] = coro
         return MagicMock()
 
-    with patch("app.services.db.writer._BackgroundSession", return_value=_FakeSessionCM(AsyncMock())), \
-         patch("app.services.db.writer._bg_write_semaphore", asyncio.Semaphore(2)), \
-         patch("app.services.db.writer.asyncio.create_task", side_effect=_fake_create_task), \
-         patch("app.services.db.writer._persist_book_chunk", side_effect=_record):
+    with patch("app.services.db.persist_queue.asyncio.create_task", side_effect=_fake_create_task), \
+         patch("app.services.db.persist_queue._persist_book_chunk_background", side_effect=_record):
         persist_books_background(books, region)
         await captured["coro"]
 

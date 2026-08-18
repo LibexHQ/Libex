@@ -24,7 +24,7 @@ from app.core.utils import strip_html
 from app.services.audible.client import audible_get
 from app.services.cache import manager as cache
 from app.services.cache.manager import series_key, series_books_key
-from app.services.db.writer import persist_series_background, persist_cache_background
+from app.services.db.persist_queue import persist_series_background, persist_cache_background
 from app.services.db.reader import get_series_from_db, search_series_from_db
 
 logger = get_logger()

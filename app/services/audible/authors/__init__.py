@@ -37,7 +37,7 @@ from app.services.audible.authors.catalog import (
 )
 from app.services.cache import manager as cache
 from app.services.cache.manager import author_key, author_books_key
-from app.services.db.writer import persist_author_background, persist_author_books_cache_background
+from app.services.db.persist_queue import persist_author_background, persist_author_books_cache_background
 from app.services.db.reader import get_author_from_db, get_author_book_asins_from_db
 
 logger = get_logger()
@@ -80,7 +80,7 @@ AUTHOR_BOOKS_TIME_BUDGET_SECONDS = 45.0
 # complete union this run (see the screens_clean / catalog_clean / db_clean
 # gate inside _walk_author_books). persist_author_books_cache_background's
 # write is a union with whatever is already stored, taken under
-# SELECT ... FOR UPDATE (see its own docstring in db/writer.py), so a
+# SELECT ... FOR UPDATE (see its own docstring in db/persist_queue.py), so a
 # partial write can only ever grow the stored list, never shrink it -- there
 # is no storage-side reason left to withhold the write entirely on an
 # incomplete result. Withholding it bought nothing but cost a lot: a
@@ -635,7 +635,7 @@ async def _walk_author_books(
     # less-data-never-accepted, applied through the TTL rather than a
     # cache-or-don't decision: persist_author_books_cache_background's write
     # is a union with whatever is already stored, taken under
-    # SELECT ... FOR UPDATE (see its own docstring in db/writer.py), so a
+    # SELECT ... FOR UPDATE (see its own docstring in db/persist_queue.py), so a
     # partial write can only ever grow the stored list, never shrink it --
     # there is no storage-side reason left to withhold this write on an
     # incomplete result. What still varies by completeness is the TTL.

@@ -296,9 +296,11 @@ async def test_new_releases_passes_category_to_service(async_client):
     """The category query param is forwarded to get_new_releases."""
     with patch("app.api.routes.releases.router.get_new_releases", new_callable=AsyncMock) as mock:
         mock.return_value = []
-        await async_client.get("/new-releases?region=us&category=C1")
+        # real-shaped Audible category id (11 digits), not a minimal "1" that
+        # would satisfy the pattern without exercising its realistic length.
+        await async_client.get("/new-releases?region=us&category=18580628011")
         # signature: get_new_releases(region, session, days, category)
-        assert mock.await_args.args[3] == "C1"
+        assert mock.await_args.args[3] == "18580628011"
 
 
 @pytest.mark.asyncio
@@ -311,9 +313,53 @@ async def test_new_releases_without_category_passes_none(async_client):
 
 
 @pytest.mark.asyncio
+async def test_new_releases_invalid_category_rejected(async_client):
+    """
+    A non-numeric category is caller-typed text, exactly the shape the pattern
+    constraint exists to keep out (see manager.py's raw `cacheKey` log, which
+    is not covered by the query-field redaction). It is rejected by parameter
+    validation before the route body runs, so get_new_releases -- and with it
+    new_releases_key(), which is what builds the logged cache key -- is never
+    reached at all.
+    """
+    with patch("app.api.routes.releases.router.get_new_releases", new_callable=AsyncMock) as mock:
+        response = await async_client.get(
+            "/new-releases", params={"region": "us", "category": "abc;evil=true"}
+        )
+        assert response.status_code == 422
+        # No RequestValidationError handler is registered in app/main.py, so
+        # this is FastAPI's default validation-error body: 'detail', not the
+        # LibexException 'error' key -- same precedent as
+        # test_categories_depth_zero_rejected for the depth param.
+        body = response.json()
+        assert "detail" in body
+        assert "error" not in body
+        # the tainted value never reached the service call, so it never
+        # reached cache-key construction either.
+        mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_coming_soon_passes_category_to_service(async_client):
     """The category query param is forwarded to get_coming_soon."""
     with patch("app.api.routes.releases.router.get_coming_soon", new_callable=AsyncMock) as mock:
         mock.return_value = []
-        await async_client.get("/coming-soon?region=us&category=C2")
-        assert mock.await_args.args[3] == "C2"
+        await async_client.get("/coming-soon?region=us&category=18573212011")
+        assert mock.await_args.args[3] == "18573212011"
+
+
+@pytest.mark.asyncio
+async def test_coming_soon_invalid_category_rejected(async_client):
+    """
+    Same constraint, same precedent, on the /coming-soon twin: a non-numeric
+    category 422s before get_coming_soon -- and coming_soon_key() -- ever runs.
+    """
+    with patch("app.api.routes.releases.router.get_coming_soon", new_callable=AsyncMock) as mock:
+        response = await async_client.get(
+            "/coming-soon", params={"region": "us", "category": "abc;evil=true"}
+        )
+        assert response.status_code == 422
+        body = response.json()
+        assert "detail" in body
+        assert "error" not in body
+        mock.assert_not_awaited()

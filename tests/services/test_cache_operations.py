@@ -335,27 +335,56 @@ async def test_cache_invalidate_calls_commit():
 # ============================================================
 # CACHE PURGE TESTS
 # ============================================================
+#
+# purge_expired sweeps ctid ascending with two statements per batch: a SELECT
+# of candidate ctids, then a range DELETE bounded by the cursor and the last
+# of them. These mocks answer both, in order. Where the sweep STOPS is the
+# property worth pinning -- it ends when the candidate SELECT comes back
+# empty, not when a DELETE removes nothing, because a batch can legitimately
+# delete nothing when every candidate was refreshed between the two
+# statements, and stopping there would abandon the rest of the table.
+
+
+def _purge_execute(batches):
+    """A session.execute answering a SELECT then a DELETE per batch.
+
+    batches is a list of (candidate_ctids, rows_deleted); the sweep ends on
+    the first entry with no candidates.
+    """
+    calls = []
+
+    async def _execute(stmt, params=None):
+        calls.append(params or {})
+        step = len(calls) - 1
+        idx = step // 2
+        ctids, deleted = batches[idx] if idx < len(batches) else ([], 0)
+        result = MagicMock()
+        if step % 2 == 0:
+            result.__iter__.return_value = iter([(c,) for c in ctids])
+        else:
+            result.rowcount = deleted
+        return result
+
+    return AsyncMock(side_effect=_execute), calls
+
 
 @pytest.mark.asyncio
 async def test_cache_purge_calls_execute():
-    """Cache purge executes a single delete query."""
+    """Cache purge issues its candidate query."""
     session = AsyncMock()
-    mock_result = MagicMock()
-    mock_result.rowcount = 0
-    session.execute = AsyncMock(return_value=mock_result)
+    session.execute, _ = _purge_execute([([], 0)])
     session.commit = AsyncMock()
 
     await purge_expired(session)
-    session.execute.assert_called_once()
+    assert session.execute.await_count == 1
 
 
 @pytest.mark.asyncio
 async def test_cache_purge_calls_commit():
-    """Cache purge commits the transaction."""
+    """A batch commits on its own, so a later failure keeps what already
+    went."""
     session = AsyncMock()
-    mock_result = MagicMock()
-    mock_result.rowcount = 0
-    session.execute = AsyncMock(return_value=mock_result)
+    session.execute, _ = _purge_execute([(["(0,1)"], 1), ([], 0)])
     session.commit = AsyncMock()
 
     await purge_expired(session)
@@ -364,25 +393,67 @@ async def test_cache_purge_calls_commit():
 
 @pytest.mark.asyncio
 async def test_cache_purge_returns_rowcount():
-    """Cache purge returns the number of rows the delete removed."""
+    """The total sums across batches rather than reporting only the first."""
     session = AsyncMock()
-    mock_result = MagicMock()
-    mock_result.rowcount = 42
-    session.execute = AsyncMock(return_value=mock_result)
+    session.execute, _ = _purge_execute([(["(0,1)"], 42), (["(0,9)"], 8), ([], 0)])
     session.commit = AsyncMock()
 
     count = await purge_expired(session)
-    assert count == 42
+    assert count == 50
+
+
+@pytest.mark.asyncio
+async def test_cache_purge_sweeps_past_a_batch_that_deleted_nothing():
+    """A batch can delete nothing because every candidate was refreshed
+    between the SELECT and the DELETE. Stopping there would abandon every
+    expired row further down the table."""
+    session = AsyncMock()
+    session.execute, _ = _purge_execute([(["(0,1)"], 0), (["(0,9)"], 7), ([], 0)])
+    session.commit = AsyncMock()
+
+    count = await purge_expired(session)
+    assert count == 7
+
+
+@pytest.mark.asyncio
+async def test_cache_purge_carries_the_cursor_forward():
+    """Each batch resumes after the last ctid the previous one SELECTED, not
+    the last it deleted. Without this the sweep re-reads the prefix it has
+    already cleared and a full purge is quadratic in the table size."""
+    session = AsyncMock()
+    session.execute, calls = _purge_execute([(["(0,1)", "(0,5)"], 2), (["(0,20)"], 1), ([], 0)])
+    session.commit = AsyncMock()
+
+    await purge_expired(session)
+
+    selects = [c for i, c in enumerate(calls) if i % 2 == 0]
+    assert [c["after"] for c in selects] == ["(0,0)", "(0,5)", "(0,20)"]
+
+
+@pytest.mark.asyncio
+async def test_cache_purge_deletes_only_within_the_range_it_selected():
+    """The DELETE is bounded by the cursor and the last selected ctid, and
+    carries the expiry predicate again so a row refreshed between the two
+    statements is spared exactly as the single-statement form spared it."""
+    session = AsyncMock()
+    session.execute, calls = _purge_execute([(["(0,1)", "(0,5)"], 2), ([], 0)])
+    session.commit = AsyncMock()
+
+    await purge_expired(session)
+
+    delete_params = calls[1]
+    assert delete_params["after"] == "(0,0)"
+    assert delete_params["last"] == "(0,5)"
+    assert "now" in delete_params
 
 
 @pytest.mark.asyncio
 async def test_cache_purge_returns_zero_when_nothing_expired():
-    """Cache purge returns 0 when the delete removes no rows."""
+    """Nothing expired means one candidate query and no delete at all."""
     session = AsyncMock()
-    mock_result = MagicMock()
-    mock_result.rowcount = 0
-    session.execute = AsyncMock(return_value=mock_result)
+    session.execute, _ = _purge_execute([([], 0)])
     session.commit = AsyncMock()
 
     count = await purge_expired(session)
     assert count == 0
+    session.commit.assert_not_called()

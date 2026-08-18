@@ -20,10 +20,11 @@ from app.services.audible.books import (
     get_books_by_asins,
     _normalize_product,
     _filter_products,
+    _settle_flags_list,
     BOOK_RESPONSE_GROUPS,
     IMAGE_SIZES,
 )
-from app.services.db.writer import persist_books_background
+from app.services.db.persist_queue import persist_books_background
 from app.services.db.reader import search_books_from_db
 
 logger = get_logger()
@@ -106,10 +107,16 @@ async def search(
         # Normalize directly from search results — no re-fetch needed
         normalized = [_normalize_product(p, region) for p in products]
 
-        # Persist to DB and cache in the background
+        # Persist to DB and cache in the background. Unsettled: the writer
+        # needs the tri-state flags None/True/False as _normalize_product
+        # produced them (see _asserted_bool in writer.py), so this runs
+        # before _settle_flags_list below, on the pre-settle list.
         persist_books_background(normalized, region)
 
-        return normalized
+        # filter_dicts (app/services/filtering.py) and BookResponse both run
+        # on what this returns and neither tolerates a None flag -- settle
+        # here, after the persist above got the tri-state it needs.
+        return _settle_flags_list(normalized)
 
     except NotFoundException:
         return []

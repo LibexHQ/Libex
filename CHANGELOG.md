@@ -139,13 +139,13 @@ capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
   **What this changes for callers.** No endpoint, parameter, response shape or
   field moved — the difference is the freshness of what you get when you do not
-  pass the flag. A cached answer is at most 24 hours old, and at most 15 minutes
-  old if the walk that produced it was incomplete, so a partial result corrects
-  itself quickly rather than persisting for a day. A cache miss is unaffected
-  and still returns live data. If you require a guaranteed-live answer on every
-  request, pass `?cache=false` explicitly. The legacy `/author/{asin}/books`
-  route changes identically. `/author/{asin}`, which returns a single author
-  profile rather than walking a catalog, is deliberately unchanged.
+  pass the flag. A cached answer is at most 24 hours old, and is always a
+  complete catalogue — an unfinished walk is never cached at all, as described
+  in the entry above. A cache miss is unaffected and still returns live data.
+  If you require a guaranteed-live answer on every request, pass `?cache=false`
+  explicitly. The legacy `/author/{asin}/books` route changes identically.
+  `/author/{asin}`, which returns a single author profile rather than walking a
+  catalog, is deliberately unchanged.
 - **The expired-cache purge stops on a batch that reports no row count, not
   only on one that reports zero.** The purge deletes in batches and ends the
   pass when a batch removes nothing. A database driver is not obliged to

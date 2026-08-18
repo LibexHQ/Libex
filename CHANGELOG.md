@@ -10,7 +10,7 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
-## [1.14.1]
+## [1.15.0]
 
 ### Fixed
 - **A book's VVAB (virtual voice audiobook) status was never being saved.**
@@ -34,6 +34,24 @@ capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
   overwrites.
 
 ### Changed
+- **A book's `isListenable`, `isAvailable` and `isBuyable` now read `true`
+  when Audible does not say otherwise.** Previously a response that simply
+  omitted the field was recorded and returned as `false`, which claimed a
+  book was not listenable on no evidence at all. Silence is now carried as
+  "unknown" through the write path and resolved to `true` on the way out,
+  matching how the upstream catalogue is read elsewhere. This affects
+  `/book`, `/search`, `/new-releases` and `/coming-soon`.
+
+  **One caveat worth knowing if you consume these fields.** Books already
+  stored before this release kept whatever the old rule wrote, and a later
+  response that omits the field no longer overwrites what is stored — so a
+  book recorded as `false` under the old rule stays `false` until Audible
+  states otherwise, even though a live lookup of the same book now reports
+  `true`. Nothing rewrites those rows.
+- **The `category` parameter on `/new-releases` and `/coming-soon` now
+  rejects anything that is not a number.** A non-numeric value previously
+  travelled on into the cache key and the upstream request; it now returns
+  `422`.
 - **Writing a batch of freshly fetched books issues far fewer statements per
   book.** 1.13.4 already grouped a background write into transactions of
   fifty books instead of one; within each of those transactions, every book

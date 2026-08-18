@@ -253,12 +253,58 @@ async def invalidate(session: AsyncSession, key: str) -> None:
 # bind parameter, so it cannot reintroduce the bind-limit failure the
 # predicate delete below it was already written to avoid. Measured at 94ms,
 # two orders of magnitude inside the timeout.
+#
+# That 94ms is the FIRST batch on an all-expired table, where the ten
+# thousand qualifying rows sit in the leading pages. It is not what batch
+# eighty costs. Each batch is its own statement, so without a cursor every
+# batch re-reads the dead-tuple prefix the batches before it already
+# cleared, and a 1.1M-row purge becomes a hundred-odd scans over a growing
+# prefix where the unbatched form paid exactly one. Hence :after below: the
+# pass sweeps ctid ascending and never looks at a page twice.
+#
+# The claim this replaces — that restoring the expires_at index dropped in
+# 22195f2af627 "does not help" — was true only of the unbatched DELETE it
+# was measured against, where everything is expired and a seq scan is the
+# right plan. It was never true of the batched form underneath it, and left
+# standing it would have talked the next reader out of the fix. The index
+# is still not restored, and deliberately: expires_at changes on every
+# cache.set, so indexing it makes every write non-HOT on the most
+# write-heavy table Libex has. The cursor costs nothing on either side.
 _PURGE_BATCH_SIZE = 10000
 
-_PURGE_BATCH_STATEMENT = text(
-    "DELETE FROM cache WHERE ctid IN ("
-    "SELECT ctid FROM cache WHERE expires_at <= :now LIMIT :batch_size)"
+# Selected and deleted as two statements so the sweep can carry a cursor,
+# with the expiry predicate repeated on the DELETE. The repetition is not
+# redundant: between the two statements a concurrent writer can refresh one
+# of the selected rows, and without the predicate the delete would remove an
+# entry that is live again. With it, that row is spared exactly as the
+# single-statement form spared it.
+# The double cast is not decoration: asyncpg ships no codec for tid, so a
+# bound parameter cannot be a tid directly — it raises "invalid input for
+# query" — and casting text to tid inside the statement is what lets the
+# cursor be a parameter at all. Verified against Postgres 16; the single-cast
+# and tid[] forms were both tried and both fail to bind.
+_PURGE_CANDIDATES_STATEMENT = text(
+    "SELECT ctid FROM cache "
+    "WHERE ctid > CAST(CAST(:after AS text) AS tid) AND expires_at <= :now "
+    "ORDER BY ctid LIMIT :batch_size"
 )
+
+# Deleted as a ctid RANGE rather than a list of the selected ctids, which
+# needs no array bind and is exactly equivalent: the select took every
+# expired row in ctid order from :after up to :last, so no expired row inside
+# that range was skipped. The expiry predicate is repeated because a
+# concurrent writer can refresh one of those rows between the two statements,
+# and without it the delete would remove an entry that is live again.
+_PURGE_DELETE_STATEMENT = text(
+    "DELETE FROM cache "
+    "WHERE ctid > CAST(CAST(:after AS text) AS tid) "
+    "AND ctid <= CAST(CAST(:last AS text) AS tid) "
+    "AND expires_at <= :now"
+)
+
+# Where a pass starts. Postgres's first possible tuple is (0,1), so this
+# sorts below every real row.
+_PURGE_CURSOR_START = "(0,0)"
 
 # Attempts per batch against a deadlock or serialization failure, and the
 # first backoff step between them, doubled per attempt and jittered across
@@ -275,10 +321,21 @@ _PURGE_MAX_ATTEMPTS = 3
 _PURGE_RETRY_BASE_SECONDS = 0.25
 
 
-async def _purge_batch(session: AsyncSession, now: datetime) -> int:
+async def _purge_batch(session: AsyncSession, now: datetime, after: str) -> tuple[int, str | None]:
     """
     Executes and commits one purge batch, retrying a deadlock or
     serialization failure against the same candidate rows before giving up.
+
+    Returns (rows deleted, cursor to resume from). A None cursor means the
+    sweep reached the end of the table and the pass is over.
+
+    The cursor is the last ctid SELECTED, not the last one deleted, and the
+    difference matters: a row refreshed between the two statements is spared
+    by the DELETE's own expiry predicate, and advancing past it is what keeps
+    the pass linear. It is expired again only if it lapses a second time, by
+    which point the next hourly pass collects it. Advancing to the last
+    DELETED ctid instead would re-read every spared row on the following
+    batch, which is the behaviour this cursor exists to remove.
 
     Raises the final attempt's DBAPIError rather than swallowing it — every
     batch before this one already committed regardless, so purge_expired is
@@ -286,11 +343,24 @@ async def _purge_batch(session: AsyncSession, now: datetime) -> int:
     """
     for attempt in range(1, _PURGE_MAX_ATTEMPTS + 1):
         try:
-            result = await session.execute(
-                _PURGE_BATCH_STATEMENT, {"now": now, "batch_size": _PURGE_BATCH_SIZE}
+            candidates = await session.execute(
+                _PURGE_CANDIDATES_STATEMENT,
+                {"now": now, "after": after, "batch_size": _PURGE_BATCH_SIZE},
+            )
+            # Postgres renders a ctid as "(0, 1)"; its text input accepts no
+            # space, so the round trip has to be normalised or the cast
+            # below rejects it.
+            ctids = [str(row[0]).replace(" ", "") for row in candidates]
+            if not ctids:
+                await session.rollback()
+                return 0, None
+
+            last = ctids[-1]
+            deleted = await session.execute(
+                _PURGE_DELETE_STATEMENT, {"now": now, "after": after, "last": last}
             )
             await session.commit()
-            return result.rowcount
+            return deleted.rowcount, last
         except DBAPIError as exc:
             await session.rollback()
             retryable = isinstance(getattr(exc, "orig", None), TransactionRollbackError)
@@ -338,9 +408,10 @@ async def purge_expired(session: AsyncSession) -> int:
     """
     total = 0
     now = datetime.now(timezone.utc)
+    cursor = _PURGE_CURSOR_START
     while True:
         try:
-            deleted = await _purge_batch(session, now)
+            deleted, cursor = await _purge_batch(session, now, cursor)
         except DBAPIError as exc:
             logger.warning(
                 "Cache purge batch failed, stopping this pass",
@@ -352,19 +423,22 @@ async def purge_expired(session: AsyncSession) -> int:
             )
             break
 
-        # Tested and broken on before the total is touched, so a driver's -1
-        # ends the pass without also landing in the count this returns and
-        # logs. <= rather than ==, because this comparison is the pass's only exit
-        # and a driver is not obliged to report a row count at all: the DBAPI
-        # convention for "unavailable" is -1, and an exit written against 0
-        # alone never fires against it. asyncpg reports DELETE counts
-        # faithfully, so this is a guard against a driver or dialect change
-        # rather than a live defect — but the cost of being wrong here is not
-        # a bad count, it is a background worker spending the rest of its life
-        # issuing DELETEs against a table it has already emptied, and the loop
-        # should not be one substituted driver away from that.
-        if deleted <= 0:
+        # A None cursor is the sweep reaching the end of the table, which is
+        # the only exit that means "nothing expired remains". A batch that
+        # deleted nothing is NOT that: every one of its candidates can have
+        # been refreshed between the select and the delete, which is the
+        # spared-row case the module has always had to tolerate, and the
+        # sweep must carry on past them rather than stopping at the first
+        # contended page.
+        if cursor is None:
             break
+
+        # A driver is not obliged to report a row count — the DBAPI
+        # convention for "unavailable" is -1 — and that would corrupt the
+        # total rather than the loop, since the cursor now governs
+        # termination. Clamped rather than trusted.
+        if deleted < 0:
+            deleted = 0
 
         total += deleted
 

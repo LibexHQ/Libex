@@ -766,7 +766,7 @@ async def write_books(session: AsyncSession, books: list[dict]) -> None:
     book_genres: dict[tuple, dict] = {}
     narrators: dict[str, dict] = {}
     book_narrators: dict[tuple, dict] = {}
-    series: list[dict] = []
+    series: dict[str, dict] = {}
     book_series_links: dict[tuple, dict] = {}
 
     for data in books:
@@ -797,7 +797,12 @@ async def write_books(session: AsyncSession, books: list[dict]) -> None:
             params = _series_params(entry, now)
             if params is None:
                 continue
-            series.append(params)
+            # Deduped like every sibling collection here. Fifty books of
+            # one series otherwise issued fifty identical upserts against
+            # the same row, each re-taking its row lock — the exact case
+            # book_series_links collapses a few lines below, and the case
+            # the docstring above already claimed was collapsed.
+            series.setdefault(params["asin"], params)
             book_series_links[(asin, params["asin"])] = {
                 "book_asin": asin,
                 "series_asin": params["asin"],
@@ -813,7 +818,7 @@ async def write_books(session: AsyncSession, books: list[dict]) -> None:
         await session.execute(_BOOK_NARRATOR_INSERT, list(book_narrators.values()))
 
     if series:
-        await session.execute(_SERIES_UPSERT, series)
+        await session.execute(_SERIES_UPSERT, list(series.values()))
         await session.execute(_BOOK_SERIES_UPSERT, list(book_series_links.values()))
 
     ids_by_book = await _resolve_author_ids(session, books)

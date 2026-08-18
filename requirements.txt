@@ -1,3 +1,17 @@
+# The human-edited source for requirements.lock, which is what CI and the
+# Dockerfile actually install. Nothing installs THIS file directly.
+#
+# Editing a version here changes nothing until the lock is regenerated:
+#   uv pip compile requirements.txt -c constraints.txt --generate-hashes \
+#     --python-version 3.12 -o requirements.lock
+#
+# pip verifies a hash only when every requirement in the install carries one --
+# it enters --require-hashes mode globally on seeing the first hash and then
+# rejects any unhashed line, transitive dependencies included. That is why the
+# lock is generated wholesale rather than a hash being pinned onto one package
+# at a time, and why a hand-added line here is a no-op rather than a partial
+# improvement.
+
 fastapi==0.136.1
 uvicorn[standard]==0.46.0
 starlette==1.3.1
@@ -10,5 +24,3 @@ asyncpg==0.31.0
 psycopg2-binary==2.9.12
 axiom-py==0.10.0
 python-json-logger==4.1.0
-pytest==9.0.3
-pytest-asyncio==1.3.0

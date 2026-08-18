@@ -1,0 +1,65 @@
+# Deny everything, then re-admit exactly what git tracks.
+#
+# Allowlist, not a denylist, and the reason is rule 3 rather than image size.
+# Nothing that keeps CLAUDE.md, .claude/, the LIBEX_*.md operating docs and
+# the knowledge base out of version control is visible to Docker: that
+# enforcement lives in .git/info/exclude, which the daemon does not read. A
+# denylist would therefore protect exactly the files someone remembered to
+# list on the day they wrote it, and every operating doc added afterwards
+# would ship. The published image goes to two public registries, so a stray
+# local file reaching it is not recoverable by deleting it afterwards.
+#
+# .env is here for the same structural reason and is the more immediate one:
+# it holds real credentials, sits in the repo root, and `COPY . .` would bake
+# it into a layer.
+#
+# CI has never shipped any of this, because it builds from a git checkout
+# where those files do not exist. That makes today's published image safe by
+# accident. This file makes it safe by construction, and closes the gap for a
+# local `docker build` -- which, before this, copied .env, every Claude
+# operating doc, .venv, .git, scrapers/ and the 2.1GB apk-work/ into the
+# image.
+#
+# The admitted set below is `git ls-files` at the top level, minus tests/
+# and the CI-only tooling files -- requirements-tooling.txt and its lock
+# are installed by the workflow, never by the image.
+*
+
+!.env.example
+!.github/
+!.gitignore
+!CHANGELOG.md
+!CONTRIBUTING.md
+!Dockerfile
+!LICENSE
+!PRIVACY.md
+!README.md
+!SECURITY.md
+!alembic.ini
+!app/
+!constraints.txt
+!docker-compose.yml
+!docker-entrypoint.sh
+!migrations/
+!pytest.ini
+!requirements-dev.lock
+!requirements-dev.txt
+!requirements.lock
+!requirements.txt
+!scripts/
+
+# tests/ is deliberately NOT admitted. Nothing ever ran it from inside the
+# image: tests.yml runs pytest on the runner against the checkout, and
+# publish.yml only builds and pushes, gated on tests.yml having already
+# passed. The test runner itself was removed from the image in the same slice
+# that added this line, so shipping the tests without pytest would have left
+# 952K of code the image cannot execute.
+
+# Re-excluded after the admissions above, since these live inside admitted
+# directories and are untracked build or tooling residue. app/static/docs is
+# fetched during the build by fetch_docs_assets.sh and checksum-verified
+# there, so a copy of it from the build host would be overwritten anyway --
+# and must not be trusted in the meantime.
+**/__pycache__/
+**/*.py[cod]
+app/static/docs/

@@ -12,7 +12,7 @@ Falls back to DB when Audible is unavailable.
 import asyncio
 import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, NamedTuple
 
 # Third party
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -40,6 +40,13 @@ from app.services.cache.manager import author_key, author_books_key
 from app.services.db.persist_queue import persist_author_background, persist_author_books_cache_background
 from app.services.db.reader import get_author_from_db, get_author_book_asins_from_db
 
+# Imported for its side effect on the module-level task registry it owns.
+# The edge runs one way at import time -- completion imports nothing from
+# here at module scope, and reaches _walk_author_books through a deferred
+# import inside the task body -- so this does not close a cycle. See that
+# module's own note on why the import is deferred rather than restructured.
+from app.services.audible.authors.completion import request_author_books_completion
+
 logger = get_logger()
 
 # Wall-clock budget across the whole author-books union in get_author_books
@@ -50,9 +57,9 @@ logger = get_logger()
 # this one DOES bind on a real, very prolific author's catalog before those
 # far-larger caps ever would -- at roughly 0.5s/page it cuts off around 1800
 # titles, well short of Conan Doyle's 4500 -- but a deadline-truncated walk
-# is reported as degraded (not clean/complete) and is cached with a short
-# TTL rather than the default one (see AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS
-# below), so it costs latency and a quick cache refresh on the prolific
+# is reported as degraded (not clean/complete) and is not cached at all --
+# it is handed to authors/completion.py to be finished off the request and
+# the COMPLETE result is what gets stored, so it costs latency on the prolific
 # tail, not silent, permanent data loss the way the old page/ASIN caps did.
 # That's a deliberate latency/completeness tradeoff, not an oversight, and
 # changing it is a separate decision from the caps in screens.py and
@@ -76,22 +83,33 @@ logger = get_logger()
 # genuinely pathological walk, not the mechanism the outage fix relies on.
 AUTHOR_BOOKS_TIME_BUDGET_SECONDS = 45.0
 
-# TTL for an author-books cache write that did not reach a confirmed-clean,
-# complete union this run (see the screens_clean / catalog_clean / db_clean
-# gate inside _walk_author_books). persist_author_books_cache_background's
-# write is a union with whatever is already stored, taken under
-# SELECT ... FOR UPDATE (see its own docstring in db/persist_queue.py), so a
-# partial write can only ever grow the stored list, never shrink it -- there
-# is no storage-side reason left to withhold the write entirely on an
-# incomplete result. Withholding it bought nothing but cost a lot: a
-# prolific author whose walk this module's own AUTHOR_BOOKS_TIME_BUDGET_SECONDS
-# deadline can never let finish clean would never be cached at all, so every
-# request re-ran the full walk. 15 minutes is short enough that an
-# incomplete result is refreshed soon rather than treated as settled for a
-# full day, long enough that a burst of sequential requests for the same
-# author -- beyond what the single-flight coalescing below already collapses
-# for genuinely concurrent ones -- isn't each paying its own full walk.
-AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS = 900
+
+
+class AuthorBooksResult(NamedTuple):
+    """
+    An author's ASIN list together with whether the walk that produced it
+    actually finished.
+
+    is_complete used to be computed inside _walk_author_books and thrown
+    away -- it chose the cache TTL, it went into a log line, and nothing
+    else could see it. That was survivable only while the cache served
+    almost nobody. Once the cache began serving the default path, an
+    unfinished walk became something Libex would hand back, store, and then
+    keep handing back, with no way for the route to know and no way for a
+    caller to ask. Returning it is what lets the route mark the response and
+    what lets the caching decision move to a caller that can act on it.
+    """
+    asins: list[str]
+    is_complete: bool
+    # When this list came from the cache, the moment that entry stops being
+    # live; None when it came from a walk just now. The route turns it into
+    # the edge cache's s-maxage so a copy held at the edge expires at the
+    # same instant Libex's own entry does. None is not "no expiry" -- it is
+    # "this was just walked and the cache write is still in flight", which
+    # the route deliberately treats as the conservative case, since a
+    # background write can still fail and leave the edge holding something
+    # Libex never stored.
+    cache_expires_at: datetime | None = None
 
 # Coalesces concurrent get_author_books calls for the same (asin, region)
 # onto a single walk, keyed identically to the cache key -- "concurrent"
@@ -102,7 +120,7 @@ AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS = 900
 # Per-process only: with one uvicorn worker today this collapses every
 # concurrent request in that worker onto one walk; a second worker process
 # holds its own separate map and would still run its own independent walk.
-_author_books_inflight: dict[tuple[str, str], asyncio.Task[list[str]]] = {}
+_author_books_inflight: dict[tuple[str, str], asyncio.Task[AuthorBooksResult]] = {}
 
 # ============================================================
 # HELPERS
@@ -266,15 +284,21 @@ async def get_author_books(
     region: str,
     session: AsyncSession,
     use_cache: bool = False,
-) -> list[str]:
+) -> AuthorBooksResult:
     """
     Fetches all book ASINs for an author. See _walk_author_books for the
     four-source union this delegates to and does the actual fetching.
 
     use_cache=True checks the cache first and returns on a hit, same as
-    every other Audible-first service in this module. Below that, concurrent
-    calls for the same (asin, region) -- with or without use_cache, since
-    the default Audible-first path never consults the cache on the way in --
+    every other Audible-first service in this module. Both author-books
+    routes now pass True, because the public default was flipped there --
+    see the comment on get_books_by_author for why a defaulted-False read
+    meant the cache served only callers who explicitly asked for it and no
+    repeat request was ever cheap. This signature deliberately keeps False
+    so that a future direct caller opts in for its own reasons rather than
+    silently inheriting a route's policy. Below that, concurrent calls for
+    the same (asin, region) -- with or without use_cache, since a miss and
+    an explicit cache=false arrive below identically --
     are coalesced onto a single walk via _author_books_inflight rather than
     each starting its own: the first caller for a given key becomes the
     leader and runs _walk_author_books, every other caller for that same key
@@ -287,9 +311,19 @@ async def get_author_books(
     nothing with it -- see the two awaits below for why only one of them is.
     """
     if use_cache:
-        cached = await cache.get(session, author_books_key(asin, region))
-        if cached:
-            return cached
+        entry = await cache.get_entry(session, author_books_key(asin, region))
+        if entry:
+            cached = entry.value
+            # is_complete=True is an invariant of the key, not an assumption
+            # about this entry: _walk_author_books writes it only when the
+            # walk finished, and an unfinished one goes to background
+            # completion instead. Anything read back here is therefore a
+            # complete result. The one exception is transitional -- entries
+            # written by an older build under the degraded TTL may still be
+            # in the table for up to the fifteen-minute TTL that build used
+            # for a degraded write, and will read back as complete. That
+            # window closes itself and needs no migration.
+            return AuthorBooksResult(cached, True, entry.expires_at)
 
     inflight_key = (asin, region)
     leader = _author_books_inflight.get(inflight_key)
@@ -350,7 +384,10 @@ async def _walk_author_books(
     asin: str,
     region: str,
     session: AsyncSession,
-) -> list[str]:
+    *,
+    time_budget: float = AUTHOR_BOOKS_TIME_BUDGET_SECONDS,
+    allow_background_completion: bool = True,
+) -> AuthorBooksResult:
     """
     Fetches all book ASINs for an author, as a four-source parallel union:
     the Android author-detail screen (the only ASIN-exact source), and the
@@ -409,7 +446,11 @@ async def _walk_author_books(
     entirely empty, live and DB alike, is NotFoundException raised.
     """
     start = time.monotonic()
-    deadline = start + AUTHOR_BOOKS_TIME_BUDGET_SECONDS
+    # time_budget rather than the constant directly: the background
+    # completion runs this same walk with a budget that is not bounded by
+    # what a caller will sit and wait for, which is the whole reason it can
+    # finish a walk a live request could not.
+    deadline = start + time_budget
 
     # Wave 1.
     author_name: str | None = None
@@ -558,7 +599,9 @@ async def _walk_author_books(
         # through to raise NotFoundException.
         await session.rollback()
         if cached:
-            return cached
+            # Complete by the same invariant get_author_books' own hit
+            # relies on: only a finished walk is ever written to this key.
+            return AuthorBooksResult(cached, True)
 
         logger.warning("Audible Author Books unavailable from every path", extra={
             "author_asin": asin,
@@ -658,9 +701,9 @@ async def _walk_author_books(
     # roughly half of her 1133-ASIN union, and gating completeness on
     # COMPLETED alone made is_complete permanently unreachable for exactly
     # the prolific authors this feature exists to serve, forcing them onto
-    # AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS (900s) forever instead of the
-    # default day-long TTL -- up to 96 full walks a day, each hundreds of
-    # upstream requests, strictly worse than not caching them at all.
+    # the not-cached-at-all path forever instead of the default day-long
+    # TTL -- a full walk on every single request, each hundreds of upstream
+    # requests, for exactly the authors that cost the most to walk.
     #
     # catalog_clean is True either when catalog ran with no page-fetch
     # errors, wasn't cut short by the deadline, and wasn't left unable to
@@ -676,8 +719,8 @@ async def _walk_author_books(
     # feature completing as designed and must earn the same default TTL a
     # small author's single-baseline-pass walk does; gating on "did it
     # need to slice at all" is the trap that would turn every prolific
-    # author's request into a re-walk every AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS
-    # forever, which is strictly worse than not slicing at all. author_name
+    # author's request into a re-walk forever, which is strictly worse
+    # than not slicing at all. author_name
     # is also None when name resolution raised instead of confirming an
     # absence -- name_resolution_error is checked explicitly here to keep
     # the two apart, since that case means the catalog wave never got a
@@ -686,12 +729,11 @@ async def _walk_author_books(
     # None, distinct from a genuinely empty list) -- a failed DB read means
     # the union never got the chance to include whatever it already had
     # stored, so this run is not confirmed complete either. When all three
-    # hold, the write gets the default TTL (settings.cache_ttl, unchanged);
-    # otherwise it gets the short AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS,
-    # so an incomplete result refreshes soon rather than sitting for a full
-    # day, or -- the old behavior -- never being written at all, which meant
-    # a prolific author whose walk this module's own deadline can never let
-    # finish clean re-ran the full walk on every single request.
+    # hold, the result is written with the default TTL (settings.cache_ttl);
+    # otherwise it is not written at all and is handed to background
+    # completion instead -- see the branch below for why storing a partial
+    # stopped being acceptable once the cache began serving the default
+    # path.
     screens_clean = (
         screen_result is not None
         and screen_result.termination_reason not in SCREENS_BROKEN_REASONS
@@ -707,11 +749,32 @@ async def _walk_author_books(
         )
     )
     is_complete = screens_clean and catalog_clean and db_clean
-    persist_author_books_cache_background(
-        author_books_key(asin, region),
-        asins,
-        ttl_seconds=None if is_complete else AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS,
-    )
+    if is_complete:
+        persist_author_books_cache_background(author_books_key(asin, region), asins, ttl_seconds=None)
+    elif allow_background_completion:
+        # An unfinished walk is NOT written here, and that is a reversal of
+        # what this did before. It used to be stored under a short
+        # fifteen-minute TTL, on the reasoning that a
+        # prolific author whose walk can never finish clean would otherwise
+        # never be cached and would re-walk on every request. That reasoning
+        # was sound while the cache served only callers who passed
+        # ?cache=true. It stopped being sound when the cache began serving
+        # the default path: storing a partial there means handing it to
+        # everyone, for the whole TTL, as though it were the answer.
+        #
+        # So the invariant this establishes is that ANY hit on this key is a
+        # complete result. That is what makes a cached answer safe to serve
+        # without qualification, and it is the precondition for letting an
+        # edge cache hold one at all.
+        #
+        # The old reasoning is answered instead by finishing the job rather
+        # than by lowering the standard: request_author_books_completion
+        # re-runs this walk in the background, off the request, with a
+        # budget that is not bounded by what a caller will wait for, and
+        # caches THAT. The caller still gets this partial list now -- it is
+        # returned below and the route marks the response incomplete -- it
+        # just does not become what the next caller is told is the truth.
+        request_author_books_completion(asin, region, asins)
     if catalog_result is not None and catalog_result.slicing_incomplete:
         # A distinct, measured signal -- the walk identified categories
         # worth slicing by (its baseline plateaued or over-claimed
@@ -794,7 +857,7 @@ async def _walk_author_books(
         "region": region,
     })
 
-    return asins
+    return AuthorBooksResult(asins, is_complete)
 
 
 async def get_author_books_by_name(

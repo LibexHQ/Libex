@@ -27,7 +27,7 @@ be authoritative over and no outage to fall back from in the first place.
 import asyncio
 import random
 from datetime import datetime, timezone, timedelta
-from typing import Any
+from typing import Any, NamedTuple
 
 # Third party
 from asyncpg.exceptions import TransactionRollbackError
@@ -112,10 +112,27 @@ def stats_key() -> str:
 # CACHE OPERATIONS
 # ============================================================
 
-async def get(session: AsyncSession, key: str) -> Any | None:
+class CacheEntry(NamedTuple):
+    """A live cache entry: its value, and the moment it stops being live.
+
+    expires_at exists for callers that have to say something about the
+    value's remaining life rather than merely use it -- the author-books
+    route advertises it as the edge cache's s-maxage, so that a copy held
+    at the edge expires at the same instant Libex's own entry does instead
+    of drifting past it on a fixed timer.
     """
-    Retrieves a cached value by key.
+    value: Any
+    expires_at: datetime
+
+
+async def get_entry(session: AsyncSession, key: str) -> CacheEntry | None:
+    """
+    Retrieves a cached value together with its expiry.
     Returns None if not found or expired.
+
+    get() is the same query with the expiry dropped, and delegates here so
+    there is one implementation of the read rather than two that can drift
+    apart on the expiry predicate -- the one thing both must agree on.
     """
     result = await session.execute(
         select(Cache).where(
@@ -130,7 +147,16 @@ async def get(session: AsyncSession, key: str) -> Any | None:
         return None
 
     logger.info("Cache hit", extra={"cacheKey": _safe_key_for_log(key)})
-    return entry.value
+    return CacheEntry(entry.value, entry.expires_at)
+
+
+async def get(session: AsyncSession, key: str) -> Any | None:
+    """
+    Retrieves a cached value by key.
+    Returns None if not found or expired.
+    """
+    entry = await get_entry(session, key)
+    return entry.value if entry is not None else None
 
 
 async def get_many(session: AsyncSession, keys: list[str]) -> dict[str, Any]:

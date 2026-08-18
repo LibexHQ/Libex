@@ -83,6 +83,69 @@ capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
   answer, and the book is written on the next request that fetches it. This
   only engages while the database is degraded; ordinary traffic never
   approaches the cap.
+- **Complete author-books responses can now be cached by a CDN, and expire
+  there at the same moment Libex's own copy does.** Libex previously sent no
+  caching instructions at all, so a cache sitting in front of it had nothing to
+  act on and forwarded every request. A complete response now carries
+  `Cache-Control: public, max-age=300, s-maxage=<seconds>`, where the shared
+  figure is the exact time remaining on Libex's own stored copy — so the two
+  lapse together rather than the CDN holding an answer after Libex has moved
+  on. A response assembled by a fresh walk gets a short five-minute shared TTL
+  instead: its copy is stored in the background and may not have been written
+  yet, so there is no remaining life that can honestly be quoted. Incomplete
+  responses continue to carry `no-store` and are never cached anywhere.
+
+- **A partial author-books result now says so, and is never cached as though
+  it were complete.** An author's catalogue is assembled by walking Audible
+  across several sources, and for a very prolific author that walk can run out
+  of time before it finishes. Previously the shortened list was returned with a
+  plain `200` and no indication that anything was missing, and it was written to
+  the cache — so once the cache began serving the default path, a partial answer
+  could be handed to everyone for up to fifteen minutes with nothing saying it
+  was partial.
+
+  Three things change. Every response now carries an `X-Libex-Complete` header,
+  `true` or `false`, so a caller can tell. An incomplete response also carries
+  `Cache-Control: no-store`, so a cache in front of Libex cannot hold a partial
+  answer and serve it on Libex's behalf. And an unfinished walk is no longer
+  written to the cache at all — instead it is finished in the background, with
+  a time budget no caller is waiting on, and the **complete** result is what
+  gets stored. The next request for that author is then served a whole
+  catalogue rather than the shortened one.
+
+  The status code stays `200` and the response body is unchanged — still the
+  same list of books, in the same shape, with the same fields. A client that
+  ignores the new header behaves exactly as it did before. If you rely on
+  receiving a complete catalogue, check `X-Libex-Complete`.
+
+  One case is deliberately left expensive rather than made quietly wrong: if the
+  background walk cannot finish either, after two attempts that author is simply
+  not cached, and every request re-walks and returns a marked-incomplete result.
+  Storing the partial would be cheaper but would mean a cached answer could no
+  longer be trusted to be complete, which is the guarantee the header exists to
+  make.
+- **`/author/books/{asin}` now serves cached results by default.** The `cache`
+  query parameter defaulted to `false`, so the 24-hour cache only ever served
+  callers who explicitly passed `?cache=true` — which meant there was no such
+  thing as a warm request on the default path. Every request without the flag
+  walked Audible in full, and for a prolific author that walk runs to hundreds
+  of upstream requests and frequently exceeded the proxy's timeout, returning a
+  504. The result was already being written to the cache on every walk;
+  only the read was switched off, so it was being stored for almost nobody.
+  The default is now `true`: a request that does not name the parameter is
+  served from cache when a fresh entry exists, and still performs the full live
+  walk when one does not. `?cache=false` is unchanged and still forces a fresh
+  walk, so a caller who needs an uncached answer keeps one.
+
+  **What this changes for callers.** No endpoint, parameter, response shape or
+  field moved — the difference is the freshness of what you get when you do not
+  pass the flag. A cached answer is at most 24 hours old, and at most 15 minutes
+  old if the walk that produced it was incomplete, so a partial result corrects
+  itself quickly rather than persisting for a day. A cache miss is unaffected
+  and still returns live data. If you require a guaranteed-live answer on every
+  request, pass `?cache=false` explicitly. The legacy `/author/{asin}/books`
+  route changes identically. `/author/{asin}`, which returns a single author
+  profile rather than walking a catalog, is deliberately unchanged.
 - **The expired-cache purge stops on a batch that reports no row count, not
   only on one that reports zero.** The purge deletes in batches and ends the
   pass when a batch removes nothing. A database driver is not obliged to

@@ -8,12 +8,16 @@ Audible API calls are mocked — we test our code not Audible's.
 from unittest.mock import AsyncMock, patch
 
 # Third party
+import re
+from datetime import datetime, timezone, timedelta
+
 import pytest
 from httpx import AsyncClient, ASGITransport
 
 # Local
 from app.main import app
 from app.core.exceptions import NotFoundException
+from app.services.audible.authors import AuthorBooksResult
 
 MOCK_AUTHOR = {
     "id": None,
@@ -172,7 +176,7 @@ async def test_get_author_books_returns_200(async_client):
     """Author books endpoint returns 200 with valid ASIN."""
     with patch("app.api.routes.authors.router.get_author_books", new_callable=AsyncMock) as mock_books, \
          patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
-        mock_books.return_value = ["B08G9PRS1K"]
+        mock_books.return_value = AuthorBooksResult(["B08G9PRS1K"], True)
         mock_asins.return_value = [MOCK_BOOK]
         response = await async_client.get("/author/books/B000APF21M")
         assert response.status_code == 200
@@ -183,7 +187,7 @@ async def test_get_author_books_returns_list_of_books(async_client):
     """Author books endpoint returns a list of full book objects."""
     with patch("app.api.routes.authors.router.get_author_books", new_callable=AsyncMock) as mock_books, \
          patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
-        mock_books.return_value = ["B08G9PRS1K"]
+        mock_books.return_value = AuthorBooksResult(["B08G9PRS1K"], True)
         mock_asins.return_value = [MOCK_BOOK]
         response = await async_client.get("/author/books/B000APF21M")
         data = response.json()
@@ -205,7 +209,7 @@ async def test_get_author_books_default_region_is_us(async_client):
     """Author books endpoint defaults to US region."""
     with patch("app.api.routes.authors.router.get_author_books", new_callable=AsyncMock) as mock_books, \
          patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
-        mock_books.return_value = ["B08G9PRS1K"]
+        mock_books.return_value = AuthorBooksResult(["B08G9PRS1K"], True)
         mock_asins.return_value = [MOCK_BOOK]
         await async_client.get("/author/books/B000APF21M")
         assert mock_books.call_args[0][1] == "us"
@@ -223,7 +227,7 @@ async def test_get_author_books_hydration_passes_cache_flag_and_high_concurrency
     of the two were asserted."""
     with patch("app.api.routes.authors.router.get_author_books", new_callable=AsyncMock) as mock_books, \
          patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
-        mock_books.return_value = ["B08G9PRS1K"]
+        mock_books.return_value = AuthorBooksResult(["B08G9PRS1K"], True)
         mock_asins.return_value = [MOCK_BOOK]
         response = await async_client.get("/author/books/B000APF21M?cache=true")
 
@@ -241,7 +245,7 @@ async def test_get_author_books_hydration_cache_flag_follows_query_param_false(a
     just be pinned True by coincidence of the other test's fixture."""
     with patch("app.api.routes.authors.router.get_author_books", new_callable=AsyncMock) as mock_books, \
          patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
-        mock_books.return_value = ["B08G9PRS1K"]
+        mock_books.return_value = AuthorBooksResult(["B08G9PRS1K"], True)
         mock_asins.return_value = [MOCK_BOOK]
         await async_client.get("/author/books/B000APF21M?cache=false")
 
@@ -258,7 +262,7 @@ async def test_get_author_books_legacy_route_hydration_passes_cache_flag_and_hig
     reported nothing pins at all."""
     with patch("app.api.routes.authors.router.get_author_books", new_callable=AsyncMock) as mock_books, \
          patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
-        mock_books.return_value = ["B08G9PRS1K"]
+        mock_books.return_value = AuthorBooksResult(["B08G9PRS1K"], True)
         mock_asins.return_value = [MOCK_BOOK]
         response = await async_client.get("/author/B000APF21M/books?cache=true")
 
@@ -266,6 +270,155 @@ async def test_get_author_books_legacy_route_hydration_passes_cache_flag_and_hig
     call_kwargs = mock_asins.call_args.kwargs
     assert call_kwargs["use_cache"] is True
     assert call_kwargs["high_concurrency"] is True
+
+
+@pytest.mark.asyncio
+async def test_get_author_books_defaults_to_serving_cache_on_both_phases(async_client):
+    """A request that names no cache param at all must reach BOTH phases
+    with use_cache=True.
+
+    This is the property the endpoint exists in its current form to have,
+    and until it was pinned nothing tested it: the two tests above pass
+    ?cache=true and ?cache=false explicitly, so both stayed green across a
+    change to the default in either direction. The default is the only value
+    the public path ever actually uses -- callers do not pass the flag -- so
+    an unpinned default meant the one code path everybody takes was the one
+    path no test covered. Flipping it back to False would restore the state
+    where no repeat request is ever cheap and prolific authors 504."""
+    with patch("app.api.routes.authors.router.get_author_books", new_callable=AsyncMock) as mock_books, \
+         patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
+        mock_books.return_value = AuthorBooksResult(["B08G9PRS1K"], True)
+        mock_asins.return_value = [MOCK_BOOK]
+        response = await async_client.get("/author/books/B000APF21M")
+
+    assert response.status_code == 200
+    # Discovery: positional, matching how the router calls it.
+    assert mock_books.call_args[0][3] is True
+    # Hydration: the other half of the same request.
+    assert mock_asins.call_args.kwargs["use_cache"] is True
+
+
+@pytest.mark.asyncio
+async def test_get_author_books_legacy_route_defaults_to_serving_cache_too(async_client):
+    """The legacy twin must default the same way. The two routes disagreeing
+    on this would send identical requests down the cached path or the full
+    walk depending only on which URL a caller happened to use."""
+    with patch("app.api.routes.authors.router.get_author_books", new_callable=AsyncMock) as mock_books, \
+         patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
+        mock_books.return_value = AuthorBooksResult(["B08G9PRS1K"], True)
+        mock_asins.return_value = [MOCK_BOOK]
+        response = await async_client.get("/author/B000APF21M/books")
+
+    assert response.status_code == 200
+    assert mock_books.call_args[0][3] is True
+    assert mock_asins.call_args.kwargs["use_cache"] is True
+
+
+@pytest.mark.asyncio
+async def test_the_author_profile_route_still_defaults_to_no_cache(async_client):
+    """The flipped default is scoped to the books walk, not to every route
+    that happens to take a cache flag. /author/{asin} fetches one author
+    profile in one request -- it is not the hundreds-of-requests walk the
+    flip exists to stop paying for -- so its default was deliberately left
+    alone. Pinned so that "flip the cache default" is not later applied to
+    this route as a consistency tidy-up without that being an actual
+    decision."""
+    with patch("app.api.routes.authors.router.get_author", new_callable=AsyncMock) as mock_author:
+        mock_author.return_value = MOCK_AUTHOR
+        response = await async_client.get("/author/B000APF21M")
+
+    assert response.status_code == 200
+    assert mock_author.call_args[0][3] is False
+
+
+@pytest.mark.asyncio
+async def test_a_freshly_walked_complete_result_gets_only_a_short_edge_ttl(async_client):
+    """A walk taken just now has no trustworthy remaining life to advertise:
+    its cache entry is written by a background task that has not necessarily
+    committed and can fail outright. Advertising a long TTL here would let
+    the edge -- and, with Tiered Cache, several upper tiers -- hold a copy
+    Libex may never have persisted."""
+    with patch("app.api.routes.authors.router.get_author_books", new_callable=AsyncMock) as mock_books, \
+         patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
+        mock_books.return_value = AuthorBooksResult(["B08G9PRS1K"], True, None)
+        mock_asins.return_value = [MOCK_BOOK]
+        response = await async_client.get("/author/books/B000APF21M")
+
+    assert response.status_code == 200
+    assert response.headers["X-Libex-Complete"] == "true"
+    assert "s-maxage=300" in response.headers["Cache-Control"]
+    assert response.headers["Cache-Control"].startswith("public,")
+
+
+@pytest.mark.asyncio
+async def test_a_cached_complete_result_expires_at_the_edge_when_libex_does(async_client):
+    """The point of carrying the entry's expiry out to the route. A fixed
+    edge TTL drifts past Libex's own entry and the two disagree about how
+    old the answer is; quoting the remaining life makes them expire
+    together."""
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=4000)
+    with patch("app.api.routes.authors.router.get_author_books", new_callable=AsyncMock) as mock_books, \
+         patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
+        mock_books.return_value = AuthorBooksResult(["B08G9PRS1K"], True, expires_at)
+        mock_asins.return_value = [MOCK_BOOK]
+        response = await async_client.get("/author/books/B000APF21M")
+
+    s_maxage = int(re.search(r"s-maxage=(\d+)", response.headers["Cache-Control"]).group(1))
+    assert 3990 <= s_maxage <= 4000
+    # Not the fresh-walk figure -- that would mean the expiry never arrived.
+    assert s_maxage != 300
+
+
+@pytest.mark.asyncio
+async def test_an_entry_on_the_edge_of_expiry_never_advertises_a_negative_ttl(async_client):
+    """An entry read as live can lapse between the read and this
+    arithmetic. A negative s-maxage is nonsense to send, and floats would be
+    rejected outright by some caches."""
+    expires_at = datetime.now(timezone.utc) - timedelta(seconds=5)
+    with patch("app.api.routes.authors.router.get_author_books", new_callable=AsyncMock) as mock_books, \
+         patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
+        mock_books.return_value = AuthorBooksResult(["B08G9PRS1K"], True, expires_at)
+        mock_asins.return_value = [MOCK_BOOK]
+        response = await async_client.get("/author/books/B000APF21M")
+
+    assert "s-maxage=0" in response.headers["Cache-Control"]
+
+
+@pytest.mark.asyncio
+async def test_a_truncated_walk_is_marked_incomplete_and_refused_to_caches(async_client):
+    """The property this endpoint most needs to have. A walk that ran out of
+    time still returns 200 with the partial list -- the caller gets what
+    there is -- but it is labelled, and it carries no-store so an edge cache
+    cannot hold a partial and serve it to everyone for a full TTL. The
+    status stays 200 deliberately; 206 was rejected because HTTP reserves it
+    for range responses and CDNs route it down their partial-content
+    path."""
+    with patch("app.api.routes.authors.router.get_author_books", new_callable=AsyncMock) as mock_books, \
+         patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
+        mock_books.return_value = AuthorBooksResult(["B08G9PRS1K"], False)
+        mock_asins.return_value = [MOCK_BOOK]
+        response = await async_client.get("/author/books/B000APF21M")
+
+    assert response.status_code == 200
+    assert response.headers["X-Libex-Complete"] == "false"
+    # Exactly no-store, not no-store alongside a max-age: a positive
+    # directive leaking onto an incomplete response is the whole failure
+    # this guards, and a substring check would not catch it.
+    assert response.headers["Cache-Control"] == "no-store"
+    assert response.json() != []
+
+
+@pytest.mark.asyncio
+async def test_the_legacy_route_marks_a_truncated_walk_the_same_way(async_client):
+    """The twin must not be the quiet way to get an unlabelled partial."""
+    with patch("app.api.routes.authors.router.get_author_books", new_callable=AsyncMock) as mock_books, \
+         patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
+        mock_books.return_value = AuthorBooksResult(["B08G9PRS1K"], False)
+        mock_asins.return_value = [MOCK_BOOK]
+        response = await async_client.get("/author/B000APF21M/books")
+
+    assert response.headers["X-Libex-Complete"] == "false"
+    assert response.headers["Cache-Control"] == "no-store"
 
 
 # ============================================================
@@ -277,7 +430,7 @@ async def test_get_author_books_by_name_returns_200(async_client):
     """Author books by name endpoint returns 200."""
     with patch("app.api.routes.authors.router.get_author_books_by_name", new_callable=AsyncMock) as mock_books, \
          patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
-        mock_books.return_value = ["B08G9PRS1K"]
+        mock_books.return_value = AuthorBooksResult(["B08G9PRS1K"], True)
         mock_asins.return_value = [MOCK_BOOK]
         response = await async_client.get("/author/books?name=Frank+Herbert")
         assert response.status_code == 200
@@ -295,7 +448,7 @@ async def test_get_author_books_by_name_returns_list(async_client):
     """Author books by name endpoint returns a list of full book objects."""
     with patch("app.api.routes.authors.router.get_author_books_by_name", new_callable=AsyncMock) as mock_books, \
          patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
-        mock_books.return_value = ["B08G9PRS1K"]
+        mock_books.return_value = AuthorBooksResult(["B08G9PRS1K"], True)
         mock_asins.return_value = [MOCK_BOOK]
         response = await async_client.get("/author/books?name=Frank+Herbert")
         assert isinstance(response.json(), list)

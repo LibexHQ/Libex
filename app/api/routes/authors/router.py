@@ -7,7 +7,9 @@ Compatible with AudiMeta endpoint structure for drop-in replacement.
 from typing import Annotated
 
 # Third party
-from fastapi import APIRouter, Query, Path, Depends
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Query, Path, Depends, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Database
@@ -76,11 +78,118 @@ async def get_books_by_author_name(
     return [BookResponse(**b) for b in books]
 
 
+# Browser cache for a complete author-books response. Short on purpose: a
+# browser holding a stale catalogue has no way to be purged, where the edge
+# copy expires on a schedule Libex sets below and can be purged at
+# Cloudflare. s-maxage overrides this for shared caches, so this figure only
+# ever governs the private copy.
+_BROWSER_CACHE_SECONDS = 300
+
+# Edge TTL for a complete result that was walked just now rather than read
+# from cache.
+#
+# Short, and the reason is not caution for its own sake. A fresh walk's
+# cache entry is written by a BACKGROUND task that has not necessarily
+# committed by the time this response goes out, and can fail outright. There
+# is therefore no remaining-life figure to advertise that is known to
+# correspond to anything stored. Advertising the full day here would let the
+# edge hold, and Tiered Cache spread, a copy Libex may never have persisted.
+# Five minutes bounds that to something self-correcting: the next request
+# after it lapses reads Libex's own entry and gets the exact aligned expiry
+# below.
+_FRESH_WALK_EDGE_CACHE_SECONDS = 300
+
+
+def _mark_completeness(
+    response: Response,
+    is_complete: bool,
+    cache_expires_at: datetime | None,
+) -> None:
+    """
+    Tells the caller, and any cache in front of Libex, what this response is
+    and how long it may be held.
+
+    Completeness travels in a header rather than the body, because the
+    response is a bare list[BookResponse] and that shape is a drop-in
+    compatibility contract -- adding a field would change it for every
+    consumer. A header is purely additive: a client that ignores it behaves
+    exactly as before.
+
+    The status stays 200. 206 was considered and rejected: HTTP already
+    assigns it to range requests and requires Content-Range with it, so
+    using it to mean "this data is incomplete" is both non-conformant and an
+    invitation for a CDN to route the response down its partial-content
+    path -- the last thing wanted on the endpoint whose edge caching this
+    exists to make safe.
+
+    An incomplete response is refused to caches outright. Libex's fronting
+    Cloudflare rule is configured to use the origin's cache-control when one
+    is present and to bypass when none is, so no-store here is honoured
+    rather than advisory -- measured 2026-08-17, every API path returned
+    cf-cache-status: BYPASS precisely because Libex sent no cache-control at
+    all. With Tiered Cache enabled a cached object is shared across upper
+    tiers as well, so a partial that slipped through would be wrong at
+    considerably more than one PoP.
+
+    A complete response served FROM the cache advertises exactly the life
+    remaining on Libex's own entry, so the two expire together instead of
+    the edge drifting past on a fixed timer. One served from a walk taken
+    just now gets _FRESH_WALK_EDGE_CACHE_SECONDS instead -- see that
+    constant for why a just-walked result has no trustworthy remaining life
+    to quote.
+    """
+    response.headers["X-Libex-Complete"] = "true" if is_complete else "false"
+
+    if not is_complete:
+        response.headers["Cache-Control"] = "no-store"
+        return
+
+    if cache_expires_at is None:
+        edge_seconds = _FRESH_WALK_EDGE_CACHE_SECONDS
+    else:
+        remaining = (cache_expires_at - datetime.now(timezone.utc)).total_seconds()
+        # An entry read as live can still be a hair from expiry by the time
+        # this arithmetic runs, and a negative or zero s-maxage would be
+        # nonsense to advertise. Floor rather than fall back to the fresh
+        # figure: the entry really is about to lapse, and saying so is the
+        # honest answer.
+        edge_seconds = max(0, int(remaining))
+
+    response.headers["Cache-Control"] = (
+        f"public, max-age={_BROWSER_CACHE_SECONDS}, s-maxage={edge_seconds}"
+    )
+
+
 @router.get("/books/{asin}", response_model=list[BookResponse])
 async def get_books_by_author(
     asin: Annotated[str, Path(description="Author ASIN")],
+    response: Response,
     region: str = Depends(valid_region),
-    cache: Annotated[bool, Query(description="Return cached data if available")] = False,
+    # Defaults to True, which is the point of the flag rather than an
+    # incidental choice. Defaulted False, the cache only ever served callers
+    # who explicitly asked for it, so there was no such thing as a warm
+    # request on the default public path: every request walked Audible in
+    # full, and a prolific author's walk runs to hundreds of upstream
+    # requests and 504s behind the proxy's 30s timeout. The walk already
+    # WRITES its result unconditionally -- see _walk_author_books' call to
+    # persist_author_books_cache_background -- so only the read was gated,
+    # and the cache was being populated for almost nobody.
+    #
+    # Single-flight is not a substitute and must not be read as one: it
+    # collapses CONCURRENT duplicates only. Ten callers in one instant were
+    # already a single walk; ten callers a minute apart were ten walks.
+    #
+    # The DB is not a substitute either. It is already unioned into every
+    # walk as the fourth source, so an author being stored does not spare
+    # anyone the walk -- only a cache hit does.
+    #
+    # cache=false keeps its documented meaning and still forces the full
+    # walk, so a caller who genuinely needs an uncached answer has one. That
+    # leaves the expensive path reachable by anyone, Libex having neither
+    # auth nor rate limiting by design -- but it is reachable today as the
+    # default for everyone, so this narrows the exposure rather than opening
+    # anything.
+    cache: Annotated[bool, Query(description="Return cached data if available")] = True,
     filters: LiveBookFilters = Depends(),
     sort: Annotated[BookSortField | None, Query(description="Field to sort the returned books by")] = None,
     order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
@@ -92,7 +201,9 @@ async def get_books_by_author(
     """
     if not is_valid_asin(asin):
         raise NotFoundException(f"Invalid ASIN format: {asin}")
-    asins = await get_author_books(asin, region, session, cache)
+    walk = await get_author_books(asin, region, session, cache)
+    asins = walk.asins
+    _mark_completeness(response, walk.is_complete, walk.cache_expires_at)
     if not asins:
         raise NotFoundException("No books found for author")
     # use_cache=cache: hydration is the second half of the same request
@@ -116,8 +227,11 @@ async def get_books_by_author(
 @router.get("/{asin}/books", response_model=list[BookResponse], include_in_schema=False)
 async def get_books_by_author_primary(
     asin: Annotated[str, Path(description="Author ASIN")],
+    response: Response,
     region: str = Depends(valid_region),
-    cache: Annotated[bool, Query(description="Return cached data if available")] = False,
+    # Defaults to True for the reasons given on get_books_by_author above.
+    # This is its legacy-route twin and the two must never disagree on it.
+    cache: Annotated[bool, Query(description="Return cached data if available")] = True,
     filters: LiveBookFilters = Depends(),
     sort: Annotated[BookSortField | None, Query(description="Field to sort the returned books by")] = None,
     order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
@@ -126,7 +240,9 @@ async def get_books_by_author_primary(
     """Legacy endpoint. Use /author/books/{asin} instead."""
     if not is_valid_asin(asin):
         raise NotFoundException(f"Invalid ASIN format: {asin}")
-    asins = await get_author_books(asin, region, session, cache)
+    walk = await get_author_books(asin, region, session, cache)
+    asins = walk.asins
+    _mark_completeness(response, walk.is_complete, walk.cache_expires_at)
     if not asins:
         raise NotFoundException("No books found for author")
     # use_cache=cache and high_concurrency=True: same pairing as

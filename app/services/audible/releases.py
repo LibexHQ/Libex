@@ -48,11 +48,13 @@ from app.services.audible.client import audible_get
 from app.services.audible.books import (
     _normalize_product,
     _filter_products,
+    _settle_flags_list,
     BOOK_RESPONSE_GROUPS,
     IMAGE_SIZES,
 )
 from app.services.db.reader import get_stored_genres
-from app.services.db.writer import persist_books_background, upsert_genres, reconcile_genres
+from app.services.db.persist_queue import persist_books_background
+from app.services.db.writer import upsert_genres, reconcile_genres
 from app.services.cache import manager as cache
 
 settings = get_settings()
@@ -267,7 +269,15 @@ async def get_new_releases(
         })
 
         if books:
+            # Unsettled: the writer needs the tri-state flags None/True/False
+            # exactly as _normalize_product produced them (see _asserted_bool
+            # in writer.py), so this runs before the settle below.
             persist_books_background(books, region)
+            # This endpoint's cache is read-through and returned as-is on a
+            # hit (see module docstring), unlike books.py's own cache, which
+            # is re-settled on every read regardless of source -- so what's
+            # cached and returned here has to already be the settled value.
+            books = _settle_flags_list(books)
             await cache.set(session, key, books, ttl_seconds=seconds_until_utc_midnight())
         return books
 
@@ -323,7 +333,15 @@ async def get_coming_soon(
         })
 
         if books:
+            # Unsettled: the writer needs the tri-state flags None/True/False
+            # exactly as _normalize_product produced them (see _asserted_bool
+            # in writer.py), so this runs before the settle below.
             persist_books_background(books, region)
+            # This endpoint's cache is read-through and returned as-is on a
+            # hit (see module docstring), unlike books.py's own cache, which
+            # is re-settled on every read regardless of source -- so what's
+            # cached and returned here has to already be the settled value.
+            books = _settle_flags_list(books)
             await cache.set(session, key, books, ttl_seconds=seconds_until_utc_midnight())
         return books
 

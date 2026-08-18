@@ -33,6 +33,11 @@ from app.core.exceptions import NotFoundException
 
 router = APIRouter(tags=["Releases"])
 
+# Audible category ids are purely numeric (see the stored Genre.asin column,
+# String(12)); this keeps the param from carrying arbitrary text into the
+# cache key and the Audible request.
+_CATEGORY_ID_PATTERN = r"^\d{1,12}$"
+
 
 class CategoryNode(BaseModel):
     id: str
@@ -59,7 +64,7 @@ class FlatCategoryNode(BaseModel):
 async def new_releases(
     region: str = Depends(valid_region),
     days: Annotated[ReleaseWindow, Query(description="Look-back window in days")] = ReleaseWindow.days_30,
-    category: Annotated[str | None, Query(description="Audible category id to scope the scan to (see GET /categories). Without it, the scan returns a live sample, not the full catalog.")] = None,
+    category: Annotated[str | None, Query(pattern=_CATEGORY_ID_PATTERN, description="Audible category id to scope the scan to (see GET /categories). Without it, the scan returns a live sample, not the full catalog.")] = None,
     filters: LiveBookFilters = Depends(),
     sort: Annotated[BookSortField | None, Query(description="Field to sort the returned books by")] = None,
     order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.desc,
@@ -89,7 +94,7 @@ async def new_releases(
 async def coming_soon(
     region: str = Depends(valid_region),
     days: Annotated[ReleaseWindow, Query(description="Look-ahead window in days")] = ReleaseWindow.days_30,
-    category: Annotated[str | None, Query(description="Audible category id to scope the scan to (see GET /categories). Without it, the scan returns a live sample, not the full catalog.")] = None,
+    category: Annotated[str | None, Query(pattern=_CATEGORY_ID_PATTERN, description="Audible category id to scope the scan to (see GET /categories). Without it, the scan returns a live sample, not the full catalog.")] = None,
     filters: LiveBookFilters = Depends(),
     sort: Annotated[BookSortField | None, Query(description="Field to sort the returned books by")] = None,
     order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,

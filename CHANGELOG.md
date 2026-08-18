@@ -10,6 +10,71 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.14.1]
+
+### Fixed
+- **A book's VVAB (virtual voice audiobook) status was never being saved.**
+  `isVvab` has had a column, a filter and an `/db/vvab` endpoint for months,
+  but nothing in the write path actually read it from Audible's response — a
+  new row was always inserted with it false, and an existing row's value was
+  never touched on a later write. It is now merged the same careful way as
+  the other flags below, and a fresh write correctly sets it from Audible's
+  answer. This does not repair anything already stored: every book written
+  before this release still reads false regardless of its real status, and
+  nothing here rewrites those rows. The database only sees a book again when
+  something asks for it, and the seeder never revisits a released title once
+  it has one, so `/db/vvab` will keep under-reporting until each affected book
+  happens to be requested again.
+- **An explicit `null` for `isListenable` or `isBuyable` was saved differently
+  depending on whether the book was new or already stored.** Inserting a book
+  with the field explicitly null wrote `true`; updating one with the same
+  input wrote `false`, because the two paths read the missing value through
+  different defaults. Both now read it the same way: silence keeps whatever
+  is already stored, and an explicit `true` or `false` from Audible always
+  overwrites.
+
+### Changed
+- **Writing a batch of freshly fetched books issues far fewer statements per
+  book.** 1.13.4 already grouped a background write into transactions of
+  fifty books instead of one; within each of those transactions, every book
+  still ran its own insert, its own genre and narrator statements, and so on.
+  Books in a transaction are now written with one statement per kind of row —
+  one for all fifty book rows, one for their genres, one for their pivots —
+  instead of one of each per book, cutting a prolific author's catalog from
+  roughly ten statements a book to close to one. Every write is still the
+  same upsert with the same merge rules; this only changes how many
+  statements carry them.
+- **A background write that fails from database contention is now retried
+  before falling back to writing the batch one book at a time.** A lock
+  conflict with the seeder or a dropped connection used to send the whole
+  transaction straight to the slow per-book path. It now gets up to two more
+  attempts, each in a fresh transaction and spaced out with a short,
+  randomized delay so that several workers backing off the same conflict
+  don't collide again at the same moment. Only failures a retry can plausibly
+  fix are retried — a lock conflict or a dropped connection, not a value the
+  schema rejects — so a genuinely bad book still falls through to the
+  per-book path on the first attempt.
+- **The backlog of books waiting to be written in the background is now
+  capped, and a full backlog is shed rather than left to grow.** Previously
+  nothing bounded how many background writes could be queued at once,
+  including while Postgres itself is unavailable, so a sustained outage could
+  build an unbounded amount of queued work in memory. Once roughly 5,000
+  books' worth is queued or in flight, a further batch is skipped instead of
+  queued, and a warning is logged summarizing how many books and how many
+  batches were shed. A shed book is not lost: every request still gets its
+  answer, and the book is written on the next request that fetches it. This
+  only engages while the database is degraded; ordinary traffic never
+  approaches the cap.
+- **The expired-cache purge stops on a batch that reports no row count, not
+  only on one that reports zero.** The purge deletes in batches and ends the
+  pass when a batch removes nothing. A database driver is not obliged to
+  report how many rows a statement touched — the convention for "unavailable"
+  is `-1` — and an exit written against zero alone would never fire against
+  that, leaving a background worker issuing deletes against a table it had
+  already emptied. The driver Libex uses reports these counts faithfully, so
+  nothing was doing this; the guard is against a future driver or dialect
+  change rather than an observed fault.
+
 ## [1.14.0]
 
 Nothing here changes the API itself: no endpoint, parameter, response shape,
@@ -850,7 +915,6 @@ outbound address — how much it asks of Audible at once.
   new host — but only when the notice is switched on. Left unset otherwise, so
   a self-hoster's "Try it out" and any generated SDK still target their own
   server, not the public instance.
-
 
 ## [1.9.0]
 

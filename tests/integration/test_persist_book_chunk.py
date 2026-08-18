@@ -2,23 +2,30 @@
 Integration tests for the chunked background book persist, against real
 Postgres.
 
-_persist_book_chunk trades one transaction per book for one per chunk, and
-the whole safety of that trade rests on the replay: when the shared
-transaction is lost, every book in the chunk is written again down the
+This drives _persist_book_chunk_background, the function persist_books_background
+actually calls for every chunk -- not _persist_book_chunk, which no production
+caller reaches. The two differ in exactly the place that matters for a real
+database: _persist_book_chunk_background builds a fresh session per attempt
+from the app's own engine, where the retired caller-owned-session version took
+whatever transaction the caller handed it. A mocked session cannot show which
+session survived which failure or whether a fresh one is genuinely usable
+after an aborted one, so both are asserted here against a real container --
+the whole safety of the batch-then-replay trade rests on the replay: when a
+chunk's transaction is lost, every book in it is written again down the
 per-book path, so batching never costs a book that writing one at a time
-would have stored. That guarantee is the aborted-transaction semantics
-of a real database -- a failed statement poisons the transaction, the
-rollback discards work that already succeeded within it, and the replay's
-upserts have to be genuinely idempotent against rows a previous attempt may
-or may not have left behind. A mocked session shows only that some
-statements were issued, and cannot show what survived, so the equivalence is
-asserted here against the per-book path running the same books.
+would have stored. That guarantee is the aborted-transaction semantics of a
+real database -- a failed statement poisons the transaction, the rollback
+discards work that already succeeded within it, and the replay's upserts have
+to be genuinely idempotent against rows a previous attempt may or may not
+have left behind.
 
 The failing book carries an ASIN longer than the column accepts, which is
 the schema rejecting one book's data mid-chunk: the failure lands in the
 middle of the loop with books written before it and books not yet attempted
 after it, which is the shape that distinguishes a real replay from a chunk
-that merely happened to commit.
+that merely happened to commit. It is also not retryable (_is_retryable
+returns False for a schema rejection), so the chunk falls straight to the
+per-book replay after its first attempt rather than spending its retries.
 """
 
 # Standard library
@@ -32,7 +39,8 @@ from sqlalchemy import select, text
 from app.db.models import Book, Cache
 from app.services.cache.manager import book_key, get_many
 from app.services.cache.manager import set as cache_set
-from app.services.db.writer import _persist_book_chunk, upsert_book
+from app.services.db.persist_queue import _persist_book_chunk_background
+from app.services.db.writer import upsert_book
 
 
 REGION = "us"
@@ -121,7 +129,7 @@ async def test_replay_stores_exactly_the_books_the_per_book_path_stores(db_sessi
     running those books one at a time would have. Without the replay the
     rollback takes the four sound books with it and the batching has silently
     lost data the unbatched path kept."""
-    await _persist_book_chunk(db_session, _chunk("B0CHK"), REGION)
+    await _persist_book_chunk_background(_chunk("B0CHK"), REGION)
     await _run_per_book_path(db_session, _chunk("B0PBK"))
 
     assert await _stored_books(db_session, "B0CHK") == await _stored_books(db_session, "B0PBK")
@@ -137,7 +145,7 @@ async def test_replay_writes_the_cache_entries_the_per_book_path_writes(db_sessi
     including the one whose row failed -- the two stores fail independently,
     so a book Audible answered stays servable from cache even when the schema
     refused its row."""
-    await _persist_book_chunk(db_session, _chunk("B0CHK"), REGION)
+    await _persist_book_chunk_background(_chunk("B0CHK"), REGION)
     await _run_per_book_path(db_session, _chunk("B0PBK"))
 
     chunked = {k: _strip_prefix(v, "B0CHK") for k, v in (await _cached_books(db_session, "B0CHK")).items()}
@@ -153,7 +161,7 @@ async def test_replay_restores_the_pivot_rows_too(db_session):
     """The replay recovers the whole per-book write, not just the book row:
     the author links the aborted transaction discarded are written again, so
     a recovered book is queryable by its author rather than orphaned."""
-    await _persist_book_chunk(db_session, _chunk("B0CHK"), REGION)
+    await _persist_book_chunk_background(_chunk("B0CHK"), REGION)
     await _run_per_book_path(db_session, _chunk("B0PBK"))
 
     assert await _author_links(db_session, "B0CHK") == await _author_links(db_session, "B0PBK")
@@ -168,7 +176,7 @@ async def test_a_failed_chunk_commits_nothing_before_it_replays(db_session):
     path is all-or-nothing and writes the cache entries only after every
     book, so this combination is reachable only by the rollback happening and
     the per-book replay then running."""
-    await _persist_book_chunk(db_session, _chunk("B0CHK"), REGION)
+    await _persist_book_chunk_background(_chunk("B0CHK"), REGION)
 
     poison_asin = f"B0CHK{POISON_SUFFIX}"
     stored = await db_session.execute(select(Book.asin).where(Book.asin.like("B0CHK%")))
@@ -182,7 +190,7 @@ async def test_books_after_the_failure_are_recovered_not_just_those_before_it(db
     """The books positioned after the failing one were never attempted before
     the abort, so they can only be present because the replay ran the whole
     chunk again rather than resuming from where the loop stopped."""
-    await _persist_book_chunk(db_session, _chunk("B0CHK"), REGION)
+    await _persist_book_chunk_background(_chunk("B0CHK"), REGION)
 
     stored = await _stored_books(db_session, "B0CHK")
     assert "0002" in stored and "0003" in stored
@@ -190,13 +198,16 @@ async def test_books_after_the_failure_are_recovered_not_just_those_before_it(db
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_replay_leaves_the_session_usable_for_the_next_chunk(db_session):
-    """A persist runs many chunks through one session, so a chunk that failed
-    and replayed must hand back a clean session. If the aborted transaction
-    were left open, every later chunk would fail on it and one bad book would
-    cost the rest of the catalogue."""
-    await _persist_book_chunk(db_session, _chunk("B0CHK"), REGION)
-    await _persist_book_chunk(db_session, [_book("B0NXT", 0)], REGION)
+async def test_a_replayed_chunk_does_not_cost_the_next_chunk(db_session):
+    """A persist runs many chunks in sequence, so a chunk that failed and
+    replayed must not leave anything behind that costs the next one. Each
+    attempt and the replay itself build their own session from the app's
+    engine rather than sharing the caller's, so there is no aborted
+    transaction to hand forward -- but the pool slot the failed attempt
+    checked out must still come back, or enough failing chunks in a row
+    would starve every chunk after them of a connection."""
+    await _persist_book_chunk_background(_chunk("B0CHK"), REGION)
+    await _persist_book_chunk_background([_book("B0NXT", 0)], REGION)
 
     assert await _stored_books(db_session, "B0NXT") == {"0000": "Book 0"}
 
@@ -212,7 +223,7 @@ async def test_a_sound_chunk_stores_every_book_and_every_cache_entry(db_session)
     carries all of them, and both stores end up complete."""
     chunk = [_book("B0CHK", i) for i in range(4)]
 
-    await _persist_book_chunk(db_session, chunk, REGION)
+    await _persist_book_chunk_background(chunk, REGION)
 
     assert await _stored_books(db_session, "B0CHK") == {
         "0000": "Book 0", "0001": "Book 1", "0002": "Book 2", "0003": "Book 3",
@@ -228,7 +239,7 @@ async def test_a_sound_chunk_caches_each_book_under_its_own_key(db_session):
     read serving the wrong book, which the row count alone cannot see."""
     chunk = [_book("B0CHK", i) for i in range(4)]
 
-    await _persist_book_chunk(db_session, chunk, REGION)
+    await _persist_book_chunk_background(chunk, REGION)
 
     hits = await get_many(db_session, [book_key(b["asin"], REGION) for b in chunk])
     assert hits == {book_key(b["asin"], REGION): b for b in chunk}
@@ -243,9 +254,9 @@ async def test_replaying_a_chunk_that_already_wrote_is_idempotent(db_session):
     the first left behind."""
     chunk = [_book("B0CHK", i) for i in range(3)]
 
-    await _persist_book_chunk(db_session, chunk, REGION)
+    await _persist_book_chunk_background(chunk, REGION)
     first = await _stored_books(db_session, "B0CHK")
-    await _persist_book_chunk(db_session, chunk, REGION)
+    await _persist_book_chunk_background(chunk, REGION)
 
     assert await _stored_books(db_session, "B0CHK") == first
     assert await _author_links(db_session, "B0CHK") == {"0000", "0001", "0002"}
@@ -260,7 +271,7 @@ async def test_a_chunk_write_carries_a_live_expiry(db_session):
     needed."""
     chunk = [_book("B0CHK", 0)]
 
-    await _persist_book_chunk(db_session, chunk, REGION)
+    await _persist_book_chunk_background(chunk, REGION)
 
     result = await db_session.execute(
         select(Cache.expires_at).where(Cache.key == book_key(chunk[0]["asin"], REGION))

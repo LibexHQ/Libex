@@ -60,8 +60,8 @@ def valid_region(
 # Query params whose values may be logged verbatim: region selectors,
 # pagination, sort order, and catalogue facets. Every one of them describes HOW
 # a caller asked, never WHAT they typed. Membership is necessary but not
-# sufficient -- the value must also pass _is_safe_value, and one that does not is
-# replaced by the sentinel with its key kept, exactly like a param that is
+# sufficient -- the value must also pass is_safe_log_value, and one that does not
+# is replaced by the sentinel with its key kept, exactly like a param that is
 # known but not listed here. A key in neither set is dropped whole, pair and
 # all; see _KNOWN_QUERY_PARAMS.
 #
@@ -157,8 +157,15 @@ _UNSAFE_VALUE_CHARS = frozenset(";=")
 _MAX_VALUE_LENGTH = 64
 
 
-def _is_safe_value(value: str) -> bool:
-    """True if a value is short catalogue vocabulary rather than caller text."""
+def is_safe_log_value(value: str) -> bool:
+    """
+    True if a value is short catalogue vocabulary rather than caller text.
+
+    Public rather than local to this module: it is the one place the
+    value-safety judgment is made, and every other log field that could embed
+    caller-supplied text -- a cache key built from a query param, for one --
+    calls this rather than growing its own copy of the same rule.
+    """
     if len(value) > _MAX_VALUE_LENGTH:
         return False
     return all(
@@ -214,7 +221,7 @@ def _redact_query(raw_query: str) -> str:
 
 def _logged_value(key: str, value: str) -> str:
     """Returns an allowlisted key's value if it is safe to log, else the sentinel."""
-    if key in _SAFE_QUERY_PARAMS and _is_safe_value(value):
+    if key in _SAFE_QUERY_PARAMS and is_safe_log_value(value):
         return value
     return _REDACTED
 

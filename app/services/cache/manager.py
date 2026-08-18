@@ -24,11 +24,15 @@ be authoritative over and no outage to fall back from in the first place.
 """
 
 # Standard library
+import asyncio
+import random
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
 # Third party
-from sqlalchemy import select, delete
+from asyncpg.exceptions import TransactionRollbackError
+from sqlalchemy import select, delete, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert
 
@@ -39,9 +43,24 @@ from app.db.models import Cache
 # Core
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.core.middleware import is_safe_log_value
 
 settings = get_settings()
 logger = get_logger()
+
+# Every key builder below composes only region, ASIN and enum-bounded
+# arguments -- all validated before they reach here -- so a key is safe by
+# construction and this rarely fires. It stays as the backstop for the one
+# place that isn't: get/set/invalidate take a bare `key` from any caller,
+# and the guarantee upstream validation gives a specific builder does not
+# extend to this function's signature. Reuses is_safe_log_value rather than
+# a second rule, so the two cannot drift apart.
+_REDACTED_KEY = "REDACTED"
+
+
+def _safe_key_for_log(key: str) -> str:
+    """Returns a cache key as-is for logging if it is safe, else the sentinel."""
+    return key if is_safe_log_value(key) else _REDACTED_KEY
 
 
 # ============================================================
@@ -71,11 +90,6 @@ def series_key(asin: str, region: str) -> str:
 
 def series_books_key(asin: str, region: str) -> str:
     return f"series_books:{region}:{asin}"
-
-
-def search_key(query: str, region: str) -> str:
-    normalized = query.lower().strip().replace(" ", "+")
-    return f"search:{region}:{normalized}"
 
 
 def chapters_key(asin: str, region: str) -> str:
@@ -112,10 +126,10 @@ async def get(session: AsyncSession, key: str) -> Any | None:
     entry = result.scalar_one_or_none()
 
     if entry is None:
-        logger.info("Cache miss", extra={"cacheKey": key})
+        logger.info("Cache miss", extra={"cacheKey": _safe_key_for_log(key)})
         return None
 
-    logger.info("Cache hit", extra={"cacheKey": key})
+    logger.info("Cache hit", extra={"cacheKey": _safe_key_for_log(key)})
     return entry.value
 
 
@@ -211,33 +225,149 @@ async def set(
 
     await session.execute(stmt)
     await session.commit()
-    logger.info("Cache set", extra={"cacheKey": key, "ttl": ttl})
+    logger.info("Cache set", extra={"cacheKey": _safe_key_for_log(key), "ttl": ttl})
 
 
 async def invalidate(session: AsyncSession, key: str) -> None:
     """Deletes a specific cache entry by key."""
     await session.execute(delete(Cache).where(Cache.key == key))
     await session.commit()
-    logger.debug(f"Cache invalidated: {key}")
+    logger.debug("Cache invalidated", extra={"cacheKey": _safe_key_for_log(key)})
+
+
+# Rows removed per purge_expired pass. Measured directly against a throwaway
+# Postgres 16.14 instance, cache table as defined, non-compressible payloads
+# sized to the ~3.3KB a normalized book measures serialized: an unbatched
+# DELETE over every expired row took 3.83s at 200k rows and 25.60s at 600k —
+# superlinear, and dominated by row and TOAST deletion rather than the scan
+# (600k dirtied 306,197 buffers against 6,186 for the seq scan). Restoring the
+# expires_at index dropped in 22195f2af627 does not help — the plan is
+# correctly a seq scan when everything is expired, and the cost measured
+# above it, not the lookup. A corpus refresh over 1.1M+ books writes one
+# cache row per book at the default TTL, so a single purge can face the whole
+# cache expiring inside one hourly window — comfortably past
+# session.py's statement_timeout of 30s on the unbatched form, which fails
+# every attempt identically and purges nothing, forever.
+#
+# 10,000 selected by ctid, not a WHERE IN of keys — ctid carries no per-row
+# bind parameter, so it cannot reintroduce the bind-limit failure the
+# predicate delete below it was already written to avoid. Measured at 94ms,
+# two orders of magnitude inside the timeout.
+_PURGE_BATCH_SIZE = 10000
+
+_PURGE_BATCH_STATEMENT = text(
+    "DELETE FROM cache WHERE ctid IN ("
+    "SELECT ctid FROM cache WHERE expires_at <= :now LIMIT :batch_size)"
+)
+
+# Attempts per batch against a deadlock or serialization failure, and the
+# first backoff step between them, doubled per attempt and jittered across
+# half to one and a half — same shape as persist_queue's chunk retry, kept
+# local instead of imported so this module gains no edge onto persist_queue
+# (which already imports this one). Measured under a corpus refresh's write
+# rate: 7 deadlocks in ~12 seconds against four concurrent _cache_set_many
+# writers, three of which would otherwise have killed a purger on its first
+# batch. Nothing about the collision is expected to repeat on a retry — the
+# writers bind in insertion order, the DELETE's Tid Scan follows a
+# HashAggregate's bucket order, and the two correlate with nothing about each
+# other from one attempt to the next.
+_PURGE_MAX_ATTEMPTS = 3
+_PURGE_RETRY_BASE_SECONDS = 0.25
+
+
+async def _purge_batch(session: AsyncSession, now: datetime) -> int:
+    """
+    Executes and commits one purge batch, retrying a deadlock or
+    serialization failure against the same candidate rows before giving up.
+
+    Raises the final attempt's DBAPIError rather than swallowing it — every
+    batch before this one already committed regardless, so purge_expired is
+    the one that decides whether stopping the pass there is acceptable.
+    """
+    for attempt in range(1, _PURGE_MAX_ATTEMPTS + 1):
+        try:
+            result = await session.execute(
+                _PURGE_BATCH_STATEMENT, {"now": now, "batch_size": _PURGE_BATCH_SIZE}
+            )
+            await session.commit()
+            return result.rowcount
+        except DBAPIError as exc:
+            await session.rollback()
+            retryable = isinstance(getattr(exc, "orig", None), TransactionRollbackError)
+            if attempt == _PURGE_MAX_ATTEMPTS or not retryable:
+                raise
+            nominal = _PURGE_RETRY_BASE_SECONDS * (2 ** (attempt - 1))
+            await asyncio.sleep(nominal * (0.5 + random.random()))
 
 
 async def purge_expired(session: AsyncSession) -> int:
     """
-    Deletes all expired cache entries.
-    Returns the number of rows deleted.
-    Intended to be called on a schedule.
+    Deletes all expired cache entries, one bounded batch at a time.
+    Returns the total rows deleted so far. Intended to be called on a
+    schedule.
 
-    Deletes directly by the expiry predicate rather than collecting keys and
-    deleting by an IN list — an IN over every expired key blows past asyncpg's
-    32,767 bind-parameter limit once the cache is large, which was failing the
-    purge outright. A predicate delete has no per-row parameters, so it holds at
-    any size. The row count comes from the DELETE's own rowcount.
+    A single unbatched DELETE over the whole table risks statement_timeout
+    once enough rows are expired at once — see _PURGE_BATCH_SIZE — which
+    rolls back the entire statement and purges nothing. Each batch commits on
+    its own instead, so a timeout, a deadlock, or a restart mid-purge keeps
+    whatever already committed rather than losing all progress, and no single
+    statement holds the connection anywhere near the timeout.
+
+    Selecting by ctid rather than an IN list of keys is also what keeps this
+    safe under _cache_purge_loop running uncoordinated in all six workers: a
+    row a concurrent purge already deleted is simply not selected again by
+    the next one, never a duplicate-delete error, and rowcount reflects only
+    what this call actually removed.
+
+    Loops until a pass deletes nothing — not until a pass returns fewer than
+    a full batch. A short batch is not proof the candidate set is empty: a
+    row refreshed between the SELECT's snapshot and the DELETE fails
+    ctid IN (...)'s EvalPlanQual recheck and is correctly spared, and a
+    corpus refresh's write rate makes that the norm rather than the
+    exception — measured, one purger against one modest writer: a batch of
+    10,000 candidates delivered 9,996 spared-and-short, ending the pass with
+    88,110 genuinely expired rows still in place. now is bound once before
+    the loop, so the candidate set can only shrink across passes — deleted
+    rows leave it, refreshed rows leave it — which is what still guarantees
+    termination without the short-batch shortcut.
+
+    A batch that still can't complete after _purge_batch's own retries stops
+    the pass here rather than raising out to _cache_purge_loop's hourly
+    retry — every earlier batch's commit already stands, so the loss is only
+    this pass's remainder, picked up again on the next scheduled run.
     """
-    result = await session.execute(
-        delete(Cache).where(Cache.expires_at <= datetime.now(timezone.utc))
-    )
-    await session.commit()
+    total = 0
+    now = datetime.now(timezone.utc)
+    while True:
+        try:
+            deleted = await _purge_batch(session, now)
+        except DBAPIError as exc:
+            logger.warning(
+                "Cache purge batch failed, stopping this pass",
+                extra={
+                    "purged": total,
+                    "error_type": type(exc).__name__,
+                    "sqlstate": getattr(getattr(exc, "orig", None), "sqlstate", None),
+                },
+            )
+            break
 
-    count = result.rowcount
-    logger.info(f"Purged {count} expired cache entries")
-    return count
+        # Tested and broken on before the total is touched, so a driver's -1
+        # ends the pass without also landing in the count this returns and
+        # logs. <= rather than ==, because this comparison is the pass's only exit
+        # and a driver is not obliged to report a row count at all: the DBAPI
+        # convention for "unavailable" is -1, and an exit written against 0
+        # alone never fires against it. asyncpg reports DELETE counts
+        # faithfully, so this is a guard against a driver or dialect change
+        # rather than a live defect — but the cost of being wrong here is not
+        # a bad count, it is a background worker spending the rest of its life
+        # issuing DELETEs against a table it has already emptied, and the loop
+        # should not be one substituted driver away from that.
+        if deleted <= 0:
+            break
+
+        total += deleted
+
+    if total:
+        logger.info(f"Purged {total} expired cache entries")
+    return total

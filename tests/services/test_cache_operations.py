@@ -364,15 +364,39 @@ async def test_cache_purge_calls_commit():
 
 @pytest.mark.asyncio
 async def test_cache_purge_returns_rowcount():
-    """Cache purge returns the number of rows the delete removed."""
+    """Cache purge totals the rows every batch removed, and stops on the
+    first batch that removes none. The empty batch is what ends the pass, so
+    a mock that reports the same non-zero rowcount forever never terminates."""
     session = AsyncMock()
-    mock_result = MagicMock()
-    mock_result.rowcount = 42
-    session.execute = AsyncMock(return_value=mock_result)
+    first = MagicMock()
+    first.rowcount = 42
+    exhausted = MagicMock()
+    exhausted.rowcount = 0
+    session.execute = AsyncMock(side_effect=[first, exhausted])
     session.commit = AsyncMock()
 
     count = await purge_expired(session)
     assert count == 42
+    assert session.execute.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_cache_purge_stops_on_a_driver_that_reports_no_rowcount():
+    """A batch reporting the DBAPI's "count unavailable" -1 ends the pass
+    rather than spinning. The batch loop's only exit is this comparison, so a
+    driver that never reports 0 would otherwise leave a background worker
+    issuing DELETEs forever against an already-empty table -- the failure is
+    unbounded work, not a wrong return value, which is why it is pinned here
+    rather than left to the count assertions above."""
+    session = AsyncMock()
+    no_rowcount = MagicMock()
+    no_rowcount.rowcount = -1
+    session.execute = AsyncMock(return_value=no_rowcount)
+    session.commit = AsyncMock()
+
+    count = await purge_expired(session)
+    assert session.execute.await_count == 1
+    assert count == 0
 
 
 @pytest.mark.asyncio

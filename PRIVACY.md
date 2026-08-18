@@ -291,9 +291,12 @@ Stated plainly, because the absences matter as much as the list above:
   headers named in the table above are ever read for logging.
 - **No caller data in the database at all.** Libex's Postgres database holds
   Audible metadata — books, authors, narrators, series, genres, chapters — and
-  a cache of Audible responses keyed by ASIN and region. There is no table
-  that holds anything about the people making requests. Purging caller data
-  means purging logs; the database has nothing to purge.
+  a cache of Audible responses. What a cache entry is keyed by describes what
+  was asked for, never who asked: a region and an ASIN or list of ASINs for the
+  lookup endpoints, and for the date-window endpoints a day count and the
+  catalogue category the scan was scoped to. There is no table that holds
+  anything about the people making requests. Purging caller data means purging
+  logs; the database has nothing to purge.
 
 ---
 

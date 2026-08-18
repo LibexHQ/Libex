@@ -31,7 +31,8 @@ from app.core.utils import strip_html, strip_image_size_suffix
 from app.services.audible.client import audible_get, author_books_concurrency, REGION_MAP
 from app.services.cache import manager as cache
 from app.services.cache.manager import book_key, chapters_key
-from app.services.db.writer import persist_books_background, persist_track_background, upsert_track
+from app.services.db.persist_queue import persist_books_background, persist_track_background
+from app.services.db.writer import upsert_track
 from app.services.db.reader import get_books_from_db, get_track_from_db
 
 logger = get_logger()
@@ -153,9 +154,77 @@ def _parse_genres(product: dict) -> list[dict]:
     return genres
 
 
-def _parse_plans(product: dict) -> list[str]:
-    """Extracts plan_names from the plans array."""
-    return [p["plan_name"] for p in product.get("plans", []) if p.get("plan_name")]
+# How often the "plans entries present but unreadable" warning below actually
+# logs, once it starts firing repeatedly. An upstream rename of plan_name is
+# exactly the scenario that trips this on every product in a page, or a whole
+# search response, at once -- a line per product is the flood that would bury
+# the one signal worth keeping: that it happened at all, and how much.
+_UNREADABLE_PLANS_LOG_INTERVAL_SECONDS = 60
+
+_unreadable_plans_count = 0
+_unreadable_plans_last_logged = 0.0
+
+
+def _log_unreadable_plans(asin: str) -> None:
+    """
+    Reports "Audible sent plans entries this parser can't read" at most once
+    per _UNREADABLE_PLANS_LOG_INTERVAL_SECONDS, the same windowing
+    persist_queue.py's _record_shed applies to its own repeat-incident
+    warning and for the same reason: this can fire on every product at once
+    if plan_name itself is what changed shape, and an uncapped line per
+    product would flood out the report of the one incident causing all of
+    them. asin is the most recently affected product in the window, not
+    every one of them -- enough to start looking without paying for a line
+    per occurrence.
+    """
+    global _unreadable_plans_count, _unreadable_plans_last_logged
+    _unreadable_plans_count += 1
+    now = time.monotonic()
+    if now - _unreadable_plans_last_logged < _UNREADABLE_PLANS_LOG_INTERVAL_SECONDS:
+        return
+    logger.warning("Audible plans entries present but unreadable", extra={
+        "asin": asin,
+        "occurrences": _unreadable_plans_count,
+    })
+    _unreadable_plans_count = 0
+    _unreadable_plans_last_logged = now
+
+
+def _parse_plans(product: dict) -> list[str] | None:
+    """
+    Extracts plan_names from the plans array.
+
+    None when the response carries no `plans` key at all; [] when it carries
+    an explicitly empty one. The two reach the writer differently -- None
+    coalesces onto whatever is already stored, [] replaces it (see writer.py's
+    JSONB(none_as_null=True) book upsert) -- so this response field can now
+    surface null where it previously always surfaced a list.
+
+    A third case folds into the None side rather than the [] side: entries
+    are present but not one of them yields a readable plan_name (the key
+    renamed, an entry carrying only plan_id, a plan_name that is itself
+    null). plan_name appears nowhere else in the codebase but this line, so
+    an upstream shape change here is invisible until it's read back --
+    and unlike an explicitly empty array, which is Audible asserting "there
+    are no plans," this is Libex failing to read whatever Audible actually
+    sent. Treating it as silence (None: coalesce, leave whatever's stored
+    alone) rather than as an assertion ([]: overwrite) is what stops a
+    rename from silently emptying the plans column across the whole corpus
+    the next time every stored book gets re-read. Logged, because otherwise
+    nobody would find out until the column was already empty.
+
+    A partial miss -- some entries readable, some not -- does NOT take this
+    branch: it returns whatever it could read, same as always, because a
+    partial answer is a real answer, not a total parse failure.
+    """
+    raw = product.get("plans")
+    if raw is None:
+        return None
+    names = [p["plan_name"] for p in raw if p.get("plan_name")]
+    if raw and not names:
+        _log_unreadable_plans(product.get("asin", ""))
+        return None
+    return names
 
 
 def _parse_series(product: dict, region: str) -> list[dict]:
@@ -211,10 +280,17 @@ def _normalize_product(product: dict, region: str) -> dict[str, Any]:
         "episodeType": product.get("episode_type") if is_podcast else None,
         "sku": product.get("sku"),
         "skuGroup": product.get("sku_lite"),
-        "isListenable": product.get("is_listenable", False),
-        "isAvailable": product.get("is_buyable", False),
-        "isBuyable": product.get("is_buyable", False),
-        "isVvab": product.get("is_vvab", False),
+        # No default: True/False here would be Libex asserting an answer
+        # Audible never gave. None means "Audible said nothing" and is what
+        # lets the writer's tri-state merge (see _asserted_bool in writer.py)
+        # tell that apart from an explicit false and leave a stored value
+        # alone. isAvailable and isBuyable are both is_buyable -- AudiMeta's
+        # own DTO derives them the same way (see _settle_flags below for
+        # where None stops being a valid outward value).
+        "isListenable": product.get("is_listenable"),
+        "isAvailable": product.get("is_buyable"),
+        "isBuyable": product.get("is_buyable"),
+        "isVvab": product.get("is_vvab"),
         "plans": _parse_plans(product),
         "updatedAt": None,
         "authors": _parse_authors(product, region),
@@ -222,6 +298,70 @@ def _normalize_product(product: dict, region: str) -> dict[str, Any]:
         "genres": _parse_genres(product),
         "series": series_list,
     }
+
+
+# Settled values for the four tri-state flags above, matched to the columns'
+# own DB defaults (app/db/models.py) so a live-fetched book and a DB-backed
+# one never disagree about the same ASIN once the row exists: True mirrors
+# AudiMeta's own ingest (no ?? false, unlike explicit/hasPdf/whisperSync) for
+# the three it defines, and isVvab -- which AudiMeta doesn't have -- settles
+# to Libex's own prior emitted value rather than inventing a new one.
+_FLAG_SETTLE_DEFAULTS: dict[str, bool] = {
+    "isListenable": True,
+    "isAvailable": True,
+    "isBuyable": True,
+    "isVvab": False,
+}
+
+
+def _settle_flags(book: dict[str, Any]) -> dict[str, Any]:
+    """
+    Fills a None tri-state flag with its settled default, for anything that
+    is about to leave the Audible service layer: filtering.py's equality
+    match runs on these same dict keys, and every BookResponse field is a
+    plain bool with no null variant, so None can reach neither. Persistence
+    is the one consumer this must NOT run before -- the writer needs the
+    None to tell "Audible said nothing" apart from an explicit false (see
+    _normalize_product above) -- so every caller settles only the value it
+    hands back to its own caller, never what it hands to
+    persist_books_background.
+
+    plans rides along in the same step for the same reason, even though it
+    isn't a bool: _parse_plans is deliberately tri-state too (None for "no
+    plans key at all" so the writer's coalesce leaves a stored array alone,
+    vs. [] for "Audible said explicitly empty," which overwrites -- see
+    _parse_plans), and BookResponse.plans is `list[str]` with no null
+    variant, same as the four flags below. A None here reaches neither
+    filtering.py's equality match nor BookResponse otherwise: pydantic does
+    not fall back to a field's default_factory on an explicit None, it
+    raises, and every route this feeds fell over on exactly that until this
+    settled it here rather than in _parse_plans.
+
+    Returns a new dict; the input is never mutated, since some callers still
+    need the unsettled version afterwards (see get_new_releases/
+    get_coming_soon in releases.py, which persist the tri-state and cache the
+    settled result under the same call).
+
+    Only settles a key that is PRESENT and None -- never adds a key a dict
+    never carried. _normalize_product always carries all four flags plus
+    plans, so nothing that went through it is affected by the distinction;
+    what it protects is a dict from a source outside that contract (the DB
+    backstop path's rows always carry real, already-non-null booleans and an
+    already-listed plans -- see reader.py's `book.plans or []` -- so nothing
+    there needs settling in the first place).
+    """
+    settled = dict(book)
+    for key, default in _FLAG_SETTLE_DEFAULTS.items():
+        if key in settled and settled[key] is None:
+            settled[key] = default
+    if "plans" in settled and settled["plans"] is None:
+        settled["plans"] = []
+    return settled
+
+
+def _settle_flags_list(books: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Maps _settle_flags over a list. See that function for what and why."""
+    return [_settle_flags(b) for b in books]
 
 
 async def _normalize_products(products: list[dict], region: str) -> list[dict[str, Any]]:
@@ -331,6 +471,32 @@ async def _fetch_chunk(asins: list[str], region: str) -> list[dict[str, Any]]:
 # ============================================================
 
 async def get_books_by_asins(
+    asins: list[str],
+    region: str,
+    session: AsyncSession,
+    use_cache: bool = False,
+    high_concurrency: bool = False,
+) -> list[dict[str, Any]]:
+    """
+    Public entry point. Delegates to _get_books_by_asins_unsettled and settles
+    the four tri-state flags (see _settle_flags) on whatever it returns before
+    handing it back.
+
+    That inner function has several return points -- an early cache hit, the
+    full-fetch success path, and two different failure fallbacks -- and every
+    one of them can carry a None flag, whether freshly normalized or read back
+    from a cache entry someone else wrote with the tri-state still in it.
+    Settling once here, on the outside, covers all of them from a single place
+    and can't be silently bypassed by a return path added inside later; the
+    alternative was inserting the same call at each of those points.
+    """
+    books = await _get_books_by_asins_unsettled(
+        asins, region, session, use_cache, high_concurrency
+    )
+    return _settle_flags_list(books)
+
+
+async def _get_books_by_asins_unsettled(
     asins: list[str],
     region: str,
     session: AsyncSession,

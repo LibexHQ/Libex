@@ -300,6 +300,15 @@ def test_filter_products_returns_empty_for_empty_input():
     assert _filter_products([]) == []
 
 
+def test_filter_products_drops_the_hollow_not_found_stub_before_it_reaches_normalization():
+    """The stub Audible returns for an ASIN that doesn't resolve in the
+    queried region carries no title and no `plans` key at all -- this is the
+    only real shape that can trip _parse_plans' silence branch, and it never
+    reaches _normalize_product because it has no title either."""
+    hollow_stub = {"asin": "B0NOTFOUND1", "product_state": "NOT_AVAILABLE_FOR_PURCHASE"}
+    assert _filter_products([hollow_stub]) == []
+
+
 # ============================================================
 # NORMALIZE TESTS
 # ============================================================

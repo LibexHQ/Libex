@@ -239,3 +239,65 @@ async def test_get_books_by_sku_forwards_sku_to_reader(async_client):
         await async_client.get("/book/sku/BK_ADBL_002663")
         args, _ = mock.call_args
         assert args[1] == "BK_ADBL_002663"
+
+
+# ============================================================
+# ?cache=true — THE SERVED RESPONSE, NOT JUST THE SERVICE RETURN VALUE
+# ============================================================
+# tests/services/test_books_service.py already proves get_books_by_asins'
+# own cache-hit branches return the identical dict a live fetch normalizes
+# to. What that leaves unproven is the one thing this router actually ships:
+# BookResponse(**data) -- a cache hit and a live fetch could still diverge
+# once Pydantic gets to coerce, default, or drop fields on the way out, and
+# that is the layer drop-in AudiMeta compatibility is actually enforced at.
+# These mock one level deeper than the router (audible_get and cache.get,
+# not get_book_by_asin itself) so the real service call, the real cache-hit
+# branch, and the real response_model serialization all run for real.
+
+def _cache_route_product(asin):
+    """A product shape rich enough to exercise more than the placeholder
+    defaults MOCK_BOOK above already carries as None/False."""
+    return {
+        "asin": asin, "title": "Cache Parity Book", "authors": [], "narrators": [],
+        "relationships": [], "product_images": {}, "category_ladders": [],
+        "rating": {}, "publication_datetime": "2021-01-01T00:00:00Z",
+        "is_listenable": True, "is_buyable": True, "is_vvab": False,
+        "plans": [{"plan_name": "US Minerva"}],
+    }
+
+
+@pytest.mark.asyncio
+async def test_cache_hit_serves_the_identical_response_body_a_live_fetch_would(async_client):
+    """A cache hit and a live fetch of the same ASIN must produce byte-for-byte
+    the same served JSON once both have gone through BookResponse -- not just
+    the same pre-serialization dict. audible_get is asserted not-called on the
+    cache-hit request so this is really the cache branch and not a live fetch
+    that happened to agree with itself.
+
+    The cache is seeded with the exact dict the service layer's own
+    normalization produced for a live call (obtained by calling
+    get_books_by_asins directly, the same function the route calls
+    internally) rather than a hand-built stand-in that could drift from what
+    normalization genuinely emits -- the service-layer tests already cover
+    that parity; what this adds is that BookResponse(**data) serializes both
+    paths' payloads to the same served JSON."""
+    from app.services.audible.books import get_books_by_asins
+
+    asin = "B0CACHE001"
+
+    with patch("app.services.audible.books.audible_get",
+               return_value={"product": _cache_route_product(asin)}), \
+         patch("app.services.audible.books.persist_books_background"), \
+         patch("app.services.audible.books.cache.get", return_value=None):
+        live_response = await async_client.get(f"/book/{asin}")
+        normalized = (await get_books_by_asins([asin], "us", AsyncMock()))[0]
+    assert live_response.status_code == 200
+    live_body = live_response.json()
+
+    with patch("app.services.audible.books.audible_get", new_callable=AsyncMock) as mock_audible_get, \
+         patch("app.services.audible.books.cache.get", new=AsyncMock(return_value=normalized)):
+        cached_response = await async_client.get(f"/book/{asin}?cache=true")
+
+    mock_audible_get.assert_not_called()
+    assert cached_response.status_code == 200
+    assert cached_response.json() == live_body

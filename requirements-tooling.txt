@@ -1,0 +1,27 @@
+# The human-edited source for requirements-tooling.lock — the lint and audit
+# tools CI runs. Nothing installs this file directly; regenerate with:
+#   uv pip compile requirements-tooling.txt --generate-hashes \
+#     --python-version 3.12 -o requirements-tooling.lock
+#
+# Separate from the application locks for two reasons, and the second is the
+# one that matters.
+#
+# First, hash mode is per pip invocation. `pip install ruff pip-audit` is its
+# own command, so the application locks' verification never reached it: ruff
+# was pinned but unverified and pip-audit was neither. That left the step that
+# decides whether Libex has known vulnerabilities as the least protected
+# install in the build — a substituted pip-audit reports clean. Unpinned also
+# meant CI was not reproducible: a new pip-audit release could turn every
+# branch red with nothing in the repo having changed.
+#
+# Second, and the reason this is a separate ENVIRONMENT and not merely a third
+# lock: pip-audit's own dependency tree overlaps the application's — requests,
+# urllib3, packaging, certifi. Installed alongside the app, pip is free to
+# move packages that were just installed under hash verification, which
+# defeats the guarantee twice: the environment stops being the locked set, and
+# pip-audit then audits that mutated environment rather than what actually
+# ships. CI installs this into a venv of its own and audits `requirements.lock`
+# by name, so the audited set is exactly the shipped set and no tool can
+# perturb it.
+ruff==0.14.14
+pip-audit==2.10.1

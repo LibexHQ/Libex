@@ -1,4 +1,19 @@
+# The human-edited source for requirements-dev.lock. Same rules as
+# requirements.txt: nothing installs this file directly, and an edit here is
+# inert until the lock is regenerated:
+#   uv pip compile requirements-dev.txt --generate-hashes \
+#     --python-version 3.12 -o requirements-dev.lock
+
 -r requirements.txt
 -c constraints.txt
+
+# The test runners. These are deliberately NOT in requirements.txt: that file
+# is the source for requirements.lock, which is the only thing the Dockerfile
+# installs, so anything listed there ships inside the published image. A test
+# runner in a production runtime is attack surface and image weight buying
+# nothing -- the image has no tests to run.
+pytest==9.0.3
+pytest-asyncio==1.3.0
+pytest-timeout==2.4.0
 
 testcontainers[postgres]==4.14.2

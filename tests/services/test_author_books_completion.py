@@ -155,6 +155,41 @@ async def test_the_same_author_in_another_region_is_a_separate_completion():
 
 
 @pytest.mark.asyncio
+async def test_a_full_queue_sheds_rather_than_growing_without_bound():
+    """The concurrency limit bounds how many completions RUN; this bounds how
+    many WAIT.
+
+    Completions drain one at a time at up to 300s each, so a cold catalogue
+    of prolific authors enqueues faster than it empties, and every pending
+    task retains its own copy of a partial ASIN list -- thousands of them is
+    hundreds of megabytes per worker, six workers over. Depth is also
+    latency: past the ceiling a queued completion would start over an hour
+    late, spending the Audible lane on a request nobody is waiting for.
+    persist_queue sheds for exactly this reason; this is the sibling that
+    was missing it."""
+    release = asyncio.Event()
+
+    async def _walk(asin, region, session, *, time_budget, allow_background_completion):
+        await release.wait()
+        return AuthorBooksResult([], True)
+
+    with patch("app.services.audible.authors._walk_author_books", new=_walk), \
+         patch.object(completion, "_CompletionSession"):
+        for i in range(completion._COMPLETION_QUEUE_MAX):
+            completion.request_author_books_completion(f"B{i:09d}", "us", ["B0A"])
+        await asyncio.sleep(0)
+        assert completion.inflight_count() == completion._COMPLETION_QUEUE_MAX
+
+        # One past the ceiling is refused, not queued.
+        completion.request_author_books_completion("B999999999", "us", ["B0A"])
+        assert completion.inflight_count() == completion._COMPLETION_QUEUE_MAX
+        assert ("B999999999", "us") not in completion._completion_inflight
+
+        release.set()
+        await _drain()
+
+
+@pytest.mark.asyncio
 async def test_an_author_who_never_finishes_stops_being_retried():
     """The cap is what stops an author whose walk can never complete being
     re-walked on every truncated request forever -- which would be worse

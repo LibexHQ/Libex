@@ -176,10 +176,10 @@ SCREENS_CLEAN_REASONS = frozenset({SCREENS_REASON_COMPLETED})
 # as a genuine end would be, since nothing this walk can do reaches past
 # that window. Gating completeness on COMPLETED alone made is_complete
 # permanently unreachable for exactly the prolific authors this feature
-# exists to serve, forcing them onto AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS
-# (900s) forever instead of the default day-long TTL -- up to 96 full walks
-# a day, each hundreds of upstream requests through Libex's single exit IP,
-# strictly worse than not caching them at all.
+# exists to serve, forcing them onto the not-cached-at-all path forever
+# instead of the default day-long TTL -- a full walk on every single
+# request, each hundreds of upstream requests through Libex's single exit
+# IP, for exactly the authors that cost the most to walk.
 #
 # SCREENS_REASON_TOKEN_REPEATED stays in this broken set rather than
 # joining PLATEAU_TRUNCATED, even though the sequential fallback walk's own

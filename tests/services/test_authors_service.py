@@ -6,6 +6,7 @@ Tests normalization helpers without hitting Audible.
 # Standard library
 import asyncio
 import base64
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -18,7 +19,6 @@ from app.services.audible.authors import (
     _normalize_author,
     _generate_session_id,
     _CatalogBooksResult,
-    AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS,
 )
 from app.services.audible.authors.screens import (
     _select_asin_rows,
@@ -2205,6 +2205,59 @@ def test_process_catalog_page_populates_names_into_an_already_empty_dict():
 
     assert category_names == {"18580": "Science Fiction & Fantasy"}
     assert category_frequency == {"18580": 1}
+
+
+@pytest.mark.asyncio
+async def test_a_cache_hit_returns_the_stored_list_as_complete_with_its_expiry():
+    """The read side of the invariant the whole caching design rests on.
+
+    Only a finished walk is ever written to the author-books key, so a hit
+    is complete by construction -- and the route turns that into
+    X-Libex-Complete and into how long an edge may hold the response. Until
+    this test existed the claim lived only in a docstring: flipping the
+    is_complete literal on that line left the entire suite passing, so
+    nothing would have caught a hit being reported as truncated (killing
+    edge caching outright) or, worse, the reverse.
+
+    The expiry is asserted alongside it because the two travel together --
+    s-maxage is derived from it, so a hit that returned the right list with
+    the wrong expiry would advertise a lifetime the stored entry does not
+    have."""
+    from app.services.audible.authors import get_author_books
+    from app.services.cache.manager import CacheEntry
+
+    expires_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    mock_session = AsyncMock()
+    entry = CacheEntry(["B0STORED001", "B0STORED002"], expires_at)
+
+    with patch("app.services.audible.authors.cache.get_entry", new=AsyncMock(return_value=entry)), \
+         patch("app.services.audible.authors._walk_author_books", new=AsyncMock()) as mock_walk:
+        result = await get_author_books("B000AUTHOR", "us", mock_session, use_cache=True)
+
+    assert result.asins == ["B0STORED001", "B0STORED002"]
+    assert result.is_complete is True
+    assert result.cache_expires_at == expires_at
+    # The whole point of a hit: the walk must not run.
+    mock_walk.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_cache_miss_still_walks_and_reports_no_expiry():
+    """Complement: a miss must fall through to the walk, and must not
+    inherit an expiry it has no entry for -- a freshly walked result is
+    written in the background and may not be stored at all yet, which is why
+    the route gives it only a short edge lifetime."""
+    from app.services.audible.authors import get_author_books, AuthorBooksResult
+
+    mock_session = AsyncMock()
+    with patch("app.services.audible.authors.cache.get_entry", new=AsyncMock(return_value=None)), \
+         patch("app.services.audible.authors._walk_author_books",
+               new=AsyncMock(return_value=AuthorBooksResult(["B0WALKED001"], True))) as mock_walk:
+        result = await get_author_books("B000AUTHOR", "us", mock_session, use_cache=True)
+
+    mock_walk.assert_called_once()
+    assert result.asins == ["B0WALKED001"]
+    assert result.cache_expires_at is None
 
 
 # ============================================================

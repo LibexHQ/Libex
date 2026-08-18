@@ -68,6 +68,25 @@ _COMPLETION_CONCURRENCY_LIMIT = 1
 # than the behaviour this replaced.
 _COMPLETION_MAX_ATTEMPTS = 2
 
+# Completions allowed to be queued or running at once, per worker process.
+#
+# The concurrency limit above bounds how many RUN; without a ceiling here
+# nothing bounds how many WAIT. A cold catalogue of prolific authors enqueues
+# faster than a serialized 300s drain empties, and each pending task retains
+# its own copy of the partial ASIN list -- the largest author measured is
+# 4,164 ASINs, so a queue in the thousands is hundreds of megabytes per
+# worker, six times over.
+#
+# Sixteen because depth is latency here, not just memory: at one completion
+# per 300s, the sixteenth starts eighty minutes late, by which point it is
+# spending the Audible lane on a request nobody is waiting for and the
+# author's entry has very likely been walked again anyway. Past that, a
+# further request is refused rather than queued -- the same choice
+# persist_queue makes when its backlog is full, and for the same reason:
+# shedding costs one author a completion it can have on the next request,
+# where an unbounded queue costs the worker.
+_COMPLETION_QUEUE_MAX = 16
+
 # Bound on the attempt ledger. It is keyed by (asin, region) and only ever
 # grows, so a long-running process walking a wide catalogue would otherwise
 # accumulate an entry per author that ever truncated. Cleared wholesale
@@ -225,6 +244,18 @@ def request_author_books_completion(asin: str, region: str, partial_asins: list[
         return
 
     if _completion_attempts.get(key, 0) >= _COMPLETION_MAX_ATTEMPTS:
+        return
+
+    if len(_completion_inflight) >= _COMPLETION_QUEUE_MAX:
+        # Reported, not silent. A full queue means completions are arriving
+        # faster than they drain, which is a statement about the catalogue
+        # and the Audible lane rather than about this author, and nothing
+        # else would say so.
+        logger.warning("Author books completion queue full, request shed", extra={
+            "author_asin": asin,
+            "region": region,
+            "queue_depth": len(_completion_inflight),
+        })
         return
 
     if len(_completion_attempts) > _COMPLETION_ATTEMPTS_MAX_TRACKED:

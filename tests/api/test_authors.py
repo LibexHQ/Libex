@@ -385,6 +385,67 @@ async def test_an_entry_on_the_edge_of_expiry_never_advertises_a_negative_ttl(as
 
 
 @pytest.mark.asyncio
+async def test_an_explicitly_uncached_request_is_never_made_cacheable(async_client):
+    """?cache=false must reach the Cache-Control layer, not just discovery
+    and hydration.
+
+    A caller who asks for an uncached answer and receives one marked
+    `public` gets that same answer back from their own browser or the CDN on
+    the next identical request -- the edge keys on the query string, so
+    ?cache=false becomes its own cached object and the request stops
+    reaching Libex at all for the length of the TTL. The escape hatch would
+    hold inside Libex and fail one layer up, which is worse than not
+    offering it."""
+    with patch("app.api.routes.authors.router.get_author_books", new_callable=AsyncMock) as mock_books, \
+         patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
+        mock_books.return_value = AuthorBooksResult(["B08G9PRS1K"], True, None)
+        mock_asins.return_value = [MOCK_BOOK]
+        response = await async_client.get("/author/books/B000APF21M?cache=false")
+
+    assert response.status_code == 200
+    assert response.headers["X-Libex-Complete"] == "true"
+    assert response.headers["Cache-Control"] == "no-store"
+
+
+@pytest.mark.asyncio
+async def test_a_short_hydration_is_marked_incomplete_even_when_discovery_was_whole(async_client):
+    """The header describes the BODY, not just the ASIN walk.
+
+    Discovery can hit a complete cached list while hydration loses chunks --
+    get_books_by_asins returns fewer books on a transient chunk failure only
+    partly recovered from the DB, on the outage fallback, and for ASINs
+    Audible no longer knows. Marking on discovery alone advertised a
+    half-hydrated body as complete, and once these responses became
+    cacheable that let an edge hold it for the entry's whole remaining life
+    with no way to invalidate it."""
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=4000)
+    with patch("app.api.routes.authors.router.get_author_books", new_callable=AsyncMock) as mock_books, \
+         patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
+        mock_books.return_value = AuthorBooksResult(["B0AAA", "B0BBB", "B0CCC"], True, expires_at)
+        mock_asins.return_value = [MOCK_BOOK]          # one book for three ASINs
+        response = await async_client.get("/author/books/B000APF21M")
+
+    assert response.status_code == 200
+    assert response.headers["X-Libex-Complete"] == "false"
+    assert response.headers["Cache-Control"] == "no-store"
+
+
+@pytest.mark.asyncio
+async def test_a_whole_hydration_of_a_whole_walk_stays_complete(async_client):
+    """Complement to the above -- the shortfall check must not mark every
+    response incomplete and quietly disable edge caching altogether."""
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=4000)
+    with patch("app.api.routes.authors.router.get_author_books", new_callable=AsyncMock) as mock_books, \
+         patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
+        mock_books.return_value = AuthorBooksResult(["B0AAA", "B0BBB"], True, expires_at)
+        mock_asins.return_value = [MOCK_BOOK, MOCK_BOOK]
+        response = await async_client.get("/author/books/B000APF21M")
+
+    assert response.headers["X-Libex-Complete"] == "true"
+    assert "s-maxage=" in response.headers["Cache-Control"]
+
+
+@pytest.mark.asyncio
 async def test_a_truncated_walk_is_marked_incomplete_and_refused_to_caches(async_client):
     """The property this endpoint most needs to have. A walk that ran out of
     time still returns 200 with the partial list -- the caller gets what

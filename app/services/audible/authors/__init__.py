@@ -57,9 +57,9 @@ logger = get_logger()
 # this one DOES bind on a real, very prolific author's catalog before those
 # far-larger caps ever would -- at roughly 0.5s/page it cuts off around 1800
 # titles, well short of Conan Doyle's 4500 -- but a deadline-truncated walk
-# is reported as degraded (not clean/complete) and is cached with a short
-# TTL rather than the default one (see AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS
-# below), so it costs latency and a quick cache refresh on the prolific
+# is reported as degraded (not clean/complete) and is not cached at all --
+# it is handed to authors/completion.py to be finished off the request and
+# the COMPLETE result is what gets stored, so it costs latency on the prolific
 # tail, not silent, permanent data loss the way the old page/ASIN caps did.
 # That's a deliberate latency/completeness tradeoff, not an oversight, and
 # changing it is a separate decision from the caps in screens.py and
@@ -83,22 +83,6 @@ logger = get_logger()
 # genuinely pathological walk, not the mechanism the outage fix relies on.
 AUTHOR_BOOKS_TIME_BUDGET_SECONDS = 45.0
 
-# TTL for an author-books cache write that did not reach a confirmed-clean,
-# complete union this run (see the screens_clean / catalog_clean / db_clean
-# gate inside _walk_author_books). persist_author_books_cache_background's
-# write is a union with whatever is already stored, taken under
-# SELECT ... FOR UPDATE (see its own docstring in db/persist_queue.py), so a
-# partial write can only ever grow the stored list, never shrink it -- there
-# is no storage-side reason left to withhold the write entirely on an
-# incomplete result. Withholding it bought nothing but cost a lot: a
-# prolific author whose walk this module's own AUTHOR_BOOKS_TIME_BUDGET_SECONDS
-# deadline can never let finish clean would never be cached at all, so every
-# request re-ran the full walk. 15 minutes is short enough that an
-# incomplete result is refreshed soon rather than treated as settled for a
-# full day, long enough that a burst of sequential requests for the same
-# author -- beyond what the single-flight coalescing below already collapses
-# for genuinely concurrent ones -- isn't each paying its own full walk.
-AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS = 900
 
 
 class AuthorBooksResult(NamedTuple):
@@ -336,9 +320,9 @@ async def get_author_books(
             # completion instead. Anything read back here is therefore a
             # complete result. The one exception is transitional -- entries
             # written by an older build under the degraded TTL may still be
-            # in the table for up to AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS
-            # after a deploy, and will read back as complete. That window is
-            # fifteen minutes and closes itself.
+            # in the table for up to the fifteen-minute TTL that build used
+            # for a degraded write, and will read back as complete. That
+            # window closes itself and needs no migration.
             return AuthorBooksResult(cached, True, entry.expires_at)
 
     inflight_key = (asin, region)
@@ -717,9 +701,9 @@ async def _walk_author_books(
     # roughly half of her 1133-ASIN union, and gating completeness on
     # COMPLETED alone made is_complete permanently unreachable for exactly
     # the prolific authors this feature exists to serve, forcing them onto
-    # AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS (900s) forever instead of the
-    # default day-long TTL -- up to 96 full walks a day, each hundreds of
-    # upstream requests, strictly worse than not caching them at all.
+    # the not-cached-at-all path forever instead of the default day-long
+    # TTL -- a full walk on every single request, each hundreds of upstream
+    # requests, for exactly the authors that cost the most to walk.
     #
     # catalog_clean is True either when catalog ran with no page-fetch
     # errors, wasn't cut short by the deadline, and wasn't left unable to
@@ -735,8 +719,8 @@ async def _walk_author_books(
     # feature completing as designed and must earn the same default TTL a
     # small author's single-baseline-pass walk does; gating on "did it
     # need to slice at all" is the trap that would turn every prolific
-    # author's request into a re-walk every AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS
-    # forever, which is strictly worse than not slicing at all. author_name
+    # author's request into a re-walk forever, which is strictly worse
+    # than not slicing at all. author_name
     # is also None when name resolution raised instead of confirming an
     # absence -- name_resolution_error is checked explicitly here to keep
     # the two apart, since that case means the catalog wave never got a
@@ -745,12 +729,11 @@ async def _walk_author_books(
     # None, distinct from a genuinely empty list) -- a failed DB read means
     # the union never got the chance to include whatever it already had
     # stored, so this run is not confirmed complete either. When all three
-    # hold, the write gets the default TTL (settings.cache_ttl, unchanged);
-    # otherwise it gets the short AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS,
-    # so an incomplete result refreshes soon rather than sitting for a full
-    # day, or -- the old behavior -- never being written at all, which meant
-    # a prolific author whose walk this module's own deadline can never let
-    # finish clean re-ran the full walk on every single request.
+    # hold, the result is written with the default TTL (settings.cache_ttl);
+    # otherwise it is not written at all and is handed to background
+    # completion instead -- see the branch below for why storing a partial
+    # stopped being acceptable once the cache began serving the default
+    # path.
     screens_clean = (
         screen_result is not None
         and screen_result.termination_reason not in SCREENS_BROKEN_REASONS
@@ -770,8 +753,8 @@ async def _walk_author_books(
         persist_author_books_cache_background(author_books_key(asin, region), asins, ttl_seconds=None)
     elif allow_background_completion:
         # An unfinished walk is NOT written here, and that is a reversal of
-        # what this did before. It used to be stored under the short
-        # AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS, on the reasoning that a
+        # what this did before. It used to be stored under a short
+        # fifteen-minute TTL, on the reasoning that a
         # prolific author whose walk can never finish clean would otherwise
         # never be cached and would re-walk on every request. That reasoning
         # was sound while the cache served only callers who passed

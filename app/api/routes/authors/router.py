@@ -4,11 +4,10 @@ Compatible with AudiMeta endpoint structure for drop-in replacement.
 """
 
 # Standard library
+from datetime import datetime, timezone
 from typing import Annotated
 
 # Third party
-from datetime import datetime, timezone
-
 from fastapi import APIRouter, Query, Path, Depends, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -104,6 +103,7 @@ def _mark_completeness(
     response: Response,
     is_complete: bool,
     cache_expires_at: datetime | None,
+    use_cache: bool,
 ) -> None:
     """
     Tells the caller, and any cache in front of Libex, what this response is
@@ -141,6 +141,18 @@ def _mark_completeness(
     response.headers["X-Libex-Complete"] = "true" if is_complete else "false"
 
     if not is_complete:
+        response.headers["Cache-Control"] = "no-store"
+        return
+
+    # cache=false has to reach this layer too, or the escape hatch only holds
+    # as far as Libex's own storage. A caller who asks for an uncached answer
+    # and is handed one marked publicly cacheable gets that same answer back
+    # from their browser or the CDN on the next identical request -- the edge
+    # keys on the query string, so ?cache=false becomes its own cached object
+    # and the request never reaches here again for the whole TTL. The flag
+    # already governs discovery and hydration; stopping one layer short is
+    # exactly the half-wired shape this endpoint has been bitten by before.
+    if not use_cache:
         response.headers["Cache-Control"] = "no-store"
         return
 
@@ -203,7 +215,6 @@ async def get_books_by_author(
         raise NotFoundException(f"Invalid ASIN format: {asin}")
     walk = await get_author_books(asin, region, session, cache)
     asins = walk.asins
-    _mark_completeness(response, walk.is_complete, walk.cache_expires_at)
     if not asins:
         raise NotFoundException("No books found for author")
     # use_cache=cache: hydration is the second half of the same request
@@ -219,6 +230,23 @@ async def get_books_by_author(
     # -- see get_books_by_asins' own docstring and client.py's
     # AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT for the measurements.
     books = await get_books_by_asins(asins, region, session, use_cache=cache, high_concurrency=True)
+    # Marked here rather than above, and given the hydrated books rather than
+    # the walk alone. walk.is_complete describes DISCOVERY -- whether the ASIN
+    # list is whole -- while the body a caller receives is what hydration
+    # returned, and get_books_by_asins has three documented paths that return
+    # fewer books than it was handed: chunks that failed transiently and were
+    # only partly recovered from the DB backstop, the outage fallback, and
+    # ASINs Audible no longer knows. Marking on discovery alone advertised a
+    # half-hydrated body as complete and, once these responses became
+    # cacheable, let an edge hold that body for the entry's whole remaining
+    # life. Counted before filtering, since filters legitimately shrink the
+    # list and say nothing about whether the fetch succeeded.
+    _mark_completeness(
+        response,
+        walk.is_complete and len(books) == len(asins),
+        walk.cache_expires_at,
+        cache,
+    )
     books = filter_dicts(books, filters.as_kwargs())
     books = sort_dicts(books, sort.value if sort is not None else None, order.value, BOOK_SORT_FIELDS)
     return [BookResponse(**b) for b in books]
@@ -242,13 +270,29 @@ async def get_books_by_author_primary(
         raise NotFoundException(f"Invalid ASIN format: {asin}")
     walk = await get_author_books(asin, region, session, cache)
     asins = walk.asins
-    _mark_completeness(response, walk.is_complete, walk.cache_expires_at)
     if not asins:
         raise NotFoundException("No books found for author")
     # use_cache=cache and high_concurrency=True: same pairing as
     # get_books_by_author above (this is its legacy-route twin) -- see that
     # call site's comments.
     books = await get_books_by_asins(asins, region, session, use_cache=cache, high_concurrency=True)
+    # Marked here rather than above, and given the hydrated books rather than
+    # the walk alone. walk.is_complete describes DISCOVERY -- whether the ASIN
+    # list is whole -- while the body a caller receives is what hydration
+    # returned, and get_books_by_asins has three documented paths that return
+    # fewer books than it was handed: chunks that failed transiently and were
+    # only partly recovered from the DB backstop, the outage fallback, and
+    # ASINs Audible no longer knows. Marking on discovery alone advertised a
+    # half-hydrated body as complete and, once these responses became
+    # cacheable, let an edge hold that body for the entry's whole remaining
+    # life. Counted before filtering, since filters legitimately shrink the
+    # list and say nothing about whether the fetch succeeded.
+    _mark_completeness(
+        response,
+        walk.is_complete and len(books) == len(asins),
+        walk.cache_expires_at,
+        cache,
+    )
     books = filter_dicts(books, filters.as_kwargs())
     books = sort_dicts(books, sort.value if sort is not None else None, order.value, BOOK_SORT_FIELDS)
     return [BookResponse(**b) for b in books]

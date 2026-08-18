@@ -718,7 +718,7 @@ async def test_persist_author_books_cache_background_persists_exact_order():
 async def test_persist_author_books_cache_background_degraded_write_does_not_shorten_earned_long_window():
     """A stored row with ~20000s left on an already-earned long window,
     written again with the short degraded TTL (900s, matching
-    AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS), must keep the LATER, longer
+    the old degraded write's short TTL), must keep the LATER, longer
     expiry rather than being clobbered down to 900s -- a plain overwrite
     (the pre-fix behavior) would apply the incoming 900s unconditionally
     regardless of what's already been earned."""

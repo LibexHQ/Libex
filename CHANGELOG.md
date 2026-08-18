@@ -104,8 +104,11 @@ capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
   could be handed to everyone for up to fifteen minutes with nothing saying it
   was partial.
 
-  Three things change. Every response now carries an `X-Libex-Complete` header,
-  `true` or `false`, so a caller can tell. An incomplete response also carries
+  Three things change. Every successful response now carries an
+  `X-Libex-Complete` header, `true` or `false`, so a caller can tell. It
+  describes the books actually returned, not merely whether the catalogue
+  walk finished — a request whose books could not all be fetched is reported
+  incomplete even when the list of them was whole. An incomplete response also carries
   `Cache-Control: no-store`, so a cache in front of Libex cannot hold a partial
   answer and serve it on Libex's behalf. And an unfinished walk is no longer
   written to the cache at all — instead it is finished in the background, with
@@ -135,7 +138,9 @@ capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
   The default is now `true`: a request that does not name the parameter is
   served from cache when a fresh entry exists, and still performs the full live
   walk when one does not. `?cache=false` is unchanged and still forces a fresh
-  walk, so a caller who needs an uncached answer keeps one.
+  walk — and such a response is now also marked `no-store`, so a cache
+  between you and Libex cannot answer the next identical request on its
+  behalf and quietly undo the very thing the flag asked for.
 
   **What this changes for callers.** No endpoint, parameter, response shape or
   field moved — the difference is the freshness of what you get when you do not

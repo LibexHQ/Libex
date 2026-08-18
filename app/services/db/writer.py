@@ -713,7 +713,17 @@ async def _resolve_author_ids(
                 memo[key] = author_id
             if author_id and author_id not in ids:
                 ids.append(author_id)
-        ids_by_book[data["asin"]] = ids
+        # Accumulated, not assigned. A chunk can legitimately carry the same
+        # ASIN twice — the catalog's sort windows shift between page fetches,
+        # so the same product arrives in two windows — and the two copies can
+        # name different contributors. Assigning here let the second copy
+        # replace the first copy's resolved ids, so an author present only on
+        # the first copy lost their author_book link entirely: the author row
+        # was written, the book row was written, and the relationship between
+        # them silently was not. Every sibling pivot below already unions on
+        # an (asin, x) key; this was the one keyed by asin alone.
+        merged = ids_by_book.setdefault(data["asin"], [])
+        merged.extend(i for i in ids if i not in merged)
 
     return ids_by_book
 

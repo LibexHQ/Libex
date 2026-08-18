@@ -964,3 +964,43 @@ async def test_fetch_and_store_chapters_never_raises_on_store_failure():
 
     assert result == "error"
     mock_session.rollback.assert_awaited()
+
+
+def test_the_unreadable_plans_warning_fires_on_a_freshly_booted_process():
+    """The first "plans present but unreadable" warning must not be lost on a
+    process younger than the log window.
+
+    time.monotonic() counts from boot, so a 0.0 "never reported" sentinel
+    makes the window check true for the first minute of a process's life and
+    swallows the first report. This warning is the only thing that catches an
+    upstream rename before the plans column quietly empties across the
+    corpus, and six worker processes all start fresh on every deploy -- so
+    the minute it was silent for is exactly the minute after a deploy.
+
+    Driven against a fresh-boot clock rather than the ambient one, because
+    the ambient one hides it: any machine with more than a minute of uptime
+    passes regardless of which sentinel is used."""
+    import app.services.audible.books as books_mod
+
+    with patch.object(books_mod, "_unreadable_plans_last_logged", None), \
+         patch.object(books_mod, "_unreadable_plans_count", 0), \
+         patch.object(books_mod.time, "monotonic", return_value=12.0), \
+         patch.object(books_mod, "logger") as mock_logger:
+        books_mod._log_unreadable_plans("B08G9PRS1K")
+
+    mock_logger.warning.assert_called_once()
+    assert "unreadable" in mock_logger.warning.call_args.args[0].lower()
+
+
+def test_the_unreadable_plans_warning_still_windows_after_the_first():
+    """The window must still close, or the fix trades a swallowed first
+    report for a per-book flood."""
+    import app.services.audible.books as books_mod
+
+    with patch.object(books_mod, "_unreadable_plans_last_logged", 12.0), \
+         patch.object(books_mod, "_unreadable_plans_count", 0), \
+         patch.object(books_mod.time, "monotonic", return_value=12.0), \
+         patch.object(books_mod, "logger") as mock_logger:
+        books_mod._log_unreadable_plans("B08G9PRS1K")
+
+    mock_logger.warning.assert_not_called()

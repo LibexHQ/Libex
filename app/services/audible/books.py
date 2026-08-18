@@ -162,7 +162,7 @@ def _parse_genres(product: dict) -> list[dict]:
 _UNREADABLE_PLANS_LOG_INTERVAL_SECONDS = 60
 
 _unreadable_plans_count = 0
-_unreadable_plans_last_logged = 0.0
+_unreadable_plans_last_logged: float | None = None
 
 
 def _log_unreadable_plans(asin: str) -> None:
@@ -180,7 +180,19 @@ def _log_unreadable_plans(asin: str) -> None:
     global _unreadable_plans_count, _unreadable_plans_last_logged
     _unreadable_plans_count += 1
     now = time.monotonic()
-    if now - _unreadable_plans_last_logged < _UNREADABLE_PLANS_LOG_INTERVAL_SECONDS:
+    # None rather than 0.0, and the distinction is not cosmetic:
+    # time.monotonic() counts from boot, so against a 0.0 sentinel this
+    # comparison reads "never reported" as "reported at boot" and stays true
+    # for the first minute of a process's life -- swallowing the very first
+    # report. That is the worst minute to lose this particular warning: it
+    # exists to catch an upstream rename before the plans column quietly
+    # empties across the corpus, and six worker processes all start fresh on
+    # every deploy. persist_queue's _window_elapsed carries the same guard
+    # for the same reason.
+    if (
+        _unreadable_plans_last_logged is not None
+        and now - _unreadable_plans_last_logged < _UNREADABLE_PLANS_LOG_INTERVAL_SECONDS
+    ):
         return
     logger.warning("Audible plans entries present but unreadable", extra={
         "asin": asin,

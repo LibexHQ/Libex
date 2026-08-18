@@ -42,6 +42,32 @@ from app.services.audible.authors.screens import (
     SCREENS_PAGE_SIZE,
 )
 
+
+@pytest.fixture(autouse=True)
+def _no_real_background_completion():
+    """
+    Stops a truncated walk in any test from spawning a real background
+    completion.
+
+    Not a tidiness measure -- it fixes an actual failure and prevents a
+    whole class of them. request_author_books_completion fires a task that
+    re-runs _walk_author_books, and inside a test that task runs on the
+    test's own event loop while the test's patches are still installed. So
+    a single scenario that truncates quietly executes the walk a second
+    time, against the same mocks, emitting the same log lines again:
+    test_fetch_author_books_by_screen_every_warning_line_carries_author_asin
+    collected 7 warning lines where it expected 5, for exactly that reason,
+    and nothing about the failure pointed at a background task.
+
+    Autouse because the hazard is opt-out, not opt-in: any future test that
+    happens to produce an unfinished walk inherits it without doing
+    anything wrong. Tests that want to assert on the call patch it again
+    themselves, and the inner patch wins.
+    """
+    with patch("app.services.audible.authors.request_author_books_completion"):
+        yield
+
+
 # ============================================================
 # SCREEN FIXTURE LOADER
 #
@@ -2259,7 +2285,7 @@ async def test_get_author_books_catalog_search_still_runs_when_screens_alone_wou
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
          patch("app.services.audible.authors.cache.get", return_value=None), \
          patch("app.services.audible.authors.persist_author_books_cache_background"):
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
+        result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert result == ["B0CATALOG01", "B0SCREEN001"]
     mock_catalog.assert_awaited_once()
@@ -2281,7 +2307,7 @@ async def test_get_author_books_catalog_results_survive_when_screens_raises():
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
          patch("app.services.audible.authors.cache.get", return_value=None), \
          patch("app.services.audible.authors.persist_author_books_cache_background"):
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
+        result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert result == ["B0CATALOG02"]
 
@@ -2301,7 +2327,7 @@ async def test_get_author_books_screen_results_survive_when_catalog_raises():
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
          patch("app.services.audible.authors.cache.get", return_value=None), \
          patch("app.services.audible.authors.persist_author_books_cache_background"):
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
+        result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert result == ["B0SCREEN003"]
 
@@ -2320,7 +2346,7 @@ async def test_get_author_books_catalog_results_survive_when_screens_empty():
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
          patch("app.services.audible.authors.cache.get", return_value=None), \
          patch("app.services.audible.authors.persist_author_books_cache_background"):
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
+        result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert result == ["B0CATALOG03"]
 
@@ -2343,7 +2369,7 @@ async def test_get_author_books_falls_back_to_db_when_catalog_and_screens_empty(
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=db_asins)), \
          patch("app.services.audible.authors.cache.get", return_value=None), \
          patch("app.services.audible.authors.persist_author_books_cache_background"):
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
+        result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert result == ["B0DBFALLBK1"]
 
@@ -2385,7 +2411,7 @@ async def test_get_author_books_transient_catalog_failure_falls_to_db_then_cache
          patch("app.services.audible.authors._fetch_author_books_by_catalog", new=AsyncMock(side_effect=RuntimeError("Audible down"))), \
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
          patch("app.services.audible.authors.cache.get", return_value=["B0CACHED001"]):
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
+        result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert result == ["B0CACHED001"]
 
@@ -2433,7 +2459,7 @@ async def test_get_author_books_releases_session_after_db_backstop_on_common_pat
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
          patch("app.services.audible.authors.cache.get", return_value=None), \
          patch("app.services.audible.authors.persist_author_books_cache_background"):
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
+        result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert result == ["B0NAME00001", "B0SCREEN001"]
     assert mock_session.rollback.await_count == 2
@@ -2495,7 +2521,7 @@ async def test_get_author_books_union_never_smaller_than_catalog_alone(catalog_a
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
          patch("app.services.audible.authors.cache.get", return_value=None), \
          patch("app.services.audible.authors.persist_author_books_cache_background"):
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
+        result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert len(result) >= len(catalog_asins)
     assert set(catalog_asins).issubset(set(result))
@@ -2518,7 +2544,7 @@ async def test_get_author_books_union_floor_holds_when_screens_path_raises():
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
          patch("app.services.audible.authors.cache.get", return_value=None), \
          patch("app.services.audible.authors.persist_author_books_cache_background"):
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
+        result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert len(result) >= len(catalog_asins)
     assert result == catalog_asins
@@ -2548,7 +2574,7 @@ async def test_get_author_books_union_orders_catalog_first_then_screens_only_ext
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
          patch("app.services.audible.authors.cache.get", return_value=None), \
          patch("app.services.audible.authors.persist_author_books_cache_background"):
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
+        result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert result == [
         "B0NAME00001", "B0SHARED002", "B0NAME00003", "B0SCRNONLY1", "B0SCRNONLY2",
@@ -2576,7 +2602,7 @@ async def test_get_author_books_union_orders_db_only_extras_last():
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=db_asins)), \
          patch("app.services.audible.authors.cache.get", return_value=None), \
          patch("app.services.audible.authors.persist_author_books_cache_background"):
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
+        result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert result == ["B0CATALOG01", "B0SCREEN001", "B0DBTAIL0001", "B0DBTAIL0002"]
 
@@ -2600,7 +2626,7 @@ async def test_get_author_books_catalog_asin_keeps_its_index_when_screens_adds_t
              patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
              patch("app.services.audible.authors.cache.get", return_value=None), \
              patch("app.services.audible.authors.persist_author_books_cache_background"):
-            return await get_author_books("B000AUTHOR", "us", mock_session)
+            return (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     before = await _run([])
     after = await _run(["B0SCRNONLY1", "B0SCRNONLY2"])
@@ -2631,8 +2657,9 @@ async def test_get_author_books_persists_cache_when_screens_and_catalog_both_cle
          patch("app.services.audible.authors._fetch_author_books_by_catalog", new=AsyncMock(return_value=catalog_result)), \
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
          patch("app.services.audible.authors.cache.get", return_value=None), \
-         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist:
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
+         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist, \
+         patch("app.services.audible.authors.request_author_books_completion") as mock_complete:
+        result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert result == ["B0NAME00001", "B0SCREEN001"]
     mock_persist.assert_called_once()
@@ -2657,8 +2684,9 @@ async def test_get_author_books_uses_default_ttl_when_screens_and_catalog_both_c
          patch("app.services.audible.authors._fetch_author_books_by_catalog", new=AsyncMock(return_value=catalog_result)), \
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
          patch("app.services.audible.authors.cache.get", return_value=None), \
-         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist:
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
+         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist, \
+         patch("app.services.audible.authors.request_author_books_completion") as mock_complete:
+        result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert result == ["B0NAME00001", "B0SCREEN001"]
     mock_persist.assert_called_once()
@@ -2683,8 +2711,9 @@ async def test_get_author_books_persists_cache_when_name_never_resolved():
          patch("app.services.audible.authors._fetch_author_books_by_catalog", new=AsyncMock()) as mock_catalog, \
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
          patch("app.services.audible.authors.cache.get", return_value=None), \
-         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist:
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
+         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist, \
+         patch("app.services.audible.authors.request_author_books_completion") as mock_complete:
+        result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert result == ["B0SCREEN001"]
     mock_catalog.assert_not_awaited()
@@ -2711,13 +2740,18 @@ async def test_get_author_books_caches_with_short_ttl_on_unclean_screens_termina
          patch("app.services.audible.authors._fetch_author_books_by_catalog", new=AsyncMock(return_value=catalog_result)), \
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
          patch("app.services.audible.authors.cache.get", return_value=None), \
-         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist:
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
+         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist, \
+         patch("app.services.audible.authors.request_author_books_completion") as mock_complete:
+        result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert result == ["B0NAME00001", "B0SCREEN001"]
-    mock_persist.assert_called_once()
-    _, persist_kwargs = mock_persist.call_args
-    assert persist_kwargs["ttl_seconds"] == AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS
+    # An unfinished walk is no longer cached at all. Storing it under the
+    # short TTL was defensible while the cache served only ?cache=true
+    # callers; once it served the default path it meant handing a partial
+    # to everyone as though it were the answer. It goes to background
+    # completion instead, and the complete result is what gets cached.
+    mock_persist.assert_not_called()
+    mock_complete.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -2737,13 +2771,18 @@ async def test_get_author_books_caches_with_short_ttl_on_grid_not_found():
          patch("app.services.audible.authors._fetch_author_books_by_catalog", new=AsyncMock(return_value=catalog_result)), \
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
          patch("app.services.audible.authors.cache.get", return_value=None), \
-         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist:
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
+         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist, \
+         patch("app.services.audible.authors.request_author_books_completion") as mock_complete:
+        result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert result == ["B0NAME00001", "B0SCREEN001"]
-    mock_persist.assert_called_once()
-    _, persist_kwargs = mock_persist.call_args
-    assert persist_kwargs["ttl_seconds"] == AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS
+    # An unfinished walk is no longer cached at all. Storing it under the
+    # short TTL was defensible while the cache served only ?cache=true
+    # callers; once it served the default path it meant handing a partial
+    # to everyone as though it were the answer. It goes to background
+    # completion instead, and the complete result is what gets cached.
+    mock_persist.assert_not_called()
+    mock_complete.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -2767,13 +2806,18 @@ async def test_get_author_books_caches_with_short_ttl_on_truncated_termination()
          patch("app.services.audible.authors._fetch_author_books_by_catalog", new=AsyncMock(return_value=catalog_result)), \
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
          patch("app.services.audible.authors.cache.get", return_value=None), \
-         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist:
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
+         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist, \
+         patch("app.services.audible.authors.request_author_books_completion") as mock_complete:
+        result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert result == ["B0NAME00001", "B0SCREEN001"]
-    mock_persist.assert_called_once()
-    _, persist_kwargs = mock_persist.call_args
-    assert persist_kwargs["ttl_seconds"] == AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS
+    # An unfinished walk is no longer cached at all. Storing it under the
+    # short TTL was defensible while the cache served only ?cache=true
+    # callers; once it served the default path it meant handing a partial
+    # to everyone as though it were the answer. It goes to background
+    # completion instead, and the complete result is what gets cached.
+    mock_persist.assert_not_called()
+    mock_complete.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -2808,8 +2852,9 @@ async def test_get_author_books_caches_with_default_ttl_on_plateau_truncated_ter
          patch("app.services.audible.authors._fetch_author_books_by_catalog", new=AsyncMock(return_value=catalog_result)), \
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
          patch("app.services.audible.authors.cache.get", return_value=None), \
-         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist:
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
+         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist, \
+         patch("app.services.audible.authors.request_author_books_completion") as mock_complete:
+        result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert result == ["B0NAME00001", "B0SCREEN001"]
     mock_persist.assert_called_once()
@@ -2841,13 +2886,18 @@ async def test_get_author_books_caches_with_short_ttl_on_screens_page_error_term
          patch("app.services.audible.authors._fetch_author_books_by_catalog", new=AsyncMock(return_value=catalog_result)), \
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
          patch("app.services.audible.authors.cache.get", return_value=None), \
-         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist:
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
+         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist, \
+         patch("app.services.audible.authors.request_author_books_completion") as mock_complete:
+        result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert result == ["B0NAME00001", "B0SCREEN001"]
-    mock_persist.assert_called_once()
-    _, persist_kwargs = mock_persist.call_args
-    assert persist_kwargs["ttl_seconds"] == AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS
+    # An unfinished walk is no longer cached at all. Storing it under the
+    # short TTL was defensible while the cache served only ?cache=true
+    # callers; once it served the default path it meant handing a partial
+    # to everyone as though it were the answer. It goes to background
+    # completion instead, and the complete result is what gets cached.
+    mock_persist.assert_not_called()
+    mock_complete.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -2872,8 +2922,9 @@ async def test_get_author_books_persists_cache_despite_known_shortfall():
          patch("app.services.audible.authors._fetch_author_books_by_catalog", new=AsyncMock(return_value=catalog_result)), \
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
          patch("app.services.audible.authors.cache.get", return_value=None), \
-         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist:
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
+         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist, \
+         patch("app.services.audible.authors.request_author_books_completion") as mock_complete:
+        result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert result == ["B0NAME00001", "B0SCREEN001"]
     mock_persist.assert_called_once()
@@ -2895,13 +2946,18 @@ async def test_get_author_books_caches_with_short_ttl_when_catalog_errored():
          patch("app.services.audible.authors._fetch_author_books_by_catalog", new=AsyncMock(side_effect=RuntimeError("catalog boom"))), \
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
          patch("app.services.audible.authors.cache.get", return_value=None), \
-         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist:
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
+         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist, \
+         patch("app.services.audible.authors.request_author_books_completion") as mock_complete:
+        result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert result == ["B0SCREEN001"]
-    mock_persist.assert_called_once()
-    _, persist_kwargs = mock_persist.call_args
-    assert persist_kwargs["ttl_seconds"] == AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS
+    # An unfinished walk is no longer cached at all. Storing it under the
+    # short TTL was defensible while the cache served only ?cache=true
+    # callers; once it served the default path it meant handing a partial
+    # to everyone as though it were the answer. It goes to background
+    # completion instead, and the complete result is what gets cached.
+    mock_persist.assert_not_called()
+    mock_complete.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -2925,13 +2981,18 @@ async def test_get_author_books_caches_with_short_ttl_when_catalog_has_sort_erro
          patch("app.services.audible.authors._fetch_author_books_by_catalog", new=AsyncMock(return_value=catalog_result)), \
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
          patch("app.services.audible.authors.cache.get", return_value=None), \
-         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist:
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
+         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist, \
+         patch("app.services.audible.authors.request_author_books_completion") as mock_complete:
+        result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert result == ["B0NAME00001", "B0SCREEN001"]
-    mock_persist.assert_called_once()
-    _, persist_kwargs = mock_persist.call_args
-    assert persist_kwargs["ttl_seconds"] == AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS
+    # An unfinished walk is no longer cached at all. Storing it under the
+    # short TTL was defensible while the cache served only ?cache=true
+    # callers; once it served the default path it meant handing a partial
+    # to everyone as though it were the answer. It goes to background
+    # completion instead, and the complete result is what gets cached.
+    mock_persist.assert_not_called()
+    mock_complete.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -2953,13 +3014,18 @@ async def test_get_author_books_caches_with_short_ttl_when_catalog_truncated_by_
          patch("app.services.audible.authors._fetch_author_books_by_catalog", new=AsyncMock(return_value=catalog_result)), \
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
          patch("app.services.audible.authors.cache.get", return_value=None), \
-         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist:
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
+         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist, \
+         patch("app.services.audible.authors.request_author_books_completion") as mock_complete:
+        result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert result == ["B0NAME00001", "B0SCREEN001"]
-    mock_persist.assert_called_once()
-    _, persist_kwargs = mock_persist.call_args
-    assert persist_kwargs["ttl_seconds"] == AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS
+    # An unfinished walk is no longer cached at all. Storing it under the
+    # short TTL was defensible while the cache served only ?cache=true
+    # callers; once it served the default path it meant handing a partial
+    # to everyone as though it were the answer. It goes to background
+    # completion instead, and the complete result is what gets cached.
+    mock_persist.assert_not_called()
+    mock_complete.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -3002,17 +3068,22 @@ async def test_get_author_books_caches_with_short_ttl_when_catalog_slicing_incom
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
          patch("app.services.audible.authors.cache.get", return_value=None), \
          patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist, \
+         patch("app.services.audible.authors.request_author_books_completion") as mock_complete, \
          patch("app.services.audible.authors.logger") as mock_logger:
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
+        result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     # The union is still returned in full and still written back -- only
     # the TTL is short, not a truncated or empty response or a suppressed
     # write.
     assert result == catalog_asins + ["B0SCREEN001"]
     assert len(result) == 601
-    mock_persist.assert_called_once()
-    _, persist_kwargs = mock_persist.call_args
-    assert persist_kwargs["ttl_seconds"] == AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS
+    # An unfinished walk is no longer cached at all. Storing it under the
+    # short TTL was defensible while the cache served only ?cache=true
+    # callers; once it served the default path it meant handing a partial
+    # to everyone as though it were the answer. It goes to background
+    # completion instead, and the complete result is what gets cached.
+    mock_persist.assert_not_called()
+    mock_complete.assert_called_once()
 
     slicing_calls = [
         c for c in mock_logger.warning.call_args_list
@@ -3062,8 +3133,9 @@ async def test_get_author_books_shortfall_warning_does_not_fire_when_catalog_sli
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
          patch("app.services.audible.authors.cache.get", return_value=None), \
          patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist, \
+         patch("app.services.audible.authors.request_author_books_completion") as mock_complete, \
          patch("app.services.audible.authors.logger") as mock_logger:
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
+        result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert len(result) == 601
     mock_persist.assert_called_once()
@@ -3098,13 +3170,18 @@ async def test_get_author_books_appends_db_known_asins_at_tail_and_caches_with_s
          patch("app.services.audible.authors._fetch_author_books_by_catalog", new=AsyncMock(side_effect=RuntimeError("catalog boom"))), \
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=db_asins)), \
          patch("app.services.audible.authors.cache.get", return_value=None), \
-         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist:
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
+         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist, \
+         patch("app.services.audible.authors.request_author_books_completion") as mock_complete:
+        result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert result == ["B0SCREEN001", "B0SCREEN002", "B0DBTAIL0001"]
-    mock_persist.assert_called_once()
-    _, persist_kwargs = mock_persist.call_args
-    assert persist_kwargs["ttl_seconds"] == AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS
+    # An unfinished walk is no longer cached at all. Storing it under the
+    # short TTL was defensible while the cache served only ?cache=true
+    # callers; once it served the default path it meant handing a partial
+    # to everyone as though it were the answer. It goes to background
+    # completion instead, and the complete result is what gets cached.
+    mock_persist.assert_not_called()
+    mock_complete.assert_called_once()
 
 
 # ============================================================
@@ -3132,8 +3209,9 @@ async def test_get_author_books_db_union_fires_even_on_a_fully_clean_non_degrade
          patch("app.services.audible.authors._fetch_author_books_by_catalog", new=AsyncMock(return_value=catalog_result)), \
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=db_asins)) as mock_db, \
          patch("app.services.audible.authors.cache.get", return_value=None), \
-         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist:
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
+         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist, \
+         patch("app.services.audible.authors.request_author_books_completion") as mock_complete:
+        result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert result == ["B0CATALOG01", "B0SCREEN001", "B0DBONLY0001"]
     mock_db.assert_awaited_once()
@@ -3161,14 +3239,19 @@ async def test_get_author_books_db_union_backstop_caches_with_short_ttl_when_cat
          patch("app.services.audible.authors._fetch_author_books_by_catalog", new=AsyncMock(return_value=catalog_result)), \
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=db_asins)) as mock_db, \
          patch("app.services.audible.authors.cache.get", return_value=None), \
-         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist:
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
+         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist, \
+         patch("app.services.audible.authors.request_author_books_completion") as mock_complete:
+        result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert result == ["B0NAME00001", "B0NAME00002", "B0DBEXTRA01", "B0DBEXTRA02", "B0DBEXTRA03"]
     mock_db.assert_awaited_once()
-    mock_persist.assert_called_once()
-    _, persist_kwargs = mock_persist.call_args
-    assert persist_kwargs["ttl_seconds"] == AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS
+    # An unfinished walk is no longer cached at all. Storing it under the
+    # short TTL was defensible while the cache served only ?cache=true
+    # callers; once it served the default path it meant handing a partial
+    # to everyone as though it were the answer. It goes to background
+    # completion instead, and the complete result is what gets cached.
+    mock_persist.assert_not_called()
+    mock_complete.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -3194,14 +3277,19 @@ async def test_get_author_books_db_union_backstop_caches_with_short_ttl_when_scr
          patch("app.services.audible.authors._fetch_author_books_by_catalog", new=AsyncMock(return_value=catalog_result)), \
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=db_asins)) as mock_db, \
          patch("app.services.audible.authors.cache.get", return_value=None), \
-         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist:
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
+         patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist, \
+         patch("app.services.audible.authors.request_author_books_completion") as mock_complete:
+        result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert result == ["B0NAME00001", "B0SCREEN001", "B0SCREEN002", "B0DBTAIL0001"]
     mock_db.assert_awaited_once()
-    mock_persist.assert_called_once()
-    _, persist_kwargs = mock_persist.call_args
-    assert persist_kwargs["ttl_seconds"] == AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS
+    # An unfinished walk is no longer cached at all. Storing it under the
+    # short TTL was defensible while the cache served only ?cache=true
+    # callers; once it served the default path it meant handing a partial
+    # to everyone as though it were the answer. It goes to background
+    # completion instead, and the complete result is what gets cached.
+    mock_persist.assert_not_called()
+    mock_complete.assert_called_once()
 
 
 # ============================================================
@@ -3226,7 +3314,7 @@ async def test_get_author_books_shortfall_warning_fires_past_ten_percent_gap():
          patch("app.services.audible.authors.cache.get", return_value=None), \
          patch("app.services.audible.authors.persist_author_books_cache_background"), \
          patch("app.services.audible.authors.logger") as mock_logger:
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
+        result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     # 300 catalog + 500 screens, disjoint by construction == 800 total,
     # against a claimed 1000 -- a 20% shortfall, comfortably past the 10%
@@ -3265,7 +3353,7 @@ async def test_get_author_books_shortfall_warning_does_not_fire_on_a_small_healt
          patch("app.services.audible.authors.cache.get", return_value=None), \
          patch("app.services.audible.authors.persist_author_books_cache_background"), \
          patch("app.services.audible.authors.logger") as mock_logger:
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
+        result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert len(result) == 1133
     shortfall_calls = [
@@ -3295,7 +3383,7 @@ async def test_get_author_books_shortfall_warning_does_not_fire_on_overshoot():
          patch("app.services.audible.authors.cache.get", return_value=None), \
          patch("app.services.audible.authors.persist_author_books_cache_background"), \
          patch("app.services.audible.authors.logger") as mock_logger:
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
+        result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert len(result) == 4
     shortfall_calls = [
@@ -3323,7 +3411,7 @@ async def test_get_author_books_shortfall_uses_screen_product_count_when_catalog
          patch("app.services.audible.authors.cache.get", return_value=None), \
          patch("app.services.audible.authors.persist_author_books_cache_background"), \
          patch("app.services.audible.authors.logger") as mock_logger:
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
+        result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     mock_catalog.assert_not_awaited()
     assert result == ["B0SCREEN001"]
@@ -3987,13 +4075,18 @@ async def test_get_author_books_degraded_path_warning_fires_and_caches_with_shor
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
          patch("app.services.audible.authors.cache.get", return_value=None), \
          patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist, \
+         patch("app.services.audible.authors.request_author_books_completion") as mock_complete, \
          patch("app.services.audible.authors.logger") as mock_logger:
-        result = await get_author_books("B000AUTHOR", "us", mock_session)
+        result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert result == ["B0SCREEN001"]
-    mock_persist.assert_called_once()
-    _, persist_kwargs = mock_persist.call_args
-    assert persist_kwargs["ttl_seconds"] == AUTHOR_BOOKS_DEGRADED_CACHE_TTL_SECONDS
+    # An unfinished walk is no longer cached at all. Storing it under the
+    # short TTL was defensible while the cache served only ?cache=true
+    # callers; once it served the default path it meant handing a partial
+    # to everyone as though it were the answer. It goes to background
+    # completion instead, and the complete result is what gets cached.
+    mock_persist.assert_not_called()
+    mock_complete.assert_called_once()
     mock_logger.warning.assert_called_once_with(
         "Audible Author Books served from a degraded path",
         extra={

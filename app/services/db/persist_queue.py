@@ -170,13 +170,13 @@ _inflight: set[asyncio.Task] = set()
 _queued_books = 0
 _shed_books = 0
 _shed_events = 0
-_shed_last_logged = 0.0
+_shed_last_logged: float | None = None
 
 # Chunk-retry accounting, windowed the same way and for the same reason as
 # shedding — see _record_retry.
 _retry_attempts = 0
 _retry_chunks_replayed = 0
-_retry_last_logged = 0.0
+_retry_last_logged: float | None = None
 
 
 # ============================================================
@@ -210,9 +210,21 @@ def _get_bg_write_semaphore() -> asyncio.Semaphore:
     return _bg_write_semaphore
 
 
-def _window_elapsed(last_logged: float, now: float) -> bool:
+def _window_elapsed(last_logged: float | None, now: float) -> bool:
     """True at most once per _SHED_LOG_INTERVAL_SECONDS since last_logged —
-    the gate shared by every incident-volume log line on this path."""
+    the gate shared by every incident-volume log line on this path.
+
+    None means nothing has been reported yet, and it is deliberately a
+    separate value rather than 0.0. time.monotonic() counts from boot, so
+    against a 0.0 sentinel the arithmetic below reads "never reported" as
+    "reported at boot" and stays false for the first minute of a machine's
+    life — swallowing the very first shed and the very first retry report,
+    which is the opposite of what _record_shed promises and the worst
+    possible minute in which to be quiet. Caught by CI on freshly booted
+    runners while passing on any developer machine with more than a minute
+    of uptime."""
+    if last_logged is None:
+        return True
     return now - last_logged >= _SHED_LOG_INTERVAL_SECONDS
 
 

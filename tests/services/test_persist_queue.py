@@ -66,17 +66,34 @@ def reset_queue_state():
     The backlog counter and the shed window are module state that outlives a
     test. Reset around every one so an earlier test's shed cannot silence a
     later test's window, or its backlog shed a batch that should be admitted.
+
+    The window sentinels reset to None, not 0.0. None is what "nothing
+    reported yet" means; 0.0 is a real reading on a monotonic clock that
+    counts from boot, so setting them to 0.0 quietly reinstated the very
+    bug the production code had -- it made every test here believe a report
+    had already happened at boot, which is invisible on a machine with more
+    than a minute of uptime and fails outright on a fresh CI runner.
+
+    _retry_last_logged is reset too. It was previously left alone, so the
+    retry window leaked across tests in exactly the way this fixture exists
+    to prevent for the shed window.
     """
     pq._queued_books = 0
     pq._shed_books = 0
     pq._shed_events = 0
-    pq._shed_last_logged = 0.0
+    pq._shed_last_logged = None
+    pq._retry_last_logged = None
+    pq._retry_attempts = 0
+    pq._retry_chunks_replayed = 0
     pq._inflight.clear()
     yield
     pq._queued_books = 0
     pq._shed_books = 0
     pq._shed_events = 0
-    pq._shed_last_logged = 0.0
+    pq._shed_last_logged = None
+    pq._retry_last_logged = None
+    pq._retry_attempts = 0
+    pq._retry_chunks_replayed = 0
     pq._inflight.clear()
 
 
@@ -459,6 +476,32 @@ async def test_the_backlog_is_released_even_when_the_task_raises():
         await asyncio.sleep(0)
 
     assert pq._queued_books == 0
+
+
+def test_the_window_reports_the_first_event_on_a_freshly_booted_machine():
+    """The window gate must treat "nothing reported yet" as due, not as
+    "reported at boot".
+
+    time.monotonic() counts from boot, so a 0.0 sentinel makes the elapsed
+    arithmetic false for the first minute of a machine's life and swallows
+    the very first shed and the very first retry report. That is the
+    opposite of what _record_shed documents, and the worst minute in which
+    to be silent -- a process shedding this early is already in trouble.
+
+    Pinned against a fresh-boot clock rather than the ambient one because
+    the ambient one hides it: this passed on every developer machine with
+    more than a minute of uptime and failed on CI's freshly booted runners,
+    which is exactly the shape of bug a test has to force rather than
+    observe."""
+    for uptime in (0.0, 12.0, 59.9):
+        assert pq._window_elapsed(None, uptime) is True, uptime
+
+    # And it must still close the window once something HAS been reported,
+    # on the same fresh-boot clock -- a fix that simply always returns True
+    # would satisfy the assertions above and reinstate the per-event flood
+    # the window exists to prevent.
+    assert pq._window_elapsed(12.0, 12.0) is False
+    assert pq._window_elapsed(12.0, 12.0 + pq._SHED_LOG_INTERVAL_SECONDS) is True
 
 
 def test_the_first_shed_is_reported_at_once():

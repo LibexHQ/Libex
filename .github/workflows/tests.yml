@@ -14,15 +14,50 @@ jobs:
         with:
           python-version: '3.12'
           cache: 'pip'
-          cache-dependency-path: requirements.txt
+          cache-dependency-path: requirements-dev.lock
+      # The dev lock, not the application one: the test runners live there now,
+      # so that they are not in requirements.lock and therefore not in the
+      # published image. The dev lock is a strict superset of the application
+      # lock, so this job still runs against every version that ships.
       - name: Install dependencies
-        run: pip install -r requirements.txt -c constraints.txt
+        run: |
+          pip install --require-hashes -r requirements-dev.lock
+      # Into a venv of its own, never the job's environment. pip-audit's
+      # dependency tree overlaps the application's -- requests, urllib3,
+      # packaging, certifi -- so installing it alongside would let pip move
+      # packages that were just installed under hash verification, and the
+      # audit would then be reading an environment that no longer matches
+      # either lock. RUNNER_TEMP keeps it out of the workspace, so it can never
+      # reach a build context or a commit.
       - name: Install tooling
-        run: pip install ruff==0.14.14 pip-audit
+        run: |
+          python -m venv "$RUNNER_TEMP/tooling"
+          "$RUNNER_TEMP/tooling/bin/pip" install --require-hashes -r requirements-tooling.lock
       - name: Lint with ruff
-        run: ruff check app/ --ignore E501
+        run: |
+          "$RUNNER_TEMP/tooling/bin/ruff" check app/ --ignore E501
+      # Audits the locks by name rather than whatever happens to be installed,
+      # so what is checked is exactly what ships. Both are named: the first is
+      # the shipped set, and the second adds the test-only packages, which
+      # never reach production but do run in CI with access to the repo's
+      # secrets. The third audits the audit tooling itself: leaving the tool
+      # that reports vulnerabilities as the one thing nothing checks is a gap
+      # this slice exists to close.
+      #
+      # One invocation each, not three -r flags on one command: pip-audit
+      # resolves everything it is handed as a single install, and these three
+      # sets are deliberately unsatisfiable together -- the application locks
+      # are held to constraints.txt (idna 3.15, pygments 2.20.0, requests
+      # 2.33.0) while the tooling lock resolves freely (3.18, 2.21.0, 2.34.2).
+      # That conflict is the isolation working as intended, and combining the
+      # flags fails the step with a pip install error rather than reporting
+      # anything. Actions runs this block under `bash -e`, so any one of the
+      # three failing still fails the job.
       - name: Audit dependencies
-        run: pip-audit
+        run: |
+          "$RUNNER_TEMP/tooling/bin/pip-audit" -r requirements.lock
+          "$RUNNER_TEMP/tooling/bin/pip-audit" -r requirements-dev.lock
+          "$RUNNER_TEMP/tooling/bin/pip-audit" -r requirements-tooling.lock
       - name: Run unit tests
         run: pytest tests/ -v -m "not integration"
 
@@ -35,8 +70,9 @@ jobs:
         with:
           python-version: '3.12'
           cache: 'pip'
-          cache-dependency-path: requirements-dev.txt
+          cache-dependency-path: requirements-dev.lock
       - name: Install dependencies
-        run: pip install -r requirements-dev.txt
+        run: |
+          pip install --require-hashes -r requirements-dev.lock
       - name: Run integration tests
         run: pytest tests/ -v -m integration

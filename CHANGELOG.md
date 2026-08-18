@@ -10,6 +10,41 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.14.1]
+
+### Security
+- **Every dependency in the published image is now pinned and cryptographically
+  verified at install time.** The image and CI previously installed from a list
+  that pinned Libex's own direct dependencies by version but left everything
+  those pull in — the large majority of what actually ends up installed —
+  free to resolve to whatever the index offered at build time, with nothing
+  checking that what arrived was what the maintainers published. Both now
+  install from a generated lock that pins every package, direct and indirect,
+  to one version and verifies each against recorded SHA-256 hashes; a
+  substituted or altered archive fails the build instead of shipping. This
+  matches how the base image (pinned by digest) and the bundled documentation
+  assets (checksum-verified) were already handled. No dependency changed
+  version as part of this — the lock records what was already resolving.
+- **The test runners no longer ship inside the published image.** `pytest` and
+  its plugins were declared alongside the application's own dependencies, so
+  they — and the packages they pull in — were installed into the image that
+  runs in production, which has no tests to run. They now live with the rest
+  of the development tooling and are installed only where tests actually
+  execute. Seven packages left the image; nothing the application imports at
+  runtime changed.
+- **The tools CI uses to lint and audit are now pinned and verified too, and
+  run isolated from the application.** The audit tool in particular was
+  previously installed unpinned and unverified — the one step responsible for
+  reporting known vulnerabilities was the least protected install in the
+  build, and an unpinned version also meant an upstream release could fail
+  every branch with nothing in the repository having changed. It is now
+  version-pinned and hash-verified like everything else, and installed into
+  an environment of its own: its own dependencies overlap the application's,
+  so sharing an environment let it quietly replace packages that had just
+  been verified, and then audit the result rather than what actually ships.
+  The audit now names the locks directly, so what is checked is exactly what
+  is shipped.
+
 ## [1.14.0]
 
 Nothing here changes the API itself: no endpoint, parameter, response shape,

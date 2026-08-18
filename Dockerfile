@@ -10,8 +10,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN pip install --no-cache-dir --upgrade "pip>=26.1.2"
 
-COPY requirements.txt constraints.txt ./
-RUN pip install --no-cache-dir -r requirements.txt -c constraints.txt
+# The lock, not requirements.txt: every package and every transitive
+# dependency pinned to one version and verified against its recorded hashes,
+# the same guarantee the digest on the base image above and the checksums in
+# fetch_docs_assets.sh already give. --require-hashes is redundant with a lock
+# that hashes every line -- pip enters that mode on its own the moment it sees
+# one hash -- and is written out anyway so the build fails loudly if a future
+# edit ever lands an unhashed line here rather than quietly installing it.
+# Regenerate with:
+#   uv pip compile requirements.txt -c constraints.txt --generate-hashes \
+#     --python-version 3.12 -o requirements.lock
+COPY requirements.lock ./
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 
 COPY . .
 

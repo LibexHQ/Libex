@@ -35,6 +35,20 @@ capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
   hydrate inside the window will keep returning marked-incomplete until that
   work is reduced. The legacy `/author/{asin}/books` route changes
   identically. No endpoint, parameter, response shape or field changed.
+- **The bundled compose file now passes through the Audible proxy and Axiom
+  logging settings it has always documented.** `AUDIBLE_PROXY_URL`,
+  `AXIOM_TOKEN` and `AXIOM_DATASET` have long been in `.env.example` and the
+  README, and the app reads all three — but `docker-compose.yml` never named
+  any of them in the service's `environment:` block, and Compose does not
+  inject a host `.env` value into the container unless it is named there.
+  Setting any of the three in `.env` for a deployment run from this repo's
+  compose file as-is had no effect: Audible traffic left by the container's
+  own address instead of the configured proxy, and nothing shipped to Axiom no
+  matter what token was set. All three now pass through, defaulting to the
+  same off/empty behaviour as an unset value always had. This is a deployment
+  fix only — no endpoint, parameter or response changed, and it has no effect
+  on a deployment that already sets these at the stack or environment level
+  rather than through this file.
 
 ## [1.15.0]
 

@@ -624,6 +624,12 @@ class _CatalogBooksResult:
     categories_harvested: int = 0
     categories_considered: int = 0
     categories_expanded: int = 0
+    # Categories that earned Phase 4 but were already fully enumerated by
+    # Phase 3's probe, so their extra sorts were skipped. Counted separately
+    # from categories_expanded because "paid but needed nothing more" is a
+    # different outcome from "did not pay", and collapsing them would hide
+    # exactly the saving this split exists to make.
+    categories_complete_after_probe: int = 0
     windows_used: int = 0
     asin_match_count: int = 0
     asin_reject_count: int = 0
@@ -779,6 +785,33 @@ def _window_label(window: _CatalogWindow) -> str:
     if window.category_id is None:
         return window.sort
     return f"category {window.category_id} {window.sort}"
+
+
+def _needs_further_sorts(probe_total: int | None) -> bool:
+    """
+    Whether a category that earned Phase 4 has anything left for the extra
+    sorts to find.
+
+    The deep-paging ceiling applies per (products_sort_by, category_id) pair,
+    not per author -- that is the whole reason Phase 4 spends several sorts on
+    one category, because each opens a separately-ceilinged window into a
+    result set too large for any single one to reach. It also means the
+    reverse: a category whose own total_results sits at or under
+    CATALOG_RESULT_CEILING has no second window to open. Phase 3's probe
+    already paged that category to _pages_needed_for(total), which for a total
+    under the ceiling is all of it, so every further sort can only re-return
+    products already folded into seen -- up to four sorts by ten pages of
+    them, per category, for nothing.
+
+    The count is trustworthy for this because the query carries the author
+    name as well as the category, so total_results is how many of THIS
+    author's products sit in that category, not the category's own size.
+
+    None means the probe's page 0 gave no usable total, in which case
+    _pages_needed_for fell back to a single page and the category was NOT
+    fully enumerated -- those keep their sorts.
+    """
+    return probe_total is None or probe_total > CATALOG_RESULT_CEILING
 
 
 def _pages_needed_for(total_results: int | None) -> int:
@@ -1046,6 +1079,7 @@ async def _fetch_author_books_by_catalog(
     categories_harvested = 0
     categories_considered = 0
     categories_expanded = 0
+    categories_complete_after_probe = 0
     slicing_incomplete = False
 
     if needs_slicing and not truncated_by_deadline and not deadline_passed():
@@ -1148,16 +1182,29 @@ async def _fetch_author_books_by_catalog(
                     if dry_streak >= CATALOG_DRY_STREAK_LIMIT:
                         break
 
-            categories_expanded = len(paying)
+            # A category the probe already saw in full has nothing for the
+            # extra sorts to find -- see _needs_further_sorts. Splitting here
+            # rather than filtering inside the comprehension below keeps the
+            # skipped ones countable, because "paid but needed nothing more"
+            # is a different fact from "did not pay" and the log should not
+            # collapse them.
+            to_expand = [
+                cid for cid in paying
+                if _needs_further_sorts(
+                    probe_totals.get(_CatalogWindow(cid, _CATALOG_CATEGORY_PROBE_SORT))
+                )
+            ]
+            categories_complete_after_probe = len(paying) - len(to_expand)
+            categories_expanded = len(to_expand)
 
             # ---- Phase 4: remaining sorts for every category that paid ----
-            if paying:
+            if to_expand:
                 if truncated_by_deadline or deadline_passed():
                     truncated_by_deadline = True
                 else:
                     expand_windows = [
                         _CatalogWindow(category_id, sort)
-                        for category_id in paying
+                        for category_id in to_expand
                         for sort in _CATALOG_CATEGORY_SPEND_SORTS
                     ]
                     expand_page0 = await _fetch_window_page0_batch(author_name, region, expand_windows)
@@ -1218,6 +1265,7 @@ async def _fetch_author_books_by_catalog(
         categories_harvested=categories_harvested,
         categories_considered=categories_considered,
         categories_expanded=categories_expanded,
+        categories_complete_after_probe=categories_complete_after_probe,
         windows_used=windows_used,
         asin_match_count=counts.get(_CATALOG_TIER_ASIN_MATCH, 0),
         asin_reject_count=counts.get(_CATALOG_TIER_ASIN_REJECT, 0),

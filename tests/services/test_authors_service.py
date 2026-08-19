@@ -1849,8 +1849,15 @@ async def test_fetch_author_books_by_catalog_dry_streak_stops_walk_and_only_payi
        deliberately the strongest individual candidate of the five and is
        still shut out purely by rank position once the streak trips at
        CAT4.
-    3. Only a category that earned it (paying -- here, only CAT1) gets its
-       remaining sorts spent in Phase 4; CAT2-CAT5 never do.
+    3. Only a category that earned it (paying -- here, only CAT1) is even
+       considered for Phase 4; CAT2-CAT5 never are. CAT1 then needs nothing
+       further: its probe reported total_results 100, well inside
+       CATALOG_RESULT_CEILING, so Phase 3 already paged the whole of it and
+       the extra sorts would re-fetch products already folded. That it pays
+       and is still skipped is the point -- paying and needing more are two
+       separate questions, and the counters keep them apart. A paying
+       category that genuinely exceeds the ceiling IS expanded, which
+       test_a_category_past_the_ceiling_still_gets_its_extra_sorts pins.
     """
     from app.services.audible.authors import _fetch_author_books_by_catalog
     from app.services.audible.authors.catalog import (
@@ -1915,8 +1922,12 @@ async def test_fetch_author_books_by_catalog_dry_streak_stops_walk_and_only_payi
     assert result.sliced is True
     assert result.categories_harvested == 5
     assert result.categories_considered == 5  # every candidate is still probed up front
-    assert result.categories_expanded == 1    # only CAT1 paid
-    assert result.windows_used == 11          # 2 baseline + 5 considered + 1 expanded x 4 spend sorts
+    # CAT1 paid, but its 100 results were already fully enumerated by the
+    # probe, so it is counted as complete rather than expanded and no spend
+    # sort is issued for it.
+    assert result.categories_expanded == 0
+    assert result.categories_complete_after_probe == 1
+    assert result.windows_used == 7           # 2 baseline + 5 considered + 0 expanded
 
     # CAT5's cheap-tier probe (folded unconditionally, in Phase 3's first
     # pass, before the dry-streak fold even starts) is present...
@@ -1935,7 +1946,12 @@ async def test_fetch_author_books_by_catalog_dry_streak_stops_walk_and_only_payi
         if params.get("category_id") in ("CAT2", "CAT3", "CAT4"):
             assert params["products_sort_by"] == _CATALOG_CATEGORY_PROBE_SORT
 
-    assert mock_get.await_count == 14  # 3 baseline + 7 probe + 4 spend
+    # 3 baseline + 7 probe + 0 spend. It was 14 before Phase 4 learned to skip
+    # a category the probe had already enumerated -- the four spend requests
+    # it no longer makes would have re-fetched CAT1's same 100 results in a
+    # different order. That saving is the whole point of the change, so it is
+    # asserted as a request count rather than left implicit in the counters.
+    assert mock_get.await_count == 10
 
 
 @pytest.mark.asyncio
@@ -4539,3 +4555,82 @@ def test_the_author_books_budget_can_actually_fire_before_the_proxy_gives_up():
     # And with enough margin to assemble and write the response, not merely
     # a hair under.
     assert AUTHOR_BOOKS_TIME_BUDGET_SECONDS <= FRONTING_PROXY_TIMEOUT_SECONDS - 3.0
+
+
+def test_needs_further_sorts_only_past_the_ceiling():
+    """The predicate Phase 4 gates on.
+
+    The deep-paging ceiling applies per (sort, category) pair, so a category
+    holding fewer results than the ceiling has no second window for another
+    sort to open -- Phase 3's probe already paged all of it. Past the ceiling
+    each further sort reaches a genuinely different subset, which is the only
+    reason Phase 4 exists.
+
+    An unknown total is treated as needing more, not less: _pages_needed_for
+    falls back to a single page when total_results is missing, so that
+    category was NOT fully enumerated and skipping its sorts would lose books."""
+    from app.services.audible.authors.catalog import (
+        _needs_further_sorts, CATALOG_RESULT_CEILING,
+    )
+
+    assert _needs_further_sorts(None) is True, "unknown total must not be treated as complete"
+    assert _needs_further_sorts(CATALOG_RESULT_CEILING + 1) is True
+    assert _needs_further_sorts(CATALOG_RESULT_CEILING) is False
+    assert _needs_further_sorts(CATALOG_RESULT_CEILING - 1) is False
+    assert _needs_further_sorts(0) is False
+
+
+@pytest.mark.asyncio
+async def test_a_category_past_the_ceiling_still_gets_its_extra_sorts():
+    """The complement to the skip: a category too large for one sort to
+    enumerate must still be expanded, or prolific-author discovery loses the
+    books only the other sorts can reach.
+
+    This is the case Phase 4 exists for. The deep-paging ceiling is per
+    (sort, category), so a category holding more than CATALOG_RESULT_CEILING
+    results has a genuinely different subset behind each sort -- measured
+    live against Conan Doyle, five sorts over one fat category reached
+    roughly 1850 distinct results where the ceiling caps any single sort at
+    500. Skipping the sorts there would be a silent data loss, which is why
+    the gate keys on the category's own total rather than on a flat cap."""
+    from app.services.audible.authors import _fetch_author_books_by_catalog
+    from app.services.audible.authors.catalog import (
+        _CATALOG_SORTS, CATALOG_RESULT_CEILING, _CATALOG_CATEGORY_SPEND_SORTS,
+    )
+
+    spend_seen: set[str] = set()
+
+    async def _get(region, path, params):
+        sort = params["products_sort_by"]
+        page = params["page"]
+        category_id = params.get("category_id")
+
+        if category_id is None:
+            # Baseline: over-claims its total so the walk decides to slice,
+            # and carries a category so Phase 2 has a candidate to rank.
+            if sort == _CATALOG_SORTS[0] and page == 0:
+                products = _catalog_asin_match_products("BASE", 50)
+                for prod in products:
+                    prod["category_ladders"] = [{"ladder": [{"id": "FAT", "name": "Fat"}]}]
+                return {"total_results": CATALOG_RESULT_CEILING * 3, "products": products}
+            return {"total_results": CATALOG_RESULT_CEILING * 3, "products": []}
+
+        if sort in _CATALOG_CATEGORY_SPEND_SORTS:
+            spend_seen.add(sort)
+            return {"total_results": 10, "products": _catalog_asin_match_products(f"SPEND{sort}", 5)}
+
+        # The probe sort on a category far past the ceiling -- one sort
+        # cannot reach all of it, so the extra sorts have somewhere to go.
+        return {
+            "total_results": CATALOG_RESULT_CEILING * 2,
+            "products": _catalog_asin_match_products(f"FATP{page}", 50),
+        }
+
+    with patch("app.services.audible.authors.catalog.audible_get", new=AsyncMock(side_effect=_get)):
+        result = await _fetch_author_books_by_catalog("B000AUTHOR", "Some Author", "us")
+
+    assert result.categories_expanded == 1, "a category past the ceiling was not expanded"
+    assert result.categories_complete_after_probe == 0
+    assert spend_seen == set(_CATALOG_CATEGORY_SPEND_SORTS), (
+        "not every spend sort was issued for an over-ceiling category"
+    )

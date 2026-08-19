@@ -452,6 +452,28 @@ def _filter_products(products: list[dict]) -> list[dict]:
 # CHUNKING
 # ============================================================
 
+async def _await_chunks(tasks, timeout, chunks, region) -> None:
+    """Waits out the chunk fan-out, cancelling whatever is still in flight
+    when the request's deadline arrives.
+
+    Split from the caller so the try/finally that guarantees cancellation on
+    an OUTER cancel stays one readable statement -- see that finally for why
+    it has to exist at all.
+    """
+    _, pending = await asyncio.wait(tasks, timeout=timeout)
+    for task in pending:
+        task.cancel()
+    if pending:
+        # Let the cancellations settle before anything reads a task, so
+        # nothing is still running when results are assembled.
+        await asyncio.gather(*pending, return_exceptions=True)
+        logger.warning("Hydration deadline reached, chunks abandoned", extra={
+            "abandoned_chunks": len(pending),
+            "total_chunks": len(chunks),
+            "region": region,
+        })
+
+
 class HydrationDeadlineExceeded(Exception):
     """One hydration chunk abandoned because the request ran out of time.
 
@@ -639,19 +661,22 @@ async def _get_books_by_asins_unsettled(
                 for chunk in chunks
             ]
             timeout = None if deadline is None else max(0.0, deadline - time.monotonic())
-            _, pending = await asyncio.wait(tasks, timeout=timeout)
-            for task in pending:
-                task.cancel()
-            if pending:
-                # Let the cancellations settle before reading any task, so
-                # nothing is still running when the results are assembled.
-                await asyncio.gather(*pending, return_exceptions=True)
-                logger.warning("Hydration deadline reached, chunks abandoned", extra={
-                    "abandoned_chunks": len(pending),
-                    "total_chunks": len(chunks),
-                    "region": region,
-                })
-
+            try:
+                await _await_chunks(tasks, timeout, chunks, region)
+            finally:
+                # gather cancelled its children when the coroutine awaiting it
+                # was cancelled; wait does not, and swapping one for the other
+                # silently dropped that. Without this, an outer cancellation --
+                # a graceful shutdown, or anything that later wraps these routes
+                # in wait_for -- unwinds straight out of the await above and
+                # leaves the whole fan-out running detached: no one holding the
+                # tasks, each still holding an Audible pool permit and an httpx
+                # connection, and any exception they raise never retrieved.
+                # Discovery's own fan-out still uses gather and still gets this
+                # for free; hydration has to ask for it.
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
             # Rebuilt in the original chunk order, which zip() below relies on.
             results: list[Any] = []
             for task in tasks:

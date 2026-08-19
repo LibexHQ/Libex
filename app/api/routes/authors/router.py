@@ -278,11 +278,8 @@ async def get_books_by_author_primary(
     """Legacy endpoint. Use /author/books/{asin} instead."""
     if not is_valid_asin(asin):
         raise NotFoundException(f"Invalid ASIN format: {asin}")
-    # One deadline for the whole request, computed here and shared by both
-    # phases. Previously each phase was bounded separately -- discovery by its
-    # own budget, hydration by nothing at all -- so the worst case was the
-    # discovery budget plus an unbounded fan-out, on a request the proxy was
-    # already timing out on. Sharing it means the two cannot add up past it.
+    # One deadline shared by both phases, same as get_books_by_author above
+    # -- this is its legacy-route twin; see that call site's comment.
     deadline = time.monotonic() + AUTHOR_BOOKS_TIME_BUDGET_SECONDS
     walk = await get_author_books(asin, region, session, cache, deadline=deadline)
     asins = walk.asins

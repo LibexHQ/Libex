@@ -332,6 +332,39 @@ async def test_the_author_profile_route_still_defaults_to_no_cache(async_client)
 
 
 @pytest.mark.asyncio
+async def test_both_phases_share_one_deadline(async_client):
+    """Discovery and hydration must be bounded by the SAME deadline object,
+    not one each.
+
+    This is the whole point of the change: two budgets that each start when
+    their phase does add up, so the request can run to the sum of them on a
+    gateway that gave up long before. Recomputing the clock for the second
+    phase is the defect, and it is invisible to every other test -- a
+    fresh-deadline mutation here passes the full suite, because nothing else
+    looks at the value at all."""
+    seen = {}
+
+    async def _discovery(asin, region, session, cache, deadline=None):
+        seen["discovery"] = deadline
+        return AuthorBooksResult(["B08G9PRS1K"], True, None)
+
+    async def _hydration(asins, region, session, **kwargs):
+        seen["hydration"] = kwargs.get("deadline")
+        return [MOCK_BOOK]
+
+    with patch("app.api.routes.authors.router.get_author_books", new=_discovery), \
+         patch("app.api.routes.authors.router.get_books_by_asins", new=_hydration):
+        response = await async_client.get("/author/books/B000APF21M")
+
+    assert response.status_code == 200
+    assert seen["discovery"] is not None, "discovery was not given a deadline"
+    assert seen["hydration"] is not None, "hydration was not given a deadline"
+    assert seen["hydration"] == seen["discovery"], (
+        "the two phases were given different deadlines, so they can add up"
+    )
+
+
+@pytest.mark.asyncio
 async def test_a_freshly_walked_complete_result_gets_only_a_short_edge_ttl(async_client):
     """A walk taken just now has no trustworthy remaining life to advertise:
     its cache entry is written by a background task that has not necessarily

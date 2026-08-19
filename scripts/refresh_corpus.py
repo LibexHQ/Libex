@@ -3,8 +3,7 @@ Corpus repair tool. Kept, not spent.
 
 Reach for this whenever a writer or normalizer fix lands: it only repairs rows
 written after it deploys, and the seeder never revisits a released title, so
-without a pass here the existing corpus keeps the old value forever. Last run
-2026-08-18 for is_vvab -- 1.1M books, 105 minutes, clean.
+without a pass here the existing corpus keeps the old value forever.
 
 Re-fetches every book already stored and rewrites it through the normal
 fetch/normalize/persist path, so fields that were never written, or that have

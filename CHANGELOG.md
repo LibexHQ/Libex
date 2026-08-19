@@ -10,6 +10,32 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.15.1]
+
+### Fixed
+- **A slow `/author/books/{asin}` request now returns what it has instead of
+  timing out with nothing.** The endpoint had a time budget, but it was set
+  longer than the gateway in front of it waits — so it could never actually
+  take effect, and a request that ran long was abandoned by the gateway before
+  the budget noticed. Worse, the budget only ever covered the first half of the
+  work (finding the author's titles); fetching the books themselves was
+  unbounded, so the real worst case was the budget plus however long that took.
+
+  Both halves now share one budget for the whole request, set inside the
+  gateway's window. A request that reaches it returns the books it managed to
+  fetch, marked `X-Libex-Complete: false` and `Cache-Control: no-store`, rather
+  than failing outright. Books it could not fetch in time are served from
+  Libex's own stored copy where one exists.
+
+  **What this does not do.** If the shortfall was in fetching the books rather
+  than in finding them, nothing re-fetches the missing ones afterwards — the
+  author's title list is still completed in the background, so the next
+  request starts from a warm list, but it attempts the books live again and
+  can fall short again. An author whose catalogue is simply too large to
+  hydrate inside the window will keep returning marked-incomplete until that
+  work is reduced. The legacy `/author/{asin}/books` route changes
+  identically. No endpoint, parameter, response shape or field changed.
+
 ## [1.15.0]
 
 ### Changed
@@ -141,20 +167,6 @@ capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
   change rather than an observed fault.
 
 ### Fixed
-- **A slow `/author/books/{asin}` request now returns what it has instead of
-  timing out with nothing.** The endpoint had a time budget, but it was set
-  longer than the gateway in front of it waits — so it could never actually
-  take effect, and a request that ran long was abandoned by the gateway before
-  the budget noticed. Worse, the budget only ever covered the first half of the
-  work (finding the author's titles); fetching the books themselves was
-  unbounded, so the real worst case was the budget plus however long that took.
-
-  Both halves now share one budget for the whole request, set inside the
-  gateway's window. A request that reaches it returns the books it managed to
-  fetch, marked `X-Libex-Complete: false` and `Cache-Control: no-store`, rather
-  than failing outright — and the rest of that author's catalogue is completed
-  in the background as before, so the next request gets the whole thing. No
-  endpoint, parameter, response shape or field changed.
 - **A book's VVAB (virtual voice audiobook) status was never being saved.**
   `isVvab` has had a column, a filter and an `/db/vvab` endpoint for months,
   but nothing in the write path actually read it from Audible's response — a

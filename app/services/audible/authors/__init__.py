@@ -79,11 +79,12 @@ logger = get_logger()
 # the outage, and the only one the measurements resolve clear of their own
 # run-to-run noise. That is what keeps a full, untruncated result inside the
 # proxy's window rather than needing to return less than what Audible has.
-# This 45s deadline remains underneath that as a backstop against a
-# genuinely pathological walk, not the mechanism the outage fix relies on.
-# 25s, not 45. At 45 this could never fire: the fronting proxy gives up at
-# 30s, so the deadline sat beyond the point where the caller had already been
-# sent a 504 and the backstop was decorative. It now bounds the WHOLE request
+# This deadline remains underneath that as a backstop against a genuinely
+# pathological walk, not the mechanism the outage fix relies on.
+#
+# It is 25s, and was 45. At 45 it could never fire: the fronting proxy gives
+# up at 30s, so the deadline sat beyond the point where the caller had already
+# been sent a 504 and the backstop was decorative. It now bounds the WHOLE request
 # -- discovery and hydration share one deadline, computed once at the route --
 # and lands inside the proxy's window with room for the response to be
 # assembled and written. A walk that hits it returns what it has, marked

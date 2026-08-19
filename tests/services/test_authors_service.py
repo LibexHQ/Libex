@@ -4175,7 +4175,7 @@ async def test_get_author_books_coalesces_concurrent_calls_for_same_author_onto_
     call_count = 0
     release = asyncio.Event()
 
-    async def _slow_walk(asin, region, session, **_kwargs):
+    async def _slow_walk(asin, region, session, deadline=None):
         nonlocal call_count
         call_count += 1
         await release.wait()
@@ -4205,7 +4205,7 @@ async def test_get_author_books_does_not_coalesce_different_asin_or_region():
 
     calls: list[tuple[str, str]] = []
 
-    async def _walk(asin, region, session, **_kwargs):
+    async def _walk(asin, region, session, deadline=None):
         calls.append((asin, region))
         return [f"B0{asin}{region.upper()}"]
 
@@ -4238,7 +4238,7 @@ async def test_get_author_books_leader_failure_propagates_to_followers_and_clear
     call_count = 0
     release = asyncio.Event()
 
-    async def _failing_walk(asin, region, session, **_kwargs):
+    async def _failing_walk(asin, region, session, deadline=None):
         nonlocal call_count
         call_count += 1
         await release.wait()
@@ -4263,7 +4263,7 @@ async def test_get_author_books_leader_failure_propagates_to_followers_and_clear
     # A follow-up call for the same key must run its own fresh walk rather
     # than being poisoned by the failed one -- proves the cleanup actually
     # unblocks future calls, not merely that the dict looks empty.
-    async def _recovers(asin, region, session, **_kwargs):
+    async def _recovers(asin, region, session, deadline=None):
         return ["B0RECOVERED1"]
 
     with patch("app.services.audible.authors._walk_author_books", new=_recovers):
@@ -4291,7 +4291,7 @@ async def test_get_author_books_cancelled_follower_does_not_kill_the_shared_walk
     walk_completed = False
     release = asyncio.Event()
 
-    async def _slow_walk(asin, region, session, **_kwargs):
+    async def _slow_walk(asin, region, session, deadline=None):
         nonlocal call_count, walk_completed
         call_count += 1
         await release.wait()
@@ -4361,7 +4361,7 @@ async def test_get_author_books_cancelled_leader_ends_the_shared_walk_and_clears
     walk_completed = False
     release = asyncio.Event()
 
-    async def _slow_walk(asin, region, session, **_kwargs):
+    async def _slow_walk(asin, region, session, deadline=None):
         nonlocal call_count, walk_completed
         call_count += 1
         await release.wait()
@@ -4398,7 +4398,7 @@ async def test_get_author_books_cancelled_leader_ends_the_shared_walk_and_clears
 
     # And the key is genuinely reusable afterwards, not merely absent from
     # the dict -- a stale entry here would be worse than the bug above.
-    async def _recovers(asin, region, session, **_kwargs):
+    async def _recovers(asin, region, session, deadline=None):
         return ["B0RECOVERED2"]
 
     with patch("app.services.audible.authors._walk_author_books", new=_recovers):

@@ -1,5 +1,10 @@
 """
-One-off corpus refresh.
+Corpus repair tool. Kept, not spent.
+
+Reach for this whenever a writer or normalizer fix lands: it only repairs rows
+written after it deploys, and the seeder never revisits a released title, so
+without a pass here the existing corpus keeps the old value forever. Last run
+2026-08-18 for is_vvab -- 1.1M books, 105 minutes, clean.
 
 Re-fetches every book already stored and rewrites it through the normal
 fetch/normalize/persist path, so fields that were never written, or that have
@@ -209,6 +214,23 @@ RAMP_INTERVAL = _env_int("REFRESH_RAMP_INTERVAL", 150)
 # for good — that region has told us where the shared exit's rate is.
 LATENCY_WINDOW = _env_int("REFRESH_LATENCY_WINDOW", 60)
 DEGRADE_P95_RATIO = _env_float("REFRESH_DEGRADE_P95_RATIO", 2.0)
+
+# Latency samples a region must contribute before the degrade check above is
+# allowed to act on it.
+#
+# Measured on the first live pass, 2026-08-18: the ramp froze at the opening
+# rung 1.3 minutes in, with no exit problem at all. best_p95 takes any new
+# minimum, so the first full window sets the bar -- and consecutive early
+# windows vary widely. The samples that froze that run were 1104ms, 546ms,
+# 469ms, 663ms and 795ms: 1104/469 is 2.35, past the ratio, on nothing but
+# ordinary jitter. The freeze is permanent, so a run that trips it spends its
+# whole life at CONCURRENCY_START.
+#
+# Three windows rather than one, so the baseline is a settled minimum rather
+# than whichever window happened to land first. It only delays the check --
+# a genuinely degrading exit still trips it, just after the ramp has seen
+# enough to know what normal looks like.
+DEGRADE_WARMUP_SAMPLES = _env_int("REFRESH_DEGRADE_WARMUP_SAMPLES", LATENCY_WINDOW * 3)
 
 # Abort thresholds. Any 429 ends the run outright. 5xx is allowed to be noise
 # up to a point, because a single upstream 503 is not a throttle.
@@ -430,6 +452,10 @@ class _RegionSignal:
         self.latencies: deque[float] = deque(maxlen=LATENCY_WINDOW)
         self.clean_streak = 0
         self.best_p95: float | None = None
+        # Total samples ever seen, not the window's length -- the window is
+        # bounded, and what the warmup needs to know is how much evidence this
+        # region has contributed overall.
+        self.samples = 0
 
     def p95(self) -> float | None:
         if len(self.latencies) < LATENCY_WINDOW:
@@ -486,6 +512,7 @@ class _Ramp:
         signal.clean_streak += 1
         if elapsed is not None:
             signal.latencies.append(elapsed)
+            signal.samples += 1
 
         p95 = signal.p95()
         if p95 is None:
@@ -494,7 +521,14 @@ class _Ramp:
         if signal.best_p95 is None or p95 < signal.best_p95:
             signal.best_p95 = p95
 
-        if not self._frozen and p95 > signal.best_p95 * DEGRADE_P95_RATIO:
+        # Warming up: keep letting best_p95 settle toward a real minimum, but
+        # do not let this region freeze the ramp yet. Climbing stays allowed,
+        # which is why this gates only the degrade branch below rather than
+        # returning -- a cold exit that is genuinely fast should not be held
+        # at the opening rung waiting for permission to leave it.
+        warming_up = signal.samples < DEGRADE_WARMUP_SAMPLES
+
+        if not warming_up and not self._frozen and p95 > signal.best_p95 * DEGRADE_P95_RATIO:
             await self._step_down(region, signal, p95)
             return
 

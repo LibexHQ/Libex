@@ -276,7 +276,11 @@ async def test_ramp_steps_down_on_one_degraded_region_and_freezes_the_climb():
     trouble is evidence about the shared ceiling, not just about itself."""
     gate = _Gate(limit=refresh_corpus.CONCURRENCY_START + refresh_corpus.RAMP_STEP)
     ramp = _Ramp(gate)
-    await _fill_window(ramp, "us", 0.1)
+    # Past DEGRADE_WARMUP_SAMPLES before degrading, so this exercises a
+    # settled baseline rather than first-window jitter -- the warmup
+    # deliberately ignores the latter, which is a separate test.
+    for _ in range(refresh_corpus.DEGRADE_WARMUP_SAMPLES):
+        await ramp.record("us", 0.1, failed=False)
     starting_limit = gate.limit
 
     degraded = 0.1 * refresh_corpus.DEGRADE_P95_RATIO + 1.0
@@ -381,3 +385,31 @@ def test_check_abort_reports_only_the_first_reason():
     run.abort("second reason")
 
     assert run.abort_reason == "first reason"
+
+
+@pytest.mark.asyncio
+async def test_the_ramp_does_not_freeze_on_first_window_jitter():
+    """A degrade signal from a region that has barely been sampled must not
+    freeze the ramp for the rest of the run.
+
+    Measured on the first live pass: the ramp froze at the opening rung 1.3
+    minutes in against a perfectly healthy exit. best_p95 takes any new
+    minimum, so the first full window sets the bar, and the samples that
+    tripped it were 1104ms against a 469ms best -- 2.35x, past the ratio, on
+    ordinary jitter. The freeze is permanent, so that run spent its whole life
+    at CONCURRENCY_START for no reason.
+
+    Feeds a fast baseline and then a spike, both inside the warmup, and
+    asserts the ramp is still live."""
+    gate = _Gate(limit=refresh_corpus.CONCURRENCY_START)
+    ramp = _Ramp(gate)
+
+    window = refresh_corpus.LATENCY_WINDOW
+    for _ in range(window):
+        await ramp.record("us", 0.469, failed=False)
+    # A spike well past the ratio, still inside the warmup.
+    for _ in range(window):
+        await ramp.record("us", 1.104, failed=False)
+
+    assert ramp.frozen is False, "froze on jitter before it had a settled baseline"
+    assert gate.limit == refresh_corpus.CONCURRENCY_START

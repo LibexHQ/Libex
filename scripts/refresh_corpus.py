@@ -229,7 +229,7 @@ DEGRADE_P95_RATIO = _env_float("REFRESH_DEGRADE_P95_RATIO", 2.0)
 # than whichever window happened to land first. It only delays the check --
 # a genuinely degrading exit still trips it, just after the ramp has seen
 # enough to know what normal looks like.
-DEGRADE_WARMUP_SAMPLES = _env_int("REFRESH_DEGRADE_WARMUP_SAMPLES", LATENCY_WINDOW * 3)
+DEGRADE_WARMUP_SAMPLES = LATENCY_WINDOW * 3
 
 # Abort thresholds. Any 429 ends the run outright. 5xx is allowed to be noise
 # up to a point, because a single upstream 503 is not a throttle.

@@ -676,7 +676,7 @@ async def test_get_books_by_asins_not_found_chunk_does_not_discard_other_chunks(
     # get_books_by_asins' own comment at the DB-backstop read): a 404 is a
     # confirmed absence, not a retry signal, and papering over it with
     # whatever stale data the DB happens to hold would be exactly the kind
-    # of silent, wrong content data-integrity forbids. Asserting the mock
+    # of silent, wrong content the data contract forbids. Asserting the mock
     # was never called (rather than just checking missing_asin isn't in the
     # result) is deliberate: with get_books_from_db left unmocked, a real
     # call here still returns [] against a bare AsyncMock session, so the
@@ -743,7 +743,7 @@ async def test_get_books_by_asins_transient_chunk_failure_is_skipped_not_fatal()
     Audible-hydration list; the other chunk's results still come back rather
     than the whole request failing. The DB backstop scoped to exactly the
     transiently-failed ASINs is unioned into the return value rather than
-    silently dropped -- the defect data-integrity found this test had
+    silently dropped -- the defect this test previously had
     LOCKED IN: without mocking get_books_from_db, the call went through to
     the real function against a bare AsyncMock session and gave no signal
     either way on whether the backstop fired."""

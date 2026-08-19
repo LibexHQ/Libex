@@ -258,8 +258,8 @@ async def test_get_author_books_hydration_cache_flag_follows_query_param_false(a
 async def test_get_author_books_legacy_route_hydration_passes_cache_flag_and_high_concurrency(async_client):
     """The legacy twin route (/author/{asin}/books) must pass the same two
     args to the same call -- this is the exact route the fix's own comment
-    calls out as needing the identical pairing, and the one api-routes
-    reported nothing pins at all."""
+    calls out as needing the identical pairing, and the one that
+    nothing else pins at all."""
     with patch("app.api.routes.authors.router.get_author_books", new_callable=AsyncMock) as mock_books, \
          patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
         mock_books.return_value = AuthorBooksResult(["B08G9PRS1K"], True)

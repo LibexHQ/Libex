@@ -1041,7 +1041,7 @@ async def _fetch_author_books_by_catalog(
             baseline_totals[window] = None
             continue
         if not isinstance(outcome, dict) or not isinstance(outcome.get("products"), list):
-            # SITE 4 (bug-hunter, live-reproduced): the worst of every hole
+            # SITE 4, reproduced live: the worst of every hole
             # in this function, because Phase 1 runs on EVERY author query,
             # not just a large or sliced one. A malformed-but-dict 200 --
             # `{"total_results": 100}` with no "products" at all -- used to
@@ -1093,7 +1093,7 @@ async def _fetch_author_books_by_catalog(
             # (persist_author_books_cache_background unions under a row
             # lock), so the only thing this guard has to protect is the
             # walk's own completeness CLAIM, not the data itself.
-            # Measured live (data-integrity): in the single-window case
+            # Measured live: in the single-window case
             # this loses nothing at all -- both baseline sorts enumerate
             # the same unfiltered result set, so the sibling window
             # already covers it. The residual cost is both windows
@@ -1420,7 +1420,7 @@ async def _fetch_author_books_by_catalog(
                             sort_errors.append(f"{_window_label(window)} page 0: {type(outcome).__name__}: {outcome}")
                             continue
                         if not isinstance(outcome, dict) or not isinstance(outcome.get("products"), list):
-                            # SITE 5 (bug-hunter, live-reproduced): the same
+                            # SITE 5, reproduced live: the same
                             # shape as SITE 4 above, one phase later -- a
                             # malformed-but-dict page 0 used to pass this
                             # loop's old BaseException-only check, get

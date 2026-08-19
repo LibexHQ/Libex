@@ -5229,8 +5229,8 @@ async def test_a_probe_page_0_that_raises_is_visible_but_unrecoverable_pinning_e
 
 @pytest.mark.asyncio
 async def test_a_malformed_baseline_page_0_is_visible_and_not_reported_clean():
-    """SITE 4 (bug-hunter and data-integrity, both live-reproduced
-    independently, after the three sites above were already fixed): the
+    """SITE 4, reproduced live twice over after the three sites above
+    were already fixed: the
     worst hole found in this function, because Phase 1's baseline
     windows run on EVERY author query, not just a large or sliced one.
     A malformed-but-dict page 0 -- a 200 whose body has no usable
@@ -5290,13 +5290,12 @@ async def test_a_malformed_baseline_page_0_is_visible_and_not_reported_clean():
 
 @pytest.mark.asyncio
 async def test_a_malformed_expand_page_0_is_visible_and_never_folds():
-    """SITE 5 (bug-hunter and data-integrity, both live-reproduced
-    independently): the same shape as SITE 4, one phase later. A
+    """SITE 5, reproduced live twice over: the same shape as SITE 4, one phase later. A
     malformed-but-dict page 0 for one of Phase 4's spend sorts used to
     pass this extraction loop's old BaseException-only check, get
     wrongly added to expand_ok and counted as fetched, then pass the
     fold loop's own isinstance(dict) gate too, landing on a silent
-    no-op with zero sort_errors -- data-integrity's own live measurement
+    no-op with zero sort_errors -- a live measurement
     against a disjoint-sort fixture found up to CATALOG_RESULT_CEILING
     unique ASINs lost per affected window this way, with zero trace. Per
     the neighbouring expand-rest guard's own comment, Phase 4 has no

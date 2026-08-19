@@ -12,6 +12,34 @@ capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
 ## [1.15.1]
 
+### Changed
+- **`/author/books/{asin}` makes fewer upstream requests for the same books.**
+  Building an author's title list walks their catalogue one category at a
+  time, and each category was then re-walked under four more sort orders to
+  dig past the depth limit a single sort can reach. That limit applies per
+  sort *and* category, so a category holding fewer titles than the limit was
+  already read in full on the first pass — the four extra walks could only
+  return the same titles in a different order. Those categories are now
+  skipped, cutting up to four requests each.
+
+  The set of books returned is unchanged. A category large enough to actually
+  hit the limit is still walked under every sort, and a category whose first
+  pass came back short — a page that failed to load, one the batch never
+  returned, or one whose body came back unusable — is treated as unread and
+  walked in full rather than assumed finished, rather than trusting a total
+  that was recorded before the shortfall happened. Fewer requests means more
+  authors finish inside the request's time budget, and a category the probe
+  had already read in full is no longer wrongly counted as owed work when
+  judging whether the request ran out of time — between the two,
+  marked-incomplete responses should get rarer.
+
+  **What this does not cover.** The one page this doesn't retry is a
+  category's very first probe page, the one that decides whether the category
+  is worth a second look at all — if that page itself fails to load or comes
+  back unusable, the category is treated as having nothing new, the same as
+  it would be if it genuinely had nothing, and it is not walked further. No
+  endpoint, parameter, response shape or field changed.
+
 ### Fixed
 - **A slow `/author/books/{asin}` request now returns what it has instead of
   timing out with nothing.** The endpoint had a time budget, but it was set

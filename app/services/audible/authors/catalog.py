@@ -1040,6 +1040,75 @@ async def _fetch_author_books_by_catalog(
             sort_errors.append(f"{_window_label(window)} page 0: {type(outcome).__name__}: {outcome}")
             baseline_totals[window] = None
             continue
+        if not isinstance(outcome, dict) or not isinstance(outcome.get("products"), list):
+            # SITE 4 (bug-hunter, live-reproduced): the worst of every hole
+            # in this function, because Phase 1 runs on EVERY author query,
+            # not just a large or sliced one. A malformed-but-dict 200 --
+            # `{"total_results": 100}` with no "products" at all -- used to
+            # pass this loop's old BaseException-only check, get counted as
+            # fetched, and then ALSO pass the fold loop's own
+            # `isinstance(page0_outcome, dict)` gate below (a malformed
+            # dict is still a dict), landing on _process_catalog_page's
+            # silent no-op with zero sort_errors either way. The result:
+            # asins == [], sort_errors == [], slicing_incomplete == False --
+            # a walk that returned nothing looked perfectly clean, and
+            # catalog_clean (see get_author_books in authors/__init__.py)
+            # gates the cache write under the full default TTL
+            # (settings.cache_ttl, 24 hours) on nothing but sort_errors
+            # being empty, so an empty result was one malformed 200 away
+            # from being cached under that full default TTL as an
+            # exhaustive walk.
+            #
+            # Fixed here, in the extraction loop, not at the fold below --
+            # by the time the fold loop's `page0_data = ... else None` runs,
+            # pages_fetched has already been incremented and there is no
+            # longer one place left to also correct baseline_totals; this
+            # loop is that one place; the BaseException branch just above
+            # already proves the pattern (also sets baseline_totals[window]
+            # = None before continuing), so a malformed dict is now handled
+            # exactly the same way a raised exception already was rather
+            # than inventing a second, divergent path for the same "page 0
+            # unusable" fact. total_results is deliberately not trusted
+            # from a malformed page even when the dict happens to carry
+            # a total_results value -- as for the exception branch, this
+            # window's pages_needed then falls back to just page 0 via
+            # _pages_needed_for(None), matching the existing next
+            # BaseException handling exactly rather than adding a
+            # speculative rest-page recovery attempt no other page-0 site
+            # in this function makes either.
+            #
+            # sort_errors alone is sufficient here, for the identical
+            # reason it already was for the baseline rest-page site: read
+            # live, catalog_clean's gate does not distinguish a SHORT clean
+            # walk from an EMPTY clean one -- both need sort_errors empty
+            # before get_author_books writes ANYTHING to the cache (not
+            # merely the full default TTL write; the `elif allow_
+            # background_completion` branch that a non-empty sort_errors
+            # falls into writes nothing at all and re-runs the walk in the
+            # background instead -- see that branch's own comment).
+            # Nothing stronger than the signal already used everywhere
+            # else in this function would do anything the existing gate
+            # does not already do -- in particular, the stored union at
+            # the DB layer cannot shrink regardless
+            # (persist_author_books_cache_background unions under a row
+            # lock), so the only thing this guard has to protect is the
+            # walk's own completeness CLAIM, not the data itself.
+            # Measured live (data-integrity): in the single-window case
+            # this loses nothing at all -- both baseline sorts enumerate
+            # the same unfiltered result set, so the sibling window
+            # already covers it. The residual cost is both windows
+            # malformed at once, transiently, page 0 only, with
+            # total_results happening to survive -- and there the loss is
+            # only transient, because nothing gets cached and the very
+            # next request recovers it, against main's alternative of
+            # caching the shortfall as complete for the full default TTL.
+            # This is the other of Phase 1's two guards -- see the
+            # malformed-rest-page guard further below in this same loop
+            # for the narrower, page>=1 half of the same protection;
+            # neither one alone covers the other's gap.
+            sort_errors.append(f"{_window_label(window)} page 0: malformed response body")
+            baseline_totals[window] = None
+            continue
         pages_fetched += 1
         candidate_total = outcome.get("total_results") if isinstance(outcome, dict) else None
         baseline_totals[window] = candidate_total if isinstance(candidate_total, int) and candidate_total >= 0 else None
@@ -1079,6 +1148,38 @@ async def _fetch_author_books_by_catalog(
             outcome = baseline_rest[target]
             if isinstance(outcome, BaseException):
                 sort_errors.append(f"{_window_label(window)} page {page}: {type(outcome).__name__}: {outcome}")
+                continue
+            if not isinstance(outcome, dict) or not isinstance(outcome.get("products"), list):
+                # This is one of TWO guards Phase 1 needs, not the whole
+                # of its protection alone -- the other covers this same
+                # window's own page 0 (see the SITE 4 comment in the
+                # extraction loop above). A malformed page 0 is the worse
+                # of the two: it also poisons baseline_totals for this
+                # whole window, which caps _pages_needed_for at a single
+                # page and means this rest-page loop is never even
+                # reached for that window at all. Losing a page HERE,
+                # mid-walk, after page 0 already succeeded, is the
+                # narrower failure -- but nothing downstream of Phase 1
+                # ever re-examines a baseline window on its own either
+                # way, so sort_errors is the only trace either kind of
+                # loss ever leaves for that window, and that is exactly
+                # what keeps catalog_clean (see
+                # app/services/audible/authors/__init__.py) from caching a
+                # short OR an empty result under the full default TTL as
+                # though the walk were complete. slicing_incomplete is
+                # deliberately left untouched: that field's own contract
+                # is narrower (a harvest that surfaced zero categories to
+                # slice with, not a page that failed to fetch -- see
+                # _CatalogBooksResult's docstring), and folding this into
+                # it would blur a signal that field already defines
+                # precisely. Plateau detection needs no extra guard
+                # either: _catalog_page_signature already returns None
+                # for a body this shape can't be compared from, so a
+                # malformed page here neither trips a false
+                # baseline_plateaued nor overwrites previous_signature
+                # with something the next real page would wrongly compare
+                # against.
+                sort_errors.append(f"{_window_label(window)} page {page}: malformed response body")
                 continue
             pages_fetched += 1
             signature = _catalog_page_signature(outcome)
@@ -1123,6 +1224,13 @@ async def _fetch_author_books_by_catalog(
 
             probe_ok: set[_CatalogWindow] = set()
             probe_totals: dict[_CatalogWindow, int | None] = {}
+            # Populated here, not just below at the rest-page tier, because
+            # a malformed page 0 (see the loop below) is folded into these
+            # same two collections immediately -- there is no separate
+            # "page-0 lost" set, it shares probe_pages_lost and paying with
+            # the rest-page-loss case they were already built for.
+            probe_pages_lost: set[_CatalogWindow] = set()
+            paying: list[str] = []
             # Each window's own page-0 new-ASIN yield, captured the instant
             # it's folded below -- this is the cheap tier's half of the
             # "across both tiers" score the docstring above promises. It has
@@ -1139,6 +1247,42 @@ async def _fetch_author_books_by_catalog(
                 outcome = probe_page0[window]
                 if isinstance(outcome, BaseException):
                     sort_errors.append(f"{_window_label(window)} page 0: {type(outcome).__name__}: {outcome}")
+                    continue
+                if not isinstance(outcome, dict) or not isinstance(outcome.get("products"), list):
+                    # Unlike the raising case just above, this window still
+                    # got an HTTP 200 -- there was simply nothing usable in
+                    # the body. That is a stronger case than a malformed
+                    # REST page: page 0 is the ONLY source of
+                    # probe_page0_new and advancing, so with no guard here
+                    # this window silently scores added == 0, which is
+                    # indistinguishable from a category that genuinely had
+                    # nothing, and, worse, consumes a slot in the
+                    # CATALOG_DRY_STREAK_LIMIT streak that can stop the walk
+                    # from ever folding a real, lower-ranked category (see
+                    # this function's own docstring on Phase 3). There is no
+                    # yield signal at all to score here, so this window
+                    # never enters probe_ok and skips the dry/paying fold
+                    # below entirely -- it is instead pushed straight into
+                    # paying and probe_pages_lost, the same treatment a
+                    # window whose REST pages went missing gets, so
+                    # _needs_further_sorts forces Phase 4 to give this
+                    # category the one remaining chance to recover it
+                    # (probe_totals has no entry for it either, which alone
+                    # would already force that same recovery -- both reasons
+                    # hold at once). Erring toward the extra Phase 4 request
+                    # is the same call this module already made for a lost
+                    # REST page: spending four requests that turn out
+                    # redundant is cheap, silently dropping a category that
+                    # was never actually dry is not. paying itself is not
+                    # appended here -- see the second loop below, which adds
+                    # every probe_pages_lost window to paying at the point
+                    # in that loop's own probe_windows iteration order that
+                    # keeps _CatalogBooksResult's documented fold order
+                    # (ranked-candidate-then-sort-priority) intact; appending
+                    # here instead would put every malformed candidate ahead
+                    # of higher-ranked ones the second loop scores later.
+                    sort_errors.append(f"{_window_label(window)} page 0: malformed response body")
+                    probe_pages_lost.add(window)
                     continue
                 pages_fetched += 1
                 probe_ok.add(window)
@@ -1172,10 +1316,21 @@ async def _fetch_author_books_by_catalog(
             # silently no-ops on a non-dict or a dict without a list
             # "products"). Their total_results says nothing about it, so it
             # has to be carried separately. See _needs_further_sorts.
-            probe_pages_lost: set[_CatalogWindow] = set()
-            paying: list[str] = []
+            # probe_pages_lost and paying are declared above, alongside the
+            # page-0 loop, because a malformed page 0 is folded into both of
+            # them there rather than here.
             dry_streak = 0
             for window in probe_windows:
+                if window in probe_pages_lost:
+                    # A malformed page 0 (folded into probe_pages_lost and
+                    # left out of paying in the loop above -- see that
+                    # loop's own comment). Handled here, at this same
+                    # probe_windows iteration point, purely to land in
+                    # paying in rank order; it never touches probe_ok, the
+                    # rest-page fetch below, or dry_streak, because there is
+                    # no yield to score it against.
+                    paying.append(window.category_id)
+                    continue
                 if window not in probe_ok:
                     continue
                 before = len(seen)
@@ -1264,6 +1419,28 @@ async def _fetch_author_books_by_catalog(
                         if isinstance(outcome, BaseException):
                             sort_errors.append(f"{_window_label(window)} page 0: {type(outcome).__name__}: {outcome}")
                             continue
+                        if not isinstance(outcome, dict) or not isinstance(outcome.get("products"), list):
+                            # SITE 5 (bug-hunter, live-reproduced): the same
+                            # shape as SITE 4 above, one phase later -- a
+                            # malformed-but-dict page 0 used to pass this
+                            # loop's old BaseException-only check, get
+                            # wrongly added to expand_ok and counted as
+                            # fetched, and then pass the fold loop's own
+                            # `isinstance(page0_outcome, dict)` gate too,
+                            # landing on a silent no-op with zero
+                            # sort_errors -- up to 50 ASINs dropped with no
+                            # trace and, as the neighbouring expand-rest
+                            # guard's own comment already notes, Phase 4 has
+                            # no further recovery mechanism, so a loss here
+                            # is permanent. Fixed at the same point as
+                            # SITE 4, for the same reason: this extraction
+                            # loop is the one place pages_fetched and
+                            # expand_ok are decided, so this is where "was
+                            # page 0 usable" has to be decided too, rather
+                            # than at the fold below where expand_ok
+                            # membership has already been wrongly granted.
+                            sort_errors.append(f"{_window_label(window)} page 0: malformed response body")
+                            continue
                         pages_fetched += 1
                         expand_ok.add(window)
                         candidate_total = outcome.get("total_results") if isinstance(outcome, dict) else None
@@ -1296,6 +1473,21 @@ async def _fetch_author_books_by_catalog(
                             outcome = expand_rest[target]
                             if isinstance(outcome, BaseException):
                                 sort_errors.append(f"{_window_label(window)} page {page}: {type(outcome).__name__}: {outcome}")
+                                continue
+                            if not isinstance(outcome, dict) or not isinstance(outcome.get("products"), list):
+                                # No recovery mechanism to wire this into --
+                                # Phase 4 is the walk's last phase, so unlike
+                                # the probe's lost rest pages (probe_pages_lost,
+                                # which forces this same category's OTHER
+                                # sorts to run in Phase 4) there is nothing
+                                # further downstream for a lost expand page to
+                                # feed. sort_errors is still required
+                                # regardless: it is what blocks catalog_clean
+                                # from caching the short result as complete,
+                                # and the nothing-silently-dropped invariant
+                                # demands the visibility whether or not
+                                # recovery is possible.
+                                sort_errors.append(f"{_window_label(window)} page {page}: malformed response body")
                                 continue
                             pages_fetched += 1
                             _process_catalog_page(outcome, author_asin, author_name, seen, asins, counts)

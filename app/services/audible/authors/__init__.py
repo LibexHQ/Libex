@@ -858,6 +858,9 @@ async def _walk_author_books(
         "catalog_categories_harvested": catalog_result.categories_harvested if catalog_result else 0,
         "catalog_categories_considered": catalog_result.categories_considered if catalog_result else 0,
         "catalog_categories_expanded": catalog_result.categories_expanded if catalog_result else 0,
+        "catalog_categories_complete_after_probe": (
+            catalog_result.categories_complete_after_probe if catalog_result else 0
+        ),
         "catalog_slicing_incomplete": catalog_result.slicing_incomplete if catalog_result else False,
         "catalog_asin_match": catalog_result.asin_match_count if catalog_result else 0,
         "catalog_asin_reject": catalog_result.asin_reject_count if catalog_result else 0,

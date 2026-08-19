@@ -1849,13 +1849,19 @@ async def test_fetch_author_books_by_catalog_dry_streak_stops_walk_and_only_payi
        deliberately the strongest individual candidate of the five and is
        still shut out purely by rank position once the streak trips at
        CAT4.
-    3. Only a category that earned it (paying -- here, only CAT1) gets its
-       remaining sorts spent in Phase 4; CAT2-CAT5 never do.
+    3. Only a category that earned it (paying -- here, only CAT1) is even
+       considered for Phase 4; CAT2-CAT5 never are. CAT1 then needs nothing
+       further: its probe reported total_results 100, well inside
+       CATALOG_RESULT_CEILING, so Phase 3 already paged the whole of it and
+       the extra sorts would re-fetch products already folded. That it pays
+       and is still skipped is the point -- paying and needing more are two
+       separate questions, and the counters keep them apart. A paying
+       category that genuinely exceeds the ceiling IS expanded, which
+       test_a_category_past_the_ceiling_still_gets_its_extra_sorts pins.
     """
     from app.services.audible.authors import _fetch_author_books_by_catalog
     from app.services.audible.authors.catalog import (
         _CATALOG_CATEGORY_PROBE_SORT,
-        _CATALOG_CATEGORY_SPEND_SORTS,
         CATALOG_DRY_STREAK_LIMIT,
     )
 
@@ -1873,8 +1879,6 @@ async def test_fetch_author_books_by_catalog_dry_streak_stops_walk_and_only_payi
         }
         for n in range(1, 6)
     ]
-
-    spend_tags = {"-ReleaseDate": "C1XA", "ReleaseDate": "C1XB", "Title": "C1XC", "Relevance": "C1XD"}
 
     async def _get(region, path, params):
         sort = params["products_sort_by"]
@@ -1902,10 +1906,10 @@ async def test_fetch_author_books_by_catalog_dry_streak_stops_walk_and_only_payi
                 return {"products": _catalog_asin_match_products("C5P1", 50)}
             raise AssertionError(f"unexpected probe category {category_id}")
 
-        # Phase 4 spend sorts -- only CAT1 should ever be reached.
-        if category_id == "CAT1" and sort in _CATALOG_CATEGORY_SPEND_SORTS:
-            return {"total_results": 5, "products": _catalog_asin_match_products(spend_tags[sort], 5)}
-
+        # No Phase 4 spend sort is reachable in this walk: CAT2-CAT5 never pay,
+        # and CAT1 pays but was fully enumerated by its own probe. Anything
+        # arriving here is the skip failing, so it fails the test rather than
+        # being served a canned response.
         raise AssertionError(f"unexpected category-scoped request: {category_id} {sort} page {page}")
 
     mock_get = AsyncMock(side_effect=_get)
@@ -1915,8 +1919,12 @@ async def test_fetch_author_books_by_catalog_dry_streak_stops_walk_and_only_payi
     assert result.sliced is True
     assert result.categories_harvested == 5
     assert result.categories_considered == 5  # every candidate is still probed up front
-    assert result.categories_expanded == 1    # only CAT1 paid
-    assert result.windows_used == 11          # 2 baseline + 5 considered + 1 expanded x 4 spend sorts
+    # CAT1 paid, but its 100 results were already fully enumerated by the
+    # probe, so it is counted as complete rather than expanded and no spend
+    # sort is issued for it.
+    assert result.categories_expanded == 0
+    assert result.categories_complete_after_probe == 1
+    assert result.windows_used == 7           # 2 baseline + 5 considered + 0 expanded
 
     # CAT5's cheap-tier probe (folded unconditionally, in Phase 3's first
     # pass, before the dry-streak fold even starts) is present...
@@ -1935,7 +1943,12 @@ async def test_fetch_author_books_by_catalog_dry_streak_stops_walk_and_only_payi
         if params.get("category_id") in ("CAT2", "CAT3", "CAT4"):
             assert params["products_sort_by"] == _CATALOG_CATEGORY_PROBE_SORT
 
-    assert mock_get.await_count == 14  # 3 baseline + 7 probe + 4 spend
+    # 3 baseline + 7 probe + 0 spend. It was 14 before Phase 4 learned to skip
+    # a category the probe had already enumerated -- the four spend requests
+    # it no longer makes would have re-fetched CAT1's same 100 results in a
+    # different order. That saving is the whole point of the change, so it is
+    # asserted as a request count rather than left implicit in the counters.
+    assert mock_get.await_count == 10
 
 
 @pytest.mark.asyncio
@@ -2774,12 +2787,18 @@ async def test_get_author_books_persists_cache_when_name_never_resolved():
 
 
 @pytest.mark.asyncio
-async def test_get_author_books_caches_with_short_ttl_on_unclean_screens_termination():
-    """An unclean screens termination is still written back -- the writer's
-    union can only grow the stored list, never shrink it -- but with the
-    short degraded TTL rather than the default, so it refreshes soon
-    instead of sitting for a full day. The caller still gets the degraded
-    union either way, not an error."""
+async def test_get_author_books_does_not_cache_on_unclean_screens_termination():
+    """SCREENS_REASON_TOKEN_REPEATED is in SCREENS_BROKEN_REASONS: the
+    sequential fallback walk noticed its own pagination token repeating
+    rather than upstream ever confirming an end, so nothing here rules out
+    real content sitting past the point it stopped looking. screens_clean
+    is False on this reason alone, which fails is_complete regardless of
+    what the catalog wave did, so this is not written to the cache at all.
+    Caching it anyway would freeze that unconfirmed gap in place for
+    whatever TTL was chosen; going to background completion instead is
+    what gives a later request an actual chance to walk past where this
+    one gave up, rather than replaying the same degraded union until it
+    expires."""
     from app.services.audible.authors import get_author_books
 
     mock_session = AsyncMock()
@@ -2808,9 +2827,16 @@ async def test_get_author_books_caches_with_short_ttl_on_unclean_screens_termina
 
 
 @pytest.mark.asyncio
-async def test_get_author_books_caches_with_short_ttl_on_grid_not_found():
-    """A walk reclassified from completed to grid_not_found is unclean and
-    caches with the short degraded TTL, not the default one."""
+async def test_get_author_books_does_not_cache_on_grid_not_found():
+    """SCREENS_REASON_GRID_NOT_FOUND means the sequential fallback walk
+    never even located the paginated grid it was supposed to page through
+    -- this wave contributed nothing confirmed, not a partial confirmed
+    read of it. It is in SCREENS_BROKEN_REASONS, so screens_clean is False
+    and is_complete is False regardless of the catalog wave, and this is
+    not written to the cache at all. A grid that failed to resolve once is
+    exactly the kind of transient upstream condition a retry can clear;
+    caching the gap under any TTL would keep serving the gap for the whole
+    of it instead of letting a later request try again."""
     from app.services.audible.authors import get_author_books
 
     mock_session = AsyncMock()
@@ -2839,13 +2865,18 @@ async def test_get_author_books_caches_with_short_ttl_on_grid_not_found():
 
 
 @pytest.mark.asyncio
-async def test_get_author_books_caches_with_short_ttl_on_truncated_termination():
-    """A walk demoted from completed to sections_or_rows_truncated (a
-    SCREENS_MAX_SECTIONS or SCREENS_MAX_ROWS_PER_PAGE cap trimmed data mid-
-    walk) is unclean -- some upstream content was never even looked at, so
-    it's not a confirmed-complete read regardless of how pagination itself
-    ended -- and caches with the short degraded TTL rather than the
-    default."""
+async def test_get_author_books_does_not_cache_on_truncated_termination():
+    """SCREENS_REASON_TRUNCATED (a SCREENS_MAX_SECTIONS or SCREENS_MAX_
+    ROWS_PER_PAGE cap trimmed data mid-walk) means some upstream content was
+    never even looked at, regardless of how pagination itself ended -- not
+    a confirmed-complete read this walk can vouch for. It is in SCREENS_
+    BROKEN_REASONS, so screens_clean is False and is_complete is False, and
+    this is not written to the cache at all. The content past the cap is
+    real and unread, not merely unconfirmed the way a plateau is (see
+    SCREENS_REASON_PLATEAU_TRUNCATED's own reclassification above, which
+    this is deliberately not extended to) -- caching it would mean a caller
+    never sees that content until the entry expires and a fresh walk is
+    forced, rather than background completion picking it up sooner."""
     from app.services.audible.authors import get_author_books
 
     mock_session = AsyncMock()
@@ -2916,15 +2947,19 @@ async def test_get_author_books_caches_with_default_ttl_on_plateau_truncated_ter
 
 
 @pytest.mark.asyncio
-async def test_get_author_books_caches_with_short_ttl_on_screens_page_error_termination():
+async def test_get_author_books_does_not_cache_on_screens_page_error_termination():
     """Unlike a plateau, a genuine screens-side fetch failure
     (SCREENS_REASON_PAGE_ERROR) is real breakage, not a designed handoff --
     the wave stopped because a request errored, not because it ran out of
-    new content to report. This must still earn the short degraded TTL,
-    proving the plateau reclassification above did not widen into a blanket
-    'screens is never unclean' change: PAGE_ERROR stays in SCREENS_
-    BROKEN_REASONS precisely because nothing else confirms whatever that
-    failed page would have contributed."""
+    new content to report, and nothing else confirms whatever that failed
+    page would have contributed. PAGE_ERROR stays in SCREENS_BROKEN_REASONS
+    precisely because of that, proving the plateau reclassification above
+    did not widen into a blanket 'screens is never unclean' change:
+    screens_clean is False here, is_complete is False, and this is not
+    written to the cache at all. A fetch failure is exactly the transient
+    case a retry is likely to clear; caching the resulting gap under any
+    TTL would hold a caller to it regardless, instead of letting background
+    completion try the failed page again."""
     from app.services.audible.authors import get_author_books
 
     mock_session = AsyncMock()
@@ -2984,11 +3019,19 @@ async def test_get_author_books_persists_cache_despite_known_shortfall():
 
 
 @pytest.mark.asyncio
-async def test_get_author_books_caches_with_short_ttl_when_catalog_errored():
-    """Even a clean, no-shortfall screens walk caches with the short
-    degraded TTL, not the default one, if the catalog wave that seeds the
-    front of the list errored outright — the union is still missing
-    whatever the catalog would have contributed."""
+async def test_get_author_books_does_not_cache_when_catalog_errored():
+    """The catalog wave raising outright is a different mechanism from
+    every screens-side case above: catalog_error is set and catalog_result
+    stays None (see the try/except around the catalog task), so
+    catalog_clean's own `catalog_result is not None and catalog_error is
+    None` check fails on both halves at once. Even a clean, no-shortfall
+    screens walk can't make is_complete True on its own -- the union is
+    still missing whatever the catalog would have contributed at the front
+    of the list -- so this is not written to the cache at all, regardless
+    of screens_clean. Caching a screens-only partial here would mean every
+    caller gets a catalog-less answer for the whole TTL even after
+    whatever broke the catalog call clears; background completion is what
+    actually retries it."""
     from app.services.audible.authors import get_author_books
 
     mock_session = AsyncMock()
@@ -3014,12 +3057,18 @@ async def test_get_author_books_caches_with_short_ttl_when_catalog_errored():
 
 
 @pytest.mark.asyncio
-async def test_get_author_books_caches_with_short_ttl_when_catalog_has_sort_errors():
+async def test_get_author_books_does_not_cache_when_catalog_has_sort_errors():
     """catalog_clean requires an empty sort_errors list, not merely the
-    absence of a top-level catalog_error -- a catalog walk that ran but had
-    one sort fail partway (sort_errors non-empty) still caches, but with the
-    short degraded TTL, even though _fetch_author_books_by_catalog itself
-    didn't raise."""
+    absence of a top-level catalog_error -- a catalog walk that ran and
+    returned normally can still have had one sort window fail partway
+    (sort_errors non-empty), and that is a real gap in what got read even
+    though _fetch_author_books_by_catalog itself never raised. catalog_clean
+    is False on sort_errors alone, so is_complete is False and this is not
+    written to the cache at all, the same as an outright catalog_error --
+    the whole point of gating on sort_errors separately is that a caller
+    reading a cached entry has no way to tell 'the catalog ran clean' from
+    'the catalog ran and quietly lost a slice of itself' unless the write
+    itself refuses to happen on the latter."""
     from app.services.audible.authors import get_author_books
 
     mock_session = AsyncMock()
@@ -3049,11 +3098,17 @@ async def test_get_author_books_caches_with_short_ttl_when_catalog_has_sort_erro
 
 
 @pytest.mark.asyncio
-async def test_get_author_books_caches_with_short_ttl_when_catalog_truncated_by_deadline():
+async def test_get_author_books_does_not_cache_when_catalog_truncated_by_deadline():
     """A catalog walk cut short by the shared deadline (truncated_by_deadline
-    True) is degraded the same way an error is, even with no sort_errors and
-    no exception raised -- so it caches with the short degraded TTL rather
-    than the default one."""
+    True) fails catalog_clean the same way a sort error or an outright
+    catalog_error does, even with sort_errors empty and no exception ever
+    raised -- so it is not written to the cache at all, the same as every
+    other unclean catalog outcome, rather than under some degraded TTL.
+    Caching a deadline-truncated read would mean handing every caller, for
+    the whole TTL, a partial catalog as though it were the finished one;
+    going to background completion instead is what lets a later request see
+    the completed result rather than the same partial one replayed until it
+    expires."""
     from app.services.audible.authors import get_author_books
 
     mock_session = AsyncMock()
@@ -4539,3 +4594,541 @@ def test_the_author_books_budget_can_actually_fire_before_the_proxy_gives_up():
     # And with enough margin to assemble and write the response, not merely
     # a hair under.
     assert AUTHOR_BOOKS_TIME_BUDGET_SECONDS <= FRONTING_PROXY_TIMEOUT_SECONDS - 3.0
+
+
+def test_needs_further_sorts_only_past_the_ceiling():
+    """The predicate Phase 4 gates on.
+
+    The deep-paging ceiling applies per (sort, category) pair, so a category
+    holding fewer results than the ceiling has no second window for another
+    sort to open -- Phase 3's probe already paged all of it. Past the ceiling
+    each further sort reaches a genuinely different subset, which is the only
+    reason Phase 4 exists.
+
+    An unknown total is treated as needing more, not less: _pages_needed_for
+    falls back to a single page when total_results is missing, so that
+    category was NOT fully enumerated and skipping its sorts would lose books."""
+    from app.services.audible.authors.catalog import (
+        _needs_further_sorts, CATALOG_RESULT_CEILING,
+    )
+
+    assert _needs_further_sorts(None, False) is True, "unknown total must not be treated as complete"
+    assert _needs_further_sorts(CATALOG_RESULT_CEILING + 1, False) is True
+    # Exactly the ceiling is NOT treated as complete: the module's own
+    # measurement records one sort plateauing at 499 rather than 500, so a
+    # category claiming exactly 500 is not provably reachable in full.
+    assert _needs_further_sorts(CATALOG_RESULT_CEILING, False) is True
+    assert _needs_further_sorts(CATALOG_RESULT_CEILING - 1, False) is False
+    assert _needs_further_sorts(0, False) is False
+
+    # A lost probe page overrides an under-ceiling total. total_results is
+    # page 0's claim, made before the page that failed was ever fetched, so
+    # it still reads small while products sit unfolded -- and the extra sorts
+    # are the only remaining route to them.
+    assert _needs_further_sorts(CATALOG_RESULT_CEILING - 1, True) is True
+    assert _needs_further_sorts(0, True) is True
+
+
+@pytest.mark.asyncio
+async def test_a_category_past_the_ceiling_still_gets_its_extra_sorts():
+    """The complement to the skip: a category too large for one sort to
+    enumerate must still be expanded, or prolific-author discovery loses the
+    books only the other sorts can reach.
+
+    This is the case Phase 4 exists for. The deep-paging ceiling is per
+    (sort, category), so a category holding more than CATALOG_RESULT_CEILING
+    results has a genuinely different subset behind each sort -- measured
+    live against Conan Doyle, five sorts over one fat category reached
+    roughly 1850 distinct results where the ceiling caps any single sort at
+    500. Skipping the sorts there would be a silent data loss, which is why
+    the gate keys on the category's own total rather than on a flat cap."""
+    from app.services.audible.authors import _fetch_author_books_by_catalog
+    from app.services.audible.authors.catalog import (
+        _CATALOG_SORTS, CATALOG_RESULT_CEILING, _CATALOG_CATEGORY_SPEND_SORTS,
+    )
+
+    spend_seen: set[str] = set()
+
+    async def _get(region, path, params):
+        sort = params["products_sort_by"]
+        page = params["page"]
+        category_id = params.get("category_id")
+
+        if category_id is None:
+            # Baseline: over-claims its total so the walk decides to slice,
+            # and carries a category so Phase 2 has a candidate to rank.
+            if sort == _CATALOG_SORTS[0] and page == 0:
+                products = _catalog_asin_match_products("BASE", 50)
+                for prod in products:
+                    prod["category_ladders"] = [{"ladder": [{"id": "FAT", "name": "Fat"}]}]
+                return {"total_results": CATALOG_RESULT_CEILING * 3, "products": products}
+            return {"total_results": CATALOG_RESULT_CEILING * 3, "products": []}
+
+        if sort in _CATALOG_CATEGORY_SPEND_SORTS:
+            spend_seen.add(sort)
+            return {"total_results": 10, "products": _catalog_asin_match_products(f"SPEND{sort}", 5)}
+
+        # The probe sort on a category far past the ceiling -- one sort
+        # cannot reach all of it, so the extra sorts have somewhere to go.
+        return {
+            "total_results": CATALOG_RESULT_CEILING * 2,
+            "products": _catalog_asin_match_products(f"FATP{page}", 50),
+        }
+
+    with patch("app.services.audible.authors.catalog.audible_get", new=AsyncMock(side_effect=_get)):
+        result = await _fetch_author_books_by_catalog("B000AUTHOR", "Some Author", "us")
+
+    assert result.categories_expanded == 1, "a category past the ceiling was not expanded"
+    assert result.categories_complete_after_probe == 0
+    assert spend_seen == set(_CATALOG_CATEGORY_SPEND_SORTS), (
+        "not every spend sort was issued for an over-ceiling category"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_category_whose_probe_lost_a_page_still_gets_its_extra_sorts():
+    """The skip must not fire on a category the probe failed to read in full.
+
+    total_results is page 0's claim about how many results exist, captured
+    before any later page is fetched. If one of those later pages then
+    errors, the count still reads as a modest, under-ceiling number while
+    products sit unfolded -- and skipping Phase 4 there removes the only
+    remaining route to them. That is a silent loss, in the direction the
+    "less data is never accepted" rule exists to prevent, so a lost page has
+    to override an otherwise-complete-looking total."""
+    from app.services.audible.authors import _fetch_author_books_by_catalog
+    from app.services.audible.authors.catalog import (
+        _CATALOG_SORTS, CATALOG_RESULT_CEILING, _CATALOG_CATEGORY_SPEND_SORTS,
+    )
+
+    spend_seen: set[str] = set()
+
+    async def _get(region, path, params):
+        sort = params["products_sort_by"]
+        page = params["page"]
+        category_id = params.get("category_id")
+
+        if category_id is None:
+            if sort == _CATALOG_SORTS[0] and page == 0:
+                products = _catalog_asin_match_products("BASE", 50)
+                for prod in products:
+                    prod["category_ladders"] = [{"ladder": [{"id": "PART", "name": "Partial"}]}]
+                return {"total_results": CATALOG_RESULT_CEILING * 3, "products": products}
+            return {"total_results": CATALOG_RESULT_CEILING * 3, "products": []}
+
+        if sort in _CATALOG_CATEGORY_SPEND_SORTS:
+            spend_seen.add(sort)
+            return {"total_results": 10, "products": _catalog_asin_match_products(f"SP{sort}", 5)}
+
+        # Probe sort. Page 0 claims a small, under-ceiling total -- so the
+        # category looks fully enumerable -- but page 1 fails.
+        if page == 0:
+            return {"total_results": 150, "products": _catalog_asin_match_products("PARTP0", 50)}
+        raise RuntimeError("probe page failed")
+
+    with patch("app.services.audible.authors.catalog.audible_get", new=AsyncMock(side_effect=_get)):
+        result = await _fetch_author_books_by_catalog("B000AUTHOR", "Some Author", "us")
+
+    assert result.categories_expanded == 1, (
+        "a category whose probe lost a page was treated as fully enumerated"
+    )
+    assert result.categories_complete_after_probe == 0
+    assert spend_seen == set(_CATALOG_CATEGORY_SPEND_SORTS)
+
+
+@pytest.mark.asyncio
+async def test_a_walk_mixing_over_and_under_ceiling_categories_expands_only_the_over():
+    """One walk, both kinds of category, and only the right ones expanded.
+
+    Every other test here is all-one-or-all-the-other, which cannot catch a
+    to_expand comprehension that filters on the wrong category -- the list is
+    built from `paying` while the totals are keyed by probe window, so an
+    off-by-category slice would look correct in any single-kind fixture and
+    would quietly strip the sorts from the large category while spending them
+    on the small one."""
+    from app.services.audible.authors import _fetch_author_books_by_catalog
+    from app.services.audible.authors.catalog import (
+        _CATALOG_SORTS, CATALOG_RESULT_CEILING, _CATALOG_CATEGORY_SPEND_SORTS,
+    )
+
+    spend_by_category: dict[str, set[str]] = {}
+
+    async def _get(region, path, params):
+        sort = params["products_sort_by"]
+        page = params["page"]
+        category_id = params.get("category_id")
+
+        if category_id is None:
+            if sort == _CATALOG_SORTS[0] and page == 0:
+                products = _catalog_asin_match_products("BASE", 50)
+                # A 25/25 tie between BIG and SMALL -- ranking order between
+                # them is deliberately irrelevant here, since both sit well
+                # under CATALOG_MAX_CANDIDATE_CATEGORIES (40) and neither
+                # gets dropped by the dry-streak cutoff regardless of fold
+                # order. What distinguishes them is only their own probe
+                # total, past the ceiling for one and under it for the
+                # other.
+                for i, prod in enumerate(products):
+                    cid = "BIG" if i % 2 == 0 else "SMALL"
+                    prod["category_ladders"] = [{"ladder": [{"id": cid, "name": cid}]}]
+                return {"total_results": CATALOG_RESULT_CEILING * 3, "products": products}
+            return {"total_results": CATALOG_RESULT_CEILING * 3, "products": []}
+
+        if sort in _CATALOG_CATEGORY_SPEND_SORTS:
+            spend_by_category.setdefault(category_id, set()).add(sort)
+            return {"total_results": 10, "products": _catalog_asin_match_products(f"S{category_id}{sort}", 5)}
+
+        # Probe sort. BIG is past the ceiling and needs its extra sorts;
+        # SMALL sits well under it and the probe reads all of it.
+        if category_id == "BIG":
+            return {
+                "total_results": CATALOG_RESULT_CEILING * 2,
+                "products": _catalog_asin_match_products(f"BIGP{page}", 50),
+            }
+        return {"total_results": 120, "products": _catalog_asin_match_products(f"SMALLP{page}", 50)}
+
+    with patch("app.services.audible.authors.catalog.audible_get", new=AsyncMock(side_effect=_get)):
+        result = await _fetch_author_books_by_catalog("B000AUTHOR", "Some Author", "us")
+
+    assert result.categories_expanded == 1, "expected exactly the over-ceiling category to expand"
+    assert result.categories_complete_after_probe == 1, "expected exactly one skipped as complete"
+    assert set(spend_by_category) == {"BIG"}, (
+        f"spend sorts went to the wrong categories: {sorted(spend_by_category)}"
+    )
+    assert spend_by_category["BIG"] == set(_CATALOG_CATEGORY_SPEND_SORTS)
+
+
+@pytest.mark.asyncio
+async def test_a_probe_page_missing_from_the_rest_batch_is_marked_lost_and_recovered():
+    """The third way a probe page can go unfetched, distinct from the
+    other two probe_pages_lost branches: not an exception the batch
+    raised, and not a malformed 200 body, but a target the batch was asked
+    for and simply doesn't carry a key for at all. _fetch_window_rest_
+    batch's own contract is `dict(zip(targets, outcomes))`, so this can't
+    happen from the real function -- it's reached here by patching that
+    function directly with something that hands back a dict a page short,
+    which lands on `target not in probe_rest` without needing to
+    choreograph a deadline trip to produce the gap.
+
+    PMISS's own total_results (250, comfortably under
+    CATALOG_RESULT_CEILING) would otherwise mark it complete after the
+    probe -- the missing page is the only reason it still needs its extra
+    sorts, and those sorts firing is the recovery this test exists to
+    prove actually happens, not merely that the gap was noticed."""
+    from app.services.audible.authors import _fetch_author_books_by_catalog
+    from app.services.audible.authors.catalog import (
+        _CATALOG_SORTS, _CATALOG_CATEGORY_PROBE_SORT, _CATALOG_CATEGORY_SPEND_SORTS,
+        CATALOG_RESULT_CEILING,
+    )
+
+    spend_seen: set[str] = set()
+
+    async def _get(region, path, params):
+        sort = params["products_sort_by"]
+        page = params["page"]
+        category_id = params.get("category_id")
+
+        if category_id is None:
+            # Only page 0 of either baseline sort ever reaches audible_get
+            # here -- every rest page, baseline's own included, is served
+            # by the patched _fetch_window_rest_batch below instead.
+            assert page == 0
+            if sort == _CATALOG_SORTS[0]:
+                products = _catalog_asin_match_products("BASE0", 50)
+                for prod in products:
+                    prod["category_ladders"] = [{"ladder": [{"id": "PMISS", "name": "Missing Page"}]}]
+                return {"total_results": CATALOG_RESULT_CEILING * 3, "products": products}
+            return {"total_results": 0, "products": []}
+
+        if category_id == "PMISS" and sort == _CATALOG_CATEGORY_PROBE_SORT:
+            assert page == 0
+            return {"total_results": 250, "products": _catalog_asin_match_products("PMISSP0", 50)}
+
+        if category_id == "PMISS" and sort in _CATALOG_CATEGORY_SPEND_SORTS:
+            spend_seen.add(sort)
+            return {"total_results": 10, "products": _catalog_asin_match_products(f"SPEND{sort}", 5)}
+
+        raise AssertionError(f"unexpected request: category={category_id} sort={sort} page={page}")
+
+    async def _fake_rest_batch(author_name, region, targets):
+        # Every requested target gets a normal page back except PMISS's
+        # own page 2 -- the batch silently drops exactly that one key,
+        # the shape `target not in probe_rest` exists to catch.
+        result = {}
+        for window, page in targets:
+            if window.category_id == "PMISS" and page == 2:
+                continue
+            label = window.category_id or "BASELINE"
+            result[(window, page)] = {"products": _catalog_asin_match_products(f"{label}P{page}", 50)}
+        return result
+
+    with patch("app.services.audible.authors.catalog.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.authors.catalog._fetch_window_rest_batch", new=AsyncMock(side_effect=_fake_rest_batch)):
+        result = await _fetch_author_books_by_catalog("B000AUTHOR", "Some Author", "us")
+
+    # The gap is real: nothing from PMISS's page 2 ever entered the union.
+    assert not any(a.startswith("B0PMISSP2") for a in result.asins)
+    assert result.categories_expanded == 1, (
+        "a category with a page missing from the rest batch was wrongly treated as complete"
+    )
+    assert result.categories_complete_after_probe == 0
+    assert spend_seen == set(_CATALOG_CATEGORY_SPEND_SORTS), "the recovery sorts were never issued"
+
+
+@pytest.mark.asyncio
+async def test_a_non_dict_probe_page_is_marked_lost_and_recovered():
+    """audible_get returns response.json() unvalidated on any 200 (see
+    catalog.py's client.py cross-reference in this branch's own comment),
+    so a probe page whose body parses to something other than a dict --
+    `null`, a bare list, anything JSON-legal but not an object -- is a
+    live possibility this walk has to treat as a lost page, not as a
+    fetched-and-empty one, or a category this size would be wrongly
+    marked complete after the probe. Both halves of the fix are asserted:
+    sort_errors records what happened (the silence was half of the
+    original defect, see the module's own measured-loss comment), and the
+    category still gets its extra sorts -- the recovery, not merely the
+    complaint."""
+    from app.services.audible.authors import _fetch_author_books_by_catalog
+    from app.services.audible.authors.catalog import (
+        _CATALOG_SORTS, _CATALOG_CATEGORY_PROBE_SORT, _CATALOG_CATEGORY_SPEND_SORTS,
+        CATALOG_RESULT_CEILING,
+    )
+
+    spend_seen: set[str] = set()
+
+    async def _get(region, path, params):
+        sort = params["products_sort_by"]
+        page = params["page"]
+        category_id = params.get("category_id")
+
+        if category_id is None:
+            if sort == _CATALOG_SORTS[0] and page == 0:
+                products = _catalog_asin_match_products("BASE0", 50)
+                for prod in products:
+                    prod["category_ladders"] = [{"ladder": [{"id": "MAL1", "name": "Malformed Body"}]}]
+                return {"total_results": CATALOG_RESULT_CEILING * 3, "products": products}
+            return {"total_results": CATALOG_RESULT_CEILING * 3, "products": []}
+
+        if category_id != "MAL1":
+            raise AssertionError(f"unexpected category-scoped request: {category_id} {sort} page {page}")
+
+        if sort in _CATALOG_CATEGORY_SPEND_SORTS:
+            spend_seen.add(sort)
+            return {"total_results": 10, "products": _catalog_asin_match_products(f"SPEND{sort}", 5)}
+
+        assert sort == _CATALOG_CATEGORY_PROBE_SORT
+        if page == 0:
+            return {"total_results": 200, "products": _catalog_asin_match_products("MAL1P0", 50)}
+        if page == 1:
+            # The malformed 200: parses cleanly, to something that is not
+            # a dict at all.
+            return None
+        return {"products": _catalog_asin_match_products(f"MAL1P{page}", 50)}
+
+    with patch("app.services.audible.authors.catalog.audible_get", new=AsyncMock(side_effect=_get)):
+        result = await _fetch_author_books_by_catalog("B000AUTHOR", "Some Author", "us")
+
+    assert any("page 1: malformed response body" in err for err in result.sort_errors), result.sort_errors
+    assert not any(a.startswith("B0MAL1P1") for a in result.asins)
+    assert result.categories_expanded == 1, "a category with a malformed probe page was wrongly treated as complete"
+    assert result.categories_complete_after_probe == 0
+    assert spend_seen == set(_CATALOG_CATEGORY_SPEND_SORTS), "the recovery sorts were never issued"
+
+
+@pytest.mark.asyncio
+async def test_a_probe_page_whose_products_is_not_a_list_is_marked_lost_and_recovered():
+    """The other malformed-200 shape, distinct from a non-dict body: a
+    dict that parses fine but whose own "products" key is missing or
+    isn't a list -- _process_catalog_page's own silent no-op condition is
+    `not isinstance(data, dict) or not isinstance(products, list)`, an OR
+    of two independently reachable shapes, and a fix that only covered one
+    of them would still lose books the other way. Covered here with a
+    dict that carries a "products" value of the wrong type rather than a
+    missing key, so this is provably testing the isinstance check and not
+    just a missing-key .get() fallback."""
+    from app.services.audible.authors import _fetch_author_books_by_catalog
+    from app.services.audible.authors.catalog import (
+        _CATALOG_SORTS, _CATALOG_CATEGORY_PROBE_SORT, _CATALOG_CATEGORY_SPEND_SORTS,
+        CATALOG_RESULT_CEILING,
+    )
+
+    spend_seen: set[str] = set()
+
+    async def _get(region, path, params):
+        sort = params["products_sort_by"]
+        page = params["page"]
+        category_id = params.get("category_id")
+
+        if category_id is None:
+            if sort == _CATALOG_SORTS[0] and page == 0:
+                products = _catalog_asin_match_products("BASE0", 50)
+                for prod in products:
+                    prod["category_ladders"] = [{"ladder": [{"id": "MAL2", "name": "Malformed Products"}]}]
+                return {"total_results": CATALOG_RESULT_CEILING * 3, "products": products}
+            return {"total_results": CATALOG_RESULT_CEILING * 3, "products": []}
+
+        if category_id != "MAL2":
+            raise AssertionError(f"unexpected category-scoped request: {category_id} {sort} page {page}")
+
+        if sort in _CATALOG_CATEGORY_SPEND_SORTS:
+            spend_seen.add(sort)
+            return {"total_results": 10, "products": _catalog_asin_match_products(f"SPEND{sort}", 5)}
+
+        assert sort == _CATALOG_CATEGORY_PROBE_SORT
+        if page == 0:
+            return {"total_results": 200, "products": _catalog_asin_match_products("MAL2P0", 50)}
+        if page == 1:
+            # A dict, not None -- but its "products" is a string, not a
+            # list, the other half of the isinstance check.
+            return {"total_results": 200, "products": "not-a-list"}
+        return {"products": _catalog_asin_match_products(f"MAL2P{page}", 50)}
+
+    with patch("app.services.audible.authors.catalog.audible_get", new=AsyncMock(side_effect=_get)):
+        result = await _fetch_author_books_by_catalog("B000AUTHOR", "Some Author", "us")
+
+    assert any("page 1: malformed response body" in err for err in result.sort_errors), result.sort_errors
+    assert not any(a.startswith("B0MAL2P1") for a in result.asins)
+    assert result.categories_expanded == 1, "a category with a malformed probe page was wrongly treated as complete"
+    assert result.categories_complete_after_probe == 0
+    assert spend_seen == set(_CATALOG_CATEGORY_SPEND_SORTS), "the recovery sorts were never issued"
+
+
+@pytest.mark.asyncio
+async def test_deadline_tripping_after_the_probe_completes_does_not_truncate_a_walk_with_nothing_left():
+    """The narrowed Phase 4 gate (`if to_expand:`, not `if paying:`) means
+    a category that paid but was already fully enumerated by its own
+    probe is never even weighed against the deadline -- there is nothing
+    left for it to do, so a deadline that only trips after the probe has
+    already finished must not cost this walk its completeness.
+
+    time.monotonic is faked as a plain counter, not choreographed to a
+    handful of exact calls: asyncio's own event loop reads the same
+    patched function internally the moment any gather-based concurrency
+    runs (see test_fetch_author_books_by_name_detailed_deadline_
+    truncation_sets_completed_false's own comment on this, for the
+    simpler single-gather case), so the raw call count includes calls
+    this test does not itself make. This fixture's own four real checks
+    (top-of-function, baseline's remaining pages, the Phase 2/3 entry
+    gate, the probe's remaining pages) plus every internal call riding
+    alongside them come to 16 by the time the probe has folded everything
+    CAT1 has -- measured directly against this fixture, not derived --
+    and every one of them reads "before the deadline" here. Only a 17th
+    call, which only happens if the Phase 4 gate widens back to `paying`
+    and weighs CAT1 against the deadline anyway, reads "after"."""
+    from app.services.audible.authors import _fetch_author_books_by_catalog
+    from app.services.audible.authors.catalog import (
+        _CATALOG_SORTS, _CATALOG_CATEGORY_PROBE_SORT, CATALOG_RESULT_CEILING,
+    )
+
+    async def _get(region, path, params):
+        sort = params["products_sort_by"]
+        page = params["page"]
+        category_id = params.get("category_id")
+
+        if category_id is None:
+            if sort == _CATALOG_SORTS[0]:
+                products = _catalog_asin_match_products(f"BASE{page}", 50)
+                if page == 0:
+                    for prod in products:
+                        prod["category_ladders"] = [{"ladder": [{"id": "CAT1", "name": "Cat1"}]}]
+                return {"total_results": CATALOG_RESULT_CEILING * 3, "products": products}
+            return {"total_results": 0, "products": []}
+
+        if category_id == "CAT1" and sort == _CATALOG_CATEGORY_PROBE_SORT:
+            return {"total_results": 200, "products": _catalog_asin_match_products(f"CAT1P{page}", 50)}
+
+        raise AssertionError(
+            f"unexpected request: {category_id} {sort} page {page} -- CAT1 was already complete "
+            "after its own probe, so no spend sort should ever be issued for it"
+        )
+
+    call_count = {"n": 0}
+
+    def _fake_monotonic():
+        call_count["n"] += 1
+        return 0.0 if call_count["n"] <= 16 else 1_000_000.0
+
+    with patch("app.services.audible.authors.catalog.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.authors.time.monotonic", side_effect=_fake_monotonic):
+        result = await _fetch_author_books_by_catalog(
+            "B000AUTHOR", "Some Author", "us", deadline=500_000.0,
+        )
+
+    assert result.truncated_by_deadline is False, (
+        "a deadline that only trips after the probe finished must not truncate a walk with nothing left to expand"
+    )
+    assert result.categories_expanded == 0
+    assert result.categories_complete_after_probe == 1
+    assert len(result.asins) == 700, "the probe's own full read of CAT1 was not folded in complete"
+
+
+@pytest.mark.asyncio
+async def test_an_already_truncated_walk_stays_truncated_even_with_nothing_left_to_expand():
+    """The regression risk in the same fix, and the mirror of the test
+    above: truncated_by_deadline is only ever turned on, never reset
+    (`or` at every site that sets it), so a genuine earlier truncation --
+    here, the probe's own remaining-pages batch never firing because the
+    deadline had already tripped -- must survive to the result even
+    though the one category that paid (CATB) needed no Phase 4 expansion
+    of its own. Losing this would be silent in the dangerous direction: a
+    walk that really did drop pages would report itself complete purely
+    because Phase 4 happened to have nothing left to do.
+
+    CATA is ranked first (it carries 25 of the 50 baseline-page-0 tags)
+    and is deliberately never paying: its own probe needs further pages,
+    the deadline trips at exactly that check, and the batch for those
+    pages is never even fetched -- so its own page 0 alone (10 new ASINs)
+    falls short of CATALOG_DRY_WINDOW_MIN_NEW. CATB (the other 25 tags)
+    pays entirely from its own page 0 and needs nothing further, so
+    to_expand ends up empty for a reason that has nothing to do with
+    CATA's lost pages -- which is exactly what must not erase them."""
+    from app.services.audible.authors import _fetch_author_books_by_catalog
+    from app.services.audible.authors.catalog import _CATALOG_SORTS, CATALOG_RESULT_CEILING
+
+    async def _get(region, path, params):
+        sort = params["products_sort_by"]
+        page = params["page"]
+        category_id = params.get("category_id")
+
+        if category_id is None:
+            if sort == _CATALOG_SORTS[0]:
+                products = _catalog_asin_match_products(f"BASE{page}", 50)
+                if page == 0:
+                    for i, prod in enumerate(products):
+                        cid = "CATA" if i < 25 else "CATB"
+                        prod["category_ladders"] = [{"ladder": [{"id": cid, "name": cid}]}]
+                return {"total_results": CATALOG_RESULT_CEILING * 3, "products": products}
+            return {"total_results": 0, "products": []}
+
+        if category_id == "CATA":
+            if page == 0:
+                return {"total_results": 300, "products": _catalog_asin_match_products("CATAP0", 10)}
+            raise AssertionError("CATA's remaining probe pages must never be fetched -- the deadline trips first")
+
+        if category_id == "CATB":
+            return {"total_results": 50, "products": _catalog_asin_match_products("CATBP0", 50)}
+
+        raise AssertionError(f"unexpected spend-sort request: {category_id} {sort} page {page}")
+
+    call_count = {"n": 0}
+
+    def _fake_monotonic():
+        call_count["n"] += 1
+        # The probe's own remaining-pages fetch (Phase 3 continued) is
+        # this walk's 4th real deadline check; tripping exactly there,
+        # rather than at Phase 4, is what makes this a genuine earlier
+        # truncation rather than the false positive the paired test above
+        # covers. Measured directly against this fixture at 13 calls.
+        return 0.0 if call_count["n"] < 13 else 1_000_000.0
+
+    with patch("app.services.audible.authors.catalog.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.authors.time.monotonic", side_effect=_fake_monotonic):
+        result = await _fetch_author_books_by_catalog(
+            "B000AUTHOR", "Some Author", "us", deadline=500_000.0,
+        )
+
+    assert result.truncated_by_deadline is True, (
+        "an earlier genuine truncation must survive even when Phase 4 finds nothing left to expand"
+    )
+    assert result.categories_expanded == 0
+    assert result.categories_complete_after_probe == 1

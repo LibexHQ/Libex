@@ -624,6 +624,12 @@ class _CatalogBooksResult:
     categories_harvested: int = 0
     categories_considered: int = 0
     categories_expanded: int = 0
+    # Categories that earned Phase 4 but were already fully enumerated by
+    # Phase 3's probe, so their extra sorts were skipped. Counted separately
+    # from categories_expanded because "paid but needed nothing more" is a
+    # different outcome from "did not pay", and collapsing them would hide
+    # exactly the saving this split exists to make.
+    categories_complete_after_probe: int = 0
     windows_used: int = 0
     asin_match_count: int = 0
     asin_reject_count: int = 0
@@ -779,6 +785,54 @@ def _window_label(window: _CatalogWindow) -> str:
     if window.category_id is None:
         return window.sort
     return f"category {window.category_id} {window.sort}"
+
+
+def _needs_further_sorts(probe_total: int | None, probe_pages_lost: bool) -> bool:
+    """
+    Whether a category that earned Phase 4 has anything left for the extra
+    sorts to find.
+
+    The deep-paging ceiling applies per (products_sort_by, category_id) pair,
+    not per author -- that is the whole reason Phase 4 spends several sorts on
+    one category, because each opens a separately-ceilinged window into a
+    result set too large for any single one to reach. It also means the
+    reverse: a category whose own total_results sits at or under
+    CATALOG_RESULT_CEILING has no second window to open. Phase 3's probe
+    already paged that category to _pages_needed_for(total), which for a total
+    under the ceiling is all of it, so every further sort can only re-return
+    products already folded into seen -- up to four sorts by ten pages of
+    them, per category, for nothing.
+
+    The count is trustworthy for this because the query carries the author
+    name as well as the category, so total_results is how many of THIS
+    author's products sit in that category, not the category's own size.
+
+    None means the probe's page 0 gave no usable total, in which case
+    _pages_needed_for fell back to a single page and the category was NOT
+    fully enumerated -- those keep their sorts.
+
+    The comparison is >=, not >, and the difference matters at exactly one
+    value. CATALOG_RESULT_CEILING is 500 because that is where most sorts
+    plateau, but the same measurement recorded Christie's ascending
+    ReleaseDate plateauing one short, at 499 -- the ceiling is not uniformly
+    500 across (sort, category) pairs. A category claiming exactly 500 is
+    therefore not provably reachable in full by one sort, and plateau
+    detection runs on baseline windows only, never on probe windows, so
+    nothing else would notice the shortfall. Spending four sorts on a
+    category claiming exactly 500 is the cost of the one boundary where the
+    module's own two measurements disagree.
+
+    probe_pages_lost is the other way the enumeration can be incomplete, and
+    it is not visible in the total at all: total_results is page 0's claim
+    about how many results exist, made before any later page is fetched, so
+    it still reads as a modest number when one of those pages then failed.
+    A category whose probe lost a page has products nobody folded, and the
+    extra sorts are the only remaining chance to reach them -- exactly the
+    recovery this skip would otherwise remove. Erring toward spending four
+    requests that turn out to be redundant is the cheap mistake; erring the
+    other way drops books silently.
+    """
+    return probe_pages_lost or probe_total is None or probe_total >= CATALOG_RESULT_CEILING
 
 
 def _pages_needed_for(total_results: int | None) -> int:
@@ -1046,6 +1100,7 @@ async def _fetch_author_books_by_catalog(
     categories_harvested = 0
     categories_considered = 0
     categories_expanded = 0
+    categories_complete_after_probe = 0
     slicing_incomplete = False
 
     if needs_slicing and not truncated_by_deadline and not deadline_passed():
@@ -1110,6 +1165,14 @@ async def _fetch_author_books_by_catalog(
                 else:
                     probe_rest = await _fetch_window_rest_batch(author_name, region, probe_rest_targets)
 
+            # Windows whose probe did not fetch every page it needed -- a
+            # page that errored, one the batch never returned, or one that
+            # came back 200 with an unusable body (audible_get returns
+            # response.json() unvalidated on any 200; _process_catalog_page
+            # silently no-ops on a non-dict or a dict without a list
+            # "products"). Their total_results says nothing about it, so it
+            # has to be carried separately. See _needs_further_sorts.
+            probe_pages_lost: set[_CatalogWindow] = set()
             paying: list[str] = []
             dry_streak = 0
             for window in probe_windows:
@@ -1121,10 +1184,16 @@ async def _fetch_author_books_by_catalog(
                     for page in range(1, pages_needed):
                         target = (window, page)
                         if target not in probe_rest:
+                            probe_pages_lost.add(window)
                             continue
                         outcome = probe_rest[target]
                         if isinstance(outcome, BaseException):
                             sort_errors.append(f"{_window_label(window)} page {page}: {type(outcome).__name__}: {outcome}")
+                            probe_pages_lost.add(window)
+                            continue
+                        if not isinstance(outcome, dict) or not isinstance(outcome.get("products"), list):
+                            sort_errors.append(f"{_window_label(window)} page {page}: malformed response body")
+                            probe_pages_lost.add(window)
                             continue
                         pages_fetched += 1
                         _process_catalog_page(outcome, author_asin, author_name, seen, asins, counts)
@@ -1148,16 +1217,42 @@ async def _fetch_author_books_by_catalog(
                     if dry_streak >= CATALOG_DRY_STREAK_LIMIT:
                         break
 
-            categories_expanded = len(paying)
+            # A category the probe already saw in full has nothing for the
+            # extra sorts to find -- see _needs_further_sorts. Splitting here
+            # rather than filtering inside the comprehension below keeps the
+            # skipped ones countable, because "paid but needed nothing more"
+            # is a different fact from "did not pay" and the log should not
+            # collapse them.
+            to_expand = [
+                cid for cid in paying
+                if _needs_further_sorts(
+                    probe_totals.get(_CatalogWindow(cid, _CATALOG_CATEGORY_PROBE_SORT)),
+                    _CatalogWindow(cid, _CATALOG_CATEGORY_PROBE_SORT) in probe_pages_lost,
+                )
+            ]
+            categories_complete_after_probe = len(paying) - len(to_expand)
+            categories_expanded = len(to_expand)
 
-            # ---- Phase 4: remaining sorts for every category that paid ----
-            if paying:
+            # ---- Phase 4: remaining sorts for every category that still needs one ----
+            # The deadline is judged against `to_expand`, not `paying`.
+            # Before the probe-completeness skip existed (see
+            # _needs_further_sorts), the two sets were identical, so a
+            # deadline trip here always meant real, unfetched work existed.
+            # Now a category can pay -- score enough new ASINs on its own
+            # probe -- and still need nothing further, because the probe
+            # already saw it in full. Charging that as a truncation would
+            # cost a walk that finished everything it needed its full-TTL
+            # cache, for work that was never there to do. An already-True
+            # truncated_by_deadline from an earlier phase (the probe rest
+            # batch itself timing out) is never reset here -- `or` only
+            # ever turns it on.
+            if to_expand:
                 if truncated_by_deadline or deadline_passed():
                     truncated_by_deadline = True
                 else:
                     expand_windows = [
                         _CatalogWindow(category_id, sort)
-                        for category_id in paying
+                        for category_id in to_expand
                         for sort in _CATALOG_CATEGORY_SPEND_SORTS
                     ]
                     expand_page0 = await _fetch_window_page0_batch(author_name, region, expand_windows)
@@ -1218,6 +1313,7 @@ async def _fetch_author_books_by_catalog(
         categories_harvested=categories_harvested,
         categories_considered=categories_considered,
         categories_expanded=categories_expanded,
+        categories_complete_after_probe=categories_complete_after_probe,
         windows_used=windows_used,
         asin_match_count=counts.get(_CATALOG_TIER_ASIN_MATCH, 0),
         asin_reject_count=counts.get(_CATALOG_TIER_ASIN_REJECT, 0),

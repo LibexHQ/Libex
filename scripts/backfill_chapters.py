@@ -163,13 +163,104 @@ class _Stopper:
 
 # --- core operations -------------------------------------------------------
 
+def _proxy_host_for_log(proxy: str | None) -> str:
+    """
+    Best-effort hostname for a log line -- never the raw AUDIBLE_PROXY_URL.
+
+    httpx's proxy= accepts credentials embedded in the URL
+    (http://user:pass@host:port), and Settings stores the value as a plain
+    str, not a SecretStr, so nothing that reaches a log record may be the
+    full value. The hostname is the diagnostically useful part -- which exit
+    this run is using -- and carries no secret, so that's what gets logged
+    instead. Must never raise: a logging call taking the whole run down over
+    a malformed env var would turn a cosmetic problem into an outage.
+    """
+    if not proxy:
+        return "direct"
+    try:
+        host = httpx.URL(proxy).host
+    except Exception:
+        return "(unparseable)"
+    return host or "(unparseable)"
+
+
+def _verify_dedicated_proxy() -> None:
+    """
+    Refuses to start unless AUDIBLE_PROXY_URL both is set and names this
+    run's own exit.
+
+    Without this, an unset value reaches httpx.AsyncClient as proxy=None and
+    this script's Audible traffic egresses DIRECT FROM THE CONTAINER -- the
+    same public address the live service answers on. Today that's a slow
+    trickle; it's also the one path from "backfill trouble" to "Libex is
+    down", so the run must die here rather than discover it request by
+    request.
+
+    Checked against the hostname, not a literal URL, because the real
+    production proxy value is infrastructure this app never carries in
+    source and has no secret to compare against. "backfill" in the hostname
+    is the convention this script's own module docstring and RUN IT example
+    already commit to (libex-backfill-vpn) -- the same convention
+    scripts/refresh_corpus.py's own _verify_dedicated_proxy cites as shared
+    between the two scripts. An operator who leaves the variable unset, or
+    reuses the shared/live value, fails this on hostname alone, before a
+    single request goes out.
+
+    The failure message names the hostname only, never the full value:
+    httpx's proxy= accepts credentials embedded in the URL
+    (http://user:pass@host:port) and nothing in Settings forbids
+    AUDIBLE_PROXY_URL being configured that way, so the one path that fires
+    on operator misconfiguration must not be the one that echoes back
+    whatever the operator typed, including a possible credential.
+
+    Logged, not just raised: SystemExit propagates straight out of the
+    process without ever touching the libex logger, so on its own it would
+    survive only as stderr text -- in a container that runs unattended, the
+    highest-severity startup condition this script has would be the one
+    piece of evidence that never reaches the rotating file handler or
+    Axiom. The log call is made first, with the same hostname-only
+    discipline as the SystemExit message, so the raw value can't reach it
+    either.
+
+    Hostname extraction goes through _proxy_host_for_log rather than a bare
+    httpx.URL(proxy).host, deliberately: a value that is set but malformed
+    (a typo'd port is the realistic case -- a Portainer env field is free
+    text) makes httpx.URL raise InvalidURL, and that must fail exactly like
+    an unset or wrongly-named value -- logged and refused -- not escape as
+    an uncaught traceback that skips both the log line and the deliberate
+    SystemExit message. _proxy_host_for_log already turns that same
+    exception into "(unparseable)", which reads fine as a proxy_host value
+    and correctly fails the "backfill" in host check below, so there is no
+    second try/except to keep in sync with the first.
+    """
+    proxy = os.environ.get("AUDIBLE_PROXY_URL", "")
+    host = _proxy_host_for_log(proxy) if proxy else ""
+    if not proxy or "backfill" not in host:
+        detail = f"host {host!r}" if proxy else "unset"
+        logger.error(
+            "Backfill: refusing to start, AUDIBLE_PROXY_URL does not name "
+            "a backfill-dedicated exit",
+            extra={"proxy_host": host or "unset", "proxy_configured": bool(proxy)},
+        )
+        raise SystemExit(
+            f"AUDIBLE_PROXY_URL ({detail}) does not name a "
+            f"backfill-dedicated exit. Refusing to start against what may "
+            f"be the shared production proxy or the container's own direct "
+            "egress -- point this at the dedicated backfill exit before "
+            "starting."
+        )
+
+
 async def _log_exit_ip() -> None:
     """One-time startup check: confirm which IP our proxy actually exits from."""
     proxy = os.environ.get("AUDIBLE_PROXY_URL") or None
     try:
         async with httpx.AsyncClient(proxy=proxy, timeout=15.0) as client:
             resp = await client.get("https://api.ipify.org")
-            logger.info(f"Backfill: exit IP {resp.text.strip()} (via {proxy or 'direct'})")
+            logger.info(
+                f"Backfill: exit IP {resp.text.strip()} "
+                f"(via {_proxy_host_for_log(proxy)})"
+            )
     except Exception as e:
         logger.warning(f"Backfill: could not determine exit IP: {type(e).__name__}: {e}")
 
@@ -310,11 +401,17 @@ async def _process_one(session: AsyncSession, asin: str, region: str) -> tuple[s
 # --- the run ---------------------------------------------------------------
 
 async def _run(limit: int | None) -> None:
-    proxy = os.environ.get("AUDIBLE_PROXY_URL", "(none)")
+    # Dies here, before anything else, if AUDIBLE_PROXY_URL doesn't name this
+    # run's own dedicated exit -- see _verify_dedicated_proxy. Applies to a
+    # --limit trial exactly like the real run: a trial still calls Audible
+    # for real, so it needs the same containment, not a bypass.
+    _verify_dedicated_proxy()
+
+    proxy = os.environ.get("AUDIBLE_PROXY_URL")
     logger.info(
         "Backfill: starting",
         extra={
-            "proxy": proxy,
+            "proxy_host": _proxy_host_for_log(proxy),
             "limit": limit if limit is not None else "all",
             "delay_range": f"{DELAY_MIN}-{DELAY_MAX}s",
             "active_hours": ACTIVE_HOURS,

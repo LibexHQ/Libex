@@ -4994,6 +4994,367 @@ async def test_a_probe_page_whose_products_is_not_a_list_is_marked_lost_and_reco
 
 
 @pytest.mark.asyncio
+async def test_a_malformed_baseline_rest_page_is_visible_and_blocks_caching():
+    """HOLE 1 (the worst of the three remaining sites): Phase 1's own
+    rest-page loop had no malformed-200 guard at all before this fix --
+    unlike the probe's rest tier, which #209 already guarded here, a
+    malformed baseline page left NO trace whatsoever: no sort_errors
+    entry, no pages_fetched change, nothing. catalog_clean
+    (app/services/audible/authors/__init__.py) gates solely on
+    sort_errors being empty, so an invisible baseline failure let a short
+    result get cached under the full default TTL as though the walk were
+    complete -- worse than the probe hole it mirrors, because nothing
+    downstream of Phase 1 ever re-examines a baseline window on its own.
+
+    slicing_incomplete is asserted False alongside sort_errors: that
+    field's own contract is narrower (a harvest that surfaced zero
+    categories to slice with, not a page that failed to fetch -- see
+    _CatalogBooksResult's docstring), and this fixture never even reaches
+    Phase 2, so folding this failure into slicing_incomplete would both
+    misuse a field with a precise, different meaning and be reached by a
+    code path that plateaus/over-claims a total, not a plain rest-page
+    loss. sort_errors alone is what has to do the blocking, and does."""
+    from app.services.audible.authors import _fetch_author_books_by_catalog
+    from app.services.audible.authors.catalog import _CATALOG_SORTS
+
+    async def _get(region, path, params):
+        sort = params["products_sort_by"]
+        page = params["page"]
+        if sort != _CATALOG_SORTS[0]:
+            return {"total_results": 0, "products": []}
+        if page == 0:
+            return {"total_results": 100, "products": _catalog_asin_match_products("PAGE0", 50)}
+        # Page 1: an HTTP 200 whose body carries no usable "products" list
+        # -- audible_get passes this through unvalidated (client.py).
+        return {"total_results": 100}
+
+    with patch("app.services.audible.authors.catalog.audible_get", new=AsyncMock(side_effect=_get)):
+        result = await _fetch_author_books_by_catalog("B000AUTHOR", "Some Author", "us")
+
+    assert any("-ReleaseDate page 1: malformed response body" in err for err in result.sort_errors), result.sort_errors
+    assert len(result.asins) == 50, "only page 0's real content should have folded"
+    assert result.pages_fetched == 2, "the malformed rest page must not be counted as fetched"
+    assert result.slicing_incomplete is False, "the narrower slicing_incomplete signal must not absorb this"
+    assert result.truncated_by_deadline is False
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_expand_rest_page_is_visible_with_no_further_recovery_mechanism():
+    """HOLE 2: Phase 4's own rest-page loop had the same unguarded
+    BaseException-only branch as HOLE 1, just lower stakes -- Phase 4 runs
+    only after the walk has already paid for Phases 1-3, so a page lost
+    here can only shrink what this one category's own extra sort
+    contributes, not the whole walk. There is deliberately no
+    "expand_pages_lost" bookkeeping added for it, unlike probe_pages_lost:
+    Phase 4 is the walk's last phase, so nothing downstream would ever
+    read such a set -- the recovery mechanism probe_pages_lost feeds
+    (Phase 4 itself) does not exist a second time past Phase 4. The only
+    obligation the invariants impose here is visibility (sort_errors) and
+    not letting the walk claim more than it actually fetched, both proven
+    below; there is no completeness signal to prove recovering, because
+    there is nothing further to recover into."""
+    from app.services.audible.authors import _fetch_author_books_by_catalog
+    from app.services.audible.authors.catalog import (
+        _CATALOG_SORTS, _CATALOG_CATEGORY_SPEND_SORTS, CATALOG_RESULT_CEILING,
+    )
+
+    lossy_sort = _CATALOG_CATEGORY_SPEND_SORTS[0]
+
+    async def _get(region, path, params):
+        sort = params["products_sort_by"]
+        page = params["page"]
+        category_id = params.get("category_id")
+
+        if category_id is None:
+            if sort == _CATALOG_SORTS[0] and page == 0:
+                products = _catalog_asin_match_products("BASE", 50)
+                for prod in products:
+                    prod["category_ladders"] = [{"ladder": [{"id": "EXPMAL", "name": "Expand Malformed"}]}]
+                return {"total_results": CATALOG_RESULT_CEILING * 3, "products": products}
+            return {"total_results": CATALOG_RESULT_CEILING * 3, "products": []}
+
+        if category_id != "EXPMAL":
+            raise AssertionError(f"unexpected category-scoped request: {category_id} {sort} page {page}")
+
+        if sort == lossy_sort:
+            if page == 0:
+                return {"total_results": 100, "products": _catalog_asin_match_products("EXPP0", 50)}
+            # Page 1: the malformed 200 this test exists to catch.
+            return {"total_results": 100}
+        if sort in _CATALOG_CATEGORY_SPEND_SORTS:
+            return {"total_results": 5, "products": _catalog_asin_match_products(f"SP{sort}", 5)}
+
+        # The probe sort (-Title): a big enough total to guarantee Phase 4.
+        assert sort == "-Title"
+        return {"total_results": CATALOG_RESULT_CEILING, "products": _catalog_asin_match_products("PROBE", 50)}
+
+    with patch("app.services.audible.authors.catalog.audible_get", new=AsyncMock(side_effect=_get)):
+        result = await _fetch_author_books_by_catalog("B000AUTHOR", "Some Author", "us")
+
+    assert any(
+        f"category EXPMAL {lossy_sort} page 1: malformed response body" in err for err in result.sort_errors
+    ), result.sort_errors
+    assert not any(a.startswith("B0EXPP1") for a in result.asins), "the lost page's content must never have folded"
+    assert result.categories_expanded == 1, "the walk must still record the category as expanded, not silently drop it"
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_probe_page_0_does_not_consume_a_dry_streak_slot():
+    """HOLE 3 (malformed sub-case): before this fix, a malformed page 0
+    fell all the way through _process_catalog_page's own silent no-op
+    with zero visible trace and scored added == 0 -- indistinguishable
+    from a category that genuinely had nothing, and, worse, that false
+    dry score consumed one of CATALOG_DRY_STREAK_LIMIT's three slots.
+
+    This fixture is exactly the shape that exposes the cost of that: A
+    (malformed page 0), B (genuinely dry), C (malformed page 0), D
+    (genuinely pays), ranked in that order. Under the pre-fix code this
+    breaks at C (three false/real dry scores in a row) and D is never
+    scored at all. Under the fix, A and C bypass the dry/paying fold
+    entirely rather than scoring a false dry, so the streak never
+    reaches D -- D shows up scored (categories_complete_after_probe),
+    not merely fetched for its own page 0 (every candidate's page 0 is
+    fetched regardless of the streak, so that alone would prove
+    nothing about whether the streak-consumption bug was actually
+    fixed). A and C are independently proven both visible (sort_errors)
+    and recovered (categories_expanded, since a page-0 total of None
+    forces _needs_further_sorts True)."""
+    from app.services.audible.authors import _fetch_author_books_by_catalog
+    from app.services.audible.authors.catalog import _CATALOG_SORTS, _CATALOG_CATEGORY_SPEND_SORTS
+
+    base_products = _catalog_asin_match_products("BASE", 50)
+    # Distinct, strictly descending frequencies so Phase 2's ranking is
+    # unambiguous regardless of tie-breaking: A(40) > B(30) > C(20) > D(10)
+    # once both baseline pages below (page 0 and its plateau repeat) are
+    # both harvested from.
+    for cid, start, end in (("A", 0, 20), ("B", 20, 35), ("C", 35, 45), ("D", 45, 50)):
+        for prod in base_products[start:end]:
+            prod["category_ladders"] = [{"ladder": [{"id": cid, "name": cid}]}]
+
+    async def _get(region, path, params):
+        sort = params["products_sort_by"]
+        page = params["page"]
+        category_id = params.get("category_id")
+
+        if category_id is None:
+            if sort == _CATALOG_SORTS[0]:
+                if page in (0, 1):
+                    # page 1 re-serves page 0's exact signature -- the
+                    # observed plateau this walk needs to decide slicing
+                    # is warranted at all, without requiring a
+                    # total_results claim past CATALOG_RESULT_CEILING.
+                    return {"total_results": 100, "products": base_products}
+                raise AssertionError("baseline plateaus at page 1; no further baseline page is expected")
+            return {"total_results": 0, "products": []}
+
+        if category_id in ("A", "C"):
+            if sort == "-Title":
+                assert page == 0
+                return None  # the malformed page 0 this test exists to catch
+            if sort in _CATALOG_CATEGORY_SPEND_SORTS:
+                return {"total_results": 5, "products": _catalog_asin_match_products(f"SP{category_id}{sort}", 5)}
+            raise AssertionError(f"unexpected sort for {category_id}: {sort}")
+
+        if category_id == "B":
+            assert sort == "-Title" and page == 0
+            return {"total_results": 20, "products": _catalog_asin_match_products("BP0", 5)}
+
+        if category_id == "D":
+            if sort in _CATALOG_CATEGORY_SPEND_SORTS:
+                raise AssertionError("D must not need further sorts -- its own probe already covers it in full")
+            assert sort == "-Title"
+            return {"total_results": 60, "products": _catalog_asin_match_products("DP", 50)}
+
+        raise AssertionError(f"unexpected request: category={category_id} sort={sort} page={page}")
+
+    with patch("app.services.audible.authors.catalog.audible_get", new=AsyncMock(side_effect=_get)):
+        result = await _fetch_author_books_by_catalog("B000AUTHOR", "Some Author", "us")
+
+    assert sum("malformed response body" in err for err in result.sort_errors) == 2, result.sort_errors
+    assert any("category A -Title page 0: malformed response body" in err for err in result.sort_errors)
+    assert any("category C -Title page 0: malformed response body" in err for err in result.sort_errors)
+    assert result.categories_expanded == 2, "A and C must both be recovered via Phase 4, not scored dry"
+    assert result.categories_complete_after_probe == 1, (
+        "D was never reached under the pre-fix streak-consumption bug -- this is the proof it is scored now"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_probe_page_0_that_raises_is_visible_but_unrecoverable_pinning_existing_behaviour():
+    """HOLE 3's other sub-case -- deliberately UNCHANGED by this fix, so
+    this pins the existing behaviour rather than proving anything new: a
+    page-0 fetch that raises never enters probe_ok, so the window is
+    silently dropped from the pay/dry fold entirely and never reaches
+    Phase 4 -- unlike the malformed-200 sibling case (see the paired
+    tests above), which this same fix now forces into recovery. The one
+    thing that already worked before this change is that the failure is
+    not silent: it lands in sort_errors, which is why the two sub-cases
+    are "visible either way" but only one of them is "recoverable"."""
+    from app.services.audible.authors import _fetch_author_books_by_catalog
+    from app.services.audible.authors.catalog import (
+        _CATALOG_SORTS, _CATALOG_CATEGORY_SPEND_SORTS, CATALOG_RESULT_CEILING,
+    )
+
+    async def _get(region, path, params):
+        sort = params["products_sort_by"]
+        page = params["page"]
+        category_id = params.get("category_id")
+
+        if category_id is None:
+            if sort == _CATALOG_SORTS[0] and page == 0:
+                products = _catalog_asin_match_products("BASE", 50)
+                for prod in products:
+                    prod["category_ladders"] = [{"ladder": [{"id": "RAISES", "name": "Raises"}]}]
+                return {"total_results": CATALOG_RESULT_CEILING * 3, "products": products}
+            return {"total_results": CATALOG_RESULT_CEILING * 3, "products": []}
+
+        if category_id == "RAISES" and sort == "-Title":
+            assert page == 0
+            raise RuntimeError("upstream 500")
+
+        if category_id == "RAISES" and sort in _CATALOG_CATEGORY_SPEND_SORTS:
+            raise AssertionError("a category whose probe raised must never reach Phase 4")
+
+        raise AssertionError(f"unexpected request: category={category_id} sort={sort} page={page}")
+
+    with patch("app.services.audible.authors.catalog.audible_get", new=AsyncMock(side_effect=_get)):
+        result = await _fetch_author_books_by_catalog("B000AUTHOR", "Some Author", "us")
+
+    assert any(
+        "category RAISES -Title page 0: RuntimeError: upstream 500" in err for err in result.sort_errors
+    ), result.sort_errors
+    assert result.categories_expanded == 0
+    assert result.categories_complete_after_probe == 0
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_baseline_page_0_is_visible_and_not_reported_clean():
+    """SITE 4 (bug-hunter and data-integrity, both live-reproduced
+    independently, after the three sites above were already fixed): the
+    worst hole found in this function, because Phase 1's baseline
+    windows run on EVERY author query, not just a large or sliced one.
+    A malformed-but-dict page 0 -- a 200 whose body has no usable
+    "products" list, `{"total_results": 100}` here -- used to pass BOTH
+    the extraction loop's old BaseException-only check AND the fold
+    loop's own `isinstance(page0_outcome, dict)` gate (a malformed dict
+    is still a dict), landing on _process_catalog_page's silent no-op
+    with zero sort_errors either way. Measured live against this exact
+    fixture before the fix: sort_errors == [], asins == [], and
+    catalog_clean's own expression (not (sort_errors or
+    truncated_by_deadline or slicing_incomplete)) read True -- an empty
+    walk reported itself complete, which get_author_books (see
+    authors/__init__.py) would cache under the full default TTL
+    (settings.cache_ttl, 24 hours -- ttl_seconds=None resolves to it in
+    persist_queue.py) as though it were exhaustive, with the `elif
+    allow_background_completion` re-walk path never even reached.
+
+    total_results is asserted as coming only from the OTHER, genuinely
+    valid baseline window (0, not the malformed window's own claimed
+    100) -- the fix does not trust ANY field from an unvalidated body,
+    matching the same all-or-nothing gate every other guard in this
+    function already uses (isinstance(dict) AND isinstance("products",
+    list) together, never one alone). Trusting total_results in
+    isolation is exactly the accidental partial credit the pre-fix code
+    gave this same shape on the sibling expand-page-0 site (measured:
+    50 of 500 ASINs recovered there instead of the 500 lost by every
+    other malformed shape) -- not a principled distinction worth
+    keeping, just an implementation accident of validating one field
+    without validating the one that actually carries the data."""
+    from app.services.audible.authors import _fetch_author_books_by_catalog
+    from app.services.audible.authors.catalog import _CATALOG_SORTS
+
+    async def _get(region, path, params):
+        sort = params["products_sort_by"]
+        page = params["page"]
+        assert page == 0, "only page 0 of either baseline sort should ever be requested here"
+        if sort == _CATALOG_SORTS[0]:
+            # The malformed 200 this test exists to catch: a dict, but
+            # with no usable "products" list at all.
+            return {"total_results": 100}
+        return {"total_results": 0, "products": []}
+
+    with patch("app.services.audible.authors.catalog.audible_get", new=AsyncMock(side_effect=_get)):
+        result = await _fetch_author_books_by_catalog("B000AUTHOR", "Some Author", "us")
+
+    assert any(
+        "-ReleaseDate page 0: malformed response body" in err for err in result.sort_errors
+    ), result.sort_errors
+    assert result.asins == []
+    assert result.pages_fetched == 1, "only the other, genuinely valid baseline window should count as fetched"
+    assert result.total_results == 0, "the malformed window's own claimed total_results must never be trusted"
+    assert result.slicing_incomplete is False
+    assert result.truncated_by_deadline is False
+    catalog_clean = not result.sort_errors and not result.truncated_by_deadline and not result.slicing_incomplete
+    assert catalog_clean is False, "an empty walk from a malformed page 0 must never read as a clean, complete one"
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_expand_page_0_is_visible_and_never_folds():
+    """SITE 5 (bug-hunter and data-integrity, both live-reproduced
+    independently): the same shape as SITE 4, one phase later. A
+    malformed-but-dict page 0 for one of Phase 4's spend sorts used to
+    pass this extraction loop's old BaseException-only check, get
+    wrongly added to expand_ok and counted as fetched, then pass the
+    fold loop's own isinstance(dict) gate too, landing on a silent
+    no-op with zero sort_errors -- data-integrity's own live measurement
+    against a disjoint-sort fixture found up to CATALOG_RESULT_CEILING
+    unique ASINs lost per affected window this way, with zero trace. Per
+    the neighbouring expand-rest guard's own comment, Phase 4 has no
+    further recovery mechanism, so a loss here is permanent -- unlike
+    the baseline site, there is no second chance downstream at all,
+    which is why visibility (sort_errors) is the only thing this guard
+    can or needs to provide."""
+    from app.services.audible.authors import _fetch_author_books_by_catalog
+    from app.services.audible.authors.catalog import (
+        _CATALOG_SORTS, _CATALOG_CATEGORY_SPEND_SORTS, CATALOG_RESULT_CEILING,
+    )
+
+    lossy_sort = _CATALOG_CATEGORY_SPEND_SORTS[0]
+
+    async def _get(region, path, params):
+        sort = params["products_sort_by"]
+        page = params["page"]
+        category_id = params.get("category_id")
+
+        if category_id is None:
+            if sort == _CATALOG_SORTS[0] and page == 0:
+                products = _catalog_asin_match_products("BASE", 50)
+                for prod in products:
+                    prod["category_ladders"] = [{"ladder": [{"id": "EXPMAL2", "name": "Expand Malformed Page0"}]}]
+                return {"total_results": CATALOG_RESULT_CEILING * 3, "products": products}
+            return {"total_results": CATALOG_RESULT_CEILING * 3, "products": []}
+
+        if category_id != "EXPMAL2":
+            raise AssertionError(f"unexpected category-scoped request: {category_id} {sort} page {page}")
+
+        if sort == lossy_sort:
+            assert page == 0
+            # The malformed 200 this test exists to catch: a dict, but
+            # with no usable "products" list at all.
+            return {"total_results": 50}
+        if sort in _CATALOG_CATEGORY_SPEND_SORTS:
+            return {"total_results": 5, "products": _catalog_asin_match_products(f"SP{sort}", 5)}
+
+        assert sort == "-Title"
+        return {"total_results": CATALOG_RESULT_CEILING, "products": _catalog_asin_match_products("PROBE2", 50)}
+
+    with patch("app.services.audible.authors.catalog.audible_get", new=AsyncMock(side_effect=_get)):
+        result = await _fetch_author_books_by_catalog("B000AUTHOR", "Some Author", "us")
+
+    assert any(
+        f"category EXPMAL2 {lossy_sort} page 0: malformed response body" in err for err in result.sort_errors
+    ), result.sort_errors
+    assert result.categories_expanded == 1
+    # 50 (BASE, Phase 1) + 50 (PROBE2, Phase 3's probe) + 5*3 (the three
+    # other, genuinely valid spend sorts) -- the lossy sort's own zero
+    # contribution is exactly what proves nothing folded from its
+    # malformed page 0.
+    assert len(result.asins) == 50 + 50 + 5 * 3
+    catalog_clean = not result.sort_errors and not result.truncated_by_deadline and not result.slicing_incomplete
+    assert catalog_clean is False
+
+
+@pytest.mark.asyncio
 async def test_deadline_tripping_after_the_probe_completes_does_not_truncate_a_walk_with_nothing_left():
     """The narrowed Phase 4 gate (`if to_expand:`, not `if paying:`) means
     a category that paid but was already fully enumerated by its own

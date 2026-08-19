@@ -79,9 +79,17 @@ logger = get_logger()
 # the outage, and the only one the measurements resolve clear of their own
 # run-to-run noise. That is what keeps a full, untruncated result inside the
 # proxy's window rather than needing to return less than what Audible has.
-# This 45s deadline remains underneath that as a backstop against a
-# genuinely pathological walk, not the mechanism the outage fix relies on.
-AUTHOR_BOOKS_TIME_BUDGET_SECONDS = 45.0
+# This deadline remains underneath that as a backstop against a genuinely
+# pathological walk, not the mechanism the outage fix relies on.
+#
+# It is 25s, and was 45. At 45 it could never fire: the fronting proxy gives
+# up at 30s, so the deadline sat beyond the point where the caller had already
+# been sent a 504 and the backstop was decorative. It now bounds the WHOLE request
+# -- discovery and hydration share one deadline, computed once at the route --
+# and lands inside the proxy's window with room for the response to be
+# assembled and written. A walk that hits it returns what it has, marked
+# incomplete, instead of the caller getting a 504 and nothing.
+AUTHOR_BOOKS_TIME_BUDGET_SECONDS = 25.0
 
 
 
@@ -284,6 +292,7 @@ async def get_author_books(
     region: str,
     session: AsyncSession,
     use_cache: bool = False,
+    deadline: float | None = None,
 ) -> AuthorBooksResult:
     """
     Fetches all book ASINs for an author. See _walk_author_books for the
@@ -346,7 +355,7 @@ async def get_author_books(
         # longer a result coming for them to wait on.
         return await asyncio.shield(leader)
 
-    task = asyncio.ensure_future(_walk_author_books(asin, region, session))
+    task = asyncio.ensure_future(_walk_author_books(asin, region, session, deadline=deadline))
     _author_books_inflight[inflight_key] = task
     try:
         # Deliberately NOT shielded, unlike the follower await above, and
@@ -387,6 +396,7 @@ async def _walk_author_books(
     *,
     time_budget: float = AUTHOR_BOOKS_TIME_BUDGET_SECONDS,
     allow_background_completion: bool = True,
+    deadline: float | None = None,
 ) -> AuthorBooksResult:
     """
     Fetches all book ASINs for an author, as a four-source parallel union:
@@ -450,7 +460,12 @@ async def _walk_author_books(
     # completion runs this same walk with a budget that is not bounded by
     # what a caller will sit and wait for, which is the whole reason it can
     # finish a walk a live request could not.
-    deadline = start + time_budget
+    # A caller-supplied deadline wins, so a live request bounds discovery and
+    # hydration with ONE budget rather than two that add up. time_budget is
+    # the fallback for callers that own no request clock -- the background
+    # completion, which runs on a budget nobody is waiting on.
+    if deadline is None:
+        deadline = start + time_budget
 
     # Wave 1.
     author_name: str | None = None

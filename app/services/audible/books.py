@@ -452,6 +452,40 @@ def _filter_products(products: list[dict]) -> list[dict]:
 # CHUNKING
 # ============================================================
 
+async def _await_chunks(tasks, timeout, chunks, region) -> None:
+    """Waits out the chunk fan-out, cancelling whatever is still in flight
+    when the request's deadline arrives.
+
+    Split from the caller so the try/finally that guarantees cancellation on
+    an OUTER cancel stays one readable statement -- see that finally for why
+    it has to exist at all.
+    """
+    _, pending = await asyncio.wait(tasks, timeout=timeout)
+    for task in pending:
+        task.cancel()
+    if pending:
+        # Let the cancellations settle before anything reads a task, so
+        # nothing is still running when results are assembled.
+        await asyncio.gather(*pending, return_exceptions=True)
+        logger.warning("Hydration deadline reached, chunks abandoned", extra={
+            "abandoned_chunks": len(pending),
+            "total_chunks": len(chunks),
+            "region": region,
+        })
+
+
+class HydrationDeadlineExceeded(Exception):
+    """One hydration chunk abandoned because the request ran out of time.
+
+    Deliberately an Exception rather than letting CancelledError through:
+    CancelledError is a BaseException in 3.12, so it would slip past the
+    `isinstance(result, Exception)` branch below that routes a failed chunk to
+    the DB backstop. Abandoned chunks must take that path -- their ASINs are
+    still worth answering from stored rows -- and must also leave the response
+    visibly short, which is what makes the route mark it incomplete.
+    """
+
+
 async def _fetch_chunk(asins: list[str], region: str) -> list[dict[str, Any]]:
     """Fetches a single chunk of up to 50 ASINs from Audible."""
     if not asins:
@@ -488,6 +522,7 @@ async def get_books_by_asins(
     session: AsyncSession,
     use_cache: bool = False,
     high_concurrency: bool = False,
+    deadline: float | None = None,
 ) -> list[dict[str, Any]]:
     """
     Public entry point. Delegates to _get_books_by_asins_unsettled and settles
@@ -503,7 +538,7 @@ async def get_books_by_asins(
     alternative was inserting the same call at each of those points.
     """
     books = await _get_books_by_asins_unsettled(
-        asins, region, session, use_cache, high_concurrency
+        asins, region, session, use_cache, high_concurrency, deadline
     )
     return _settle_flags_list(books)
 
@@ -514,6 +549,7 @@ async def _get_books_by_asins_unsettled(
     session: AsyncSession,
     use_cache: bool = False,
     high_concurrency: bool = False,
+    deadline: float | None = None,
 ) -> list[dict[str, Any]]:
     """
     Fetches one or more books by ASIN from Audible.
@@ -606,10 +642,50 @@ async def _get_books_by_asins_unsettled(
         # -- the pool draw only changes for the one path that opts in.
         pool_context = author_books_concurrency() if high_concurrency else nullcontext()
         with pool_context:
-            results = await asyncio.gather(
-                *(_fetch_chunk(chunk, region) for chunk in chunks),
-                return_exceptions=True,
-            )
+            # asyncio.wait with a timeout rather than gather, so the request's
+            # own budget bounds hydration as well as discovery. Hydration used
+            # to run entirely outside that budget: the walk stopped at its
+            # deadline and then handed an unbounded fan-out to a caller the
+            # proxy was already timing out on, so the worst case was the
+            # discovery budget PLUS however long the books took.
+            #
+            # wait, not wait_for: wait_for cancels the whole gather and throws
+            # away every chunk that had already come back. Here the chunks
+            # that landed are kept, the ones still in flight are cancelled,
+            # and their ASINs fall through to the DB backstop below exactly
+            # as a transiently failed chunk does. The response is then
+            # visibly short, which is what makes the route mark it incomplete
+            # rather than advertising a half-hydrated body as whole.
+            tasks = [
+                asyncio.ensure_future(_fetch_chunk(chunk, region))
+                for chunk in chunks
+            ]
+            timeout = None if deadline is None else max(0.0, deadline - time.monotonic())
+            try:
+                await _await_chunks(tasks, timeout, chunks, region)
+            finally:
+                # gather cancelled its children when the coroutine awaiting it
+                # was cancelled; wait does not, and swapping one for the other
+                # silently dropped that. Without this, an outer cancellation --
+                # a graceful shutdown, or anything that later wraps these routes
+                # in wait_for -- unwinds straight out of the await above and
+                # leaves the whole fan-out running detached: no one holding the
+                # tasks, each still holding an Audible pool permit and an httpx
+                # connection, and any exception they raise never retrieved.
+                # Discovery's own fan-out still uses gather and still gets this
+                # for free; hydration has to ask for it.
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+            # Rebuilt in the original chunk order, which zip() below relies on.
+            results: list[Any] = []
+            for task in tasks:
+                if task.cancelled():
+                    results.append(HydrationDeadlineExceeded())
+                elif task.exception() is not None:
+                    results.append(task.exception())
+                else:
+                    results.append(task.result())
 
         requested_took = round((time.monotonic() - start) * 1000, 2)
 

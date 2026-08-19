@@ -5,6 +5,7 @@ Tests normalization and helper functions without hitting Audible.
 
 # Standard library
 import asyncio
+import time
 from unittest.mock import AsyncMock, patch
 
 # Third party
@@ -1004,3 +1005,160 @@ def test_the_unreadable_plans_warning_still_windows_after_the_first():
         books_mod._log_unreadable_plans("B08G9PRS1K")
 
     mock_logger.warning.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_hydration_stops_at_the_deadline_and_keeps_what_landed():
+    """Hydration is bounded by the request's own budget, and an abandoned
+    chunk does not discard the chunks that already came back.
+
+    Before this, the deadline reached discovery and nothing else: the walk
+    stopped at its budget and then handed an unbounded fan-out to a caller
+    the proxy was already timing out on, so the worst case was the discovery
+    budget PLUS however long the books took. asyncio.wait rather than
+    wait_for is what keeps the landed chunks -- wait_for cancels the whole
+    gather and throws them away."""
+    import app.services.audible.books as books_mod
+
+    async def _one_fast_one_hanging(asins, region):
+        if asins[0].startswith("B0FAST"):
+            return [{"asin": a, "title": "t", "region": region} for a in asins]
+        await asyncio.sleep(30)
+        return []
+
+    session = AsyncMock()
+    session.rollback = AsyncMock()
+    # Distinct ASINs: the fetch dedupes, and chunking is at 50, so this is
+    # exactly one fast chunk followed by one that never returns.
+    asins = [f"B0FAST{i:05d}" for i in range(50)] + [f"B0SLOW{i:05d}" for i in range(50)]
+
+    with patch.object(books_mod, "_fetch_chunk", new=AsyncMock(side_effect=_one_fast_one_hanging)), \
+         patch.object(books_mod, "get_books_from_db", new=AsyncMock(return_value=[])), \
+         patch("app.services.audible.books.cache.get_many", new=AsyncMock(return_value={})):
+        books = await books_mod.get_books_by_asins(
+            asins, "us", session, deadline=time.monotonic() + 0.25
+        )
+
+    # The fast chunk survived; the hanging one was abandoned rather than
+    # taking the whole response down with it.
+    assert len(books) == 50
+    assert all(b["asin"].startswith("B0FAST") for b in books)
+
+
+@pytest.mark.asyncio
+async def test_hydration_without_a_deadline_still_waits_for_every_chunk():
+    """The bound is opt-in. Every caller that passes no deadline -- the seeder,
+    the refresh, every non-author route -- must behave exactly as it did
+    before the parameter existed."""
+    import app.services.audible.books as books_mod
+
+    async def _slow_but_finite(asins, region):
+        await asyncio.sleep(0.05)
+        return [{"asin": a, "title": "t", "region": region} for a in asins]
+
+    session = AsyncMock()
+    session.rollback = AsyncMock()
+
+    with patch.object(books_mod, "_fetch_chunk", new=AsyncMock(side_effect=_slow_but_finite)), \
+         patch.object(books_mod, "get_books_from_db", new=AsyncMock(return_value=[])), \
+         patch("app.services.audible.books.cache.get_many", new=AsyncMock(return_value={})):
+        books = await books_mod.get_books_by_asins(
+            [f"B0AAA{i:05d}" for i in range(50)], "us", session
+        )
+
+    assert len(books) == 50
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_request_cancels_the_chunks_still_in_flight():
+    """An outer cancellation must take the fan-out with it.
+
+    asyncio.gather cancels its children when the coroutine awaiting it is
+    cancelled; asyncio.wait does NOT, and swapping one for the other silently
+    dropped that guarantee. Without the try/finally, a graceful shutdown --
+    or anything that later wraps these routes in wait_for -- unwinds out of
+    the wait and leaves every in-flight chunk running detached, each holding
+    an Audible pool permit and an httpx connection, with any exception it
+    raises never retrieved.
+
+    Discovery has a test for exactly this on its own leader await; hydration
+    did not, which is how the regression got in."""
+    import app.services.audible.books as books_mod
+
+    started = asyncio.Event()
+    chunk_tasks: list[asyncio.Task] = []
+
+    async def _hangs(asins, region):
+        started.set()
+        await asyncio.sleep(30)
+        return []
+
+    session = AsyncMock()
+    session.rollback = AsyncMock()
+
+    real_ensure_future = asyncio.ensure_future
+
+    def _track(coro):
+        task = real_ensure_future(coro)
+        chunk_tasks.append(task)
+        return task
+
+    with patch.object(books_mod, "_fetch_chunk", new=AsyncMock(side_effect=_hangs)), \
+         patch.object(books_mod.asyncio, "ensure_future", new=_track), \
+         patch.object(books_mod, "get_books_from_db", new=AsyncMock(return_value=[])), \
+         patch("app.services.audible.books.cache.get_many", new=AsyncMock(return_value={})):
+        outer = asyncio.ensure_future(
+            books_mod.get_books_by_asins([f"B0AAA{i:05d}" for i in range(50)], "us", session)
+        )
+        await started.wait()
+        outer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await outer
+
+    assert chunk_tasks, "the fan-out never started, so this asserts nothing"
+    # Let the cancellations settle, then confirm nothing is left running.
+    await asyncio.gather(*chunk_tasks, return_exceptions=True)
+    assert all(t.done() for t in chunk_tasks), "a chunk survived the request being cancelled"
+
+
+@pytest.mark.asyncio
+async def test_an_abandoned_chunk_falls_through_to_the_stored_copy():
+    """A chunk cut off by the deadline must still answer from the database.
+
+    This is HydrationDeadlineExceeded's entire reason for being an Exception
+    rather than a CancelledError: it has to land in the branch that routes a
+    failed chunk to the DB backstop, so the books are served from what Libex
+    already stored instead of being dropped. Routing it away from the backstop
+    passes both other hydration tests, which is how the gap was found."""
+    import app.services.audible.books as books_mod
+
+    stored = [{"asin": f"B0SLOW{i:05d}", "title": "from the db", "region": "us"}
+              for i in range(50)]
+
+    async def _one_fast_one_hanging(asins, region):
+        if asins[0].startswith("B0FAST"):
+            return [{"asin": a, "title": "live", "region": region} for a in asins]
+        await asyncio.sleep(30)
+        return []
+
+    session = AsyncMock()
+    session.rollback = AsyncMock()
+    asins = [f"B0FAST{i:05d}" for i in range(50)] + [f"B0SLOW{i:05d}" for i in range(50)]
+
+    with patch.object(books_mod, "_fetch_chunk", new=AsyncMock(side_effect=_one_fast_one_hanging)), \
+         patch.object(books_mod, "get_books_from_db", new=AsyncMock(return_value=stored)) as mock_db, \
+         patch("app.services.audible.books.cache.get_many", new=AsyncMock(return_value={})):
+        books = await books_mod.get_books_by_asins(
+            asins, "us", session, deadline=time.monotonic() + 0.25
+        )
+
+    # The abandoned chunk's ASINs were handed to the backstop...
+    mock_db.assert_awaited()
+    backstop_asins = mock_db.await_args.args[1] if len(mock_db.await_args.args) > 1 else []
+    assert any(a.startswith("B0SLOW") for a in backstop_asins), (
+        "the abandoned chunk's ASINs never reached the DB backstop"
+    )
+    # ...and their stored copies are in the response alongside the live ones.
+    returned = {b["asin"] for b in books}
+    assert any(a.startswith("B0FAST") for a in returned), "lost the chunk that landed"
+    assert any(a.startswith("B0SLOW") for a in returned), "lost the stored fallback"

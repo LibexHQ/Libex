@@ -4,6 +4,7 @@ Compatible with AudiMeta endpoint structure for drop-in replacement.
 """
 
 # Standard library
+import time
 from datetime import datetime, timezone
 from typing import Annotated
 
@@ -22,6 +23,7 @@ from app.api.routes.filter_params import LiveBookFilters
 
 # Services
 from app.services.audible.authors import (
+    AUTHOR_BOOKS_TIME_BUDGET_SECONDS,
     get_author,
     get_author_books,
     get_author_books_by_name,
@@ -213,7 +215,13 @@ async def get_books_by_author(
     """
     if not is_valid_asin(asin):
         raise NotFoundException(f"Invalid ASIN format: {asin}")
-    walk = await get_author_books(asin, region, session, cache)
+    # One deadline for the whole request, computed here and shared by both
+    # phases. Previously each phase was bounded separately -- discovery by its
+    # own budget, hydration by nothing at all -- so the worst case was the
+    # discovery budget plus an unbounded fan-out, on a request the proxy was
+    # already timing out on. Sharing it means the two cannot add up past it.
+    deadline = time.monotonic() + AUTHOR_BOOKS_TIME_BUDGET_SECONDS
+    walk = await get_author_books(asin, region, session, cache, deadline=deadline)
     asins = walk.asins
     if not asins:
         raise NotFoundException("No books found for author")
@@ -229,7 +237,9 @@ async def get_books_by_author(
     # pairing running serialized behind the default Audible concurrency pool
     # -- see get_books_by_asins' own docstring and client.py's
     # AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT for the measurements.
-    books = await get_books_by_asins(asins, region, session, use_cache=cache, high_concurrency=True)
+    books = await get_books_by_asins(
+        asins, region, session, use_cache=cache, high_concurrency=True, deadline=deadline
+    )
     # Marked here rather than above, and given the hydrated books rather than
     # the walk alone. walk.is_complete describes DISCOVERY -- whether the ASIN
     # list is whole -- while the body a caller receives is what hydration
@@ -268,14 +278,22 @@ async def get_books_by_author_primary(
     """Legacy endpoint. Use /author/books/{asin} instead."""
     if not is_valid_asin(asin):
         raise NotFoundException(f"Invalid ASIN format: {asin}")
-    walk = await get_author_books(asin, region, session, cache)
+    # One deadline for the whole request, computed here and shared by both
+    # phases. Previously each phase was bounded separately -- discovery by its
+    # own budget, hydration by nothing at all -- so the worst case was the
+    # discovery budget plus an unbounded fan-out, on a request the proxy was
+    # already timing out on. Sharing it means the two cannot add up past it.
+    deadline = time.monotonic() + AUTHOR_BOOKS_TIME_BUDGET_SECONDS
+    walk = await get_author_books(asin, region, session, cache, deadline=deadline)
     asins = walk.asins
     if not asins:
         raise NotFoundException("No books found for author")
     # use_cache=cache and high_concurrency=True: same pairing as
     # get_books_by_author above (this is its legacy-route twin) -- see that
     # call site's comments.
-    books = await get_books_by_asins(asins, region, session, use_cache=cache, high_concurrency=True)
+    books = await get_books_by_asins(
+        asins, region, session, use_cache=cache, high_concurrency=True, deadline=deadline
+    )
     # Marked here rather than above, and given the hydrated books rather than
     # the walk alone. walk.is_complete describes DISCOVERY -- whether the ASIN
     # list is whole -- while the body a caller receives is what hydration

@@ -7,11 +7,14 @@ long stretch, so it doesn't look like a scraper and doesn't get the exit IP
 flagged.
 
 Design notes:
-- Routes Audible calls through whatever AUDIBLE_PROXY_URL is set for THIS process
-  (meant to be a dedicated VPN exit, separate from the live app's), so if this
-  IP gets throttled the live service is unaffected.
+- Routes Audible calls through the AUDIBLE_PROXY_URL set for THIS process, a
+  dedicated VPN exit separate from the live app's, so if this IP gets throttled
+  the live service is unaffected. Not a convention but a precondition: the run
+  refuses to start unless the hostname names a backfill exit -- see
+  _verify_dedicated_proxy.
 - Reuses the app's own fetch/normalize/write path (audible_get, the chapter
-  normalizer, upsert_track) so stored data is identical to on-demand fetches.
+  normalizer, and an upsert of the same Track row) so stored data is identical
+  to on-demand fetches.
 - The work queue is self-checkpointing: a book leaves it the moment
   chapters_checked_at is set, whether we stored chapters, found none, or Audible
   404s the record. So the run is fully resumable and never re-fetches a book it
@@ -63,6 +66,59 @@ Run as a separate container off the Libex image:
 
 Stop with `docker stop libex-chapter-backfill` — it finishes the current book,
 commits, and exits cleanly.
+
+ENVIRONMENT. Everything this container reads. The first two are required and
+the run dies without either, though differently -- see each. The rest have
+working defaults, env-overridable so a live run can be adjusted without a
+rebuild.
+
+    DATABASE_URL               the same database the app uses, read straight
+                               from the environment -- unset is a KeyError on
+                               startup, not a fallback. The image entrypoint
+                               also runs `alembic upgrade head` against it
+                               before this script gets control.
+    AUDIBLE_PROXY_URL          the dedicated VPN exit this run leaves by. Its
+                               hostname must contain "backfill" --
+                               _verify_dedicated_proxy refuses to start on
+                               anything else, because an unset value sends
+                               every request out by the container's own egress,
+                               the host's public address, and a value copied
+                               from another stack points this run at whatever
+                               exit that stack uses -- and if that is the live
+                               service's, a weeks-long crawl would land on the
+                               exit the service depends on, which is what this
+                               check exists to stop. It tests that substring and
+                               nothing else, so a genuinely dedicated exit named
+                               without the word is refused exactly as a shared
+                               one is.
+
+    LOG_LEVEL                  INFO    DEBUG, INFO, WARNING or ERROR. DEBUG=true
+                                       forces DEBUG whatever this says.
+    AXIOM_TOKEN                (unset) set means every line of this run ships to
+                                       Axiom as well as stdout. Copying another
+                                       stack's environment is the easy way to
+                                       inherit it without meaning to.
+    AXIOM_DATASET              libex   the dataset those lines land in.
+    LOG_RETENTION_DAYS         7       rotation of the log file inside the
+                                       container; 0 keeps everything. The handler
+                                       is attached whether or not a logs volume
+                                       is mounted, so 0 across a weeks-long run
+                                       grows the file in the container layer
+                                       unbounded.
+
+    BACKFILL_DELAY_MIN         0.7     per-request delay floor, seconds
+    BACKFILL_DELAY_MAX         2.0     per-request delay ceiling, seconds
+    BACKFILL_ACTIVE_HOURS      12.0    hours awake before a pause
+    BACKFILL_PAUSE_MIN_HOURS   4.0     shortest pause between active stretches
+    BACKFILL_PAUSE_MAX_HOURS   11.0    longest pause between active stretches
+    BACKFILL_CHUNK_SIZE        500     books per DB round-trip, not a rate knob
+    BACKFILL_ERROR_WINDOW      50      attempts in the rolling back-off window
+    BACKFILL_ERROR_THRESHOLD   25      failures in that window that trip cooldown
+    BACKFILL_ERROR_COOLDOWN    1800.0  cooldown length, seconds
+    BACKFILL_PROGRESS_EVERY    50      books between progress lines
+
+Lowering the delays or raising the active hours is what makes the run look
+less organic, which is the one thing this script is shaped to avoid.
 """
 
 # Standard library
@@ -125,7 +181,7 @@ PAUSE_MAX_HOURS = _env_float("BACKFILL_PAUSE_MAX_HOURS", 11.0)
 # not a rate knob).
 CHUNK_SIZE = _env_int("BACKFILL_CHUNK_SIZE", 500)
 
-# back-off: if the last WINDOW attempts had more than THRESHOLD failures where
+# back-off: if the last WINDOW attempts had THRESHOLD or more failures where
 # pausing is a plausible remedy (NOT 404s, NOT a confirmed-permanent status
 # like 400 — see _is_backoff_signal), the exit IP is probably being
 # throttled — pause hard for COOLDOWN.

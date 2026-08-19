@@ -117,21 +117,145 @@ crossing it. A shed that gets through anyway is still counted and reported in
 the exit summary, never silently absorbed into a clean-looking run.
 
 RUN IT (its own container, its own AirVPN endpoint — AUDIBLE_PROXY_URL must
-name it explicitly; the run refuses to start against an unset or
-production-looking proxy, see _verify_dedicated_proxy):
+name it explicitly; the run refuses to start unless its hostname contains
+"refresh", see _verify_dedicated_proxy):
 
     docker run -d --name libex-refresh-corpus \\
       --network libex-proxy \\
+      --network libex_default \\
       -e DATABASE_URL=<same as the app> \\
       -e AUDIBLE_PROXY_URL=http://libex-refresh-vpn:8888 \\
       ghcr.io/libexhq/libex:latest \\
       python scripts/refresh_corpus.py --dry-run     # prints the plan, calls nothing
 
-Drop --dry-run for the real run. `docker stop -t 300 libex-refresh-corpus`
-(matching or exceeding DRAIN_TIMEOUT_SECONDS; docker's own default 10s grace
-ends in SIGKILL before a page's own drain can finish, and the run falls back
-to the previous page's resume cursor rather than the current one) finishes
-the chunks in flight, prints the resume cursor, and exits.
+Both networks are needed: libex-proxy reaches the VPN sidecar, and the app
+stack's own network is the only place the `postgres` host in DATABASE_URL
+resolves. Its real name is the stack's, not necessarily libex_default --
+`docker inspect libex --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}'`
+prints both of them; the one that is not libex-proxy is the stack's.
+Repeating --network on run needs Engine 25.0 or newer; on older
+ones use docker create, then docker network connect, then docker start, so the
+second network is attached before the run reads its first page.
+
+Drop --dry-run for the real run. `docker stop -t 600 libex-refresh-corpus`
+finishes the chunks in flight, prints the resume cursor, and exits. 600 rather
+than DRAIN_TIMEOUT_SECONDS itself: a SIGTERM first waits out the in-flight
+fetches (up to three attempts at a 30s timeout, plus capped backoffs) and only
+then starts the drain, and one landing during a page-boundary drain pays for
+that one AND the exit drain. -t is a deadline rather than a delay -- docker
+stop returns as soon as the process exits -- so a generous value costs nothing
+on a healthy stop and only bounds the pathological one. Docker's own default
+10s grace ends in SIGKILL before a page's drain can finish, and the run then
+falls back to the previous page's resume cursor rather than the current one.
+
+ENVIRONMENT. Everything this container reads. The first two are required --
+the run refuses to start without a proxy it recognises as its own. The rest
+have working defaults, env-overridable so a live run can be adjusted without
+a rebuild.
+
+    DATABASE_URL                      the same database the app uses. Unset
+                                      does NOT fail here -- the app's settings
+                                      default it to a localhost URL, so the run
+                                      dies on a connection error inside the
+                                      container rather than a clear one. Read
+                                      through those settings rather than by
+                                      this script, and by the
+                                      `alembic upgrade head` the image
+                                      entrypoint runs before this script gets
+                                      control -- so launching this container
+                                      migrates that database. Needs the app
+                                      stack's own network as well as
+                                      libex-proxy; see RUN IT above for how to
+                                      find its name.
+    AUDIBLE_PROXY_URL                 this run's own dedicated exit. Its
+                                      HOSTNAME MUST CONTAIN "refresh" --
+                                      _verify_dedicated_proxy checks for that
+                                      substring and nothing else, so a
+                                      genuinely dedicated exit named without
+                                      the word is refused exactly as the shared
+                                      production one is.
+    REFRESH_RESUME_FROM       (unset) ASIN to resume AFTER, exclusive -- the walk
+                                      restarts at the next one. --resume-from is
+                                      the same setting and wins over it.
+
+    LOG_LEVEL                 INFO    INFO is what this run needs, and DEBUG
+                                      only adds noise (httpx and httpcore are
+                                      muted separately, so it leaks no caller
+                                      URLs). WARNING and above drop the RESUME
+                                      CURSOR line a restart depends on, which is
+                                      logged at INFO. ERROR additionally kills
+                                      BOTH log-driven aborts below: their
+                                      detector is a handler on the throttle
+                                      record, which is emitted at WARNING.
+                                      DEBUG=true forces DEBUG whatever this says.
+    AXIOM_TOKEN               (unset) set means every line of this run ships to
+                                      Axiom as well as stdout. Copying another
+                                      stack's environment is the easy way to
+                                      inherit it without meaning to.
+    AXIOM_DATASET             libex   the dataset those lines land in.
+    LOG_RETENTION_DAYS        7       rotation of the log file inside the
+                                      container; 0 keeps everything. The handler
+                                      is attached whether or not a logs volume is
+                                      mounted -- a mount changes where the file
+                                      survives, not whether it is written -- and
+                                      the run command above mounts none.
+
+    CACHE_TTL                         86400   seconds until a cached book expires.
+                                              This run writes one cache row per
+                                              book through the normal persist
+                                              path, so a full pass restamps the
+                                              whole corpus's expiry horizon.
+
+    REFRESH_PAGE_SIZE                 25000   rows per keyset page
+    REFRESH_CONCURRENCY_START         6       opening ramp rung
+    REFRESH_CONCURRENCY_MAX           48      ramp ceiling
+    REFRESH_RAMP_STEP                 6       width added per climb
+    REFRESH_RAMP_INTERVAL             150     clean chunks required per climb
+    REFRESH_LATENCY_WINDOW            60      latency samples per rolling window.
+                                              Also sets the degrade warmup at
+                                              three times this, so raising it
+                                              delays the check below as well.
+    REFRESH_DEGRADE_P95_RATIO         2.0     p95-against-best-p95 ratio that
+                                              steps the ramp back down AND
+                                              freezes the climb for good -- a
+                                              run that trips it spends the rest
+                                              of its life at that rung.
+    REFRESH_ABORT_5XX_WITHIN          20      5xx count that aborts the run. Shares
+                                              the throttle detector with the 429
+                                              abort, so LOG_LEVEL=ERROR disables
+                                              this one too.
+    REFRESH_ABORT_5XX_WINDOW_SECONDS  120.0   window that count is measured over
+    REFRESH_ABORT_CHUNK_FAILURE_RATE  0.25    sustained chunk-failure rate that aborts
+    REFRESH_ABORT_CHUNK_FAILURE_MIN   40      chunks required before that rate is judged
+    REFRESH_DB_WRITE_CONCURRENCY      8       concurrent background persist
+                                              transactions. Bounded by the app
+                                              engine's pool (pool_size 10 plus
+                                              max_overflow 10), which is not
+                                              env-tunable, so past roughly 16
+                                              the writers queue on pool_timeout
+                                              instead of going faster.
+    REFRESH_BACKLOG_HIGH_WATER        2550    queued books above which dispatch
+                                              waits. Derived as the persist
+                                              queue's own capacity (5000) minus
+                                              (CONCURRENCY_MAX + 1) chunks, so
+                                              it FALLS as CONCURRENCY_MAX rises:
+                                              at 99 or more the derivation
+                                              leaves no room for a single chunk
+                                              and the run refuses to start
+                                              unless this is also set.
+    REFRESH_DRAIN_TIMEOUT_SECONDS     300.0   bound on waiting for the persist
+                                              queue, between pages and again at
+                                              exit. `docker stop -t` must exceed
+                                              it with room to spare -- see the
+                                              -t 600 above for why matching it
+                                              exactly is not enough. SIGKILL
+                                              mid-drain rewinds the resume
+                                              cursor by a page.
+    REFRESH_PROGRESS_EVERY            100     chunks between progress lines
+
+Any 429 ends the run outright, whatever the abort thresholds above are set
+to. Both that and the 5xx abort need LOG_LEVEL at WARNING or more verbose to see
+anything at all, and the resume cursor needs INFO -- see LOG_LEVEL above.
 """
 
 # Standard library
@@ -853,7 +977,7 @@ def _verify_backlog_headroom() -> None:
     _env_int applies no floor to REFRESH_CONCURRENCY_MAX, and the module
     docstring explicitly invites raising it "if the endpoint is visibly
     bored," citing 250 as measured clean elsewhere. At the default derivation,
-    CONCURRENCY_MAX = 100 already consumes the whole 5000-book
+    CONCURRENCY_MAX = 99 already consumes the whole 5000-book
     backlog_capacity() in reserve, leaving a high water of zero; above that it
     goes negative. _wait_for_backlog then loops on `queued_books() >
     BACKLOG_HIGH_WATER`, which is true even at a queue depth of zero -- the

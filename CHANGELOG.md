@@ -41,6 +41,37 @@ capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
   endpoint, parameter, response shape or field changed.
 
 ### Fixed
+- **A page Audible sent back unreadable could make an author's book list come
+  back empty and still get cached as a complete answer for a full day.**
+  Building the list reads many pages, one category and sort order at a time,
+  and a `200` response whose body wasn't shaped the way the code expected —
+  missing the list of books, or carrying something other than a list where
+  one was expected — was treated the same as a page that had genuinely
+  finished, in five of the six places a page gets read. That included the
+  very first page of the very first pass, which runs on every author lookup:
+  an author with three hundred books could come back with zero, nothing
+  recorded as having gone wrong, and the empty result stored as a finished
+  walk for the standard 24-hour cache lifetime.
+
+  All six of those reads now treat an unreadable body as a failure rather
+  than as "nothing here." A walk that lost a page this way no longer reports
+  itself clean, so it is not cached as complete — the next request tries
+  again instead of being served the same short answer for the rest of the
+  day.
+
+  **One case gives up ground the old code shouldn't have taken.** Where a
+  page's body carried a believable total-results figure but nothing usable
+  in the list of books itself, the old code sometimes trusted that figure
+  and returned whatever partial set it had managed to read — as few as fifty
+  books out of five hundred — and called it complete for the day anyway.
+  That partial credit is gone: a page shaped like this is no longer trusted
+  at all, even for the count. The cost is a request that could have returned
+  fifty books now returns none of them; the trade is that the next request
+  gets a real attempt instead of the same fifty standing in for five hundred
+  until the cache expires. This only applies where the page's body already
+  came back malformed — a normal, complete page is read exactly as before.
+  The legacy `/author/{asin}/books` route changes identically. No endpoint,
+  parameter, response shape or field changed.
 - **A slow `/author/books/{asin}` request now returns what it has instead of
   timing out with nothing.** The endpoint had a time budget, but it was set
   longer than the gateway in front of it waits — so it could never actually

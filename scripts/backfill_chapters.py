@@ -86,7 +86,7 @@ Run as a separate container off the Libex image:
       -e AUDIBLE_PROXY_URL=http://libex-backfill-vpn:8888 \\
       -e DATABASE_URL=<same as the app> \\
       ghcr.io/libexhq/libex:latest \\
-      python scripts/backfill_chapters.py --limit 5     # dry run; drop --limit for the real run
+      python -m scripts.backfill_chapters --limit 5     # dry run; drop --limit for the real run
 
 Stop with `docker stop libex-chapter-backfill` -- it finishes whatever books are
 currently in flight, commits them, and exits cleanly.

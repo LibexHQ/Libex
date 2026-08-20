@@ -126,7 +126,7 @@ name it explicitly; the run refuses to start unless its hostname contains
       -e DATABASE_URL=<same as the app> \\
       -e AUDIBLE_PROXY_URL=http://libex-refresh-vpn:8888 \\
       ghcr.io/libexhq/libex:latest \\
-      python scripts/refresh_corpus.py --dry-run     # prints the plan, calls nothing
+      python -m scripts.refresh_corpus --dry-run     # prints the plan, calls nothing
 
 Both networks are needed: libex-proxy reaches the VPN sidecar, and the app
 stack's own network is the only place the `postgres` host in DATABASE_URL

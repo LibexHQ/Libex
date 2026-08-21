@@ -17,10 +17,17 @@ prove -- covering them here would mean re-implementing get_books_by_asins,
 persist_queue and a testcontainers Postgres session as fakes, which is
 exactly the "three nested mocks" shape that means the thing under test is
 too coupled to unit test honestly.
+
+Also covers containment: _proxy_host_for_log never letting a full (possibly
+credentialed) AUDIBLE_PROXY_URL reach a log record, and _verify_dedicated_proxy
+refusing to start -- logged as well as raised -- against anything but this
+script's own dedicated exit, mirroring scripts/backfill_chapters.py's own
+tests for the same pair of functions.
 """
 
 # Standard library
 import asyncio
+import logging
 
 # Third party
 import pytest
@@ -34,6 +41,8 @@ from scripts.refresh_corpus import (
     _ThrottleSentinel,
     _check_abort,
     _chunks_for_page,
+    _proxy_host_for_log,
+    _verify_dedicated_proxy,
 )
 import scripts.refresh_corpus as refresh_corpus
 
@@ -413,3 +422,148 @@ async def test_the_ramp_does_not_freeze_on_first_window_jitter():
 
     assert ramp.frozen is False, "froze on jitter before it had a settled baseline"
     assert gate.limit == refresh_corpus.CONCURRENCY_START
+
+
+# ============================================================
+# _proxy_host_for_log -- containment: no full proxy value in any log record
+# ============================================================
+
+CREDENTIALED_PROXY = "http://opsuser:s3cr3t-token@libex-refresh-vpn:8888"
+
+
+def test_proxy_host_for_log_strips_credentials():
+    """The hostname is what a log line needs to say which exit is in use;
+    the embedded user:pass must never survive into it."""
+    host = _proxy_host_for_log(CREDENTIALED_PROXY)
+    assert host == "libex-refresh-vpn"
+    assert "opsuser" not in host
+    assert "s3cr3t-token" not in host
+
+
+def test_proxy_host_for_log_direct_when_unset():
+    assert _proxy_host_for_log(None) == "direct"
+    assert _proxy_host_for_log("") == "direct"
+
+
+def test_proxy_host_for_log_never_raises_on_malformed_value():
+    """A logging call must never take the run down over an unparseable env
+    var. httpx.URL raises InvalidURL on some malformed strings -- confirmed
+    directly against the installed httpx: 'http://[::1' is one of them --
+    so this must catch it and return a sentinel, not propagate."""
+    assert _proxy_host_for_log("http://[::1") == "(unparseable)"
+
+
+# ============================================================
+# _verify_dedicated_proxy -- containment: refuse to egress from the host
+# ============================================================
+
+def test_verify_dedicated_proxy_raises_when_unset(monkeypatch):
+    """Unset means httpx.AsyncClient would get proxy=None and this script's
+    traffic would egress direct from the container -- the production
+    host's own address. Must refuse before anything else runs."""
+    monkeypatch.delenv("AUDIBLE_PROXY_URL", raising=False)
+    with pytest.raises(SystemExit, match="unset"):
+        _verify_dedicated_proxy()
+
+
+def test_verify_dedicated_proxy_raises_on_non_refresh_hostname(monkeypatch):
+    """A hostname naming some OTHER exit -- the shared production proxy, or
+    backfill_chapters's own dedicated one -- must fail exactly like unset.
+    This is what stops a copy-pasted backfill exit from being reused here."""
+    monkeypatch.setenv("AUDIBLE_PROXY_URL", "http://libex-backfill-vpn:8888")
+    with pytest.raises(SystemExit, match="libex-backfill-vpn"):
+        _verify_dedicated_proxy()
+
+
+def test_verify_dedicated_proxy_failure_never_names_credentials(monkeypatch):
+    """The failure message names the hostname only, proving a credentialed
+    but wrongly-named value can't leak into the SystemExit text either."""
+    monkeypatch.setenv(
+        "AUDIBLE_PROXY_URL", "http://opsuser:s3cr3t-token@libex-backfill-vpn:8888"
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        _verify_dedicated_proxy()
+    assert "s3cr3t-token" not in str(exc_info.value)
+    assert "opsuser" not in str(exc_info.value)
+
+
+def test_verify_dedicated_proxy_passes_on_refresh_hostname(monkeypatch):
+    monkeypatch.setenv("AUDIBLE_PROXY_URL", "http://libex-refresh-vpn:8888")
+    _verify_dedicated_proxy()  # must not raise
+
+
+def test_verify_dedicated_proxy_logs_error_before_raising_on_unset(monkeypatch, caplog):
+    """SystemExit alone never reaches the libex logger -- it propagates
+    straight out of the process, so unattended it would survive only as
+    stderr text. The refusal must also land as a structured ERROR record
+    (rotating file handler, Axiom) before the raise, not instead of it."""
+    monkeypatch.delenv("AUDIBLE_PROXY_URL", raising=False)
+    with caplog.at_level(logging.ERROR, logger="libex"):
+        with pytest.raises(SystemExit):
+            _verify_dedicated_proxy()
+
+    error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(error_records) == 1
+    record = error_records[0]
+    assert "AUDIBLE_PROXY_URL" in record.getMessage()
+    assert record.proxy_host == "unset"
+    assert record.proxy_configured is False
+
+
+def test_verify_dedicated_proxy_logs_error_with_hostname_when_wrongly_named(monkeypatch, caplog):
+    """A wrongly-named but set value logs proxy_configured=True and the
+    actual (safe) hostname it resolved to -- distinct from the unset case,
+    and still never the raw, possibly-credentialed value."""
+    monkeypatch.setenv(
+        "AUDIBLE_PROXY_URL", "http://opsuser:s3cr3t-token@libex-backfill-vpn:8888"
+    )
+    with caplog.at_level(logging.ERROR, logger="libex"):
+        with pytest.raises(SystemExit):
+            _verify_dedicated_proxy()
+
+    error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(error_records) == 1
+    record = error_records[0]
+    assert record.proxy_host == "libex-backfill-vpn"
+    assert record.proxy_configured is True
+    full_text = record.getMessage() + " ".join(
+        str(v) for v in vars(record).values() if isinstance(v, str)
+    )
+    assert "s3cr3t-token" not in full_text
+    assert "opsuser" not in full_text
+
+
+def test_verify_dedicated_proxy_logs_error_on_malformed_value(monkeypatch, caplog):
+    """A value that is set but unparseable (a typo'd port is the realistic
+    case -- a Portainer env field is free text) must take the exact same
+    logged-then-refused path as unset or wrongly-named, not escape as an
+    uncaught httpx.InvalidURL that skips both the log line and the
+    deliberate SystemExit message."""
+    monkeypatch.setenv(
+        "AUDIBLE_PROXY_URL",
+        "http://opsuser:s3cr3t-token@libex-refresh-vpn:notaport",
+    )
+    with caplog.at_level(logging.ERROR, logger="libex"):
+        with pytest.raises(SystemExit) as exc_info:
+            _verify_dedicated_proxy()
+
+    error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(error_records) == 1
+    record = error_records[0]
+    assert record.proxy_host == "(unparseable)"
+    assert record.proxy_configured is True
+    full_text = record.getMessage() + " ".join(
+        str(v) for v in vars(record).values() if isinstance(v, str)
+    ) + str(exc_info.value)
+    assert "s3cr3t-token" not in full_text
+    assert "opsuser" not in full_text
+
+
+def test_verify_dedicated_proxy_logs_nothing_at_error_when_correctly_named(monkeypatch, caplog):
+    """The success path must not also emit the refusal record -- proves the
+    logger.error call is gated on the same condition as the raise, not
+    unconditional."""
+    monkeypatch.setenv("AUDIBLE_PROXY_URL", "http://libex-refresh-vpn:8888")
+    with caplog.at_level(logging.ERROR, logger="libex"):
+        _verify_dedicated_proxy()
+    assert [r for r in caplog.records if r.levelno == logging.ERROR] == []

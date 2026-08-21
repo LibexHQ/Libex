@@ -138,15 +138,21 @@ ones use docker create, then docker network connect, then docker start, so the
 second network is attached before the run reads its first page.
 
 Drop --dry-run for the real run. `docker stop -t 600 libex-refresh-corpus`
-finishes the chunks in flight, prints the resume cursor, and exits. 600 rather
-than DRAIN_TIMEOUT_SECONDS itself: a SIGTERM first waits out the in-flight
-fetches (up to three attempts at a 30s timeout, plus capped backoffs) and only
-then starts the drain, and one landing during a page-boundary drain pays for
-that one AND the exit drain. -t is a deadline rather than a delay -- docker
-stop returns as soon as the process exits -- so a generous value costs nothing
-on a healthy stop and only bounds the pathological one. Docker's own default
-10s grace ends in SIGKILL before a page's drain can finish, and the run then
-falls back to the previous page's resume cursor rather than the current one.
+finishes the chunks in flight, prints the resume cursor, and exits. -t must be
+STRICTLY GREATER than DRAIN_TIMEOUT_SECONDS -- matching it exactly is not
+enough. A SIGTERM first waits out the in-flight fetches (up to three attempts
+at a 30s timeout, plus capped backoffs -- roughly 110s worst case) before a
+page's drain even starts; that wait is over by the time any drain begins, so
+it does not stack with what follows. What does stack is a SIGTERM landing
+while a page-boundary drain is already running: that drain runs to its own
+timeout, and the exit drain in the `finally` block then runs to its own
+timeout right after, so the pair of them -- not the fetch wait -- sets the
+true worst case at up to DRAIN_TIMEOUT_SECONDS x 2 (~600s). -t is a deadline
+rather than a delay -- docker stop returns as soon as the process exits -- so
+a generous value costs nothing on a healthy stop and only bounds the
+pathological one. Docker's own default 10s grace ends in SIGKILL before a
+page's drain can finish, and the run then falls back to the previous page's
+resume cursor rather than the current one.
 
 ENVIRONMENT. Everything this container reads. The first two are required --
 the run refuses to start without a proxy it recognises as its own. The rest
@@ -245,12 +251,13 @@ a rebuild.
                                               unless this is also set.
     REFRESH_DRAIN_TIMEOUT_SECONDS     300.0   bound on waiting for the persist
                                               queue, between pages and again at
-                                              exit. `docker stop -t` must exceed
-                                              it with room to spare -- see the
-                                              -t 600 above for why matching it
-                                              exactly is not enough. SIGKILL
-                                              mid-drain rewinds the resume
-                                              cursor by a page.
+                                              exit. `docker stop -t` must be
+                                              STRICTLY GREATER than this value,
+                                              not merely equal to it -- see the
+                                              -t 600 above for the arithmetic
+                                              behind why. SIGKILL mid-drain
+                                              rewinds the resume cursor by a
+                                              page.
     REFRESH_PROGRESS_EVERY            100     chunks between progress lines
 
 Any 429 ends the run outright, whatever the abort thresholds above are set
@@ -930,6 +937,27 @@ def _log_progress(run: _Run, gate: _Gate, ramp: _Ramp, remaining_books: int) -> 
 # PROCESS LIMITS
 # ============================================================
 
+def _proxy_host_for_log(proxy: str | None) -> str:
+    """
+    Best-effort hostname for a log line -- never the raw AUDIBLE_PROXY_URL.
+
+    httpx's proxy= accepts credentials embedded in the URL
+    (http://user:pass@host:port), and Settings stores the value as a plain
+    str, not a SecretStr, so nothing that reaches a log record may be the
+    full value. The hostname is the diagnostically useful part -- which exit
+    this run is using -- and carries no secret, so that's what gets logged
+    instead. Must never raise: a logging call taking the whole run down over
+    a malformed env var would turn a cosmetic problem into an outage.
+    """
+    if not proxy:
+        return "direct"
+    try:
+        host = httpx.URL(proxy).host
+    except Exception:
+        return "(unparseable)"
+    return host or "(unparseable)"
+
+
 def _verify_dedicated_proxy() -> None:
     """
     Refuses to start unless AUDIBLE_PROXY_URL both is set and names this run's
@@ -954,11 +982,36 @@ def _verify_dedicated_proxy() -> None:
     whatever the operator typed, including a possible credential. The
     hostname is what "refresh" is actually checked against and is enough to
     tell the operator what failed; they already know what they set.
+
+    Logged, not just raised: SystemExit propagates straight out of the
+    process without ever touching the libex logger, so on its own it would
+    survive only as stderr text -- in a container that runs unattended, the
+    highest-severity startup condition this script has would be the one
+    piece of evidence that never reaches the rotating file handler or
+    Axiom. The log call is made first, with the same hostname-only
+    discipline as the SystemExit message, so the raw value can't reach it
+    either.
+
+    Hostname extraction goes through _proxy_host_for_log rather than a bare
+    httpx.URL(proxy).host, deliberately: a value that is set but malformed
+    (a typo'd port is the realistic case -- a Portainer env field is free
+    text) makes httpx.URL raise InvalidURL, and that must fail exactly like
+    an unset or wrongly-named value -- logged and refused -- not escape as
+    an uncaught traceback that skips both the log line and the deliberate
+    SystemExit message. _proxy_host_for_log already turns that same
+    exception into "(unparseable)", which reads fine as a proxy_host value
+    and correctly fails the "refresh" in host check below, so there is no
+    second try/except to keep in sync with the first.
     """
     proxy = os.environ.get("AUDIBLE_PROXY_URL", "")
-    host = httpx.URL(proxy).host if proxy else ""
+    host = _proxy_host_for_log(proxy) if proxy else ""
     if not proxy or "refresh" not in host:
         detail = f"host {host!r}" if proxy else "unset"
+        logger.error(
+            "Refresh: refusing to start, AUDIBLE_PROXY_URL does not name "
+            "a refresh-dedicated exit",
+            extra={"proxy_host": host or "unset", "proxy_configured": bool(proxy)},
+        )
         raise SystemExit(
             f"AUDIBLE_PROXY_URL ({detail}) does not name a "
             f"refresh-dedicated exit. Refusing to raise concurrency to "

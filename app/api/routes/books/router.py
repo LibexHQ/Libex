@@ -8,7 +8,7 @@ Response formats match AudiMeta exactly for drop-in compatibility.
 from typing import Annotated, Any
 
 # Third party
-from fastapi import APIRouter, Query, Path, Depends
+from fastapi import APIRouter, Query, Path, Depends, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Database
@@ -16,6 +16,7 @@ from app.db.session import get_session
 
 # Routes
 from app.api.routes.books.schemas import BookResponse, BulkBookResponse, ChapterResponse
+from app.api.routes.large_response import build_large_list_response
 from app.api.routes.sort_params import BookSortField, SortOrder
 from app.api.routes.filter_params import LiveBookFilters
 
@@ -102,7 +103,7 @@ async def get_books_bulk(
     sort: Annotated[BookSortField | None, Query(description="Field to sort the returned books by")] = None,
     order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
     session: AsyncSession = Depends(get_session),
-) -> BulkBookResponse:
+) -> BulkBookResponse | Response:
     """
     Get multiple books by ASIN.
     Accepts all three forms: ?asins=X,Y — ?asins=X&asins=Y — ?asins=X,Y&asins=Z
@@ -135,7 +136,11 @@ async def get_books_bulk(
     data = filter_dicts(data, filters.as_kwargs())
     data = sort_dicts(data, sort.value if sort is not None else None, order.value, BOOK_SORT_FIELDS)
 
-    return BulkBookResponse(
-        books=[BookResponse(**book) for book in data],
-        notFound=not_found,
+    return await build_large_list_response(
+        BulkBookResponse,
+        len(data),
+        lambda: BulkBookResponse(
+            books=[BookResponse(**book) for book in data],
+            notFound=not_found,
+        ),
     )

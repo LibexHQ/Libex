@@ -13,6 +13,8 @@ from httpx import AsyncClient, ASGITransport
 
 # Local
 from app.main import app
+import app.api.routes.large_response as large_response_module
+from app.api.routes.large_response import LARGE_RESPONSE_THREAD_THRESHOLD
 
 
 @pytest.fixture
@@ -113,6 +115,12 @@ MOCK_CHAPTERS = {
 }
 
 READER_PATH = "app.api.routes.db.router.search_books_from_db"
+
+
+def _many_db_books(n):
+    """n distinct books, cheap enough to build at both below- and
+    well-above-threshold sizes for the large-catalogue offload tests."""
+    return [{**MOCK_BOOK, "asin": f"B{i:09d}"} for i in range(n)]
 
 
 # ============================================================
@@ -981,6 +989,93 @@ async def test_get_db_author_books_forwards_region_to_reader(async_client):
 
 
 # ============================================================
+# GET /db/author/{asin}/books — LARGE CATALOGUE OFFLOAD
+# ============================================================
+#
+# This route is wired to build_large_list_response (app.api.routes.large_response),
+# which above LARGE_RESPONSE_THREAD_THRESHOLD builds and serializes on a worker
+# thread and returns a pre-serialized Response instead of a plain list. It is
+# also one of the two /db/* list routes with no limit/page — a deliberate,
+# stated exception among the paginated /db/* routes, kept complete on purpose.
+
+@pytest.mark.asyncio
+async def test_get_db_author_books_below_and_above_threshold_produce_identical_bodies(async_client):
+    """Same data, forced down each path by patching the threshold rather than
+    building a 200-item fixture twice, so the two runs differ in nothing but
+    which path built the response."""
+    books = _many_db_books(5)
+
+    with patch("app.api.routes.db.router.get_author_books_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = books
+        inline_response = await async_client.get("/db/author/B000APF21M/books")
+
+    with patch("app.api.routes.db.router.get_author_books_from_db", new_callable=AsyncMock) as mock, \
+         patch("app.api.routes.large_response.LARGE_RESPONSE_THREAD_THRESHOLD", 1):
+        mock.return_value = books
+        offloaded_response = await async_client.get("/db/author/B000APF21M/books")
+
+    assert inline_response.status_code == 200
+    assert offloaded_response.status_code == 200
+    assert inline_response.content == offloaded_response.content
+
+
+@pytest.mark.asyncio
+async def test_get_db_author_books_stays_inline_below_the_threshold(async_client):
+    """Below the threshold, _build_and_serialize (the offload worker-thread
+    entry point) must not be called at all — asserted with a spy, not assumed
+    from the response alone."""
+    books = _many_db_books(5)
+
+    with patch("app.api.routes.db.router.get_author_books_from_db", new_callable=AsyncMock) as mock, \
+         patch(
+             "app.api.routes.large_response._build_and_serialize",
+             wraps=large_response_module._build_and_serialize,
+         ) as spy:
+        mock.return_value = books
+        response = await async_client.get("/db/author/B000APF21M/books")
+
+    spy.assert_not_called()
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_get_db_author_books_offloads_at_the_threshold(async_client):
+    """At and above the threshold, the offload path is genuinely taken — a
+    spy on _build_and_serialize proves it ran, rather than a bytes comparison
+    that would pass just as well if both sides secretly took the inline path."""
+    n = LARGE_RESPONSE_THREAD_THRESHOLD
+    books = _many_db_books(n)
+
+    with patch("app.api.routes.db.router.get_author_books_from_db", new_callable=AsyncMock) as mock, \
+         patch(
+             "app.api.routes.large_response._build_and_serialize",
+             wraps=large_response_module._build_and_serialize,
+         ) as spy:
+        mock.return_value = books
+        response = await async_client.get("/db/author/B000APF21M/books")
+
+    spy.assert_called_once()
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_get_db_author_books_no_truncation_above_threshold(async_client):
+    """No limit/page on this route — a full catalogue well above the
+    threshold comes back complete, not capped to any page size."""
+    n = LARGE_RESPONSE_THREAD_THRESHOLD + 50
+    books = _many_db_books(n)
+
+    with patch("app.api.routes.db.router.get_author_books_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = books
+        response = await async_client.get("/db/author/B000APF21M/books")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) == n
+    assert {b["asin"] for b in data} == {b["asin"] for b in books}
+
+
+# ============================================================
 # GET /db/series/{asin}
 # ============================================================
 
@@ -1102,3 +1197,88 @@ async def test_get_db_series_books_returns_multiple(async_client):
         assert len(data) == 2
         assert data[0]["asin"] == "B08G9PRS1K"
         assert data[1]["asin"] == "B08G9PRS2K"
+
+
+# ============================================================
+# GET /db/series/{asin}/books — LARGE CATALOGUE OFFLOAD
+# ============================================================
+#
+# Twin coverage of the author/books offload tests above — same helper
+# (build_large_list_response), same threshold, same no-limit/no-page
+# exception, different reader (get_series_books_from_db).
+
+@pytest.mark.asyncio
+async def test_get_db_series_books_below_and_above_threshold_produce_identical_bodies(async_client):
+    """Same data, forced down each path by patching the threshold rather than
+    building a 200-item fixture twice, so the two runs differ in nothing but
+    which path built the response."""
+    books = _many_db_books(5)
+
+    with patch("app.api.routes.db.router.get_series_books_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = books
+        inline_response = await async_client.get("/db/series/B00SERIES1/books")
+
+    with patch("app.api.routes.db.router.get_series_books_from_db", new_callable=AsyncMock) as mock, \
+         patch("app.api.routes.large_response.LARGE_RESPONSE_THREAD_THRESHOLD", 1):
+        mock.return_value = books
+        offloaded_response = await async_client.get("/db/series/B00SERIES1/books")
+
+    assert inline_response.status_code == 200
+    assert offloaded_response.status_code == 200
+    assert inline_response.content == offloaded_response.content
+
+
+@pytest.mark.asyncio
+async def test_get_db_series_books_stays_inline_below_the_threshold(async_client):
+    """Below the threshold, _build_and_serialize (the offload worker-thread
+    entry point) must not be called at all — asserted with a spy, not assumed
+    from the response alone."""
+    books = _many_db_books(5)
+
+    with patch("app.api.routes.db.router.get_series_books_from_db", new_callable=AsyncMock) as mock, \
+         patch(
+             "app.api.routes.large_response._build_and_serialize",
+             wraps=large_response_module._build_and_serialize,
+         ) as spy:
+        mock.return_value = books
+        response = await async_client.get("/db/series/B00SERIES1/books")
+
+    spy.assert_not_called()
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_get_db_series_books_offloads_at_the_threshold(async_client):
+    """At and above the threshold, the offload path is genuinely taken — a
+    spy on _build_and_serialize proves it ran, rather than a bytes comparison
+    that would pass just as well if both sides secretly took the inline path."""
+    n = LARGE_RESPONSE_THREAD_THRESHOLD
+    books = _many_db_books(n)
+
+    with patch("app.api.routes.db.router.get_series_books_from_db", new_callable=AsyncMock) as mock, \
+         patch(
+             "app.api.routes.large_response._build_and_serialize",
+             wraps=large_response_module._build_and_serialize,
+         ) as spy:
+        mock.return_value = books
+        response = await async_client.get("/db/series/B00SERIES1/books")
+
+    spy.assert_called_once()
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_get_db_series_books_no_truncation_above_threshold(async_client):
+    """No limit/page on this route — a full series list well above the
+    threshold comes back complete, not capped to any page size."""
+    n = LARGE_RESPONSE_THREAD_THRESHOLD + 50
+    books = _many_db_books(n)
+
+    with patch("app.api.routes.db.router.get_series_books_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = books
+        response = await async_client.get("/db/series/B00SERIES1/books")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) == n
+    assert {b["asin"] for b in data} == {b["asin"] for b in books}

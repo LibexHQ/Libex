@@ -180,6 +180,32 @@ async def test_bulk_books_rejects_over_1000_asins(async_client):
 
 
 @pytest.mark.asyncio
+async def test_bulk_books_near_the_1000_asin_cap_returns_every_book(async_client):
+    """The bulk endpoint's own maximum is large enough to cross
+    LARGE_RESPONSE_THREAD_THRESHOLD -- this is the offload path from
+    app.api.routes.large_response, not the inline one, and it must still
+    return every book found plus an accurate notFound list."""
+    from app.api.routes.large_response import LARGE_RESPONSE_THREAD_THRESHOLD
+
+    n = 999
+    assert n + 1 >= LARGE_RESPONSE_THREAD_THRESHOLD
+    books = [{**MOCK_BOOK, "asin": f"B{i:09d}"} for i in range(n)]
+    found_asins = [b["asin"] for b in books]
+    missing_asin = "B999999999"  # brings the request to exactly the 1000-ASIN cap
+    with patch("app.api.routes.books.router.get_books_by_asins", new_callable=AsyncMock) as mock:
+        mock.return_value = books
+        response = await async_client.get(
+            f"/book?asins={','.join(found_asins)},{missing_asin}"
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["books"]) == n
+    assert {b["asin"] for b in data["books"]} == set(found_asins)
+    assert data["notFound"] == [missing_asin]
+
+
+@pytest.mark.asyncio
 async def test_get_book_rejects_invalid_asin(async_client):
     """Book endpoint rejects malformed ASIN."""
     response = await async_client.get("/book/not-an-asin")

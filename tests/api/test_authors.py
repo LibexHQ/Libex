@@ -516,6 +516,98 @@ async def test_the_legacy_route_marks_a_truncated_walk_the_same_way(async_client
 
 
 # ============================================================
+# LARGE CATALOGUE OFFLOAD
+# ============================================================
+#
+# A prolific author's full catalogue crosses LARGE_RESPONSE_THREAD_THRESHOLD
+# and is built and serialized on a worker thread rather than inline (see
+# app.api.routes.large_response). These prove that offload path preserves
+# both the response body and the completeness/cache headers exactly --
+# unit coverage of the helper itself lives in test_large_response.py.
+
+def _many_books(n):
+    return [{**MOCK_BOOK, "asin": f"B{i:09d}"} for i in range(n)]
+
+
+@pytest.mark.asyncio
+async def test_a_large_catalogue_still_returns_every_book(async_client):
+    from app.api.routes.large_response import LARGE_RESPONSE_THREAD_THRESHOLD
+
+    n = LARGE_RESPONSE_THREAD_THRESHOLD
+    books = _many_books(n)
+    with patch("app.api.routes.authors.router.get_author_books", new_callable=AsyncMock) as mock_books, \
+         patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
+        mock_books.return_value = AuthorBooksResult([b["asin"] for b in books], True, None)
+        mock_asins.return_value = books
+        response = await async_client.get("/author/books/B000APF21M")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == n
+    assert {b["asin"] for b in body} == {b["asin"] for b in books}
+
+
+@pytest.mark.asyncio
+async def test_a_large_catalogue_still_carries_the_completeness_headers(async_client):
+    """The offload path returns a pre-built Response directly, which bypasses
+    FastAPI's usual merge of headers set on the injected `response` object --
+    this is the case that merge has to be redone for explicitly, or a large
+    catalogue would silently lose X-Libex-Complete and Cache-Control."""
+    from app.api.routes.large_response import LARGE_RESPONSE_THREAD_THRESHOLD
+
+    n = LARGE_RESPONSE_THREAD_THRESHOLD
+    books = _many_books(n)
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=4000)
+    with patch("app.api.routes.authors.router.get_author_books", new_callable=AsyncMock) as mock_books, \
+         patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
+        mock_books.return_value = AuthorBooksResult([b["asin"] for b in books], True, expires_at)
+        mock_asins.return_value = books
+        response = await async_client.get("/author/books/B000APF21M")
+
+    assert response.headers["X-Libex-Complete"] == "true"
+    s_maxage = int(re.search(r"s-maxage=(\d+)", response.headers["Cache-Control"]).group(1))
+    assert 3990 <= s_maxage <= 4000
+
+
+@pytest.mark.asyncio
+async def test_the_legacy_route_also_carries_completeness_headers_when_large(async_client):
+    """Twin coverage for get_books_by_author_primary -- same offload path,
+    same header requirement, must not diverge from its non-legacy sibling."""
+    from app.api.routes.large_response import LARGE_RESPONSE_THREAD_THRESHOLD
+
+    n = LARGE_RESPONSE_THREAD_THRESHOLD
+    books = _many_books(n)
+    with patch("app.api.routes.authors.router.get_author_books", new_callable=AsyncMock) as mock_books, \
+         patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
+        mock_books.return_value = AuthorBooksResult([b["asin"] for b in books], False, None)
+        mock_asins.return_value = books
+        response = await async_client.get("/author/B000APF21M/books")
+
+    assert response.status_code == 200
+    assert len(response.json()) == n
+    assert response.headers["X-Libex-Complete"] == "false"
+    assert response.headers["Cache-Control"] == "no-store"
+
+
+@pytest.mark.asyncio
+async def test_a_large_result_from_get_books_by_author_name_is_unaffected(async_client):
+    """The name-based lookup has no injected response object to merge
+    headers from -- confirms the offload path doesn't require one."""
+    from app.api.routes.large_response import LARGE_RESPONSE_THREAD_THRESHOLD
+
+    n = LARGE_RESPONSE_THREAD_THRESHOLD
+    books = _many_books(n)
+    with patch("app.api.routes.authors.router.get_author_books_by_name", new_callable=AsyncMock) as mock_books, \
+         patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
+        mock_books.return_value = AuthorBooksResult([b["asin"] for b in books], True)
+        mock_asins.return_value = books
+        response = await async_client.get("/author/books?name=Frank+Herbert")
+
+    assert response.status_code == 200
+    assert len(response.json()) == n
+
+
+# ============================================================
 # GET AUTHOR BOOKS BY NAME
 # ============================================================
 

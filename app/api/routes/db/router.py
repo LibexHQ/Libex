@@ -8,13 +8,14 @@ Only returns books that have been fetched and stored previously.
 from typing import Annotated, Any
 
 # Third party
-from fastapi import APIRouter, Depends, Path, Query
+from fastapi import APIRouter, Depends, Path, Query, Response
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Local
 from app.api.routes.authors.schemas import AuthorResponse
 from app.api.routes.books.schemas import BookResponse, ChapterResponse
+from app.api.routes.large_response import build_large_list_response
 from app.api.routes.narrators.schemas import NarratorProfileResponse
 from app.api.routes.series.schemas import SeriesResponse
 from app.core.exceptions import NotFoundException
@@ -282,7 +283,7 @@ async def get_db_author_books(
     sort: Annotated[BookSortField | None, Query(description="Field to sort by")] = None,
     order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
     session: AsyncSession = Depends(get_session),
-) -> list[dict[str, Any]]:
+) -> list[BookResponse] | Response:
     """Get all books by an author from the local DB."""
     if not is_valid_asin(asin):
         raise NotFoundException(f"Invalid ASIN format: {asin}")
@@ -297,7 +298,9 @@ async def get_db_author_books(
     )
     if not books:
         raise NotFoundException("No books found for author")
-    return books
+    return await build_large_list_response(
+        list[BookResponse], len(books), lambda: [BookResponse(**b) for b in books]
+    )
 
 
 @router.get("/author/{asin}", response_model=AuthorResponse)
@@ -372,7 +375,7 @@ async def get_db_series_books(
     sort: Annotated[BookSortField | None, Query(description="Field to sort by (overrides default position order)")] = None,
     order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
     session: AsyncSession = Depends(get_session),
-) -> list[dict[str, Any]]:
+) -> list[BookResponse] | Response:
     """Get all books in a series from the local DB.
 
     Defaults to series position order; passing a sort field overrides it.
@@ -388,7 +391,9 @@ async def get_db_series_books(
     )
     if not books:
         raise NotFoundException("No books found for series")
-    return books
+    return await build_large_list_response(
+        list[BookResponse], len(books), lambda: [BookResponse(**b) for b in books]
+    )
 
 
 @router.get("/series/{asin}", response_model=SeriesResponse)

@@ -10,6 +10,30 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.15.2]
+
+### Changed
+- **Building and serializing a large book list — an author's full catalogue,
+  a bulk `/book` request, or either of the two uncapped `/db/*` list routes —
+  now happens off the request-handling thread once the list is large enough
+  to be worth the move.** Turning that many rows into response objects and
+  JSON is real CPU work, and it used to run inline on the same thread that
+  answers every other request a worker is holding; a big enough list could
+  hold up everything else on that worker while it ran. That work now moves to
+  a separate thread once a response reaches 200 items — a size only an
+  author's full catalogue or a near-cap bulk `/book` request realistically
+  reaches; every smaller response is still built exactly as before, inline.
+  The bytes returned are unchanged: the offloaded path reproduces the same
+  validation and JSON-encoding step for step, so what a caller receives —
+  body, status code, and any headers a route set — is identical either way.
+  This does not make a large response itself any faster; most of its time is
+  spent well before this step, fetching from the database, and this step
+  costs the same wall-clock time wherever it runs. What changes is that other
+  requests sharing the same worker are no longer stuck behind it while it
+  runs. No endpoint, parameter, response shape, field or status code moved,
+  and the two `/db/*` list routes remain uncapped and still return the
+  complete set.
+
 ## [1.15.1]
 
 ### Changed

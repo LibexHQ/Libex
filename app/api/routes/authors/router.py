@@ -18,6 +18,7 @@ from app.db.session import get_session
 # Routes
 from app.api.routes.authors.schemas import AuthorResponse
 from app.api.routes.books.schemas import BookResponse
+from app.api.routes.large_response import build_large_list_response
 from app.api.routes.sort_params import BookSortField, SortOrder
 from app.api.routes.filter_params import LiveBookFilters
 
@@ -64,7 +65,7 @@ async def get_books_by_author_name(
     sort: Annotated[BookSortField | None, Query(description="Field to sort the returned books by")] = None,
     order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
     session: AsyncSession = Depends(get_session),
-) -> list[BookResponse]:
+) -> list[BookResponse] | Response:
     """
     Get books by author name.
     Used when no author ASIN is available.
@@ -76,7 +77,9 @@ async def get_books_by_author_name(
     books = await get_books_by_asins(asins, region, session)
     books = filter_dicts(books, filters.as_kwargs())
     books = sort_dicts(books, sort.value if sort is not None else None, order.value, BOOK_SORT_FIELDS)
-    return [BookResponse(**b) for b in books]
+    return await build_large_list_response(
+        list[BookResponse], len(books), lambda: [BookResponse(**b) for b in books]
+    )
 
 
 # Browser cache for a complete author-books response. Short on purpose: a
@@ -208,7 +211,7 @@ async def get_books_by_author(
     sort: Annotated[BookSortField | None, Query(description="Field to sort the returned books by")] = None,
     order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
     session: AsyncSession = Depends(get_session),
-) -> list[BookResponse]:
+) -> list[BookResponse] | Response:
     """
     Get all books by author ASIN.
     Returns full book objects matching AudiMeta's BookDto format.
@@ -259,7 +262,12 @@ async def get_books_by_author(
     )
     books = filter_dicts(books, filters.as_kwargs())
     books = sort_dicts(books, sort.value if sort is not None else None, order.value, BOOK_SORT_FIELDS)
-    return [BookResponse(**b) for b in books]
+    return await build_large_list_response(
+        list[BookResponse],
+        len(books),
+        lambda: [BookResponse(**b) for b in books],
+        injected_response=response,
+    )
 
 
 @router.get("/{asin}/books", response_model=list[BookResponse], include_in_schema=False)
@@ -274,7 +282,7 @@ async def get_books_by_author_primary(
     sort: Annotated[BookSortField | None, Query(description="Field to sort the returned books by")] = None,
     order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
     session: AsyncSession = Depends(get_session),
-) -> list[BookResponse]:
+) -> list[BookResponse] | Response:
     """Legacy endpoint. Use /author/books/{asin} instead."""
     if not is_valid_asin(asin):
         raise NotFoundException(f"Invalid ASIN format: {asin}")
@@ -310,7 +318,12 @@ async def get_books_by_author_primary(
     )
     books = filter_dicts(books, filters.as_kwargs())
     books = sort_dicts(books, sort.value if sort is not None else None, order.value, BOOK_SORT_FIELDS)
-    return [BookResponse(**b) for b in books]
+    return await build_large_list_response(
+        list[BookResponse],
+        len(books),
+        lambda: [BookResponse(**b) for b in books],
+        injected_response=response,
+    )
 
 
 @router.get("/{asin}", response_model=AuthorResponse)

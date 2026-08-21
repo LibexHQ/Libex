@@ -10,6 +10,29 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.15.3]
+
+### Fixed
+- **An author with more than one stored name spelling came back empty.**
+  Authors are keyed by ASIN, region *and* name, so a later fetch that found
+  Audible now spelling a name slightly differently — an accent, a middle
+  initial, a punctuation change — inserted a second row for the same author
+  rather than replacing the first. Reading the author back matched only on
+  ASIN and region, so as soon as a second row existed the read no longer knew
+  which one to return and answered with nothing at all, as if the author had
+  never been stored. This was hitting real authors continuously in
+  production, some many dozens of times over.
+
+  The read now collects every row for that author and merges them: the
+  longest description, the first non-blank image, the newest `updatedAt`, and
+  the union of genres across all rows, so a caller sees everything that was
+  ever recorded rather than whichever row happened to be picked. Nothing
+  about this stops new spellings from creating new rows in the first place —
+  that write-side duplication is unchanged — so the same author can still
+  gain rows over time; this only makes sure a read no longer loses the
+  author because of it. No field, endpoint or response shape changed, and a
+  failed read is now logged with the reason instead of failing silently.
+
 ## [1.15.2]
 
 ### Changed

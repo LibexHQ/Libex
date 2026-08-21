@@ -780,16 +780,113 @@ async def get_coming_soon_from_db(
 # ============================================================
 
 async def get_author_from_db(session: AsyncSession, asin: str, region: str) -> dict[str, Any] | None:
-    """Fetches an author from the DB with genres."""
+    """Fetches an author from the DB with genres.
+
+    The unique constraint on the authors table covers (asin, region, name), not
+    just (asin, region) — a fresh spelling of an existing author's name inserts
+    a second row instead of updating the first, so more than one row can match
+    here. Every matching row is fetched, ordered by id both in the query and
+    again defensively on the fetched rows (so the merge below is deterministic
+    regardless of what order rows come back in), then merged. Identity and
+    content are selected independently of each other:
+
+    - id, name and region come from the oldest row. This is a stability choice,
+      not a content comparison — oldest-id is also the convention writer.py's
+      upsert_author uses to converge concurrent writers, but only for its own,
+      narrower case: same-name rows still missing an asin, racing to claim
+      one. That path never runs for what this function merges — a non-null
+      asin under a *different* name spelling — which upsert_author's exact
+      three-column match misses, falling through to a plain insert of a new
+      row instead of converging on the old one. That gap is exactly why these
+      duplicates exist; the oldest-id choice here is this function's own
+      answer to it, not a convergence the writer already provides.
+    - description is the longest trimmed value across every candidate, in the
+      spirit of _longer_wins (writer.py) — a whitespace-only value measures as
+      absent — independently of which row supplies identity above. Not a
+      literal match: _longer_wins trims only the incoming side and Postgres
+      btrim strips spaces only, while this trims every candidate and Python's
+      .strip() strips all Unicode whitespace. Neither difference can make the
+      result poorer, only occasionally more willing to treat a candidate as
+      absent.
+    - image is the first candidate, in id order, with a real, non-blank value
+      — using the same absent test as description (a whitespace-only or empty
+      image is exactly as absent as a whitespace-only description) but not
+      its length ranking: two real URLs are not compared against each other,
+      the earlier one simply wins. Falls back to the base row's own (possibly
+      absent) value if no candidate has one, which is also what keeps a
+      single-row read byte-identical to returning that row's raw field.
+    - updatedAt is the max across every candidate, not the base row's own —
+      description or image can come from a newer sibling, and a caller doing
+      incremental sync on updatedAt must still see that the record changed.
+    - genres are unioned across every candidate row, deduplicated by asin.
+
+    What this guarantees: description, image and genres are never poorer than
+    any single stored row — description is always the longest available,
+    genres are always a superset (equal when every row carries the same
+    genres, or there is only one row), and image is never null when any row
+    holds one. What it does not guarantee: that the surfaced id/name was
+    drawn from whichever row happened to supply the winning description or
+    image — identity and content are chosen on separate criteria.
+    """
     try:
         result = await session.execute(
             select(Author)
             .where(Author.asin == asin, Author.region == region)
             .options(selectinload(Author.genres))
+            .order_by(Author.id)
         )
-        author = result.scalar_one_or_none()
-        if not author:
+        authors = sorted(result.scalars().all(), key=lambda a: a.id)
+        if not authors:
             return None
+
+        if len(authors) > 1:
+            logger.warning(
+                "Multiple author rows found for asin/region, merging into one read",
+                extra={
+                    "asin": asin,
+                    "region": region,
+                    "row_count": len(authors),
+                },
+            )
+
+        base = authors[0]
+
+        def _measured_length(value: str | None) -> int:
+            """Trimmed length, floored to -1 for absent — same idea as
+            _longer_wins' absent-sentinel, applied to whichever text is
+            being ranked (description or image)."""
+            stripped = value.strip() if value else ""
+            return len(stripped) if stripped else -1
+
+        description = base.description
+        best_length = _measured_length(description)
+        for a in authors[1:]:
+            length = _measured_length(a.description)
+            if length > best_length:
+                description = a.description
+                best_length = length
+
+        image = next(
+            (a.image for a in authors if _measured_length(a.image) >= 0),
+            base.image,
+        )
+
+        # Defensive against a stored null slipping through despite the column
+        # being NOT NULL on every write path today: the `if a.updated_at`
+        # filter drops None candidates before max() ever sees them, so an
+        # all-None input leaves the generator empty rather than raising
+        # TypeError on a bad comparison — but max() on an empty iterable
+        # raises ValueError unless a default is given. `default=None` is
+        # what closes that, and it would otherwise be swallowed by the
+        # blanket except below into a silent whole-author None —
+        # reintroducing the invisible-failure mode this function exists to
+        # close.
+        updated_at = max((a.updated_at for a in authors if a.updated_at), default=None)
+
+        genres_by_asin: dict[str, Any] = {}
+        for a in authors:
+            for g in (a.genres or []):
+                genres_by_asin.setdefault(g.asin, g)
 
         genres = [
             {
@@ -799,22 +896,30 @@ async def get_author_from_db(session: AsyncSession, asin: str, region: str) -> d
                 "betterType": g.type.lower().rstrip("s"),
                 "updatedAt": g.updated_at.isoformat() if g.updated_at else None,
             }
-            for g in (author.genres or [])
+            for g in genres_by_asin.values()
         ]
 
         return {
-            "id": author.id,
-            "asin": author.asin,
-            "name": author.name,
-            "description": author.description,
-            "image": author.image,
-            "region": author.region,
-            "regions": [author.region],
+            "id": base.id,
+            "asin": base.asin,
+            "name": base.name,
+            "description": description,
+            "image": image,
+            "region": base.region,
+            "regions": [base.region],
             "genres": genres,
-            "updatedAt": author.updated_at.isoformat() if author.updated_at else None,
+            "updatedAt": updated_at.isoformat() if updated_at else None,
         }
     except Exception as e:
-        logger.warning(f"DB read failed for author {asin}: {e}")
+        logger.warning(
+            "DB read failed for author",
+            extra={
+                "asin": asin,
+                "region": region,
+                "error_type": type(e).__name__,
+                "error": str(e),
+            },
+        )
         return None
 
 

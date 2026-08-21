@@ -5,6 +5,7 @@ All DB interactions are mocked — we test our logic not SQLAlchemy.
 """
 
 # Standard library
+import logging
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
@@ -392,7 +393,7 @@ async def test_get_author_from_db_returns_dict_on_hit():
     author = _make_author()
     session = AsyncMock()
     result_mock = MagicMock()
-    result_mock.scalar_one_or_none.return_value = author
+    result_mock.scalars.return_value.all.return_value = [author]
     session.execute = AsyncMock(return_value=result_mock)
 
     result = await get_author_from_db(session, "B000APF21M", "us")
@@ -406,7 +407,7 @@ async def test_get_author_from_db_returns_none_on_miss():
     """Returns None when author is not found."""
     session = AsyncMock()
     result_mock = MagicMock()
-    result_mock.scalar_one_or_none.return_value = None
+    result_mock.scalars.return_value.all.return_value = []
     session.execute = AsyncMock(return_value=result_mock)
 
     result = await get_author_from_db(session, "B000APF21M", "us")
@@ -420,7 +421,7 @@ async def test_get_author_from_db_maps_genres():
     author.genres = [_make_genre()]
     session = AsyncMock()
     result_mock = MagicMock()
-    result_mock.scalar_one_or_none.return_value = author
+    result_mock.scalars.return_value.all.return_value = [author]
     session.execute = AsyncMock(return_value=result_mock)
 
     result = await get_author_from_db(session, "B000APF21M", "us")
@@ -437,7 +438,7 @@ async def test_get_author_from_db_empty_genres_returns_empty_list():
     author.genres = []
     session = AsyncMock()
     result_mock = MagicMock()
-    result_mock.scalar_one_or_none.return_value = author
+    result_mock.scalars.return_value.all.return_value = [author]
     session.execute = AsyncMock(return_value=result_mock)
 
     result = await get_author_from_db(session, "B000APF21M", "us")
@@ -450,7 +451,7 @@ async def test_get_author_from_db_includes_regions_list():
     author = _make_author()
     session = AsyncMock()
     result_mock = MagicMock()
-    result_mock.scalar_one_or_none.return_value = author
+    result_mock.scalars.return_value.all.return_value = [author]
     session.execute = AsyncMock(return_value=result_mock)
 
     result = await get_author_from_db(session, "B000APF21M", "us")
@@ -464,6 +465,477 @@ async def test_get_author_from_db_returns_none_on_exception():
     session.execute = AsyncMock(side_effect=Exception("DB error"))
     result = await get_author_from_db(session, "B000APF21M", "us")
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_get_author_from_db_single_row_output_unchanged():
+    """A single matching row produces the exact dict the pre-merge code did —
+    the multi-row merge path must be a no-op in the overwhelmingly common case."""
+    author = _make_author()
+    author.genres = [_make_genre()]
+    session = AsyncMock()
+    result_mock = MagicMock()
+    result_mock.scalars.return_value.all.return_value = [author]
+    session.execute = AsyncMock(return_value=result_mock)
+
+    result = await get_author_from_db(session, "B000APF21M", "us")
+
+    assert result == {
+        "id": author.id,
+        "asin": author.asin,
+        "name": author.name,
+        "description": author.description,
+        "image": author.image,
+        "region": author.region,
+        "regions": [author.region],
+        "genres": [
+            {
+                "asin": "G001",
+                "name": "Science Fiction",
+                "type": "Genres",
+                "betterType": "genre",
+                "updatedAt": author.genres[0].updated_at.isoformat(),
+            }
+        ],
+        "updatedAt": author.updated_at.isoformat(),
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_author_from_db_merges_duplicate_rows_content_independent_of_identity():
+    """When two rows share (asin, region) under different name spellings, the
+    oldest row supplies identity regardless of which row carries more content
+    — but description and image are still pulled from whichever row actually
+    holds them, and both rows' genres are unioned into the result."""
+    sparse = _make_author(id_=2, name="Frank  Herbert")
+    sparse.description = None
+    sparse.image = None
+    sparse.genres = [_make_genre(asin="G002", name="Fantasy")]
+
+    rich = _make_author(id_=5, name="Frank Herbert")
+    rich.description = "A full biography."
+    rich.image = "https://example.com/rich.jpg"
+    rich.genres = [_make_genre(asin="G001", name="Science Fiction")]
+
+    session = AsyncMock()
+    result_mock = MagicMock()
+    result_mock.scalars.return_value.all.return_value = [sparse, rich]
+    session.execute = AsyncMock(return_value=result_mock)
+
+    result = await get_author_from_db(session, "B000APF21M", "us")
+
+    # Identity is the oldest row (sparse, id 2) even though it contributes
+    # neither description nor image to the merged output.
+    assert result["id"] == 2
+    assert result["name"] == "Frank  Herbert"
+    assert result["description"] == "A full biography."
+    assert result["image"] == "https://example.com/rich.jpg"
+    assert {g["asin"] for g in result["genres"]} == {"G001", "G002"}
+
+
+@pytest.mark.asyncio
+async def test_get_author_from_db_description_coalesces_from_sibling_when_base_lacks_one():
+    """A base row whose own description is absent still gets a real one from
+    a sibling row, since the base's null measures as absent against the
+    sibling's real text. The base row's own image is left untouched here
+    because it already carries a real value — image's own id-order
+    preference is exercised separately, not by this fixture."""
+    base = _make_author(id_=1)
+    base.description = None
+    base.image = "https://example.com/img.jpg"
+
+    sibling = _make_author(id_=9)
+    sibling.description = "Filled in from the sibling."
+    sibling.image = None
+
+    session = AsyncMock()
+    result_mock = MagicMock()
+    result_mock.scalars.return_value.all.return_value = [base, sibling]
+    session.execute = AsyncMock(return_value=result_mock)
+
+    result = await get_author_from_db(session, "B000APF21M", "us")
+
+    assert result["id"] == 1
+    assert result["description"] == "Filled in from the sibling."
+    assert result["image"] == "https://example.com/img.jpg"
+
+
+@pytest.mark.asyncio
+async def test_get_author_from_db_base_identity_is_always_the_oldest_row():
+    """Identity (id/name/region) always comes from the oldest row — there is
+    no scoring or tie-break involved, the choice is unconditional."""
+    older = _make_author(id_=3)
+    newer = _make_author(id_=7)
+
+    session = AsyncMock()
+    result_mock = MagicMock()
+    result_mock.scalars.return_value.all.return_value = [newer, older]
+    session.execute = AsyncMock(return_value=result_mock)
+
+    result = await get_author_from_db(session, "B000APF21M", "us")
+    assert result["id"] == 3
+
+
+@pytest.mark.asyncio
+async def test_get_author_from_db_no_duplicate_log_on_single_row(caplog):
+    """No duplicate-collapse warning fires for the common single-row case."""
+    author = _make_author()
+    session = AsyncMock()
+    result_mock = MagicMock()
+    result_mock.scalars.return_value.all.return_value = [author]
+    session.execute = AsyncMock(return_value=result_mock)
+
+    with caplog.at_level(logging.WARNING):
+        result = await get_author_from_db(session, "B000APF21M", "us")
+
+    assert result is not None
+    assert not any("Multiple author rows" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_get_author_from_db_logs_duplicate_collapse_with_structured_fields(caplog):
+    """The duplicate-collapse log carries asin/region/row_count as structured
+    extra fields rather than interpolated into the message, so Axiom can
+    aggregate across authors instead of grouping every asin separately."""
+    rich = _make_author(id_=5)
+    sparse = _make_author(id_=2)
+
+    session = AsyncMock()
+    result_mock = MagicMock()
+    result_mock.scalars.return_value.all.return_value = [sparse, rich]
+    session.execute = AsyncMock(return_value=result_mock)
+
+    with caplog.at_level(logging.WARNING):
+        result = await get_author_from_db(session, "B000APF21M", "us")
+
+    assert result is not None
+    matches = [r for r in caplog.records if "Multiple author rows" in r.getMessage()]
+    assert len(matches) == 1
+    record = matches[0]
+    assert "B000APF21M" not in record.getMessage()
+    assert record.asin == "B000APF21M"
+    assert record.region == "us"
+    assert record.row_count == 2
+
+
+@pytest.mark.asyncio
+async def test_get_author_from_db_image_prefers_base_but_description_does_not():
+    """Image selection is purely order-based (first truthy value in id
+    order), so the base row's own populated image always wins when present.
+    Description selection is length-based and does not care which row
+    supplies identity — a longer sibling description replaces the base's own
+    shorter one, because content selection and identity selection are
+    independent criteria."""
+    base = _make_author(id_=1)
+    base.description = "Base bio."
+    base.image = "https://example.com/base.jpg"
+
+    sibling = _make_author(id_=9)
+    sibling.description = "Sibling bio, considerably longer than the base row's own text."
+    sibling.image = "https://example.com/sibling.jpg"
+
+    session = AsyncMock()
+    result_mock = MagicMock()
+    result_mock.scalars.return_value.all.return_value = [base, sibling]
+    session.execute = AsyncMock(return_value=result_mock)
+
+    result = await get_author_from_db(session, "B000APF21M", "us")
+
+    assert result["id"] == 1
+    assert result["image"] == "https://example.com/base.jpg"
+    assert result["description"] == sibling.description
+
+
+@pytest.mark.asyncio
+async def test_get_author_from_db_genre_union_dedups_by_asin_not_name_or_type():
+    """Genre identity for the union is the genre's asin, not its name or type —
+    two rows carrying the same genre asin under a different name/type collapse
+    into one entry (first-seen wins), while two different genre asins that
+    happen to share a name stay distinct."""
+    base = _make_author(id_=1)
+    base.genres = [
+        _make_genre(asin="G001", name="Science Fiction", type_="Genres"),
+        _make_genre(asin="G003", name="Adventure", type_="Genres"),
+    ]
+
+    sibling = _make_author(id_=9)
+    sibling.genres = [
+        _make_genre(asin="G001", name="Sci-Fi", type_="Tags"),
+        _make_genre(asin="G004", name="Adventure", type_="Genres"),
+    ]
+
+    session = AsyncMock()
+    result_mock = MagicMock()
+    result_mock.scalars.return_value.all.return_value = [base, sibling]
+    session.execute = AsyncMock(return_value=result_mock)
+
+    result = await get_author_from_db(session, "B000APF21M", "us")
+
+    genre_asins = {g["asin"] for g in result["genres"]}
+    assert genre_asins == {"G001", "G003", "G004"}
+    g001 = next(g for g in result["genres"] if g["asin"] == "G001")
+    assert g001["name"] == "Science Fiction"
+
+
+@pytest.mark.asyncio
+async def test_get_author_from_db_merges_three_duplicate_rows():
+    """The merge generalizes past two rows — three duplicate spellings still
+    converge on the oldest id as base identity, select the longest available
+    description and the first available image across all three (not just a
+    pair), and union genres from all three. Fed out of id order to prove the
+    defensive sort, not just the ORDER BY, is doing the work."""
+    a1 = _make_author(id_=10, name="Frank Herbert")
+    a1.description = None
+    a1.image = None
+    a1.genres = [_make_genre(asin="G001", name="Science Fiction")]
+
+    a2 = _make_author(id_=4, name="Frank  Herbert")
+    a2.description = "Filled from a2."
+    a2.image = None
+    a2.genres = [_make_genre(asin="G002", name="Fantasy")]
+
+    a3 = _make_author(id_=7, name="Frank Herbert ")
+    a3.description = None
+    a3.image = "https://example.com/a3.jpg"
+    a3.genres = [_make_genre(asin="G003", name="Horror")]
+
+    session = AsyncMock()
+    result_mock = MagicMock()
+    result_mock.scalars.return_value.all.return_value = [a1, a2, a3]
+    session.execute = AsyncMock(return_value=result_mock)
+
+    result = await get_author_from_db(session, "B000APF21M", "us")
+
+    # Identity is unconditionally the oldest id: a2 (4). a2 also happens to
+    # hold the only description, so it wins that too. Image comes from a3
+    # (7) — the first id-ordered row after a2 that actually has one.
+    assert result["id"] == 4
+    assert result["description"] == "Filled from a2."
+    assert result["image"] == "https://example.com/a3.jpg"
+    assert {g["asin"] for g in result["genres"]} == {"G001", "G002", "G003"}
+
+
+@pytest.mark.asyncio
+async def test_get_author_from_db_empty_string_never_shadows_real_content():
+    """An empty-string description/image is exactly as sparse as a null one:
+    it must not block a genuinely populated sibling from supplying either
+    field. Identity still comes from the oldest row regardless of which row
+    supplied the content."""
+    empty = _make_author(id_=2)
+    empty.description = ""
+    empty.image = ""
+
+    populated = _make_author(id_=6)
+    populated.description = "Has content."
+    populated.image = "https://example.com/img.jpg"
+
+    session = AsyncMock()
+    result_mock = MagicMock()
+    result_mock.scalars.return_value.all.return_value = [empty, populated]
+    session.execute = AsyncMock(return_value=result_mock)
+
+    result = await get_author_from_db(session, "B000APF21M", "us")
+
+    assert result["id"] == 2
+    assert result["description"] == "Has content."
+    assert result["image"] == "https://example.com/img.jpg"
+
+
+@pytest.mark.asyncio
+async def test_get_author_from_db_whitespace_only_description_loses_to_real_content():
+    """A whitespace-only description measures as absent, exactly like
+    _longer_wins on the write path — it must not block a real description
+    held by another row, even though the whitespace-only row is the older one
+    and therefore still supplies identity."""
+    whitespace = _make_author(id_=3)
+    whitespace.description = "   "
+    whitespace.image = None
+
+    real = _make_author(id_=8)
+    real.description = "A real biography."
+    real.image = None
+
+    session = AsyncMock()
+    result_mock = MagicMock()
+    result_mock.scalars.return_value.all.return_value = [whitespace, real]
+    session.execute = AsyncMock(return_value=result_mock)
+
+    result = await get_author_from_db(session, "B000APF21M", "us")
+
+    assert result["id"] == 3
+    assert result["description"] == "A real biography."
+
+
+@pytest.mark.asyncio
+async def test_get_author_from_db_older_row_with_shorter_description_loses_to_longer_sibling():
+    """The mainline duplicate case: both rows carry a real description (e.g.
+    upsert_author_profile writes both description and image on every profile
+    fetch, so two name spellings both end up fully populated). The older row
+    still supplies identity, but the longer description wins regardless of
+    which row is older — content and identity are not the same decision."""
+    older_short = _make_author(id_=2)
+    older_short.description = "A short stub."
+    older_short.image = None
+
+    newer_long = _make_author(id_=9)
+    newer_long.description = (
+        "A much longer biography with considerably more detail than the "
+        "short stub the older row happened to be written with."
+    )
+    newer_long.image = None
+
+    session = AsyncMock()
+    result_mock = MagicMock()
+    result_mock.scalars.return_value.all.return_value = [older_short, newer_long]
+    session.execute = AsyncMock(return_value=result_mock)
+
+    result = await get_author_from_db(session, "B000APF21M", "us")
+
+    assert result["id"] == 2
+    assert result["description"] == newer_long.description
+
+
+@pytest.mark.asyncio
+async def test_get_author_from_db_output_is_order_independent():
+    """The same candidate rows fed to the merge in a different order produce
+    byte-identical output — determinism does not depend on the order the
+    query happens to return rows in."""
+    a = _make_author(id_=2)
+    a.description = "Short."
+    a.image = None
+    a.genres = [_make_genre(asin="G001", name="Science Fiction")]
+
+    b = _make_author(id_=9)
+    b.description = "A considerably longer biography than the other row."
+    b.image = "https://example.com/img.jpg"
+    b.genres = [_make_genre(asin="G002", name="Fantasy")]
+
+    forward_session = AsyncMock()
+    forward_result_mock = MagicMock()
+    forward_result_mock.scalars.return_value.all.return_value = [a, b]
+    forward_session.execute = AsyncMock(return_value=forward_result_mock)
+
+    reversed_session = AsyncMock()
+    reversed_result_mock = MagicMock()
+    reversed_result_mock.scalars.return_value.all.return_value = [b, a]
+    reversed_session.execute = AsyncMock(return_value=reversed_result_mock)
+
+    forward = await get_author_from_db(forward_session, "B000APF21M", "us")
+    reversed_ = await get_author_from_db(reversed_session, "B000APF21M", "us")
+
+    assert forward == reversed_
+
+
+@pytest.mark.asyncio
+async def test_get_author_from_db_whitespace_only_image_loses_to_real_url():
+    """A whitespace-only image on the older row must not shadow a real URL
+    held by a sibling — the same absent-measurement that protects description
+    against a whitespace-only value applies to image too."""
+    whitespace = _make_author(id_=1)
+    whitespace.description = "An author."
+    whitespace.image = "   "
+
+    real = _make_author(id_=4)
+    real.description = "An author."
+    real.image = "https://example.com/real.jpg"
+
+    session = AsyncMock()
+    result_mock = MagicMock()
+    result_mock.scalars.return_value.all.return_value = [whitespace, real]
+    session.execute = AsyncMock(return_value=result_mock)
+
+    result = await get_author_from_db(session, "B000APF21M", "us")
+
+    assert result["id"] == 1
+    assert result["image"] == "https://example.com/real.jpg"
+
+
+@pytest.mark.asyncio
+async def test_get_author_from_db_single_row_empty_string_image_stays_empty_string():
+    """A lone row's blank-but-not-null image (`""`) is returned verbatim, not
+    coerced to null — that distinction is what tells "Audible answered blank"
+    apart from "Audible never answered", and the single-row path must match
+    what returning that row's raw field would have produced."""
+    author = _make_author()
+    author.image = ""
+    session = AsyncMock()
+    result_mock = MagicMock()
+    result_mock.scalars.return_value.all.return_value = [author]
+    session.execute = AsyncMock(return_value=result_mock)
+
+    result = await get_author_from_db(session, "B000APF21M", "us")
+
+    assert result["image"] == ""
+
+
+@pytest.mark.asyncio
+async def test_get_author_from_db_updated_at_is_the_max_across_candidates():
+    """updatedAt reflects the most recently changed candidate row, not
+    necessarily the base row's own timestamp — content can come from a newer
+    sibling, so the caller-visible updatedAt must move too."""
+    base = _make_author(id_=1)
+    base.updated_at = datetime(2023, 1, 1, tzinfo=timezone.utc)
+
+    newer_sibling = _make_author(id_=5)
+    newer_sibling.updated_at = datetime(2025, 6, 1, tzinfo=timezone.utc)
+
+    older_sibling = _make_author(id_=8)
+    older_sibling.updated_at = datetime(2020, 1, 1, tzinfo=timezone.utc)
+
+    session = AsyncMock()
+    result_mock = MagicMock()
+    result_mock.scalars.return_value.all.return_value = [base, newer_sibling, older_sibling]
+    session.execute = AsyncMock(return_value=result_mock)
+
+    result = await get_author_from_db(session, "B000APF21M", "us")
+
+    assert result["id"] == 1
+    assert result["updatedAt"] == newer_sibling.updated_at.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_get_author_from_db_description_tie_at_equal_length_keeps_older_row():
+    """Two candidates with descriptions of exactly equal trimmed length do not
+    replace each other — the comparison is strict '>', so the older row's
+    text is kept rather than the later-processed row's equally-long one."""
+    older = _make_author(id_=2)
+    older.description = "Nine char."
+
+    newer = _make_author(id_=7)
+    newer.description = "Ten chars!"
+    assert len(older.description) == len(newer.description)
+
+    session = AsyncMock()
+    result_mock = MagicMock()
+    result_mock.scalars.return_value.all.return_value = [older, newer]
+    session.execute = AsyncMock(return_value=result_mock)
+
+    result = await get_author_from_db(session, "B000APF21M", "us")
+
+    assert result["description"] == "Nine char."
+
+
+@pytest.mark.asyncio
+async def test_get_author_from_db_all_none_updated_at_returns_record_not_none():
+    """Every candidate row missing updated_at must not crash the whole read —
+    the record still comes back, just with updatedAt: None, rather than the
+    author collapsing to None the way an uncaught exception in this function
+    would. This guards the max() default against ever being dropped again."""
+    older = _make_author(id_=2)
+    older.updated_at = None
+
+    newer = _make_author(id_=7)
+    newer.updated_at = None
+
+    session = AsyncMock()
+    result_mock = MagicMock()
+    result_mock.scalars.return_value.all.return_value = [older, newer]
+    session.execute = AsyncMock(return_value=result_mock)
+
+    result = await get_author_from_db(session, "B000APF21M", "us")
+
+    assert result is not None
+    assert result["updatedAt"] is None
 
 
 # ============================================================

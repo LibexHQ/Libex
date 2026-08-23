@@ -35,9 +35,15 @@ jobs:
         run: |
           python -m venv "$RUNNER_TEMP/tooling"
           "$RUNNER_TEMP/tooling/bin/pip" install --require-hashes -r requirements-tooling.lock
+      # One invocation over all four, unlike the audit step below: ruff
+      # reports every finding across every path it is given, so splitting it
+      # per directory would gain nothing and lose something -- the block runs
+      # under `bash -e`, so the first failing directory would abort the rest
+      # and hide whatever is behind it. The list is exhaustive rather than
+      # selective; these four hold every Python file in the repo.
       - name: Lint with ruff
         run: |
-          "$RUNNER_TEMP/tooling/bin/ruff" check app/ --ignore E501
+          "$RUNNER_TEMP/tooling/bin/ruff" check app/ migrations/ scripts/ tests/ --ignore E501
       # Audits the locks by name rather than whatever happens to be installed,
       # so what is checked is exactly what ships. Both are named: the first is
       # the shipped set, and the second adds the test-only packages, which

@@ -4,7 +4,7 @@
 
 ## Checklist
 
-- [ ] `ruff check app/ --ignore E501` passes
+- [ ] `ruff check app/ migrations/ scripts/ tests/ --ignore E501` passes
 - [ ] `pytest tests/ -v` passes
 - [ ] New features include tests
 - [ ] Migration revision ID is unique (`ls migrations/versions/`)

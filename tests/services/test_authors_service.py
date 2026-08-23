@@ -2724,7 +2724,7 @@ async def test_get_author_books_persists_cache_when_screens_and_catalog_both_cle
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
          patch("app.services.audible.authors.cache.get", return_value=None), \
          patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist, \
-         patch("app.services.audible.authors.request_author_books_completion") as mock_complete:
+         patch("app.services.audible.authors.request_author_books_completion"):
         result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert result == ["B0NAME00001", "B0SCREEN001"]
@@ -2751,7 +2751,7 @@ async def test_get_author_books_uses_default_ttl_when_screens_and_catalog_both_c
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
          patch("app.services.audible.authors.cache.get", return_value=None), \
          patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist, \
-         patch("app.services.audible.authors.request_author_books_completion") as mock_complete:
+         patch("app.services.audible.authors.request_author_books_completion"):
         result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert result == ["B0NAME00001", "B0SCREEN001"]
@@ -2778,7 +2778,7 @@ async def test_get_author_books_persists_cache_when_name_never_resolved():
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
          patch("app.services.audible.authors.cache.get", return_value=None), \
          patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist, \
-         patch("app.services.audible.authors.request_author_books_completion") as mock_complete:
+         patch("app.services.audible.authors.request_author_books_completion"):
         result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert result == ["B0SCREEN001"]
@@ -2937,7 +2937,7 @@ async def test_get_author_books_caches_with_default_ttl_on_plateau_truncated_ter
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
          patch("app.services.audible.authors.cache.get", return_value=None), \
          patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist, \
-         patch("app.services.audible.authors.request_author_books_completion") as mock_complete:
+         patch("app.services.audible.authors.request_author_books_completion"):
         result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert result == ["B0NAME00001", "B0SCREEN001"]
@@ -3011,7 +3011,7 @@ async def test_get_author_books_persists_cache_despite_known_shortfall():
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
          patch("app.services.audible.authors.cache.get", return_value=None), \
          patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist, \
-         patch("app.services.audible.authors.request_author_books_completion") as mock_complete:
+         patch("app.services.audible.authors.request_author_books_completion"):
         result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert result == ["B0NAME00001", "B0SCREEN001"]
@@ -3241,7 +3241,7 @@ async def test_get_author_books_shortfall_warning_does_not_fire_when_catalog_sli
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
          patch("app.services.audible.authors.cache.get", return_value=None), \
          patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist, \
-         patch("app.services.audible.authors.request_author_books_completion") as mock_complete, \
+         patch("app.services.audible.authors.request_author_books_completion"), \
          patch("app.services.audible.authors.logger") as mock_logger:
         result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
@@ -3318,7 +3318,7 @@ async def test_get_author_books_db_union_fires_even_on_a_fully_clean_non_degrade
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=db_asins)) as mock_db, \
          patch("app.services.audible.authors.cache.get", return_value=None), \
          patch("app.services.audible.authors.persist_author_books_cache_background") as mock_persist, \
-         patch("app.services.audible.authors.request_author_books_completion") as mock_complete:
+         patch("app.services.audible.authors.request_author_books_completion"):
         result = (await get_author_books("B000AUTHOR", "us", mock_session)).asins
 
     assert result == ["B0CATALOG01", "B0SCREEN001", "B0DBONLY0001"]

@@ -37,7 +37,7 @@ refactor: Extract book normalization into helper
 Every PR must pass both of these locally before pushing:
 
 ```bash
-ruff check app/ --ignore E501
+ruff check app/ migrations/ scripts/ tests/ --ignore E501
 pytest tests/ -v
 ```
 
@@ -90,7 +90,7 @@ Response schemas live in `app/api/routes/<resource>/schemas.py`.
 ```bash
 git checkout -b feat/my-feature
 # make changes
-ruff check app/ --ignore E501
+ruff check app/ migrations/ scripts/ tests/ --ignore E501
 pytest tests/ -v
 git add <files>
 git commit -m "feat: description"

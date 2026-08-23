@@ -32,7 +32,12 @@ router = APIRouter(prefix="/narrator", tags=["Narrators"])
 async def get_narrator_books(
     name: Annotated[str, Query(description="Narrator name")],
     region: str = Depends(valid_region),
-    limit: Annotated[int, Query(ge=1, le=50, description="Results per page (max 50)")] = 10,
+    limit: Annotated[int, Query(ge=1, le=50, description="Maximum results (max 50)")] = 10,
+    # Audible's product listing has a result ceiling that returns a full page
+    # under HTTP 200 rather than an error or an empty list, so a caller paging
+    # until it sees an empty response would never stop. le=9 stops short of
+    # that ceiling deliberately and conservatively, not at its measured edge.
+    page: Annotated[int, Query(ge=0, le=9, description="Page number")] = 0,
     cache: Annotated[bool, Query(description="Return cached data if available")] = False,
     session: AsyncSession = Depends(get_session),
 ) -> list[dict[str, Any]]:
@@ -45,6 +50,7 @@ async def get_narrator_books(
         session=session,
         narrator=name,
         limit=limit,
+        page=page,
     )
     if not results:
         raise NotFoundException(f"No books found for narrator: {name}")

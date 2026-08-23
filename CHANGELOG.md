@@ -10,6 +10,36 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.16.0]
+
+### Added
+- **`/narrator/books` now accepts a `page` parameter, lifting a hard cap that
+  silently limited every narrator's catalogue to 50 books.** The route took a
+  `limit` parameter described as "Results per page (max 50)" while having no
+  page parameter at all, so the description promised pagination that didn't
+  exist — a caller who read it reasonably assumed there were more pages to
+  ask for, and had no way to reach them. Scott Brick alone has narrated over
+  a thousand titles; a lookup for any narrator with more than 50 books
+  returned only the first 50, permanently, with no parameter that reached
+  the 51st.
+
+  `page` is 0-indexed and accepts 0 through 9, the same range already
+  enforced on `/search` and for the same reason: Audible's catalog search
+  plateaus at 500 results per query and, past that point, re-serves the
+  previous page's exact content indefinitely under a 200 status rather than
+  erroring, so paging further would hand back duplicates disguised as new
+  results. With `limit` still capped at 50, the reachable ceiling for a
+  narrator's catalogue moves from 50 books to 500. Omitting `page` returns
+  exactly what the route returned before today — the parameter is optional
+  and defaults to page 0, so no existing caller's response changes. The
+  `limit` description was also corrected to say what it actually does:
+  "Maximum results (max 50)", not "Results per page."
+
+  **Past 500 books, the ceiling still holds.** This does not add a way to
+  walk a narrator's full catalogue beyond what a single Audible search will
+  hand back — a narrator with more than 500 titles is still only reachable
+  up to that point.
+
 ## [1.15.3]
 
 ### Fixed

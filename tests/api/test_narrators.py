@@ -99,3 +99,58 @@ async def test_get_narrator_books_passes_narrator_to_search(async_client):
         await async_client.get("/narrator/books?name=Scott+Brick&region=us")
         _, kwargs = mock.call_args
         assert kwargs["narrator"] == "Scott Brick"
+
+
+@pytest.mark.asyncio
+async def test_get_narrator_books_defaults_page_to_zero(async_client):
+    """Omitting page reaches search() as page 0."""
+    with patch("app.api.routes.narrators.router.search", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        await async_client.get("/narrator/books?name=Scott+Brick&region=us")
+        _, kwargs = mock.call_args
+        assert kwargs["page"] == 0
+
+
+@pytest.mark.asyncio
+async def test_get_narrator_books_passes_page_to_search(async_client):
+    """A non-default page reaches search() with the value the caller sent."""
+    with patch("app.api.routes.narrators.router.search", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        await async_client.get("/narrator/books?name=Scott+Brick&region=us&page=9")
+        _, kwargs = mock.call_args
+        assert kwargs["page"] == 9
+
+
+@pytest.mark.asyncio
+async def test_get_narrator_books_rejects_negative_page(async_client):
+    """page=-1 is rejected."""
+    response = await async_client.get("/narrator/books?name=Scott+Brick&region=us&page=-1")
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_get_narrator_books_rejects_page_above_nine(async_client):
+    """page=10 is rejected -- Audible re-serves page 9's results as page 10, so
+    the upper bound stops duplicates being handed back as new pages."""
+    response = await async_client.get("/narrator/books?name=Scott+Brick&region=us&page=10")
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_get_narrator_books_omitted_page_behaves_as_before(async_client):
+    """A call omitting page returns 200 and the expected list, unchanged from
+    the pre-pagination behaviour."""
+    with patch("app.api.routes.narrators.router.search", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        response = await async_client.get("/narrator/books?name=Scott+Brick&region=us")
+        assert response.status_code == 200
+        data = response.json()
+        assert isinstance(data, list)
+        assert data[0]["asin"] == "B08G9PRS1K"
+
+
+@pytest.mark.asyncio
+async def test_get_narrator_books_rejects_limit_above_fifty(async_client):
+    """limit is still rejected above 50."""
+    response = await async_client.get("/narrator/books?name=Scott+Brick&region=us&limit=51")
+    assert response.status_code == 422

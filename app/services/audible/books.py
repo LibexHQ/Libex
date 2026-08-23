@@ -49,6 +49,8 @@ BOOK_RESPONSE_GROUPS = (
 
 IMAGE_SIZES = "500,1000,2400,3200"
 
+# Sentinel this repo has never seen Audible actually send -- see
+# _filter_products for what was measured and why the clause stays anyway.
 UNRELEASED_PLACEHOLDER = "2200-01-01T00:00:00Z"
 
 # Below this many products, normalization runs inline on the event loop; at
@@ -430,7 +432,15 @@ def _normalize_chapters(data: dict, asin: str) -> dict[str, Any]:
 
 
 def _filter_products(products: list[dict]) -> list[dict]:
-    """Filters out unreleased placeholder products.
+    """
+    Drops two disjoint categories of product from a raw Audible list:
+    anything with no title, and anything whose publication_datetime is the
+    UNRELEASED_PLACEHOLDER sentinel. Two callers -- _walk_one_catalog in
+    releases.py, which serves both get_new_releases and get_coming_soon,
+    and search.py's product search -- never hydrate afterwards, so what
+    survives this filter is exactly what those responses ship; a name
+    built around "unreleased" placeholders alone would undersell what
+    /coming-soon and search results actually pass through.
 
     Also load-bearing for resolving a nonexistent-but-well-formed ASIN to
     "not found": probed live, Audible's catalog endpoints don't 404 for one
@@ -440,6 +450,42 @@ def _filter_products(products: list[dict]) -> list[dict]:
     fully populated). Dropping anything with no title here is what turns
     that stub into an empty result rather than a phantom book with every
     field blank.
+
+    The UNRELEASED_PLACEHOLDER clause carries no comparable confirmation
+    from when it was written. Measured since: 1,100 products across all
+    eleven regions, two sorts each (-ReleaseDate and -Title, 50 per call --
+    11 regions x 2 sorts x 50), plus a further 500 in us across ten calls
+    spanning nine query shapes (10 calls x 50 per call) -- ascending and
+    descending release-date sorts, the descending sort run over two pages
+    (which is why the call count exceeds the shape count), three prolific
+    author catalogues, a narrator catalogue, "preorder" and "coming soon"
+    keyword searches, a title sort -- carried zero products with a
+    publication_datetime matching the sentinel, and zero hollow titleless
+    stubs of the kind above. Only the -ReleaseDate calls carry a
+    sort-order argument, and only on an assumption this sample cannot
+    verify -- every observed product had already passed the filter, so the
+    sample is silent on what it removed -- that Audible's -ReleaseDate sort
+    keys on the same publication_datetime field the clause reads. On that
+    assumption, a product carrying the sentinel would have ranked first in
+    every one of those calls, and none did. The -Title and
+    catalogue/keyword calls carry no such guarantee; their zero count is a
+    plain absence, nothing more. Real pre-orders pass through untouched
+    with real dates in both publication_datetime and release_date --
+    furthest observed: jp 2029-01-01, br 2028-05-02, us/uk/ca/au/fr
+    2027-12-10, de 2027-05-11 (the remaining three regions matched one of
+    these dates rather than adding a new one).
+
+    The constant and this clause appear in 74a79a3, the project's earliest
+    substantive commit -- the two commits before it are a bare license/
+    readme and empty scaffolding -- whose own README carries the AudiMeta
+    drop-in-replacement language, so the clause is more likely inherited
+    from that source than derived from an observed Audible response, though
+    the AudiMeta service that could confirm it is gone. 1,600 products is a
+    sample, not the catalogue: strong enough that this is no longer an
+    unexamined, possibly-wrong inheritance, not strong enough to delete an
+    original guard on the strength of its absence. The clause stays. What
+    would justify removing it is an actual product observed carrying the
+    sentinel -- so far there has never been one.
     """
     return [
         p for p in products

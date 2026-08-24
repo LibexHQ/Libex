@@ -102,3 +102,60 @@ async def test_quick_search_returns_404_on_no_results(async_client):
         mock.return_value = []
         response = await async_client.get("/quick-search?keywords=xyznotarealbook")
         assert response.status_code == 404
+
+# ============================================================
+# CACHE PARAMETER -- /search stays inert; /quick-search flipped to True
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_search_cache_false_still_marks_the_response_no_store(async_client):
+    """/search is inert -- cache never reaches search() -- but the response
+    still gets Cache-Control: no-store on an explicit cache=false, matching
+    every other route's contract for that flag even though this one has no
+    cache read for it to skip."""
+    with patch("app.api.routes.search.router.search", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        response = await async_client.get("/search?title=Dune&cache=false")
+    assert response.headers["cache-control"] == "no-store"
+    # search() takes no cache argument at all -- confirm the call never
+    # grew one silently.
+    assert "cache" not in mock.call_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_search_cache_omitted_defaults_to_false_and_still_gets_no_store(async_client):
+    """/search's cache param stays False by default (CacheInertParam) --
+    unlike the Standard routes, omitting it does not suppress
+    Cache-Control the way an explicit cache=true would."""
+    with patch("app.api.routes.search.router.search", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        response = await async_client.get("/search?title=Dune")
+    assert response.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.asyncio
+async def test_search_cache_true_sends_no_cache_control_header(async_client):
+    """Accepted for compatibility even though it changes nothing about what
+    search() does -- apply_cache_control still reads it at face value."""
+    with patch("app.api.routes.search.router.search", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        response = await async_client.get("/search?title=Dune&cache=true")
+    assert "cache-control" not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_quick_search_omits_cache_param_and_reads_the_cache_by_default(async_client):
+    with patch("app.api.routes.search.router.quick_search", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        await async_client.get("/quick-search?keywords=dune")
+    assert mock.call_args[0][3] is True
+
+
+@pytest.mark.asyncio
+async def test_quick_search_cache_false_marks_the_response_no_store(async_client):
+    with patch("app.api.routes.search.router.quick_search", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        response = await async_client.get("/quick-search?keywords=dune&cache=false")
+    assert mock.call_args[0][3] is False
+    assert response.headers["cache-control"] == "no-store"

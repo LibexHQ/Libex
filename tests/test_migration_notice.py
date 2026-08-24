@@ -347,9 +347,20 @@ def test_headers_appear_on_404_route_miss(enabled_app):
 def test_expose_headers_lists_migration_headers_unconditionally(client):
     """Access-Control-Expose-Headers is unconditional — present even with the
     notice off — because without it those headers are invisible to browser
-    JavaScript, and a known third-party integrator is browser-based."""
+    JavaScript, and a known third-party integrator is browser-based.
+
+    Asserts membership, not the exact list: the value is now the union of
+    the migration headers with the response_headers.py registry
+    (app.core.response_headers.EXPOSED_HEADER_NAMES), and a literal string
+    here would break every time a header is added to that registry for a
+    reason having nothing to do with the migration notice. Registry-level
+    exactness — the full union, in order, deduped — is
+    tests/test_response_headers.py's job, not this file's; this test's job
+    is only that the migration headers themselves are always present."""
     response = client.get("/health", headers={"Origin": "https://example.com"})
-    assert response.headers["access-control-expose-headers"] == "Deprecation, Sunset, Link"
+    exposed = response.headers["access-control-expose-headers"].split(", ")
+    for name in MIGRATION_HEADER_NAMES:
+        assert name in exposed
 
 
 def test_enabled_health_gains_notice(enabled_app):

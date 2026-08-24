@@ -18,6 +18,12 @@ from app.db.session import get_session
 # Routes
 from app.api.routes.authors.schemas import AuthorResponse
 from app.api.routes.books.schemas import BookResponse
+from app.api.routes.cache_param import CacheAuthorBooksParam, CacheStandardParam, apply_cache_control
+from app.api.routes.facts_headers import (
+    _COMPLETE_ONLY_RESPONSE_HEADERS,
+    _FACTS_RESPONSE_HEADERS,
+    _stamp_facts_headers,
+)
 from app.api.routes.large_response import build_large_list_response
 from app.api.routes.sort_params import BookSortField, SortOrder
 from app.api.routes.filter_params import LiveBookFilters
@@ -37,6 +43,7 @@ from app.services.filtering import filter_dicts
 # Core
 from app.core.middleware import is_valid_asin, valid_region
 from app.core.exceptions import NotFoundException
+from app.core.response_headers import ResponseFacts
 
 router = APIRouter(prefix="/author", tags=["Authors"])
 
@@ -177,36 +184,19 @@ def _mark_completeness(
     )
 
 
-@router.get("/books/{asin}", response_model=list[BookResponse])
+@router.get(
+    "/books/{asin}",
+    response_model=list[BookResponse],
+    responses={200: {"headers": _COMPLETE_ONLY_RESPONSE_HEADERS}},
+)
 async def get_books_by_author(
     asin: Annotated[str, Path(description="Author ASIN")],
     response: Response,
     region: str = Depends(valid_region),
-    # Defaults to True, which is the point of the flag rather than an
-    # incidental choice. Defaulted False, the cache only ever served callers
-    # who explicitly asked for it, so there was no such thing as a warm
-    # request on the default public path: every request walked Audible in
-    # full, and a prolific author's walk runs to hundreds of upstream
-    # requests and 504s behind the proxy's 30s timeout. The walk already
-    # WRITES its result unconditionally -- see _walk_author_books' call to
-    # persist_author_books_cache_background -- so only the read was gated,
-    # and the cache was being populated for almost nobody.
-    #
-    # Single-flight is not a substitute and must not be read as one: it
-    # collapses CONCURRENT duplicates only. Ten callers in one instant were
-    # already a single walk; ten callers a minute apart were ten walks.
-    #
-    # The DB is not a substitute either. It is already unioned into every
-    # walk as the fourth source, so an author being stored does not spare
-    # anyone the walk -- only a cache hit does.
-    #
-    # cache=false keeps its documented meaning and still forces the full
-    # walk, so a caller who genuinely needs an uncached answer has one. That
-    # leaves the expensive path reachable by anyone, Libex having neither
-    # auth nor rate limiting by design -- but it is reachable today as the
-    # default for everyone, so this narrows the exposure rather than opening
-    # anything.
-    cache: Annotated[bool, Query(description="Return cached data if available")] = True,
+    # See cache_param.CacheAuthorBooksParam for why this defaults to True
+    # and what cache=false does -- the reasoning is shared with this route's
+    # legacy twin below and lives in one place rather than two.
+    cache: CacheAuthorBooksParam = True,
     filters: LiveBookFilters = Depends(),
     sort: Annotated[BookSortField | None, Query(description="Field to sort the returned books by")] = None,
     order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
@@ -270,14 +260,20 @@ async def get_books_by_author(
     )
 
 
-@router.get("/{asin}/books", response_model=list[BookResponse], include_in_schema=False)
+@router.get(
+    "/{asin}/books",
+    response_model=list[BookResponse],
+    include_in_schema=False,
+    responses={200: {"headers": _COMPLETE_ONLY_RESPONSE_HEADERS}},
+)
 async def get_books_by_author_primary(
     asin: Annotated[str, Path(description="Author ASIN")],
     response: Response,
     region: str = Depends(valid_region),
-    # Defaults to True for the reasons given on get_books_by_author above.
-    # This is its legacy-route twin and the two must never disagree on it.
-    cache: Annotated[bool, Query(description="Return cached data if available")] = True,
+    # See cache_param.CacheAuthorBooksParam for the full reasoning. This is
+    # get_books_by_author's legacy-route twin and the two must never
+    # disagree on it.
+    cache: CacheAuthorBooksParam = True,
     filters: LiveBookFilters = Depends(),
     sort: Annotated[BookSortField | None, Query(description="Field to sort the returned books by")] = None,
     order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
@@ -326,15 +322,29 @@ async def get_books_by_author_primary(
     )
 
 
-@router.get("/{asin}", response_model=AuthorResponse)
+@router.get("/{asin}", response_model=AuthorResponse, responses={200: {"headers": _FACTS_RESPONSE_HEADERS}})
 async def get_author_by_asin(
     asin: Annotated[str, Path(description="Author ASIN")],
+    response: Response,
     region: str = Depends(valid_region),
-    cache: Annotated[bool, Query(description="Return cached data if available")] = False,
+    # Flipped from the profile-only False this route used to carry. A
+    # profile read is now the same Standard shape as /book/{asin},
+    # /series/{asin} and /book (bulk): one cache read decides the whole
+    # response, so it gets the same default those got. This supersedes the
+    # narrower carve-out this route used to have -- fetching one author
+    # profile in one request was reasoned as too cheap to warrant the flip
+    # that /author/books got for its hundreds-of-requests walk, but that
+    # reasoning argued against matching author-books' treatment, not against
+    # ever defaulting this cheaper, single-shot read to cache like every
+    # other Standard route already does.
+    cache: CacheStandardParam = True,
     session: AsyncSession = Depends(get_session),
 ) -> AuthorResponse:
     """Get author profile by ASIN."""
     if not is_valid_asin(asin):
         raise NotFoundException(f"Invalid ASIN format: {asin}")
-    data = await get_author(asin, region, session, cache)
+    facts = ResponseFacts()
+    data = await get_author(asin, region, session, cache, facts=facts)
+    apply_cache_control(response, cache)
+    _stamp_facts_headers(response, facts, has_entities=True)
     return AuthorResponse(**data)

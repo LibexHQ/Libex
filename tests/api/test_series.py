@@ -14,6 +14,7 @@ from httpx import AsyncClient, ASGITransport
 # Local
 from app.main import app
 from app.core.exceptions import NotFoundException
+from app.core.response_headers import SOURCE_AUDIBLE, SOURCE_CACHE, record_source, record_source_keys
 
 MOCK_SERIES = {
     "asin": "B00SERIES1",
@@ -319,3 +320,147 @@ async def test_get_series_books_rejects_invalid_asin(async_client):
     response = await async_client.get("/series/books/not-an-asin")
     assert response.status_code == 404
     assert "Invalid ASIN" in response.json()["error"]
+
+# ============================================================
+# CACHE DEFAULT FLIP -- omitting cache now reads the cache
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_get_series_omits_cache_param_and_reads_the_cache_by_default(async_client):
+    with patch("app.api.routes.series.router.get_series", new_callable=AsyncMock) as mock:
+        mock.return_value = MOCK_SERIES
+        await async_client.get("/series/B00SERIES1")
+    assert mock.call_args[0][3] is True
+
+
+@pytest.mark.asyncio
+async def test_get_series_cache_false_marks_the_response_no_store(async_client):
+    with patch("app.api.routes.series.router.get_series", new_callable=AsyncMock) as mock:
+        mock.return_value = MOCK_SERIES
+        response = await async_client.get("/series/B00SERIES1?cache=false")
+    assert mock.call_args[0][3] is False
+    assert response.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.asyncio
+async def test_get_series_cache_true_sends_no_cache_control_header(async_client):
+    with patch("app.api.routes.series.router.get_series", new_callable=AsyncMock) as mock:
+        mock.return_value = MOCK_SERIES
+        response = await async_client.get("/series/B00SERIES1?cache=true")
+    assert "cache-control" not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_get_series_books_omits_cache_param_and_reads_the_discovery_cache_by_default(async_client):
+    """cache governs the discovery read (get_series_books), not the
+    hydration that follows -- see cache_param.CacheStandardParam's own
+    documented asymmetry for this route."""
+    with patch("app.api.routes.series.router.get_series_books", new_callable=AsyncMock) as mock_series, \
+         patch("app.api.routes.series.router.get_books_by_asins", new_callable=AsyncMock) as mock_books:
+        mock_series.return_value = ["B08G9PRS1K"]
+        mock_books.return_value = [MOCK_BOOK]
+        await async_client.get("/series/books/B00SERIES1")
+    assert mock_series.call_args[0][3] is True
+
+
+@pytest.mark.asyncio
+async def test_get_series_books_cache_false_marks_the_response_no_store(async_client):
+    with patch("app.api.routes.series.router.get_series_books", new_callable=AsyncMock) as mock_series, \
+         patch("app.api.routes.series.router.get_books_by_asins", new_callable=AsyncMock) as mock_books:
+        mock_series.return_value = ["B08G9PRS1K"]
+        mock_books.return_value = [MOCK_BOOK]
+        response = await async_client.get("/series/books/B00SERIES1?cache=false")
+    assert mock_series.call_args[0][3] is False
+    assert response.headers["cache-control"] == "no-store"
+
+
+# ============================================================
+# X-LIBEX-SOURCE -- /series/{asin} and hydration on /series/books/{asin}
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_get_series_source_header_reflects_the_recorded_source(async_client):
+    async def fake_get_series(asin, region, session, cache, *, facts=None):
+        record_source(facts, SOURCE_AUDIBLE)
+        return MOCK_SERIES
+
+    with patch("app.api.routes.series.router.get_series", side_effect=fake_get_series):
+        response = await async_client.get("/series/B00SERIES1")
+
+    assert response.headers["x-libex-source"] == "audible"
+    assert response.headers["x-libex-complete"] == "true"
+
+
+@pytest.mark.asyncio
+async def test_get_series_books_source_header_describes_hydration_only(async_client):
+    """X-Libex-Source on this route names where the books in the body came
+    from (get_books_by_asins), never the discovery read that found their
+    ASINs (get_series_books) -- discovery records nothing onto facts at
+    all on this route."""
+
+    async def fake_get_books(asin_list, region, session, *, facts=None):
+        record_source_keys(facts, SOURCE_CACHE, [MOCK_BOOK["asin"]])
+        return [MOCK_BOOK]
+
+    with patch("app.api.routes.series.router.get_series_books", new_callable=AsyncMock) as mock_series, \
+         patch("app.api.routes.series.router.get_books_by_asins", side_effect=fake_get_books):
+        mock_series.return_value = ["B08G9PRS1K"]
+        response = await async_client.get("/series/books/B00SERIES1")
+
+    assert response.headers["x-libex-source"] == "cache"
+
+
+def _partial_filter_books():
+    """Two hydrated books, one from Audible and one from cache -- a
+    filter (rating_better_than) that only the Audible one survives."""
+    audible_book = {**MOCK_BOOK, "asin": "B000000001", "rating": 4.9}
+    cache_book = {**MOCK_BOOK, "asin": "B000000002", "rating": 1.0}
+    return audible_book, cache_book
+
+
+@pytest.mark.asyncio
+async def test_get_series_books_source_header_names_only_the_filter_survivors_source(async_client):
+    """Same reproduction as the bulk /book route's own version of this
+    defect: two books hydrated, one from Audible and one from cache, a
+    filter that removes the cache-sourced one from the body. The header
+    must read the plain "audible" token -- never "mixed", and never a
+    "cache" parameter naming a source that contributed nothing to what was
+    actually sent."""
+    audible_book, cache_book = _partial_filter_books()
+
+    async def fake_get_books(asin_list, region, session, *, facts=None):
+        record_source_keys(facts, SOURCE_AUDIBLE, [audible_book["asin"]])
+        record_source_keys(facts, SOURCE_CACHE, [cache_book["asin"]])
+        return [audible_book, cache_book]
+
+    with patch("app.api.routes.series.router.get_series_books", new_callable=AsyncMock) as mock_series, \
+         patch("app.api.routes.series.router.get_books_by_asins", side_effect=fake_get_books):
+        mock_series.return_value = [audible_book["asin"], cache_book["asin"]]
+        response = await async_client.get("/series/books/B00SERIES1?rating_better_than=3.0")
+
+    body = response.json()
+    assert [b["asin"] for b in body] == [audible_book["asin"]]
+    assert response.headers["x-libex-source"] == "audible"
+
+
+@pytest.mark.asyncio
+async def test_get_series_books_primary_source_header_names_only_the_filter_survivors_source(async_client):
+    """The legacy twin (/series/{asin}/books) must not diverge from the
+    named route above."""
+    audible_book, cache_book = _partial_filter_books()
+
+    async def fake_get_books(asin_list, region, session, *, facts=None):
+        record_source_keys(facts, SOURCE_AUDIBLE, [audible_book["asin"]])
+        record_source_keys(facts, SOURCE_CACHE, [cache_book["asin"]])
+        return [audible_book, cache_book]
+
+    with patch("app.api.routes.series.router.get_series_books", new_callable=AsyncMock) as mock_series, \
+         patch("app.api.routes.series.router.get_books_by_asins", side_effect=fake_get_books):
+        mock_series.return_value = [audible_book["asin"], cache_book["asin"]]
+        response = await async_client.get("/series/B00SERIES1/books?rating_better_than=3.0")
+
+    body = response.json()
+    assert [b["asin"] for b in body] == [audible_book["asin"]]
+    assert response.headers["x-libex-source"] == "audible"

@@ -3,9 +3,10 @@ Audible series service.
 Fetches series metadata directly from the Audible API.
 
 DESIGN PHILOSOPHY: Audible-first.
-Always fetches fresh data from Audible.
-Writes every result to the relational DB for persistence.
-Falls back to DB when Audible is unavailable.
+Audible is the source of truth. A fetched series's metadata is written to
+the relational DB for persistence and to the cache; a series's book list
+is cached on its own. The DB and cache both stand ready to answer in
+Audible's place, by request or when Audible can't.
 """
 
 # Standard library
@@ -18,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # Core
 from app.core.exceptions import NotFoundException
 from app.core.logging import get_logger
+from app.core.response_headers import ResponseFacts, SOURCE_AUDIBLE, SOURCE_CACHE, SOURCE_DB, record_source
 from app.core.utils import strip_html
 
 # Services
@@ -58,14 +60,21 @@ async def get_series(
     region: str,
     session: AsyncSession,
     use_cache: bool = False,
+    *,
+    facts: ResponseFacts | None = None,
 ) -> dict[str, Any]:
     """
     Fetches series metadata by ASIN.
     Audible-first, writes to DB, falls back to DB then cache.
+
+    Single-source by construction -- cache, then audible, then db, then
+    cache again, never more than one per call -- so facts takes exactly one
+    record_source per return path.
     """
     if use_cache:
         cached = await cache.get(session, series_key(asin, region))
         if cached:
+            record_source(facts, SOURCE_CACHE)
             return cached
 
     try:
@@ -98,6 +107,7 @@ async def get_series(
             "region": region,
         })
 
+        record_source(facts, SOURCE_AUDIBLE)
         return normalized
 
     except NotFoundException:
@@ -107,11 +117,13 @@ async def get_series(
         # Try DB first
         db_result = await get_series_from_db(session, asin)
         if db_result:
+            record_source(facts, SOURCE_DB)
             return db_result
 
         # Fall back to cache
         cached = await cache.get(session, series_key(asin, region))
         if cached:
+            record_source(facts, SOURCE_CACHE)
             return cached
 
         raise NotFoundException("Audible unavailable and no cached series data found")
@@ -122,10 +134,16 @@ async def get_series_books(
     region: str,
     session: AsyncSession,
     use_cache: bool = False,
+    *,
+    facts: ResponseFacts | None = None,
 ) -> list[str]:
     """
     Fetches all book ASINs for a series, sorted by position.
     Uses relationships response group from the series product endpoint.
+
+    Single-source by construction -- cache, then audible, then cache again,
+    never more than one per call -- so facts takes exactly one record_source
+    per return path.
     """
     if use_cache:
         cached = await cache.get(session, series_books_key(asin, region))
@@ -151,6 +169,7 @@ async def get_series_books(
         # re-acquires transparently.
         await session.rollback()
         if cached:
+            record_source(facts, SOURCE_CACHE)
             return cached
 
     try:
@@ -183,6 +202,7 @@ async def get_series_books(
             "region": region,
         })
 
+        record_source(facts, SOURCE_AUDIBLE)
         return asins
 
     except NotFoundException:
@@ -191,6 +211,7 @@ async def get_series_books(
     except Exception:
         cached = await cache.get(session, series_books_key(asin, region))
         if cached:
+            record_source(facts, SOURCE_CACHE)
             return cached
         raise NotFoundException("Audible unavailable and no cached series books found")
 

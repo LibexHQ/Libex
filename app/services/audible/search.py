@@ -129,6 +129,7 @@ async def quick_search(
     keywords: str,
     region: str,
     session: AsyncSession,
+    use_cache: bool = False,
 ) -> list[dict[str, Any]]:
     """Quick search using Audible search suggestions.
 
@@ -136,6 +137,12 @@ async def quick_search(
     ABS-style query (e.g. "Author - Series - Title") and suggestions
     return nothing. Falls back to the local DB if catalog also returns
     nothing.
+
+    use_cache is passed straight through to the ASIN hydration below and
+    nowhere else in this function -- quick_search has an ASIN list only
+    after the suggestions call, so that hydration is the one place here a
+    cached book can save an Audible fetch at all. search() below has no
+    comparable ASIN list to key a cache read on and stays uncached.
     """
     try:
         params = {
@@ -172,7 +179,7 @@ async def quick_search(
         })
 
         if asins:
-            return await get_books_by_asins(asins, region, session)
+            return await get_books_by_asins(asins, region, session, use_cache)
 
         # Suggestions returned nothing — check for compound ABS-style query
         # Format: "Author - Series - Title" or "Author - Title"

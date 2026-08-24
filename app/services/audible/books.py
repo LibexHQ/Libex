@@ -3,9 +3,22 @@ Audible books service.
 Fetches book metadata directly from the Audible API.
 
 DESIGN PHILOSOPHY: Audible-first.
-Always fetches fresh data from Audible.
-Writes every result to the relational DB for persistence.
-Falls back to DB when Audible is unavailable.
+Audible is the source of truth, and every result normalized from it is
+written to the relational DB for persistence.
+
+One cohesive job lives here: turning a list of ASINs into books, by whatever
+mix of Audible, the relational DB, and the cache it takes to answer without
+handing back less than a caller could have gotten a moment ago. Fetching,
+normalizing Audible's raw product shape into AudiMeta's exact DTO, and
+falling back through DB and cache are not three jobs in a trenchcoat -- the
+fallback ladder in get_books_by_asins hands back DB rows and cache hits
+alongside freshly normalized Audible products in the very same list, and the
+tri-state flag settling that every return path goes through has to treat
+whichever of the three produced a given element identically. A seam drawn
+between fetch and fallback would need each side holding the internals of the
+shape the other one produces, which is a shared contract stretched across
+two files rather than a boundary. The module stays long because the job is
+one job.
 """
 
 # Standard library
@@ -25,6 +38,14 @@ from app.db.models import Book
 # Core
 from app.core.exceptions import NotFoundException
 from app.core.logging import get_logger
+from app.core.response_headers import (
+    ResponseFacts,
+    SOURCE_AUDIBLE,
+    SOURCE_CACHE,
+    SOURCE_DB,
+    record_source,
+    record_source_keys,
+)
 from app.core.utils import strip_html, strip_image_size_suffix
 
 # Services
@@ -569,6 +590,8 @@ async def get_books_by_asins(
     use_cache: bool = False,
     high_concurrency: bool = False,
     deadline: float | None = None,
+    *,
+    facts: ResponseFacts | None = None,
 ) -> list[dict[str, Any]]:
     """
     Public entry point. Delegates to _get_books_by_asins_unsettled and settles
@@ -582,9 +605,13 @@ async def get_books_by_asins(
     Settling once here, on the outside, covers all of them from a single place
     and can't be silently bypassed by a return path added inside later; the
     alternative was inserting the same call at each of those points.
+
+    facts is threaded straight through, unexamined -- it is
+    _get_books_by_asins_unsettled's own return points, not this wrapper's
+    settling step, that know which source produced which element.
     """
     books = await _get_books_by_asins_unsettled(
-        asins, region, session, use_cache, high_concurrency, deadline
+        asins, region, session, use_cache, high_concurrency, deadline, facts=facts
     )
     return _settle_flags_list(books)
 
@@ -596,6 +623,8 @@ async def _get_books_by_asins_unsettled(
     use_cache: bool = False,
     high_concurrency: bool = False,
     deadline: float | None = None,
+    *,
+    facts: ResponseFacts | None = None,
 ) -> list[dict[str, Any]]:
     """
     Fetches one or more books by ASIN from Audible.
@@ -613,6 +642,14 @@ async def _get_books_by_asins_unsettled(
     default pool. Every other caller (single/small ASIN lists from the book,
     series, and search routes, and the seeder) defaults to False and is
     unaffected.
+
+    facts, when given, is credited at every return point below with exactly
+    which source each returned element came from -- this is the one function
+    in the module where a single response can genuinely mix cache, fresh
+    Audible, and DB-backstop elements, so the tally is built at each
+    source-segmented concatenation rather than inferred afterwards from the
+    merged list, which by that point no longer carries where any one element
+    came from.
     """
     if not asins:
         raise NotFoundException("No ASINs provided")
@@ -623,6 +660,7 @@ async def _get_books_by_asins_unsettled(
     if use_cache and len(unique_asins) == 1:
         cached = await cache.get(session, book_key(unique_asins[0], region))
         if cached:
+            record_source_keys(facts, SOURCE_CACHE, [b["asin"] for b in [cached]])
             return [cached]
 
     # Batch cache: one lookup for the whole list, only fetch misses from
@@ -647,6 +685,7 @@ async def _get_books_by_asins_unsettled(
 
         # All ASINs found in cache
         if not fetch_asins:
+            record_source_keys(facts, SOURCE_CACHE, [b["asin"] for b in cached_results])
             return cached_results
 
     # A connection is held for work, not for a request. Either cache read
@@ -817,6 +856,9 @@ async def _get_books_by_asins_unsettled(
             "region": region,
         })
 
+        record_source_keys(facts, SOURCE_CACHE, [b["asin"] for b in cached_results])
+        record_source_keys(facts, SOURCE_AUDIBLE, [b["asin"] for b in normalized])
+        record_source_keys(facts, SOURCE_DB, [b["asin"] for b in db_backstop_results])
         return cached_results + normalized + db_backstop_results
 
     except NotFoundException:
@@ -829,6 +871,8 @@ async def _get_books_by_asins_unsettled(
         # Try relational DB first for the misses
         db_results = await get_books_from_db(session, fetch_asins)
         if db_results:
+            record_source_keys(facts, SOURCE_CACHE, [b["asin"] for b in cached_results])
+            record_source_keys(facts, SOURCE_DB, [b["asin"] for b in db_results])
             return cached_results + db_results
 
         # Fall back to cache for the misses -- one lookup, same as the
@@ -841,6 +885,15 @@ async def _get_books_by_asins_unsettled(
             if hit:
                 fallback_results.append(hit)
         if fallback_results or cached_results:
+            # Both segments are cache reads -- cached_results from the
+            # pre-fetch batch lookup, fallback_results from this outage
+            # fallback's own -- so they're one source, one token, added
+            # together rather than as two separate calls.
+            record_source_keys(
+                facts,
+                SOURCE_CACHE,
+                [b["asin"] for b in cached_results] + [b["asin"] for b in fallback_results],
+            )
             return cached_results + fallback_results
 
         raise NotFoundException("Audible unavailable and no cached data found")
@@ -851,9 +904,11 @@ async def get_book_by_asin(
     region: str,
     session: AsyncSession,
     use_cache: bool = False,
+    *,
+    facts: ResponseFacts | None = None,
 ) -> dict[str, Any]:
     """Fetches a single book by ASIN."""
-    books = await get_books_by_asins([asin], region, session, use_cache)
+    books = await get_books_by_asins([asin], region, session, use_cache, facts=facts)
     if not books:
         raise NotFoundException(f"Book not found: {asin}")
     return books[0]
@@ -863,10 +918,17 @@ async def get_chapters(
     asin: str,
     region: str,
     session: AsyncSession,
+    *,
+    facts: ResponseFacts | None = None,
 ) -> dict[str, Any]:
     """
     Fetches chapter information for a book by ASIN.
     Returns data matching AudiMeta's TrackContentDto format.
+
+    Single-source by construction -- audible, then db, then cache, never more
+    than one per call -- so facts takes exactly one record_source per return
+    path rather than the per-element tally _get_books_by_asins_unsettled
+    needs.
     """
     try:
         path = f"/1.0/content/{asin}/metadata"
@@ -892,6 +954,7 @@ async def get_chapters(
             "region": region,
         })
 
+        record_source(facts, SOURCE_AUDIBLE)
         return result
 
     except NotFoundException:
@@ -901,11 +964,13 @@ async def get_chapters(
         # Try DB first
         db_result = await get_track_from_db(session, asin)
         if db_result:
+            record_source(facts, SOURCE_DB)
             return db_result
 
         # Fall back to cache
         cached = await cache.get(session, chapters_key(asin, region))
         if cached:
+            record_source(facts, SOURCE_CACHE)
             return cached
 
         raise NotFoundException("Audible unavailable and no cached chapter data found")

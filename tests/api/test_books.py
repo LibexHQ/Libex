@@ -13,6 +13,8 @@ from httpx import AsyncClient, ASGITransport
 
 # Local
 from app.main import app
+from app.api.routes.large_response import LARGE_RESPONSE_THREAD_THRESHOLD
+from app.core.response_headers import SOURCE_AUDIBLE, SOURCE_CACHE, record_source, record_source_keys
 
 
 @pytest.fixture
@@ -327,3 +329,176 @@ async def test_cache_hit_serves_the_identical_response_body_a_live_fetch_would(a
     mock_audible_get.assert_not_called()
     assert cached_response.status_code == 200
     assert cached_response.json() == live_body
+
+# ============================================================
+# CACHE DEFAULT FLIP -- omitting cache now reads the cache
+# ============================================================
+# /book/{asin} and /book (bulk) are two of the Standard routes flipped from
+# cache=False to cache=True. See cache_param.CacheStandardParam for why.
+
+
+@pytest.mark.asyncio
+async def test_get_book_omits_cache_param_and_reads_the_cache_by_default(async_client):
+    with patch("app.api.routes.books.router.get_book_by_asin", new_callable=AsyncMock) as mock:
+        mock.return_value = MOCK_BOOK
+        await async_client.get("/book/B08G9PRS1K")
+    assert mock.call_args[0][3] is True
+
+
+@pytest.mark.asyncio
+async def test_get_book_cache_false_skips_the_read_and_marks_the_response_no_store(async_client):
+    with patch("app.api.routes.books.router.get_book_by_asin", new_callable=AsyncMock) as mock:
+        mock.return_value = MOCK_BOOK
+        response = await async_client.get("/book/B08G9PRS1K?cache=false")
+    assert mock.call_args[0][3] is False
+    assert response.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.asyncio
+async def test_get_book_cache_true_sends_no_cache_control_header(async_client):
+    """apply_cache_control never sets a positive Cache-Control -- a
+    cache=true response (or the omitted-param default, same value) carries
+    none at all, matching the eight of ten routes that sent no
+    Cache-Control before this parameter existed."""
+    with patch("app.api.routes.books.router.get_book_by_asin", new_callable=AsyncMock) as mock:
+        mock.return_value = MOCK_BOOK
+        response = await async_client.get("/book/B08G9PRS1K?cache=true")
+    assert "cache-control" not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_get_books_bulk_omits_cache_param_and_reads_the_cache_by_default(async_client):
+    with patch("app.api.routes.books.router.get_books_by_asins", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        await async_client.get(f"/book?asins={MOCK_BOOK['asin']}")
+    assert mock.call_args[0][3] is True
+
+
+@pytest.mark.asyncio
+async def test_get_books_bulk_cache_false_marks_the_response_no_store(async_client):
+    with patch("app.api.routes.books.router.get_books_by_asins", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        response = await async_client.get(f"/book?asins={MOCK_BOOK['asin']}&cache=false")
+    assert mock.call_args[0][3] is False
+    assert response.headers["cache-control"] == "no-store"
+
+
+# ============================================================
+# X-LIBEX-SOURCE / X-LIBEX-COMPLETE -- stamped from the router's facts ledger
+# ============================================================
+# These mock the service one call above the router (get_book_by_asin /
+# get_books_by_asins), with a side_effect that records onto the real
+# ResponseFacts the router constructs and passes in -- so what's under test
+# is the router's own stamping logic (_stamp_facts_headers, and
+# get_book's inline equivalent), not the service's own accounting, which
+# tests/services/test_books_service.py already covers.
+
+
+@pytest.mark.asyncio
+async def test_get_book_source_header_reflects_the_single_recorded_source(async_client):
+    async def fake_get_book(asin, region, session, cache, *, facts=None):
+        record_source(facts, SOURCE_CACHE)
+        return MOCK_BOOK
+
+    with patch("app.api.routes.books.router.get_book_by_asin", side_effect=fake_get_book):
+        response = await async_client.get("/book/B08G9PRS1K")
+
+    assert response.headers["x-libex-source"] == "cache"
+    assert response.headers["x-libex-complete"] == "true"
+
+
+@pytest.mark.asyncio
+async def test_get_books_bulk_source_header_is_mixed_with_counts_summing_to_the_body(async_client):
+    async def fake_get_books_by_asins(asin_list, region, session, cache, *, facts=None):
+        record_source_keys(facts, SOURCE_AUDIBLE, ["B000000000", "B000000001"])
+        record_source_keys(facts, SOURCE_CACHE, ["B000000002"])
+        return [{**MOCK_BOOK, "asin": f"B{i:09d}"} for i in range(3)]
+
+    with patch("app.api.routes.books.router.get_books_by_asins", side_effect=fake_get_books_by_asins):
+        response = await async_client.get("/book?asins=B000000001,B000000002,B000000003")
+
+    assert response.status_code == 200
+    source_header = response.headers["x-libex-source"]
+    assert source_header == "mixed; audible=2; cache=1"
+    counts = [int(part.split("=")[1]) for part in source_header.split(";")[1:]]
+    assert sum(counts) == len(response.json()["books"])
+
+
+@pytest.mark.asyncio
+async def test_get_books_bulk_source_header_omitted_when_post_filter_body_is_empty(async_client):
+    """filter_dicts can empty a body after facts already recorded a source
+    for what was fetched -- the header must follow the body actually sent,
+    not the tally recorded before filtering ran, or a caller would see a
+    source attributed to zero returned elements."""
+
+    async def fake_get_books_by_asins(asin_list, region, session, cache, *, facts=None):
+        record_source(facts, SOURCE_AUDIBLE, 1)
+        return [MOCK_BOOK]  # rating 4.5
+
+    with patch("app.api.routes.books.router.get_books_by_asins", side_effect=fake_get_books_by_asins):
+        response = await async_client.get(
+            f"/book?asins={MOCK_BOOK['asin']}&rating_better_than=999"
+        )
+
+    assert response.status_code == 200
+    assert response.json()["books"] == []
+    assert "x-libex-source" not in response.headers
+    # X-Libex-Complete is unconditional and unaffected by the same emptying.
+    assert response.headers["x-libex-complete"] == "true"
+
+
+@pytest.mark.asyncio
+async def test_get_books_bulk_source_header_names_only_the_filter_survivors_source(async_client):
+    """The exact reproduction of the shipped defect: two books fetched, one
+    from Audible and one from cache, a filter that removes the cache-sourced
+    one. The header must read the plain "audible" token for the one
+    surviving book -- never "mixed", and never a "cache" parameter naming a
+    source that contributed nothing to the body actually sent."""
+    audible_book = {**MOCK_BOOK, "asin": "B000000001", "rating": 4.9}
+    cache_book = {**MOCK_BOOK, "asin": "B000000002", "rating": 1.0}
+
+    async def fake_get_books_by_asins(asin_list, region, session, cache, *, facts=None):
+        record_source_keys(facts, SOURCE_AUDIBLE, [audible_book["asin"]])
+        record_source_keys(facts, SOURCE_CACHE, [cache_book["asin"]])
+        return [audible_book, cache_book]
+
+    with patch("app.api.routes.books.router.get_books_by_asins", side_effect=fake_get_books_by_asins):
+        response = await async_client.get(
+            f"/book?asins={audible_book['asin']},{cache_book['asin']}&rating_better_than=3.0"
+        )
+
+    assert response.status_code == 200
+    body = response.json()["books"]
+    assert [b["asin"] for b in body] == [audible_book["asin"]]
+    assert response.headers["x-libex-source"] == "audible"
+
+
+# ============================================================
+# LARGE-RESPONSE TRAP -- headers must survive the offloaded path too
+# ============================================================
+# tests/api/test_large_response.py already proves the helper itself merges
+# an injected response's headers. This proves the real route wiring gets a
+# real header there in the first place, above the threshold, where the
+# normal FastAPI header merge is bypassed in favour of the helper's own.
+
+
+@pytest.mark.asyncio
+async def test_bulk_books_above_threshold_still_carries_facts_and_cache_headers(async_client):
+    n = LARGE_RESPONSE_THREAD_THRESHOLD
+    books = [{**MOCK_BOOK, "asin": f"B{i:09d}"} for i in range(n)]
+    found_asins = [b["asin"] for b in books]
+
+    async def fake_get_books_by_asins(asin_list, region, session, cache, *, facts=None):
+        record_source_keys(facts, SOURCE_AUDIBLE, found_asins)
+        return books
+
+    with patch("app.api.routes.books.router.get_books_by_asins", side_effect=fake_get_books_by_asins):
+        response = await async_client.get(
+            f"/book?asins={','.join(found_asins)}&cache=false"
+        )
+
+    assert response.status_code == 200
+    assert len(response.json()["books"]) == n
+    assert response.headers["x-libex-source"] == "audible"
+    assert response.headers["x-libex-complete"] == "true"
+    assert response.headers["cache-control"] == "no-store"

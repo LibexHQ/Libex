@@ -23,6 +23,7 @@ from app.services.audible.client import validate_region
 from app.core.logging import get_logger
 from app.core.exceptions import RegionException
 from app.core.migration_notice import MigrationNotice, MIGRATION_HEADER_NAMES, is_new_host_request
+from app.core.response_headers import HEADER_REQUEST_ID, EXPOSED_HEADER_NAMES
 
 logger = get_logger()
 
@@ -248,10 +249,32 @@ _SLOW_HEALTH_MS = 1000.0
 
 class LoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
+        # Minted here and nowhere else. Never taken from a caller-supplied
+        # X-Request-Id header, even though echoing one back is the "standard
+        # practice" a later change will be tempted to add: an id a caller
+        # chose is an id that same caller can reuse to correlate their own
+        # requests to Libex with each other, or hand to Libex on someone
+        # else's behalf, and either way it is caller-supplied text landing in
+        # a log field this module otherwise goes to real lengths (see
+        # _redact_query) to keep clean of exactly that.
         request_id = str(uuid.uuid4())
+        # Set on request.state before call_next, not after, so it is there
+        # for the rest of this request's life -- including the generic 500
+        # handler in app.main, which runs inside ServerErrorMiddleware,
+        # outside every middleware setup_middleware registers, this one
+        # included, and so can read nothing this middleware does after
+        # call_next returns. request.state is the one thing shared across
+        # every Request object built from the same ASGI scope, which is what
+        # makes it reachable from there at all.
+        request.state.request_id = request_id
         start = time.monotonic()
         response = await call_next(request)
         took = round((time.monotonic() - start) * 1000, 2)
+
+        # Stamped before the /health branch below returns, so /health
+        # carries it too -- this identifies the request, not the work the
+        # request triggered, and /health is a request like any other.
+        response.headers[HEADER_REQUEST_ID] = request_id
 
         if request.url.path == "/health":
             if took >= _SLOW_HEALTH_MS:
@@ -353,7 +376,13 @@ def setup_middleware(app: FastAPI, migration_notice: MigrationNotice | None = No
         allow_credentials=False,
         allow_methods=["GET"],
         allow_headers=["*"],
-        expose_headers=list(MIGRATION_HEADER_NAMES),
+        # dict.fromkeys dedupes while keeping first-seen order -- unlike
+        # set(), whose iteration order Access-Control-Expose-Headers (a
+        # single comma-joined header value) has no business depending on.
+        # There is no overlap between the two tuples today; the union is
+        # written this way so one added later still dedupes instead of
+        # repeating a name in the header.
+        expose_headers=list(dict.fromkeys((*EXPOSED_HEADER_NAMES, *MIGRATION_HEADER_NAMES))),
     )
 
     logger.info("Middleware configured")

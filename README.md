@@ -52,7 +52,7 @@ Libex exists to be a permanent, community-owned alternative:
 - **MIT licensed** — no restrictions, fork it, build on it, use it however you want
 - **No usage restrictions** — works with any software, any workflow
 - **Drop-in replacement** — compatible with AudiMeta's API endpoints
-- **Audible-first** — always fetches fresh data, the local database is a fallback not a crutch
+- **Audible-first** — Audible is the source of truth; the local database is a fallback and a cache, not a crutch
 - **Persistent local library** — every book, author, and series ever requested is stored and queryable
 - **All regions** — full support for all Audible markets without language restrictions
 - **Self-hostable** — one `docker compose up` and you're running

@@ -28,7 +28,7 @@ from app.core.response_headers import (
 # from what response_headers.py actually recognizes as valid, the same
 # reason the sort/filter enums are built from their own service allow-lists
 # rather than copied by hand.
-_FACTS_RESPONSE_HEADERS = {
+FACTS_RESPONSE_HEADERS = {
     HEADER_SOURCE: {
         "description": (
             "Where the entity element(s) in this response came from: "
@@ -62,14 +62,14 @@ _FACTS_RESPONSE_HEADERS = {
 # mark completeness through _mark_completeness in authors/router.py, on the
 # discovery walk's own success, not through anything this module's
 # X-Libex-Source/X-Libex-Incomplete-Reason machinery tracks. Declaring the
-# full _FACTS_RESPONSE_HEADERS block on them would document two headers
+# full FACTS_RESPONSE_HEADERS block on them would document two headers
 # they never send. This is the subset they actually do.
-_COMPLETE_ONLY_RESPONSE_HEADERS = {
-    HEADER_COMPLETE: _FACTS_RESPONSE_HEADERS[HEADER_COMPLETE],
+COMPLETE_ONLY_RESPONSE_HEADERS = {
+    HEADER_COMPLETE: FACTS_RESPONSE_HEADERS[HEADER_COMPLETE],
 }
 
 
-def _stamp_facts_headers(
+def stamp_facts_headers(
     response: Response,
     facts: ResponseFacts,
     *,

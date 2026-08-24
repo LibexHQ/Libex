@@ -20,9 +20,9 @@ from app.api.routes.authors.schemas import AuthorResponse
 from app.api.routes.books.schemas import BookResponse
 from app.api.routes.cache_param import CacheAuthorBooksParam, CacheStandardParam, apply_cache_control
 from app.api.routes.facts_headers import (
-    _COMPLETE_ONLY_RESPONSE_HEADERS,
-    _FACTS_RESPONSE_HEADERS,
-    _stamp_facts_headers,
+    COMPLETE_ONLY_RESPONSE_HEADERS,
+    FACTS_RESPONSE_HEADERS,
+    stamp_facts_headers,
 )
 from app.api.routes.large_response import build_large_list_response
 from app.api.routes.sort_params import BookSortField, SortOrder
@@ -43,7 +43,7 @@ from app.services.filtering import filter_dicts
 # Core
 from app.core.middleware import is_valid_asin, valid_region
 from app.core.exceptions import NotFoundException
-from app.core.response_headers import ResponseFacts
+from app.core.response_headers import HEADER_COMPLETE, ResponseFacts
 
 router = APIRouter(prefix="/author", tags=["Authors"])
 
@@ -150,7 +150,7 @@ def _mark_completeness(
     constant for why a just-walked result has no trustworthy remaining life
     to quote.
     """
-    response.headers["X-Libex-Complete"] = "true" if is_complete else "false"
+    response.headers[HEADER_COMPLETE] = "true" if is_complete else "false"
 
     if not is_complete:
         response.headers["Cache-Control"] = "no-store"
@@ -187,7 +187,7 @@ def _mark_completeness(
 @router.get(
     "/books/{asin}",
     response_model=list[BookResponse],
-    responses={200: {"headers": _COMPLETE_ONLY_RESPONSE_HEADERS}},
+    responses={200: {"headers": COMPLETE_ONLY_RESPONSE_HEADERS}},
 )
 async def get_books_by_author(
     asin: Annotated[str, Path(description="Author ASIN")],
@@ -264,7 +264,7 @@ async def get_books_by_author(
     "/{asin}/books",
     response_model=list[BookResponse],
     include_in_schema=False,
-    responses={200: {"headers": _COMPLETE_ONLY_RESPONSE_HEADERS}},
+    responses={200: {"headers": COMPLETE_ONLY_RESPONSE_HEADERS}},
 )
 async def get_books_by_author_primary(
     asin: Annotated[str, Path(description="Author ASIN")],
@@ -322,7 +322,7 @@ async def get_books_by_author_primary(
     )
 
 
-@router.get("/{asin}", response_model=AuthorResponse, responses={200: {"headers": _FACTS_RESPONSE_HEADERS}})
+@router.get("/{asin}", response_model=AuthorResponse, responses={200: {"headers": FACTS_RESPONSE_HEADERS}})
 async def get_author_by_asin(
     asin: Annotated[str, Path(description="Author ASIN")],
     response: Response,
@@ -346,5 +346,5 @@ async def get_author_by_asin(
     facts = ResponseFacts()
     data = await get_author(asin, region, session, cache, facts=facts)
     apply_cache_control(response, cache)
-    _stamp_facts_headers(response, facts, has_entities=True)
+    stamp_facts_headers(response, facts, has_entities=True)
     return AuthorResponse(**data)

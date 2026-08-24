@@ -19,7 +19,12 @@ holds the line:
       touched -- but only for that single form. `Response(headers={...})`,
       `.headers.update(...)` and `.setdefault(...)` are different
       assignment shapes the regex does not match at all, so a header added
-      through one of those is invisible to this scan.
+      through one of those is invisible to this scan. The extraction regex
+      is proven separately against a fixture, not against app/'s own
+      content: app/ now assigns zero custom headers this way (every one
+      goes through a HEADER_* constant instead), so the scan's own result
+      is always empty and can no longer double as proof the regex still
+      matches anything.
   (c) response walk -- for a representative request per route family, with
       services mocked, every x-libex-* header actually present on the
       response also appears in access-control-expose-headers, so a real
@@ -309,9 +314,9 @@ def test_cors_expose_headers_is_exactly_the_registry_unioned_with_migration_head
 
 
 def test_incomplete_reason_header_schema_declares_no_enum():
-    from app.api.routes.facts_headers import _FACTS_RESPONSE_HEADERS
+    from app.api.routes.facts_headers import FACTS_RESPONSE_HEADERS
 
-    schema = _FACTS_RESPONSE_HEADERS[HEADER_INCOMPLETE_REASON]["schema"]
+    schema = FACTS_RESPONSE_HEADERS[HEADER_INCOMPLETE_REASON]["schema"]
     assert "enum" not in schema
     assert schema["type"] == "string"
 
@@ -355,39 +360,69 @@ _APP_DIR = Path(__file__).resolve().parent.parent / "app"
 _HEADER_ASSIGNMENT_RE = re.compile(r"""\.headers\[\s*["']([^"']+)["']\s*\]\s*=""")
 
 
-def _custom_headers_assigned_in_app() -> set[str]:
-    """Every literal header name app/ assigns via the `.headers["Name"] =`
-    subscript form specifically -- not every way app/ can set a header --
+def _extract_custom_headers(text: str) -> set[str]:
+    """Every literal header name `text` assigns via the `.headers["Name"] =`
+    subscript form specifically -- not every way a header can be set --
     restricted to Libex's own custom vocabulary (the `X-` prefix), the part
     of the wire format response_headers.py actually claims ownership of.
     Standard headers Libex also sets by hand (Cache-Control,
     Access-Control-Allow-Origin, Access-Control-Expose-Headers) are a
     different, already-standard vocabulary with no registry of their own
     and are deliberately not in scope here.
+
+    Takes raw text rather than reading app/ itself, so the extraction logic
+    can be proven correct against a fixture (see
+    test_header_assignment_regex_extracts_a_known_positive below) as well as
+    run for real over app/'s own source (see
+    _custom_headers_assigned_in_app). The two are deliberately split: app/
+    assigning zero hand-typed X- header literals is the intended end state
+    (every one of them now goes through a HEADER_* constant instead), not a
+    result this function's own correctness can be inferred from -- a
+    fixture that does not depend on what app/ currently contains is what
+    tells a broken regex apart from a clean codebase.
     """
     found = set()
-    for path in _APP_DIR.rglob("*.py"):
-        text = path.read_text()
-        for match in _HEADER_ASSIGNMENT_RE.finditer(text):
-            name = match.group(1)
-            if name.lower().startswith("x-"):
-                found.add(name)
+    for match in _HEADER_ASSIGNMENT_RE.finditer(text):
+        name = match.group(1)
+        if name.lower().startswith("x-"):
+            found.add(name)
     return found
 
 
-def test_source_scan_finds_the_known_custom_headers():
-    """Sanity check on the scanner itself before trusting its negative
-    result below -- if this finds nothing, the regex is broken, not the
-    codebase clean."""
-    found = _custom_headers_assigned_in_app()
-    assert found, "the source scan found no X- header assignments in app/ at all"
+def _custom_headers_assigned_in_app() -> set[str]:
+    """_extract_custom_headers run for real over every .py file in app/."""
+    found = set()
+    for path in _APP_DIR.rglob("*.py"):
+        found |= _extract_custom_headers(path.read_text())
+    return found
+
+
+def test_header_assignment_regex_extracts_a_known_positive():
+    """Proves the scanner's extraction logic against a fixture, independent
+    of what app/ currently contains. app/ assigning zero hand-typed X-
+    header literals today -- every one of them now goes through a HEADER_*
+    constant -- is not, on its own, distinguishable from the regex having
+    stopped matching anything at all; this fixture is what keeps that
+    distinction available once the real scan's own result is always
+    empty. Covers both quote styles, and confirms a same-shape assignment
+    to a non-X- header is correctly left out, matching what
+    _extract_custom_headers itself filters on."""
+    fixture = (
+        'response.headers["X-Test-Header"] = "value"\n'
+        "response.headers['X-Other-Header'] = compute()\n"
+        'response.headers["Not-Custom"] = "value"\n'
+    )
+    assert _extract_custom_headers(fixture) == {"X-Test-Header", "X-Other-Header"}
 
 
 def test_every_custom_header_assigned_in_app_resolves_into_the_registry():
     """The one part of this module that inspection alone can't verify: a
     header assigned somewhere in app/ under a hand-typed literal name, with
     that literal never added to EXPOSED_HEADER_NAMES, is exactly the defect
-    this test exists to catch."""
+    this test exists to catch. Passes vacuously while app/ assigns no
+    custom header this way at all, which is the current, intended state --
+    the fixture-based test above is what proves that emptiness is app/
+    being clean and not this scan having quietly stopped working."""
     found = _custom_headers_assigned_in_app()
     unregistered = found - set(EXPOSED_HEADER_NAMES)
     assert not unregistered, f"assigned in app/ but never registered in EXPOSED_HEADER_NAMES: {unregistered}"

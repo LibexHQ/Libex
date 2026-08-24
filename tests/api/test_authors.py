@@ -327,8 +327,8 @@ async def test_the_author_profile_route_now_defaults_to_cache(async_client):
     once serves later requests, whoever asks -- cross-endpoint reuse, not
     walk cost, and that covers this route regardless of how cheap any one
     call is. The old pin is recorded here, still with its own reasoning
-    attached, precisely so the next reader sees a decision that was
-    revisited on new grounds rather than a pin that just vanished."""
+    attached, as a decision that was revisited on new grounds rather than
+    a pin that just vanished."""
     with patch("app.api.routes.authors.router.get_author", new_callable=AsyncMock) as mock_author:
         mock_author.return_value = MOCK_AUTHOR
         response = await async_client.get("/author/B000APF21M")
@@ -719,6 +719,7 @@ async def test_get_author_books_rejects_invalid_asin(async_client):
     assert response.status_code == 404
     assert "Invalid ASIN" in response.json()["error"]
 
+
 # ============================================================
 # /author/{asin} -- CACHE-CONTROL AND X-LIBEX-SOURCE
 # ============================================================
@@ -771,8 +772,6 @@ async def test_author_profile_source_header_reflects_the_recorded_source(async_c
 
 
 def test_get_books_by_author_declares_only_the_completeness_header_in_openapi():
-    from app.main import app
-
     schema = app.openapi()
     headers = schema["paths"]["/author/books/{asin}"]["get"]["responses"]["200"]["headers"]
     assert set(headers) == {"X-Libex-Complete"}

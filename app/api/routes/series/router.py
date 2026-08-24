@@ -17,7 +17,7 @@ from app.db.session import get_session
 from app.api.routes.series.schemas import SeriesResponse
 from app.api.routes.books.schemas import BookResponse
 from app.api.routes.cache_param import CacheStandardParam, apply_cache_control
-from app.api.routes.facts_headers import _FACTS_RESPONSE_HEADERS, _stamp_facts_headers
+from app.api.routes.facts_headers import FACTS_RESPONSE_HEADERS, stamp_facts_headers
 from app.api.routes.sort_params import BookSortField, SortOrder
 from app.api.routes.filter_params import LiveBookFilters
 
@@ -64,7 +64,7 @@ async def search_legacy(
     return [SeriesResponse(**s) for s in results]
 
 
-@router.get("/books/{asin}", response_model=list[BookResponse], responses={200: {"headers": _FACTS_RESPONSE_HEADERS}})
+@router.get("/books/{asin}", response_model=list[BookResponse], responses={200: {"headers": FACTS_RESPONSE_HEADERS}})
 async def get_books_by_series(
     asin: Annotated[str, Path(description="Series ASIN")],
     response: Response,
@@ -86,19 +86,13 @@ async def get_books_by_series(
     asins = await get_series_books(asin, region, session, cache)
     if not asins:
         raise NotFoundException("No books found for series")
-    # `cache` above governs only the series-relationships read that
-    # resolves the ASIN list; hydration below always fetches live
-    # regardless of it, an asymmetry this route carries on its own
-    # merits -- see cache_param.CacheStandardParam for the reasoning. facts
-    # below is opened for that hydration call alone, so it describes only
-    # the books actually in the body, never the discovery read above.
     facts = ResponseFacts()
-    books = await get_books_by_asins(asins, region, session, facts=facts)
+    books = await get_books_by_asins(asins, region, session, use_cache=cache, facts=facts)
     books = filter_dicts(books, filters.as_kwargs())
     books = sort_dicts(books, sort.value if sort is not None else None, order.value, BOOK_SORT_FIELDS)
     apply_cache_control(response, cache)
     body_keys = [book["asin"] for book in books]
-    _stamp_facts_headers(response, facts, has_entities=bool(books), body_keys=body_keys)
+    stamp_facts_headers(response, facts, has_entities=bool(books), body_keys=body_keys)
     return [BookResponse(**b) for b in books]
 
 
@@ -106,7 +100,7 @@ async def get_books_by_series(
     "/{asin}/books",
     response_model=list[BookResponse],
     include_in_schema=False,
-    responses={200: {"headers": _FACTS_RESPONSE_HEADERS}},
+    responses={200: {"headers": FACTS_RESPONSE_HEADERS}},
 )
 async def get_books_by_series_primary(
     asin: Annotated[str, Path(description="Series ASIN")],
@@ -125,16 +119,16 @@ async def get_books_by_series_primary(
     if not asins:
         raise NotFoundException("No books found for series")
     facts = ResponseFacts()
-    books = await get_books_by_asins(asins, region, session, facts=facts)
+    books = await get_books_by_asins(asins, region, session, use_cache=cache, facts=facts)
     books = filter_dicts(books, filters.as_kwargs())
     books = sort_dicts(books, sort.value if sort is not None else None, order.value, BOOK_SORT_FIELDS)
     apply_cache_control(response, cache)
     body_keys = [book["asin"] for book in books]
-    _stamp_facts_headers(response, facts, has_entities=bool(books), body_keys=body_keys)
+    stamp_facts_headers(response, facts, has_entities=bool(books), body_keys=body_keys)
     return [BookResponse(**b) for b in books]
 
 
-@router.get("/{asin}", response_model=SeriesResponse, responses={200: {"headers": _FACTS_RESPONSE_HEADERS}})
+@router.get("/{asin}", response_model=SeriesResponse, responses={200: {"headers": FACTS_RESPONSE_HEADERS}})
 async def get_series_by_asin(
     asin: Annotated[str, Path(description="Series ASIN")],
     response: Response,
@@ -148,5 +142,5 @@ async def get_series_by_asin(
     facts = ResponseFacts()
     data = await get_series(asin, region, session, cache, facts=facts)
     apply_cache_control(response, cache)
-    _stamp_facts_headers(response, facts, has_entities=True)
+    stamp_facts_headers(response, facts, has_entities=True)
     return SeriesResponse(**data)

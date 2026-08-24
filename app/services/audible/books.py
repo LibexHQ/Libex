@@ -17,8 +17,22 @@ tri-state flag settling that every return path goes through has to treat
 whichever of the three produced a given element identically. A seam drawn
 between fetch and fallback would need each side holding the internals of the
 shape the other one produces, which is a shared contract stretched across
-two files rather than a boundary. The module stays long because the job is
-one job.
+two files rather than a boundary.
+
+A second cluster shares the module without sharing that job:
+_normalize_chapters, get_chapters, fetch_and_store_chapters, and
+_mark_chapters_checked fetch a book's chapter listing from Audible's own
+/1.0/content/{asin}/metadata endpoint, normalize it into TrackContentDto
+rather than BookDto, and persist it to its own table (Track) under its own
+cache key -- never touching get_books_by_asins' fallback ladder, its DB
+backstop, its facts ledger, or the tri-state flag settling above. The one
+real tie to the rest of the module is _mark_chapters_checked stamping
+chapters_checked_at on the same Book row the ladder resolves, coordinating
+with the standalone chapters backfill so neither re-checks what the other
+already covered; past that one column, the cluster is its own job, sharing
+an ASIN and a file with the ladder above rather than a boundary. The module
+stays long because it holds one long job and one short one that happens to
+touch the same row.
 """
 
 # Standard library
@@ -39,10 +53,14 @@ from app.db.models import Book
 from app.core.exceptions import NotFoundException
 from app.core.logging import get_logger
 from app.core.response_headers import (
+    REASON_HYDRATION_DEADLINE,
+    REASON_HYDRATION_FAILED,
+    REASON_HYDRATION_NOT_FOUND,
     ResponseFacts,
     SOURCE_AUDIBLE,
     SOURCE_CACHE,
     SOURCE_DB,
+    record_incomplete,
     record_source,
     record_source_keys,
 )
@@ -767,6 +785,7 @@ async def _get_books_by_asins_unsettled(
             for task in tasks:
                 if task.cancelled():
                     results.append(HydrationDeadlineExceeded())
+                    record_incomplete(facts, REASON_HYDRATION_DEADLINE)
                 elif task.exception() is not None:
                     results.append(task.exception())
                 else:
@@ -794,6 +813,7 @@ async def _get_books_by_asins_unsettled(
                 # not a reason to discard everything else that already
                 # succeeded.
                 not_found_asins.extend(chunk)
+                record_incomplete(facts, REASON_HYDRATION_NOT_FOUND)
                 continue
             if isinstance(result, Exception):
                 transient_failed_asins.extend(chunk)
@@ -839,6 +859,11 @@ async def _get_books_by_asins_unsettled(
         db_backstop_results: list[dict[str, Any]] = []
         if transient_failed_asins:
             db_backstop_results = await get_books_from_db(session, transient_failed_asins)
+            # The backstop covers what the DB actually had; anything still
+            # missing after it is a real shortfall the caller has to be told
+            # about, not just an internal retry detail.
+            if len(db_backstop_results) < len(transient_failed_asins):
+                record_incomplete(facts, REASON_HYDRATION_FAILED)
 
         normalized = await _normalize_products(all_products, region)
 
@@ -873,6 +898,7 @@ async def _get_books_by_asins_unsettled(
         if db_results:
             record_source_keys(facts, SOURCE_CACHE, [b["asin"] for b in cached_results])
             record_source_keys(facts, SOURCE_DB, [b["asin"] for b in db_results])
+            record_incomplete(facts, REASON_HYDRATION_FAILED)
             return cached_results + db_results
 
         # Fall back to cache for the misses -- one lookup, same as the
@@ -894,6 +920,7 @@ async def _get_books_by_asins_unsettled(
                 SOURCE_CACHE,
                 [b["asin"] for b in cached_results] + [b["asin"] for b in fallback_results],
             )
+            record_incomplete(facts, REASON_HYDRATION_FAILED)
             return cached_results + fallback_results
 
         raise NotFoundException("Audible unavailable and no cached data found")

@@ -20,26 +20,37 @@ from fastapi import Query, Response
 # VARIANT 1 -- STANDARD
 # ============================================================
 
-# Single-entity routes where one cache read decides the whole response:
-# /book/{asin}, /book (bulk), /series/{asin}, /author/{asin}, and
-# /quick-search. Libex's own stored copy is served when one exists; `false`
-# forces a fresh Audible fetch, still stores whatever comes back exactly as
-# a cache hit would have, and marks this particular response uncacheable at
-# every downstream layer (see apply_cache_control below) so a caller's
-# explicit request for a fresh answer can't be served stale from a browser
-# or edge cache on the very next identical request.
+# /book/{asin}, /series/{asin}, /author/{asin}: single-entity routes where
+# one cache read decides the whole response. Libex's own stored copy is
+# served when one exists; `false` forces a fresh Audible fetch, still
+# stores whatever comes back exactly as a cache hit would have, and marks
+# this particular response uncacheable at every downstream layer (see
+# apply_cache_control below) so a caller's explicit request for a fresh
+# answer can't be served stale from a browser or edge cache on the very
+# next identical request.
 #
-# /series/books/{asin} also uses this variant, with one asymmetry worth
-# naming on its own terms: `cache` there governs only the series-relationships
-# read that finds the ASIN list, not the per-book hydration that follows it,
-# which always fetches live regardless of this flag. That route's own
-# X-Libex-Source header describes hydration only -- the books actually in
-# the body -- so the header and the parameter answer two different
-# questions about the same request: what this flag decided, and where the
-# body's elements actually came from. A 50-book series hydrated live on
-# every request is the deliberate cost of that split; see
-# series/router.py's own get_books_by_series for why folding `cache` into
-# the hydration call too is backlogged rather than made here.
+# /book (bulk) and /quick-search take this same variant, but "one cache
+# read decides the whole response" is not literally true of either, and
+# each earns its own line rather than being folded silently under the
+# heading above:
+#
+# - /book (bulk) resolves many ASINs in one request. `cache` decides, for
+#   the batch as a whole, whether cache is consulted at all -- but the
+#   response can still mix sources within its own body: some ASINs served
+#   from cache, others fetched live, others recovered from the DB backstop.
+#   That mixing is the entire reason record_source_keys and the "mixed"
+#   token in X-Libex-Source exist. `false` still forces a fresh fetch for
+#   every ASIN and marks the whole response uncacheable, the same as the
+#   single-entity routes above.
+#
+# - /quick-search (and its /{region}/quick-search/search twin) is
+#   two-phase: a suggestions lookup that turns a partial name into
+#   candidate titles/authors, followed by hydrating those candidates into
+#   full book objects. The suggestions phase always calls Audible live, on
+#   every request, regardless of this flag -- `cache` reaches only the
+#   hydration phase that follows it. A caller told this endpoint serves a
+#   stored copy would reasonably expect the whole response to be warmable
+#   by a prior request; only the hydration half is.
 CacheStandardParam = Annotated[
     bool,
     Query(

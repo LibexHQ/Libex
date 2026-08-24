@@ -93,7 +93,15 @@ class BookResponse(BaseModel):
 
 class BulkBookResponse(BaseModel):
     books: list[BookResponse]
-    notFound: list[str] = Field(default_factory=list)
+    notFound: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Requested ASINs Audible could not resolve, computed before "
+            "filtering is applied. A book that was found and then removed "
+            "by a filter is not reported here -- it is simply absent from "
+            "both books and notFound."
+        ),
+    )
 
 
 # ============================================================

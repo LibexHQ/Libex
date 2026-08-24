@@ -134,16 +134,16 @@ async def get_series_books(
     region: str,
     session: AsyncSession,
     use_cache: bool = False,
-    *,
-    facts: ResponseFacts | None = None,
 ) -> list[str]:
     """
     Fetches all book ASINs for a series, sorted by position.
     Uses relationships response group from the series product endpoint.
 
-    Single-source by construction -- cache, then audible, then cache again,
-    never more than one per call -- so facts takes exactly one record_source
-    per return path.
+    Carries no facts parameter: this discovery read only ever produces a
+    list of ASINs, never the books a route sends in its body, so nothing it
+    resolves belongs in a ledger scoped to what the caller actually
+    receives. series/router.py opens facts for the hydration call alone,
+    describing only the books that make it into the response.
     """
     if use_cache:
         cached = await cache.get(session, series_books_key(asin, region))
@@ -169,7 +169,6 @@ async def get_series_books(
         # re-acquires transparently.
         await session.rollback()
         if cached:
-            record_source(facts, SOURCE_CACHE)
             return cached
 
     try:
@@ -202,7 +201,6 @@ async def get_series_books(
             "region": region,
         })
 
-        record_source(facts, SOURCE_AUDIBLE)
         return asins
 
     except NotFoundException:
@@ -211,7 +209,6 @@ async def get_series_books(
     except Exception:
         cached = await cache.get(session, series_books_key(asin, region))
         if cached:
-            record_source(facts, SOURCE_CACHE)
             return cached
         raise NotFoundException("Audible unavailable and no cached series books found")
 

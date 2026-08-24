@@ -17,7 +17,7 @@ from app.db.session import get_session
 # Routes
 from app.api.routes.books.schemas import BookResponse, BulkBookResponse, ChapterResponse
 from app.api.routes.cache_param import CacheStandardParam, apply_cache_control
-from app.api.routes.facts_headers import _FACTS_RESPONSE_HEADERS, _stamp_facts_headers
+from app.api.routes.facts_headers import FACTS_RESPONSE_HEADERS, stamp_facts_headers
 from app.api.routes.large_response import build_large_list_response
 from app.api.routes.sort_params import BookSortField, SortOrder
 from app.api.routes.filter_params import LiveBookFilters
@@ -54,7 +54,7 @@ async def get_books_by_sku(
         raise NotFoundException(f"No books found for SKU: {sku}")
     return books
 
-@router.get("/{asin}", response_model=BookResponse, responses={200: {"headers": _FACTS_RESPONSE_HEADERS}})
+@router.get("/{asin}", response_model=BookResponse, responses={200: {"headers": FACTS_RESPONSE_HEADERS}})
 async def get_book(
     asin: Annotated[str, Path(description="Audible ASIN")],
     response: Response,
@@ -71,11 +71,11 @@ async def get_book(
     facts = ResponseFacts()
     data = await get_book_by_asin(asin, region, session, cache, facts=facts)
     apply_cache_control(response, cache)
-    _stamp_facts_headers(response, facts, has_entities=True)
+    stamp_facts_headers(response, facts, has_entities=True)
     return BookResponse(**data)
 
 
-@router.get("/{asin}/chapters", response_model=ChapterResponse, responses={200: {"headers": _FACTS_RESPONSE_HEADERS}})
+@router.get("/{asin}/chapters", response_model=ChapterResponse, responses={200: {"headers": FACTS_RESPONSE_HEADERS}})
 async def get_book_chapters(
     asin: Annotated[str, Path(description="Audible ASIN")],
     response: Response,
@@ -87,7 +87,7 @@ async def get_book_chapters(
         raise NotFoundException(f"Invalid ASIN format: {asin}")
     facts = ResponseFacts()
     data = await get_chapters(asin, region, session, facts=facts)
-    _stamp_facts_headers(response, facts, has_entities=True)
+    stamp_facts_headers(response, facts, has_entities=True)
     return ChapterResponse(**data)
 
 
@@ -95,7 +95,7 @@ async def get_book_chapters(
     "/chapters/{asin}",
     response_model=ChapterResponse,
     include_in_schema=False,
-    responses={200: {"headers": _FACTS_RESPONSE_HEADERS}},
+    responses={200: {"headers": FACTS_RESPONSE_HEADERS}},
 )
 async def get_book_chapters_legacy(
     asin: Annotated[str, Path(description="Audible ASIN")],
@@ -108,11 +108,11 @@ async def get_book_chapters_legacy(
         raise NotFoundException(f"Invalid ASIN format: {asin}")
     facts = ResponseFacts()
     data = await get_chapters(asin, region, session, facts=facts)
-    _stamp_facts_headers(response, facts, has_entities=True)
+    stamp_facts_headers(response, facts, has_entities=True)
     return ChapterResponse(**data)
 
 
-@router.get("", response_model=BulkBookResponse, responses={200: {"headers": _FACTS_RESPONSE_HEADERS}})
+@router.get("", response_model=BulkBookResponse, responses={200: {"headers": FACTS_RESPONSE_HEADERS}})
 async def get_books_bulk(
     asins: Annotated[list[str], Query(description="ASINs — comma-separated, repeated params, or both. Max 1000.")],
     response: Response,
@@ -157,8 +157,15 @@ async def get_books_bulk(
     data = sort_dicts(data, sort.value if sort is not None else None, order.value, BOOK_SORT_FIELDS)
 
     apply_cache_control(response, cache)
-    body_keys = {book["asin"] for book in data}
-    _stamp_facts_headers(response, facts, has_entities=bool(data), body_keys=body_keys)
+    # A list, not a set: source_header_value_for counts one contributing
+    # source per element it iterates, matching X-Libex-Source's own
+    # "count per contributing source when more than one produced elements
+    # in the body" -- a set would collapse a repeated ASIN in the body to
+    # one count and understate the tally, the same undercount
+    # source_header_value_for's own docstring treats as a fabricated-
+    # provenance failure rather than a harmless simplification.
+    body_keys = [book["asin"] for book in data]
+    stamp_facts_headers(response, facts, has_entities=bool(data), body_keys=body_keys)
 
     return await build_large_list_response(
         BulkBookResponse,

@@ -187,8 +187,6 @@ async def test_bulk_books_near_the_1000_asin_cap_returns_every_book(async_client
     LARGE_RESPONSE_THREAD_THRESHOLD -- this is the offload path from
     app.api.routes.large_response, not the inline one, and it must still
     return every book found plus an accurate notFound list."""
-    from app.api.routes.large_response import LARGE_RESPONSE_THREAD_THRESHOLD
-
     n = 999
     assert n + 1 >= LARGE_RESPONSE_THREAD_THRESHOLD
     books = [{**MOCK_BOOK, "asin": f"B{i:09d}"} for i in range(n)]
@@ -389,9 +387,13 @@ async def test_get_books_bulk_cache_false_marks_the_response_no_store(async_clie
 # These mock the service one call above the router (get_book_by_asin /
 # get_books_by_asins), with a side_effect that records onto the real
 # ResponseFacts the router constructs and passes in -- so what's under test
-# is the router's own stamping logic (_stamp_facts_headers, and
-# get_book's inline equivalent), not the service's own accounting, which
-# tests/services/test_books_service.py already covers.
+# is the router's own stamping logic (stamp_facts_headers, which every
+# endpoint in this router calls), not which source get_book_by_asin/
+# get_books_by_asins itself credits for a given ASIN. That per-key
+# attribution -- including the mixed-source and DB-backstop/outage-fallback
+# cases a router-level mock can't reach -- is covered by the
+# "RESPONSE FACTS -- SOURCE ATTRIBUTION" section of
+# tests/services/test_books_service.py.
 
 
 @pytest.mark.asyncio
@@ -405,6 +407,36 @@ async def test_get_book_source_header_reflects_the_single_recorded_source(async_
 
     assert response.headers["x-libex-source"] == "cache"
     assert response.headers["x-libex-complete"] == "true"
+
+
+@pytest.mark.asyncio
+async def test_get_book_source_header_false_on_a_real_hydration_shortfall(async_client):
+    """The false branch, through the real stack rather than a router-level
+    fake facts recorder: Audible down, the pre-fetch cache empty, and the
+    DB backstop the only thing that answers. What has to reach this
+    response is get_books_by_asins' own record_incomplete call on its
+    outage DB-fallback path (REASON_HYDRATION_FAILED, see books.py) running
+    for real, not a stand-in for it -- until now this branch has never been
+    reachable in production, so nothing exercised it against real code
+    either."""
+    db_book = {**MOCK_BOOK}
+
+    with patch(
+        "app.services.audible.books.audible_get",
+        new=AsyncMock(side_effect=RuntimeError("Audible down")),
+    ), patch(
+        "app.services.audible.books.cache.get", new=AsyncMock(return_value=None)
+    ), patch(
+        "app.services.audible.books.get_books_from_db",
+        new=AsyncMock(return_value=[db_book]),
+    ):
+        response = await async_client.get("/book/B08G9PRS1K")
+
+    assert response.status_code == 200
+    assert response.json()["asin"] == db_book["asin"]
+    assert response.headers["x-libex-source"] == "db"
+    assert response.headers["x-libex-complete"] == "false"
+    assert response.headers["x-libex-incomplete-reason"] == "hydration-failed"
 
 
 @pytest.mark.asyncio

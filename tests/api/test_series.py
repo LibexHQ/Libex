@@ -352,16 +352,24 @@ async def test_get_series_cache_true_sends_no_cache_control_header(async_client)
 
 
 @pytest.mark.asyncio
-async def test_get_series_books_omits_cache_param_and_reads_the_discovery_cache_by_default(async_client):
-    """cache governs the discovery read (get_series_books), not the
-    hydration that follows -- see cache_param.CacheStandardParam's own
-    documented asymmetry for this route."""
+async def test_get_series_books_omits_cache_param_and_reads_the_cache_for_both_phases_by_default(async_client):
+    """cache governs discovery (get_series_books) and hydration
+    (get_books_by_asins) as one decision, not two. This is the regression
+    test for a live cache-miss loop on this route: hydration used to be
+    called without use_cache at all (defaulting to False), so discovery hit
+    the stored ASIN list every time while hydration silently refetched
+    every book from Audible and rewrote it to cache on every request --
+    three requests to the same series measured live at ~1.5s each with
+    cache_hits: 0 throughout. A fake that merely accepts use_cache without
+    checking it would pass whether or not the route actually threads the
+    value through, which is exactly how the defect shipped unnoticed."""
     with patch("app.api.routes.series.router.get_series_books", new_callable=AsyncMock) as mock_series, \
          patch("app.api.routes.series.router.get_books_by_asins", new_callable=AsyncMock) as mock_books:
         mock_series.return_value = ["B08G9PRS1K"]
         mock_books.return_value = [MOCK_BOOK]
         await async_client.get("/series/books/B00SERIES1")
     assert mock_series.call_args[0][3] is True
+    assert mock_books.call_args.kwargs["use_cache"] is True
 
 
 @pytest.mark.asyncio
@@ -372,6 +380,7 @@ async def test_get_series_books_cache_false_marks_the_response_no_store(async_cl
         mock_books.return_value = [MOCK_BOOK]
         response = await async_client.get("/series/books/B00SERIES1?cache=false")
     assert mock_series.call_args[0][3] is False
+    assert mock_books.call_args.kwargs["use_cache"] is False
     assert response.headers["cache-control"] == "no-store"
 
 
@@ -400,7 +409,7 @@ async def test_get_series_books_source_header_describes_hydration_only(async_cli
     ASINs (get_series_books) -- discovery records nothing onto facts at
     all on this route."""
 
-    async def fake_get_books(asin_list, region, session, *, facts=None):
+    async def fake_get_books(asin_list, region, session, *, use_cache=None, facts=None):
         record_source_keys(facts, SOURCE_CACHE, [MOCK_BOOK["asin"]])
         return [MOCK_BOOK]
 
@@ -430,7 +439,7 @@ async def test_get_series_books_source_header_names_only_the_filter_survivors_so
     actually sent."""
     audible_book, cache_book = _partial_filter_books()
 
-    async def fake_get_books(asin_list, region, session, *, facts=None):
+    async def fake_get_books(asin_list, region, session, *, use_cache=None, facts=None):
         record_source_keys(facts, SOURCE_AUDIBLE, [audible_book["asin"]])
         record_source_keys(facts, SOURCE_CACHE, [cache_book["asin"]])
         return [audible_book, cache_book]
@@ -451,7 +460,7 @@ async def test_get_series_books_primary_source_header_names_only_the_filter_surv
     named route above."""
     audible_book, cache_book = _partial_filter_books()
 
-    async def fake_get_books(asin_list, region, session, *, facts=None):
+    async def fake_get_books(asin_list, region, session, *, use_cache=None, facts=None):
         record_source_keys(facts, SOURCE_AUDIBLE, [audible_book["asin"]])
         record_source_keys(facts, SOURCE_CACHE, [cache_book["asin"]])
         return [audible_book, cache_book]

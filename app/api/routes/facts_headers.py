@@ -105,11 +105,13 @@ def stamp_facts_headers(
     it is the body that must not lie, not the tally the fetch produced.
 
     X-Libex-Complete is set unconditionally once facts exists, with
-    X-Libex-Incomplete-Reason alongside it only when incomplete -- no
-    currently-wired service call across these routes ever records an
-    incomplete reason, so this renders "true" today, but the header is real
-    infrastructure for the day one does, not a currently-active signal on
-    its own.
+    X-Libex-Incomplete-Reason alongside it only when incomplete. This
+    function has no opinion on which value it renders -- that's decided
+    entirely upstream, by whether the service call the route just awaited
+    ever recorded an incomplete reason against this same facts object before
+    handing it back. A service that only ever records a source leaves it
+    "true"; one that also records a shortfall it couldn't fully make up for
+    renders it "false", with that reason attached.
     """
     if has_entities:
         source_value = (

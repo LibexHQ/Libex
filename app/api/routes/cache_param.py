@@ -29,10 +29,11 @@ from fastapi import Query, Response
 # answer can't be served stale from a browser or edge cache on the very
 # next identical request.
 #
-# /book (bulk) and /quick-search take this same variant, but "one cache
-# read decides the whole response" is not literally true of either, and
-# each earns its own line rather than being folded silently under the
-# heading above:
+# /book (bulk), /quick-search, and the two series-books routes
+# (/series/books/{asin} and /series/{asin}/books) take this same variant,
+# but "one cache read decides the whole response" is not literally true of
+# any of them, and each earns its own line rather than being folded
+# silently under the heading above:
 #
 # - /book (bulk) resolves many ASINs in one request. `cache` decides, for
 #   the batch as a whole, whether cache is consulted at all -- but the
@@ -51,6 +52,16 @@ from fastapi import Query, Response
 #   hydration phase that follows it. A caller told this endpoint serves a
 #   stored copy would reasonably expect the whole response to be warmable
 #   by a prior request; only the hydration half is.
+#
+# - /series/books/{asin} and /series/{asin}/books resolve a series' ASIN
+#   list, then hydrate every ASIN in it through get_books_by_asins, which
+#   can itself mix cache, Audible and DB within one response -- the same
+#   mixing /book (bulk) has. `cache` is passed through unchanged to both
+#   the ASIN-list lookup and the hydration call, so it is one decision
+#   applied consistently across the request, not two independent ones --
+#   but it still costs two cache reads on the happy path where bulk costs
+#   one: the `series_books:` read for the ASIN list, then whatever
+#   per-book reads hydration makes.
 CacheStandardParam = Annotated[
     bool,
     Query(

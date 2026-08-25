@@ -100,6 +100,24 @@ capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
   `Cache-Control` header, the same as before.
 
 ### Fixed
+- **A concurrent write could permanently strand an author's book under a
+  duplicate, asin-less author row instead of the real one.** Adding an asin
+  to an author record already stored without one — the normal path the first
+  time Audible's answer includes it — runs as a targeted `UPDATE` on that
+  row. When two writes raced to upgrade the same author at once, the loser's
+  `UPDATE` correctly failed and rolled back, but it then handed the caller
+  back the id of the row it had just failed to update — still asin-less —
+  instead of the row the winner actually produced. The book being written at
+  that moment got linked to the stranded duplicate rather than the author's
+  canonical row, and stayed invisible in that author's book listing from then
+  on, since every listing lookup resolves through the canonical, asin-bearing
+  row and has no way to know the duplicate exists. The equivalent recovery
+  for a losing insert (no prior asin-less row at all) already re-queried and
+  returned the winner correctly; the upgrade path now does the same. This is
+  not specific to running multiple server processes — two background writes
+  inside a single process are enough to race, and a prolific author's
+  catalogue is deliberately split across several of them.
+
 - **`/series/books/{asin}` and its `/series/{asin}/books` alias now honour
   `cache` for the books they return, not only for the series' own list of
   book ASINs.** Passing `cache=true` only ever affected which read resolved
@@ -123,6 +141,33 @@ capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
   the two `/author/books` routes have been sending for a full minor version.
   It's included in the header-exposure registry added above and is now
   readable from JS, along with the other three headers described there.
+
+- **`X-Request-Id` was missing from the OpenAPI schema `/docs` and `/redoc`
+  generate.** It has been stamped on every response since it was introduced
+  above, but nothing in the generated documentation named it, so a caller
+  reading `/docs` had no way to learn it existed. It's now declared there on
+  the same routes that already document `X-Libex-Complete`/`X-Libex-Source`;
+  the header itself still reaches every response Libex sends, including ones
+  outside that set, and its description says so rather than implying the
+  documented routes are the only place it appears. The `X-Libex-Incomplete-Reason`
+  values documented alongside it now explain what each of the four reasons
+  means and whether retrying is worth it, replacing a bare list of the names
+  with no explanation of any of them.
+
+- **The README's list of what Libex captures was missing the `Host` header**,
+  which has been logged since the domain migration announcement shipped and
+  was never disclosed. It records only which hostname a request came in on,
+  used to tell `libex.lostcartographer.xyz` traffic apart from `libexdb.com`
+  traffic while both serve the same instance.
+
+- **`PRIVACY.md`'s answer on deleting one logged line from Axiom read as an
+  open question rather than an honest one.** It previously lumped the Axiom
+  copy in with the same general uncertainty raised about that store's
+  internals elsewhere on the page. It now says plainly that whether a single
+  event can be removed from Axiom isn't established, so the answer defaults
+  to no — the retention schedule already described is what actually clears
+  that copy. A deletion that does succeed would be more than this page
+  promises, not a broken promise.
 
 ## [1.16.0]
 

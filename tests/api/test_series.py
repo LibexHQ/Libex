@@ -473,3 +473,116 @@ async def test_get_series_books_primary_source_header_names_only_the_filter_surv
     body = response.json()
     assert [b["asin"] for b in body] == [audible_book["asin"]]
     assert response.headers["x-libex-source"] == "audible"
+
+
+# ============================================================
+# F1 -- /series/{asin}/books' own use_cache pin (the twin the fixed
+# defect's own regression test above never reached)
+# ============================================================
+# test_get_series_books_omits_cache_param_and_reads_the_cache_for_both_
+# phases_by_default and its cache=false sibling above both exercise
+# /series/books/{asin} -- the named, canonical route -- and neither ever
+# sends a request to /series/{asin}/books, the legacy twin
+# get_books_by_series_primary serves. A fake that merely accepts use_cache
+# without checking it passes whether or not the route actually threads the
+# value through, which is exactly how the /series/books/{asin} defect
+# shipped unnoticed until a live cache-miss loop was measured -- the same
+# reasoning applies here, on the one twin that gap left unpinned.
+
+
+@pytest.mark.asyncio
+async def test_get_series_books_primary_omits_cache_param_and_reads_the_cache_for_both_phases_by_default(async_client):
+    with patch("app.api.routes.series.router.get_series_books", new_callable=AsyncMock) as mock_series, \
+         patch("app.api.routes.series.router.get_books_by_asins", new_callable=AsyncMock) as mock_books:
+        mock_series.return_value = ["B08G9PRS1K"]
+        mock_books.return_value = [MOCK_BOOK]
+        await async_client.get("/series/B00SERIES1/books")
+    assert mock_series.call_args[0][3] is True
+    assert mock_books.call_args.kwargs["use_cache"] is True
+
+
+@pytest.mark.asyncio
+async def test_get_series_books_primary_cache_false_marks_the_response_no_store(async_client):
+    with patch("app.api.routes.series.router.get_series_books", new_callable=AsyncMock) as mock_series, \
+         patch("app.api.routes.series.router.get_books_by_asins", new_callable=AsyncMock) as mock_books:
+        mock_series.return_value = ["B08G9PRS1K"]
+        mock_books.return_value = [MOCK_BOOK]
+        response = await async_client.get("/series/B00SERIES1/books?cache=false")
+    assert mock_series.call_args[0][3] is False
+    assert mock_books.call_args.kwargs["use_cache"] is False
+    assert response.headers["cache-control"] == "no-store"
+
+
+# ============================================================
+# HOLLOW-STUB NOT-FOUND -- the header is the only channel on these routes
+# ============================================================
+# Neither /series/books/{asin} nor /series/{asin}/books has a notFound body
+# field the way the bulk /book route does -- a book Audible can't hydrate
+# just isn't in the list, and X-Libex-Complete/X-Libex-Incomplete-Reason
+# are the only signal a caller gets that the list is short rather than
+# simply reflecting a series with fewer books than requested. These mock
+# audible_get directly (not NotFoundException) so the hollow, titleless
+# 200 stub Audible actually returns for an unresolvable ASIN reaches real
+# code -- every existing not-found test on this router mocks
+# NotFoundException, which only reproduces the narrow literal-404 case a
+# live batch call never actually takes.
+
+
+@pytest.mark.asyncio
+async def test_get_series_books_marks_incomplete_on_a_hollow_stub_with_no_notfound_field(async_client):
+    found_asin = "B0FOUND001"
+    stub_asin = "B0NOTFOUND1"
+
+    async def _get(region, path, params):
+        return {"products": [
+            {
+                "asin": found_asin, "title": "Real Book", "authors": [], "narrators": [],
+                "relationships": [], "product_images": {}, "category_ladders": [],
+                "rating": {}, "publication_datetime": "2021-01-01T00:00:00Z",
+            },
+            {"asin": stub_asin, "product_state": "NOT_AVAILABLE_FOR_PURCHASE"},
+        ]}
+
+    with patch("app.api.routes.series.router.get_series_books", new_callable=AsyncMock) as mock_series, \
+         patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.books.persist_books_background"), \
+         patch("app.services.audible.books.cache.get_many", new=AsyncMock(return_value={})):
+        mock_series.return_value = [found_asin, stub_asin]
+        response = await async_client.get("/series/books/B00SERIES1")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [b["asin"] for b in body] == [found_asin]
+    assert response.headers["x-libex-complete"] == "false"
+    assert response.headers["x-libex-incomplete-reason"] == "hydration-not-found"
+
+
+@pytest.mark.asyncio
+async def test_get_series_books_primary_marks_incomplete_on_a_hollow_stub_with_no_notfound_field(async_client):
+    """The legacy twin (/series/{asin}/books) must not diverge from the
+    named route above."""
+    found_asin = "B0FOUND001"
+    stub_asin = "B0NOTFOUND1"
+
+    async def _get(region, path, params):
+        return {"products": [
+            {
+                "asin": found_asin, "title": "Real Book", "authors": [], "narrators": [],
+                "relationships": [], "product_images": {}, "category_ladders": [],
+                "rating": {}, "publication_datetime": "2021-01-01T00:00:00Z",
+            },
+            {"asin": stub_asin, "product_state": "NOT_AVAILABLE_FOR_PURCHASE"},
+        ]}
+
+    with patch("app.api.routes.series.router.get_series_books", new_callable=AsyncMock) as mock_series, \
+         patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.books.persist_books_background"), \
+         patch("app.services.audible.books.cache.get_many", new=AsyncMock(return_value={})):
+        mock_series.return_value = [found_asin, stub_asin]
+        response = await async_client.get("/series/B00SERIES1/books")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [b["asin"] for b in body] == [found_asin]
+    assert response.headers["x-libex-complete"] == "false"
+    assert response.headers["x-libex-incomplete-reason"] == "hydration-not-found"

@@ -159,3 +159,48 @@ async def test_quick_search_cache_false_marks_the_response_no_store(async_client
         response = await async_client.get("/quick-search?keywords=dune&cache=false")
     assert mock.call_args[0][3] is False
     assert response.headers["cache-control"] == "no-store"
+
+
+# ============================================================
+# ABS QUICK-SEARCH TWIN -- /{region}/quick-search/search
+# ============================================================
+# The Audiobookshelf-compatible twin of /quick-search above. `cache` is
+# brand new on this route (CacheStandardParam, same default as
+# /quick-search) and shipped with no coverage at all -- F1 pinned the
+# named /quick-search route's own use_cache threading but never reached
+# this one. A fake that merely accepts the cache argument without checking
+# it proves nothing (see the /series/books/{asin} regression test's own
+# reasoning); this pins the positional value quick_search is actually
+# called with, the same way the named route is pinned above.
+
+
+@pytest.mark.asyncio
+async def test_abs_quick_search_returns_200(async_client):
+    with patch("app.api.routes.search.router.quick_search", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        response = await async_client.get("/us/quick-search/search?keywords=dune")
+    assert response.status_code == 200
+    assert "matches" in response.json()
+
+
+@pytest.mark.asyncio
+async def test_abs_quick_search_requires_search_terms(async_client):
+    response = await async_client.get("/us/quick-search/search")
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_abs_quick_search_omits_cache_param_and_reads_the_cache_by_default(async_client):
+    with patch("app.api.routes.search.router.quick_search", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        await async_client.get("/us/quick-search/search?keywords=dune")
+    assert mock.call_args[0][3] is True
+
+
+@pytest.mark.asyncio
+async def test_abs_quick_search_cache_false_marks_the_response_no_store(async_client):
+    with patch("app.api.routes.search.router.quick_search", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        response = await async_client.get("/us/quick-search/search?keywords=dune&cache=false")
+    assert mock.call_args[0][3] is False
+    assert response.headers["cache-control"] == "no-store"

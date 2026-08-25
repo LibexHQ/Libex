@@ -91,8 +91,7 @@ async def get_books_by_series(
     books = filter_dicts(books, filters.as_kwargs())
     books = sort_dicts(books, sort.value if sort is not None else None, order.value, BOOK_SORT_FIELDS)
     apply_cache_control(response, cache)
-    body_keys = [book["asin"] for book in books]
-    stamp_facts_headers(response, facts, has_entities=bool(books), body_keys=body_keys)
+    stamp_facts_headers(response, facts, entities=books)
     return [BookResponse(**b) for b in books]
 
 
@@ -123,8 +122,7 @@ async def get_books_by_series_primary(
     books = filter_dicts(books, filters.as_kwargs())
     books = sort_dicts(books, sort.value if sort is not None else None, order.value, BOOK_SORT_FIELDS)
     apply_cache_control(response, cache)
-    body_keys = [book["asin"] for book in books]
-    stamp_facts_headers(response, facts, has_entities=bool(books), body_keys=body_keys)
+    stamp_facts_headers(response, facts, entities=books)
     return [BookResponse(**b) for b in books]
 
 

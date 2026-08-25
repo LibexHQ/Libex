@@ -34,26 +34,32 @@ capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
   `X-Libex-Complete` and `X-Libex-Incomplete-Reason` are stamped on that same
   set of routes now too. `X-Libex-Complete` already existed, on the two
   `/author/books` routes only, since 1.15.0, through a separate completeness
-  check this doesn't touch — see Fixed below for what was wrong with it
-  there. On `/book` (bulk), `/series/books/{asin}` and `/series/{asin}/books`
-  — the routes that resolve more than one book through Libex's shared fetch
-  path — `X-Libex-Complete` now genuinely reads `false`, with
-  `X-Libex-Incomplete-Reason` naming why, whenever that fetch falls short: a
-  requested ASIN Audible no longer has any record of
-  (`hydration-not-found`), or Audible failing on part or all of the request
-  with the DB or cache backstop only partly covering what was lost
-  (`hydration-failed`). `/book/{asin}` shares the same fetch path
-  underneath, but a single missing ASIN there is still a plain 404 with no
-  facts headers at all — only the second case, an outage the DB or cache
-  steps in for, can leave that route answering 200 with
-  `X-Libex-Complete: false`. `/book/{asin}/chapters` (and its legacy alias),
-  `/series/{asin}` and `/author/{asin}` still always read `true` — each
+  check this doesn't touch. It asserts element coverage: `false` means the
+  body is missing one or more elements the caller asked for, never merely
+  that something went wrong internally on the way to a complete answer. On
+  `/book` (bulk), `/series/books/{asin}` and `/series/{asin}/books` — the
+  routes that resolve more than one book through Libex's shared fetch path —
+  `X-Libex-Complete` reads `false`, with `X-Libex-Incomplete-Reason` naming
+  why, whenever the body actually falls short of what was requested: a
+  requested ASIN Audible has no record of at all, including one it answers
+  with a titleless placeholder for rather than a 404 (`hydration-not-found`
+  either way), or part of the request failing outright with the DB or cache
+  backstop unable to recover every ASIN that failed (`hydration-failed`).
+  `/book/{asin}` shares the same fetch path underneath, but coverage of a
+  single requested book is all or nothing: either it comes back — from
+  Audible, or recovered whole from the DB or cache backstop during an
+  outage — and the route always reads `true`, or it doesn't and the request
+  is a plain 404 with no facts headers at all. There is no in-between
+  response for a single-ASIN request to be incomplete about.
+  `/book/{asin}/chapters` (and its legacy alias), `/series/{asin}` and
+  `/author/{asin}` still always read `true` for the same reason — each
   resolves one entity through a path with nothing partial to report; it
   either answers in full or the request 404s. `discovery-incomplete` and
   `hydration-deadline` remain part of the fixed vocabulary but aren't
   triggered by anything shipping today — the one caller that imposes a
-  hydration deadline, the `/author/books` walk-then-hydrate routes, doesn't
-  open this ledger at all.
+  hydration deadline, the `/author/books` walk-then-hydrate routes, marks
+  completeness through its own separate check and never opens this ledger
+  at all.
 
 - **`cache` is now a real parameter on `/quick-search` and its
   Audiobookshelf-compatible twin, `/{region}/quick-search/search`.**
@@ -74,7 +80,12 @@ capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
   `?cache=false` explicitly — it still forces a fresh Audible fetch exactly
   as it always has. `/search` and `/narrator/books` are unaffected — both
   fetch live regardless of the value, and it stays `false` by default on
-  them.
+  them. Separately, and worth knowing now that eight routes default to
+  reading it: the `CACHE_ENABLED` environment variable, set to `true` in the
+  shipped `docker-compose.yml`, has never actually governed anything in
+  Libex — it parses into a setting nothing reads. An operator who sets it to
+  `false` expecting to disable caching gets no such effect and, as of this
+  release, more caching than before, not less.
 
 - **Passing `cache=false` now marks the response `Cache-Control: no-store`
   on every route that takes the parameter**, not only the two

@@ -23,7 +23,13 @@ from app.services.audible.client import validate_region
 from app.core.logging import get_logger
 from app.core.exceptions import RegionException
 from app.core.migration_notice import MigrationNotice, MIGRATION_HEADER_NAMES, is_new_host_request
-from app.core.response_headers import HEADER_REQUEST_ID, EXPOSED_HEADER_NAMES
+from app.core.response_headers import (
+    HEADER_COMPLETE,
+    HEADER_INCOMPLETE_REASON,
+    HEADER_REQUEST_ID,
+    HEADER_SOURCE,
+    EXPOSED_HEADER_NAMES,
+)
 
 logger = get_logger()
 
@@ -329,6 +335,23 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                 "userAgent": user_agent,
                 "took": took,
                 "host": host,
+                # The three fields below read whatever a route already
+                # stamped on the response object this middleware is holding
+                # -- nothing new is computed or looked up here, and none of
+                # it describes the requester. Keys are always present, empty
+                # string when the header was never stamped, because a field
+                # that only sometimes exists is painful to filter on in
+                # Axiom; a sparse "sometimes absent" field would be worse
+                # than one that is merely often empty.
+                #
+                # X-Libex-Source matters even -- especially -- when it comes
+                # back empty: the cache layer's own log lines carry no
+                # request_id, so they cannot be tied back to this request or
+                # to the headers it received. This line is the only place a
+                # request_id and a response's provenance appear together.
+                "complete": response.headers.get(HEADER_COMPLETE, ""),
+                "incompleteReason": response.headers.get(HEADER_INCOMPLETE_REASON, ""),
+                "source": response.headers.get(HEADER_SOURCE, ""),
             },
         )
         return response

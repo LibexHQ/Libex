@@ -597,6 +597,22 @@ async def _fetch_chunk(asins: list[str], region: str) -> list[dict[str, Any]]:
     return _filter_products(products)
 
 
+def _has_uncovered(asins: list[str], covered: set[str]) -> bool:
+    """
+    True when at least one of `asins` is absent from `covered`.
+
+    The one predicate every hydration-incomplete site in
+    _get_books_by_asins_unsettled shares: a loss class earns its incomplete
+    reason only when it actually owns an ASIN missing from what the function
+    is about to hand back, never merely because that class experienced a
+    loss internally. `covered` is always the ASIN set already present in the
+    result about to be returned (a DB backstop, a DB fallback, a cache
+    fallback) -- never a count, since two same-sized sets can still miss
+    each other entirely.
+    """
+    return any(asin not in covered for asin in asins)
+
+
 # ============================================================
 # PUBLIC API
 # ============================================================
@@ -784,8 +800,11 @@ async def _get_books_by_asins_unsettled(
             results: list[Any] = []
             for task in tasks:
                 if task.cancelled():
+                    # Not recorded here: a cancelled chunk's ASINs still have
+                    # the DB backstop below to answer from, and only the
+                    # residue that backstop can't cover is an actual gap in
+                    # what this function returns.
                     results.append(HydrationDeadlineExceeded())
-                    record_incomplete(facts, REASON_HYDRATION_DEADLINE)
                 elif task.exception() is not None:
                     results.append(task.exception())
                 else:
@@ -795,6 +814,7 @@ async def _get_books_by_asins_unsettled(
 
         all_products: list[dict[str, Any]] = []
         not_found_asins: list[str] = []
+        deadline_asins: list[str] = []
         transient_failed_asins: list[str] = []
         transient_errors: list[Exception] = []
 
@@ -818,11 +838,25 @@ async def _get_books_by_asins_unsettled(
             if isinstance(result, Exception):
                 transient_failed_asins.extend(chunk)
                 transient_errors.append(result)
+                if isinstance(result, HydrationDeadlineExceeded):
+                    deadline_asins.extend(chunk)
                 logger.warning(
                     f"Hydration chunk {idx + 1}/{len(chunks)} failed for "
                     f"{len(chunk)} ASINs ({region}): {type(result).__name__}: {result}"
                 )
                 continue
+            # A batch chunk's own response is always a 200 even when some of
+            # its requested ASINs have no such record -- Audible answers
+            # those with a hollow, titleless stub rather than a 404 (see
+            # _filter_products), and that stub is already gone from `result`
+            # by the time it lands here. A chunk ASIN with no matching
+            # product in what came back genuinely does not exist, the same
+            # as a chunk that raised NotFoundException above.
+            returned_asins = {p.get("asin") for p in result}
+            stub_asins = [a for a in chunk if a not in returned_asins]
+            if stub_asins:
+                not_found_asins.extend(stub_asins)
+                record_incomplete(facts, REASON_HYDRATION_NOT_FOUND)
             all_products.extend(result)
 
         if not_found_asins or transient_failed_asins:
@@ -861,8 +895,16 @@ async def _get_books_by_asins_unsettled(
             db_backstop_results = await get_books_from_db(session, transient_failed_asins)
             # The backstop covers what the DB actually had; anything still
             # missing after it is a real shortfall the caller has to be told
-            # about, not just an internal retry detail.
-            if len(db_backstop_results) < len(transient_failed_asins):
+            # about, not just an internal retry detail -- and which reason it
+            # carries follows the ASIN, not the query: a deadline chunk the
+            # backstop couldn't cover is still a deadline loss, not a generic
+            # hydration failure, even though both walked the same query.
+            backstop_asins = {b["asin"] for b in db_backstop_results}
+            deadline_set = set(deadline_asins)
+            other_failed_asins = [a for a in transient_failed_asins if a not in deadline_set]
+            if _has_uncovered(deadline_asins, backstop_asins):
+                record_incomplete(facts, REASON_HYDRATION_DEADLINE)
+            if _has_uncovered(other_failed_asins, backstop_asins):
                 record_incomplete(facts, REASON_HYDRATION_FAILED)
 
         normalized = await _normalize_products(all_products, region)
@@ -898,7 +940,9 @@ async def _get_books_by_asins_unsettled(
         if db_results:
             record_source_keys(facts, SOURCE_CACHE, [b["asin"] for b in cached_results])
             record_source_keys(facts, SOURCE_DB, [b["asin"] for b in db_results])
-            record_incomplete(facts, REASON_HYDRATION_FAILED)
+            db_asins = {b["asin"] for b in db_results}
+            if _has_uncovered(fetch_asins, db_asins):
+                record_incomplete(facts, REASON_HYDRATION_FAILED)
             return cached_results + db_results
 
         # Fall back to cache for the misses -- one lookup, same as the
@@ -920,7 +964,15 @@ async def _get_books_by_asins_unsettled(
                 SOURCE_CACHE,
                 [b["asin"] for b in cached_results] + [b["asin"] for b in fallback_results],
             )
-            record_incomplete(facts, REASON_HYDRATION_FAILED)
+            # fetch_asins is what this fallback owed an answer for -- always
+            # non-empty here, since an empty one would have returned via the
+            # all-cache-hits path above before any of this outage handling
+            # ran. cached_results predates fetch_asins by construction and
+            # never overlaps it, so the coverage test reads only against
+            # fallback_results, not the two summed.
+            fallback_asins = {b["asin"] for b in fallback_results}
+            if _has_uncovered(fetch_asins, fallback_asins):
+                record_incomplete(facts, REASON_HYDRATION_FAILED)
             return cached_results + fallback_results
 
         raise NotFoundException("Audible unavailable and no cached data found")

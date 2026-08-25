@@ -766,7 +766,7 @@ async def test_author_profile_source_header_reflects_the_recorded_source(async_c
 # _mark_completeness, working off the discovery walk and the hydration
 # count, not from anything record_source/record_source_keys touches. So
 # X-Libex-Source is never on the wire for either route, and their OpenAPI
-# declaration (_COMPLETE_ONLY_RESPONSE_HEADERS) must say exactly that:
+# declaration (COMPLETE_ONLY_RESPONSE_HEADERS) must say exactly that:
 # X-Libex-Complete alone, not the full three-header set every
 # ResponseFacts-backed route declares.
 

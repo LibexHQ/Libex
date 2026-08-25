@@ -14,7 +14,15 @@ from httpx import AsyncClient, ASGITransport
 # Local
 from app.main import app
 from app.api.routes.large_response import LARGE_RESPONSE_THREAD_THRESHOLD
-from app.core.response_headers import SOURCE_AUDIBLE, SOURCE_CACHE, record_source, record_source_keys
+from app.core.response_headers import (
+    REASON_HYDRATION_FAILED,
+    SOURCE_AUDIBLE,
+    SOURCE_CACHE,
+    SOURCE_DB,
+    record_incomplete,
+    record_source,
+    record_source_keys,
+)
 
 
 @pytest.fixture
@@ -411,14 +419,21 @@ async def test_get_book_source_header_reflects_the_single_recorded_source(async_
 
 @pytest.mark.asyncio
 async def test_get_book_source_header_false_on_a_real_hydration_shortfall(async_client):
-    """The false branch, through the real stack rather than a router-level
-    fake facts recorder: Audible down, the pre-fetch cache empty, and the
-    DB backstop the only thing that answers. What has to reach this
-    response is get_books_by_asins' own record_incomplete call on its
-    outage DB-fallback path (REASON_HYDRATION_FAILED, see books.py) running
-    for real, not a stand-in for it -- until now this branch has never been
-    reachable in production, so nothing exercised it against real code
-    either."""
+    """Through the real stack rather than a router-level fake facts
+    recorder: Audible down, the pre-fetch cache empty, and the DB backstop
+    the only thing that answers. What has to reach this response is
+    get_books_by_asins' own outage DB-fallback path (see books.py) running
+    for real, not a stand-in for it.
+
+    X-Libex-Complete now asserts element coverage, not "did some internal
+    retry occur" -- and a single-ASIN request's DB fallback recovering the
+    one ASIN it was asked for is, by definition, full coverage: there is no
+    way for get_book_by_asin's own request to come back with *fewer than
+    all* of the one thing it asked for and still reach a 200 at all. So
+    despite the outage this response is complete, not short -- proving the
+    exact scenario this test's name describes is no longer classified as a
+    shortfall now that the header tracks coverage rather than "any transient
+    failure happened along the way."."""
     db_book = {**MOCK_BOOK}
 
     with patch(
@@ -434,6 +449,41 @@ async def test_get_book_source_header_false_on_a_real_hydration_shortfall(async_
 
     assert response.status_code == 200
     assert response.json()["asin"] == db_book["asin"]
+    assert response.headers["x-libex-source"] == "db"
+    assert response.headers["x-libex-complete"] == "true"
+    assert "x-libex-incomplete-reason" not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_get_books_bulk_source_header_false_on_a_real_hydration_shortfall(async_client):
+    """The bulk endpoint's own version of the real-stack outage above, with
+    two requested ASINs instead of one -- unlike the single-book route, a
+    bulk request CAN come back with fewer than every requested element and
+    still be a 200, so this is where a genuine coverage shortfall through
+    the real stack is actually reachable. Audible down, no pre-fetch cache
+    hit for either ASIN, and the DB fallback recovering only one of the
+    two -- the response must be marked incomplete with the hydration-failed
+    token, and the uncovered ASIN must show up in notFound, not silently
+    vanish."""
+    recovered_asin = MOCK_BOOK["asin"]
+    missing_asin = "B000000001"
+    recovered_book = {**MOCK_BOOK}
+
+    with patch(
+        "app.services.audible.books.audible_get",
+        new=AsyncMock(side_effect=RuntimeError("Audible down")),
+    ), patch(
+        "app.services.audible.books.cache.get_many", new=AsyncMock(return_value={})
+    ), patch(
+        "app.services.audible.books.get_books_from_db",
+        new=AsyncMock(return_value=[recovered_book]),
+    ):
+        response = await async_client.get(f"/book?asins={recovered_asin},{missing_asin}")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert [b["asin"] for b in data["books"]] == [recovered_asin]
+    assert data["notFound"] == [missing_asin]
     assert response.headers["x-libex-source"] == "db"
     assert response.headers["x-libex-complete"] == "false"
     assert response.headers["x-libex-incomplete-reason"] == "hydration-failed"
@@ -454,6 +504,42 @@ async def test_get_books_bulk_source_header_is_mixed_with_counts_summing_to_the_
     assert source_header == "mixed; audible=2; cache=1"
     counts = [int(part.split("=")[1]) for part in source_header.split(";")[1:]]
     assert sum(counts) == len(response.json()["books"])
+
+
+@pytest.mark.asyncio
+async def test_get_books_bulk_can_be_both_mixed_source_and_incomplete_at_once(async_client):
+    """The realistic shape of a partial bulk hydration failure under
+    coverage semantics: two of three requested ASINs come back -- one live
+    from Audible, one recovered from the DB backstop after a chunk failed
+    transiently -- and the third is a genuine, uncovered gap. Two populated
+    sources, "mixed", AND a real shortfall the caller must be told about, on
+    the very same response. X-Libex-Source and X-Libex-Complete are stamped
+    from the same facts object but read two independent fields on it
+    (source_counts/source_by_key vs. incomplete_reasons) -- this is the one
+    test that proves neither stamping step steps on the other when both are
+    populated in the same request, rather than each header only ever being
+    exercised alone.
+
+    A body carrying every requested element could no longer produce
+    incomplete=false at all (see the coverage-semantics rewrite of the
+    single-book shortfall test above) -- so the third, missing ASIN here is
+    load-bearing, not incidental set dressing."""
+
+    async def fake_get_books_by_asins(asin_list, region, session, cache, *, facts=None):
+        record_source_keys(facts, SOURCE_AUDIBLE, ["B000000000"])
+        record_source_keys(facts, SOURCE_DB, ["B000000001"])
+        record_incomplete(facts, REASON_HYDRATION_FAILED)
+        return [{**MOCK_BOOK, "asin": f"B{i:09d}"} for i in range(2)]
+
+    with patch("app.api.routes.books.router.get_books_by_asins", side_effect=fake_get_books_by_asins):
+        response = await async_client.get("/book?asins=B000000000,B000000001,B000000002")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["notFound"] == ["B000000002"]
+    assert response.headers["x-libex-source"] == "mixed; audible=1; db=1"
+    assert response.headers["x-libex-complete"] == "false"
+    assert response.headers["x-libex-incomplete-reason"] == "hydration-failed"
 
 
 @pytest.mark.asyncio

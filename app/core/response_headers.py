@@ -3,8 +3,7 @@ Response headers Libex adds beyond FastAPI's defaults: pure data and pure
 functions, no framework import anywhere in this module, so it is trivially
 unit-testable and cannot pull layering the wrong way -- a service reasoning
 about what it has assembled so far has no business importing Starlette to do
-it. `app.core.middleware` and `app.main` are the only two places anything
-here ever reaches the wire.
+it.
 """
 
 # Standard library
@@ -77,7 +76,11 @@ def format_source_header(counts: Mapping[str, int]) -> str:
     if not populated:
         return ""
     if len(populated) == 1:
-        return next(iter(populated))
+        # Drawn from SOURCES, not from the dict key itself, so the rendered
+        # token is always one of the closed vocabulary (or empty) regardless
+        # of what a tally holds -- structurally closed the same way the
+        # multi-source branch below already is.
+        return next((source for source in SOURCES if source in populated), "")
     parameters = "; ".join(
         f"{source}={populated[source]}" for source in SOURCES if source in populated
     )

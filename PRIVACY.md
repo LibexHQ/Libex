@@ -51,10 +51,12 @@ rather not raise in public, the email published in
 On every request that isn't `/health`, the public instance writes one log line
 containing: the method, the path, the response status, how long it took, your
 user agent, the host header you used, the number of the server process that
-handled it, and the *names* of the query parameters you sent. Parameter values
-are allowlisted — structural options like `region` and `limit` keep their
-values, anything you typed is replaced with `REDACTED`, and a parameter name
-Libex doesn't recognise is thrown away rather than written down.
+handled it, the *names* of the query parameters you sent, and three fields
+describing the response that went back — where Libex found the data, whether
+it was complete, and if not, why. Parameter values are allowlisted —
+structural options like `region` and `limit` keep their values, anything you
+typed is replaced with `REDACTED`, and a parameter name Libex doesn't
+recognise is thrown away rather than written down.
 
 `/health` writes nothing at all, unless the check itself took more than a
 second — then it writes one warning holding a duration, a status and the word
@@ -91,6 +93,9 @@ One log line per request, built in `LoggingMiddleware.dispatch`:
 | `status` | The HTTP status returned. | Finding what's broken. |
 | `took` | How long the request took, in milliseconds. | Performance. |
 | `host` | The `Host` header — which of the two hostnames you used. | The only way to tell old-host traffic from new-host traffic while both addresses serve the same container during the move to `libexdb.com`. |
+| `source` | Where the catalogue data in the response came from: `cache`, `db` or `audible`, or `mixed` with a count per source when one response drew on more than one. Empty when the response carried no catalogue entity to attribute. It is the same value that response's `X-Libex-Source` header carries, so you were handed it too. | How much traffic the cache is actually absorbing, and when Libex is falling back to its own database because Audible is unreachable. It sits on the one line every request produces, so those two questions can be answered per endpoint without piecing it together from the cache and database lines described further down. |
+| `complete` | `true` or `false` — whether Libex believes it returned everything that was asked for. Empty on responses that don't report completeness at all. The same value as that response's `X-Libex-Complete` header. | Lets me count incomplete responses instead of waiting for someone to report one. |
+| `incompleteReason` | When `complete` is `false`, why: one or more of `discovery-incomplete`, `hydration-deadline`, `hydration-failed` and `hydration-not-found`, and nothing else. Empty otherwise. The same value as that response's `X-Libex-Incomplete-Reason` header. | Separates "Audible was too slow" from "Audible doesn't have it" — different problems with different fixes, and indistinguishable without this. |
 | `request_id` | A random UUID generated for that one request, and sent back to you in that response's `X-Request-Id` header. | Gives a log entry something to be referred to by, and gives you the same reference to quote in a bug report. It is generated on the server and never echoed from a header you sent, isn't derived from anything about you, isn't reused, and isn't attached to any other line — every request gets a fresh, unrelated value. It identifies one log entry, not a person and not a session. There's more on it just below the table. |
 | `pid` | The number the operating system gave the worker process that handled the request, e.g. `pid=14`. | The API runs as several worker processes. When one of them gets into trouble, this is the only thing that tells me whether it's one process failing over and over or several failing occasionally — once the lines are pooled together the two look identical. It's a number belonging to my server: the same on every request that worker handles, changed only when the process restarts, and which worker takes a request is the kernel's choice, not yours. |
 
@@ -101,6 +106,24 @@ startup messages, all of them — and on every record shipped to Axiom. It is
 listed here rather than left to be discovered because a field that turns up in
 the logs and appears in no disclosure is exactly the thing this page exists to
 prevent, whether or not it says anything about a person. This one doesn't.
+
+**`source`, `complete` and `incompleteReason` describe the answer, not the
+asker.** Unlike the user agent and the host header, these three are not read
+from anything you sent. They are read back off the response Libex has just
+finished building, and they are the same three `X-Libex-*` headers that
+response carries — so nothing is written down about your request that your
+request didn't already get told. Their values come from a fixed vocabulary
+written into the source: `cache`, `db`, `audible`, `mixed`, `true`, `false`,
+the four incomplete reasons above, and counts. A value outside that list is
+rejected where it is recorded rather than written to a log, so there is no
+route by which text you typed reaches one of these fields.
+
+The one thing `source` does imply beyond my own server: `cache` means the
+same catalogue item had been fetched recently enough to still be stored. That
+says something about how busy a title is, not about who asked for it — there
+is nothing in the line, or anywhere else, to tie it to a person, and the
+value was on the header of the response you received, so it is not something
+the log knows and you don't.
 
 **`X-Request-Id`, and its honest limits.** Every response carries this header,
 so when something misbehaves you can quote the id and I can search for that
@@ -321,8 +344,11 @@ Stated plainly, because the absences matter as much as the list above:
   processes was on duty, not who was calling.
 - **No request bodies.** Every public endpoint is a `GET` and none of them
   accept a body.
-- **No `Authorization` header, no `Referer`, no `Cookie` header.** Only the
-  headers named in the table above are ever read for logging.
+- **No `Authorization` header, no `Referer`, no `Cookie` header.** Of the
+  headers you send, only the two named in the table above — your user agent
+  and the host header — are ever read for logging. The `source`, `complete`
+  and `incompleteReason` fields are headers too, but they are ones Libex put
+  on its own response, not ones you sent.
 - **No caller data in the database at all.** Libex's Postgres database holds
   Audible metadata — books, authors, narrators, series, genres, chapters — and
   a cache of Audible responses. What a cache entry is keyed by describes what

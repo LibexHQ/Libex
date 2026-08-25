@@ -42,6 +42,7 @@ from httpx import AsyncClient, ASGITransport
 
 # Local
 from app.main import app
+from app.api.routes.facts_headers import FACTS_RESPONSE_HEADERS
 from app.core.migration_notice import MIGRATION_HEADER_NAMES
 from app.core.response_headers import (
     EXPOSED_HEADER_NAMES,
@@ -314,8 +315,6 @@ def test_cors_expose_headers_is_exactly_the_registry_unioned_with_migration_head
 
 
 def test_incomplete_reason_header_schema_declares_no_enum():
-    from app.api.routes.facts_headers import FACTS_RESPONSE_HEADERS
-
     schema = FACTS_RESPONSE_HEADERS[HEADER_INCOMPLETE_REASON]["schema"]
     assert "enum" not in schema
     assert schema["type"] == "string"

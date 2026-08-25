@@ -24,7 +24,9 @@ from app.services.audible.books import (
 )
 from app.services.cache.manager import book_key
 from app.core.response_headers import (
+    REASON_HYDRATION_DEADLINE,
     REASON_HYDRATION_FAILED,
+    REASON_HYDRATION_NOT_FOUND,
     ResponseFacts,
     SOURCE_AUDIBLE,
     SOURCE_CACHE,
@@ -1034,13 +1036,56 @@ async def test_get_books_by_asins_facts_records_db_backstop_after_transient_fail
 
 
 @pytest.mark.asyncio
+async def test_get_books_by_asins_facts_records_hydration_not_found_for_a_hollow_stub():
+    """Audible's batch endpoint never 404s for an ASIN it doesn't recognize
+    -- it answers 200 with a titleless stub that _filter_products drops
+    (see that function and its own unit test above). One real product and
+    one hollow stub in the same batch response: the real one must hydrate
+    normally, and the stub's ASIN -- present in the request, absent from
+    what came back after filtering -- must record REASON_HYDRATION_NOT_FOUND,
+    the same as a chunk that raised NotFoundException outright, not a
+    REASON_HYDRATION_FAILED transient-retry reason it never actually hit."""
+    from app.services.audible.books import get_books_by_asins
+
+    found_asin = "B0FOUND001"
+    stub_asin = "B0NOTFOUND1"
+
+    async def _get(region, path, params):
+        asins = params["asins"].split(",")
+        assert set(asins) == {found_asin, stub_asin}
+        return {"products": [
+            _hydration_product(found_asin),
+            {"asin": stub_asin, "product_state": "NOT_AVAILABLE_FOR_PURCHASE"},
+        ]}
+
+    facts = ResponseFacts()
+
+    with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.books.get_books_from_db", new=AsyncMock(return_value=[])), \
+         patch("app.services.audible.books.persist_books_background"), \
+         patch("app.services.audible.books.cache.get_many", new=AsyncMock(return_value={})):
+        result = await get_books_by_asins(
+            [found_asin, stub_asin], "us", AsyncMock(), use_cache=True, facts=facts
+        )
+
+    assert {b["asin"] for b in result} == {found_asin}
+    assert facts.source_by_key == {found_asin: SOURCE_AUDIBLE}
+    assert not facts.is_complete
+    assert facts.incomplete_reasons == {REASON_HYDRATION_NOT_FOUND}
+    assert sum(facts.source_counts.values()) == len(facts.source_by_key)
+
+
+@pytest.mark.asyncio
 async def test_get_books_by_asins_facts_records_outage_db_fallback():
     """Audible down, a pre-fetch cache hit already in hand, and the in-try
     DB backstop read itself failing -- the only way to reach the
     except-block DB fallback with a non-empty cached_results segment (see
     the section note above). facts must credit the pre-fetch hit to cache
-    and the outage-fallback DB row to DB, and mark the response
-    incomplete."""
+    and the outage-fallback DB row to DB. X-Libex-Complete now asserts
+    element coverage, not "did some internal retry occur along the way" --
+    and the outage-fallback DB read here recovers the one ASIN it was asked
+    for, so despite the outage this response is fully covered and must be
+    complete, not incomplete."""
     from app.services.audible.books import get_books_by_asins
 
     cached_asin = "B0CACHED01"
@@ -1071,6 +1116,52 @@ async def test_get_books_by_asins_facts_records_outage_db_fallback():
     assert result == [cached_book, outage_book]
     assert facts.source_counts == {"audible": 0, "cache": 1, "db": 1}
     assert facts.source_by_key == {cached_asin: SOURCE_CACHE, failed_asin: SOURCE_DB}
+    assert facts.is_complete
+    assert facts.incomplete_reasons == set()
+    assert sum(facts.source_counts.values()) == len(facts.source_by_key)
+
+
+@pytest.mark.asyncio
+async def test_get_books_by_asins_facts_records_outage_db_fallback_short_coverage():
+    """The sibling above's short-coverage counterpart. A pre-fetch cache hit
+    is still needed to reach the except-block DB fallback at all (see the
+    section note -- without it, the empty-cached_results re-raise fires
+    before the in-try backstop is even attempted); what's new here is that
+    the outage-fallback DB read only recovers one of its own two ASINs.
+    facts must credit the pre-fetch hit to cache, the recovered ASIN to DB,
+    and mark the response incomplete for the one still genuinely missing --
+    coverage, not "an internal retry happened", is what decides this now."""
+    from app.services.audible.books import get_books_by_asins
+
+    cached_asin = "B0CACHED02"
+    recovered_asin = "B0RECOVER1"
+    unrecovered_asin = "B0MISSING1"
+    cached_book = {"asin": cached_asin, "title": "Cached"}
+    recovered_book = {"asin": recovered_asin, "title": "From DB, post-outage"}
+    facts = ResponseFacts()
+
+    async def _get_many(session, keys):
+        return {book_key(cached_asin, "us"): cached_book}
+
+    backstop_calls = []
+
+    async def _db_backstop(session, asins):
+        backstop_calls.append(list(asins))
+        if len(backstop_calls) == 1:
+            raise RuntimeError("DB backstop read failed")
+        return [recovered_book]
+
+    with patch("app.services.audible.books.cache.get_many", new=AsyncMock(side_effect=_get_many)), \
+         patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=RuntimeError("Audible down"))), \
+         patch("app.services.audible.books.get_books_from_db", new=AsyncMock(side_effect=_db_backstop)):
+        result = await get_books_by_asins(
+            [cached_asin, recovered_asin, unrecovered_asin], "us", AsyncMock(), use_cache=True, facts=facts
+        )
+
+    assert len(backstop_calls) == 2
+    assert result == [cached_book, recovered_book]
+    assert facts.source_counts == {"audible": 0, "cache": 1, "db": 1}
+    assert facts.source_by_key == {cached_asin: SOURCE_CACHE, recovered_asin: SOURCE_DB}
     assert not facts.is_complete
     assert facts.incomplete_reasons == {REASON_HYDRATION_FAILED}
     assert sum(facts.source_counts.values()) == len(facts.source_by_key)
@@ -1084,7 +1175,9 @@ async def test_get_books_by_asins_facts_records_outage_cache_fallback_combining_
     through to the outage cache fallback. The pre-fetch cache hit and the
     fallback-only cache hit are two different ASINs answered by two
     different calls to cache.get_many (see the section note above); facts
-    must combine both into a single cache attribution, one entry per key."""
+    must combine both into a single cache attribution, one entry per key.
+    The cache fallback here recovers the one ASIN it owed an answer for, so
+    the response is fully covered and must be complete."""
     from app.services.audible.books import get_books_by_asins
 
     prefetch_asin = "B0PREFETCH"
@@ -1121,9 +1214,131 @@ async def test_get_books_by_asins_facts_records_outage_cache_fallback_combining_
     assert result == [prefetch_book, fallback_book]
     assert facts.source_counts == {"audible": 0, "cache": 2, "db": 0}
     assert facts.source_by_key == {prefetch_asin: SOURCE_CACHE, fallback_asin: SOURCE_CACHE}
+    assert facts.is_complete
+    assert facts.incomplete_reasons == set()
+    assert sum(facts.source_counts.values()) == len(facts.source_by_key)
+
+
+@pytest.mark.asyncio
+async def test_get_books_by_asins_facts_records_outage_cache_fallback_short_coverage():
+    """The combining-segments sibling's short-coverage counterpart: the
+    outage cache fallback recovers only one of the two ASINs it was asked
+    to answer for after the DB fallback came back empty for both. facts
+    must combine the recovered segments into one cache attribution and mark
+    the response incomplete for the ASIN neither the DB nor the cache
+    fallback ever produced."""
+    from app.services.audible.books import get_books_by_asins
+
+    prefetch_asin = "B0PREFETCH"
+    recovered_asin = "B0RECOVER1"
+    unrecovered_asin = "B0MISSING1"
+    prefetch_book = {"asin": prefetch_asin, "title": "Cache, pre-fetch"}
+    recovered_book = {"asin": recovered_asin, "title": "Cache, outage fallback"}
+    facts = ResponseFacts()
+
+    get_many_calls = []
+
+    async def _get_many(session, keys):
+        get_many_calls.append(list(keys))
+        if len(get_many_calls) == 1:
+            return {book_key(prefetch_asin, "us"): prefetch_book}
+        return {book_key(recovered_asin, "us"): recovered_book}
+
+    db_backstop_calls = []
+
+    async def _db_backstop(session, asins):
+        db_backstop_calls.append(list(asins))
+        if len(db_backstop_calls) == 1:
+            raise RuntimeError("DB backstop read failed")
+        return []
+
+    with patch("app.services.audible.books.cache.get_many", new=AsyncMock(side_effect=_get_many)), \
+         patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=RuntimeError("Audible down"))), \
+         patch("app.services.audible.books.get_books_from_db", new=AsyncMock(side_effect=_db_backstop)):
+        result = await get_books_by_asins(
+            [prefetch_asin, recovered_asin, unrecovered_asin], "us", AsyncMock(), use_cache=True, facts=facts
+        )
+
+    assert len(get_many_calls) == 2
+    assert len(db_backstop_calls) == 2
+    assert result == [prefetch_book, recovered_book]
+    assert facts.source_counts == {"audible": 0, "cache": 2, "db": 0}
+    assert facts.source_by_key == {prefetch_asin: SOURCE_CACHE, recovered_asin: SOURCE_CACHE}
     assert not facts.is_complete
     assert facts.incomplete_reasons == {REASON_HYDRATION_FAILED}
     assert sum(facts.source_counts.values()) == len(facts.source_by_key)
+
+
+@pytest.mark.asyncio
+async def test_get_books_by_asins_facts_full_backstop_recovery_of_a_deadline_chunk_stays_complete():
+    """A chunk abandoned at the deadline is not itself recorded as an
+    incomplete reason (see the comment at the `results.append` site for
+    the cancelled-task branch in books.py) -- only the residue the DB
+    backstop can't cover is. When the backstop fully recovers every ASIN
+    from the abandoned chunk, the response must be complete despite the
+    deadline having fired partway through."""
+    import app.services.audible.books as books_mod
+
+    fast_asins = [f"B0FAST{i:05d}" for i in range(50)]
+    slow_asins = [f"B0SLOW{i:05d}" for i in range(50)]
+    stored = [{"asin": a, "title": "from the db", "region": "us"} for a in slow_asins]
+
+    async def _one_fast_one_hanging(asins, region):
+        if asins[0].startswith("B0FAST"):
+            return [{"asin": a, "title": "live", "region": region} for a in asins]
+        await asyncio.sleep(30)
+        return []
+
+    session = AsyncMock()
+    session.rollback = AsyncMock()
+    facts = ResponseFacts()
+
+    with patch.object(books_mod, "_fetch_chunk", new=AsyncMock(side_effect=_one_fast_one_hanging)), \
+         patch.object(books_mod, "get_books_from_db", new=AsyncMock(return_value=stored)), \
+         patch("app.services.audible.books.cache.get_many", new=AsyncMock(return_value={})):
+        books = await books_mod.get_books_by_asins(
+            fast_asins + slow_asins, "us", session, deadline=time.monotonic() + 0.25, facts=facts
+        )
+
+    assert {b["asin"] for b in books} == set(fast_asins) | set(slow_asins)
+    assert facts.is_complete
+    assert facts.incomplete_reasons == set()
+
+
+@pytest.mark.asyncio
+async def test_get_books_by_asins_facts_partial_backstop_recovery_of_a_deadline_chunk_is_hydration_deadline_not_failed():
+    """The backstop only partially covering an abandoned chunk's ASINs must
+    record REASON_HYDRATION_DEADLINE, not REASON_HYDRATION_FAILED -- the two
+    loss classes are checked independently (see `_has_uncovered` and its two
+    call sites in the in-try DB backstop) precisely so a deadline residue
+    doesn't masquerade as a generic hydration failure it never actually
+    hit."""
+    import app.services.audible.books as books_mod
+
+    fast_asins = [f"B0FAST{i:05d}" for i in range(50)]
+    slow_asins = [f"B0SLOW{i:05d}" for i in range(50)]
+    partially_stored = [{"asin": a, "title": "from the db", "region": "us"} for a in slow_asins[:40]]
+
+    async def _one_fast_one_hanging(asins, region):
+        if asins[0].startswith("B0FAST"):
+            return [{"asin": a, "title": "live", "region": region} for a in asins]
+        await asyncio.sleep(30)
+        return []
+
+    session = AsyncMock()
+    session.rollback = AsyncMock()
+    facts = ResponseFacts()
+
+    with patch.object(books_mod, "_fetch_chunk", new=AsyncMock(side_effect=_one_fast_one_hanging)), \
+         patch.object(books_mod, "get_books_from_db", new=AsyncMock(return_value=partially_stored)), \
+         patch("app.services.audible.books.cache.get_many", new=AsyncMock(return_value={})):
+        books = await books_mod.get_books_by_asins(
+            fast_asins + slow_asins, "us", session, deadline=time.monotonic() + 0.25, facts=facts
+        )
+
+    assert len(books) == 90
+    assert not facts.is_complete
+    assert facts.incomplete_reasons == {REASON_HYDRATION_DEADLINE}
 
 
 @pytest.mark.asyncio

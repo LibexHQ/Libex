@@ -7,7 +7,8 @@ so the contract can't drift the way three hand-typed copies did.
 """
 
 # Standard library
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
+from typing import Any
 
 # Third party
 from fastapi import Response
@@ -73,36 +74,45 @@ def stamp_facts_headers(
     response: Response,
     facts: ResponseFacts,
     *,
-    has_entities: bool,
-    body_keys: Collection[str] | None = None,
+    has_entities: bool | None = None,
+    entities: Collection[Mapping[str, Any]] | None = None,
 ) -> None:
     """
     Stamps X-Libex-Source and X-Libex-Complete from a ResponseFacts ledger
     the route just handed a service.
 
-    X-Libex-Source is set only when `has_entities` is True. A route passes
-    False here when the body it is about to send carries no entity element
-    at all -- an empty bulk result once notFound has consumed everything,
-    for instance -- and attributing a source to nothing sent would be a
-    fabricated fact, exactly what source_header_value()/source_header_value_for()
-    already refuse to do for an unpopulated or unattributable tally.
+    A single-entity route passes `has_entities` directly -- one element has
+    no sequence to derive a key from, so this keeps that call byte-identical
+    to how it behaved before `entities` existed. A bulk/list route passes
+    `entities` instead: the actual sequence of entity dicts it is about to
+    send in its body, not a pre-derived flag or key set. This function
+    derives both from it -- `has_entities` as `bool(entities)`, and the ASIN
+    key list source_header_value_for restricts its tally to -- so every
+    bulk route computes them the same way instead of each hand-rolling its
+    own projection.
 
-    `body_keys` is None for every single-entity route, and stays None there
-    forever -- one element has nothing to restrict a tally to, so the
-    unrestricted facts.source_header_value() already states exactly what
-    that one element's own source was. Passing None reproduces this
-    function's behaviour before body_keys existed, byte for byte.
+    That key list is a list, not a set: source_header_value_for counts one
+    contributing source per element it iterates, so a set would collapse a
+    repeated ASIN in the body into a single count and understate the tally
+    -- the same undercount its own docstring already treats as a fabricated-
+    provenance failure. No live route can actually produce a duplicate ASIN
+    in `entities` today -- callers dedupe the ASINs they fetch before
+    hydration, and the segments a bulk response assembles are disjoint -- so
+    this is a contractual guarantee, not a fix for an observed undercount.
 
-    A route whose response can shrink an already-fetched set --
-    filtering or sorting a bulk list after facts recorded where every
-    fetched element came from -- passes the body's own post-filter keys
-    instead, and gets facts.source_header_value_for(body_keys): the tally
-    restricted to exactly what is being sent, not what was fetched before a
-    filter removed some of it. Passing the post-filter key set is
-    deliberate rather than relying on facts being empty or unchanged:
-    filtering can drop some (or all) of the fetched elements from the
-    response after facts already recorded where all of them came from, and
-    it is the body that must not lie, not the tally the fetch produced.
+    X-Libex-Source is set only when `has_entities` is true (directly, or
+    derived from a non-empty `entities`). A route with nothing to attribute
+    -- an empty bulk result once notFound has consumed everything, for
+    instance -- gets no header at all, exactly what
+    source_header_value()/source_header_value_for() already refuse to
+    fabricate for an unpopulated or unattributable tally.
+
+    A route whose response can shrink an already-fetched set -- filtering or
+    sorting a bulk list after facts recorded where every fetched element
+    came from -- passes the body's own post-filter `entities`, restricting
+    the tally to exactly what is being sent rather than what was fetched
+    before a filter removed some of it. It is the body that must not lie,
+    not the tally the fetch produced.
 
     X-Libex-Complete is set unconditionally once facts exists, with
     X-Libex-Incomplete-Reason alongside it only when incomplete. This
@@ -113,6 +123,11 @@ def stamp_facts_headers(
     "true"; one that also records a shortfall it couldn't fully make up for
     renders it "false", with that reason attached.
     """
+    if entities is not None:
+        body_keys = [entity["asin"] for entity in entities]
+        has_entities = bool(body_keys)
+    else:
+        body_keys = None
     if has_entities:
         source_value = (
             facts.source_header_value_for(body_keys)

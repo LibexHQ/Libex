@@ -157,15 +157,7 @@ async def get_books_bulk(
     data = sort_dicts(data, sort.value if sort is not None else None, order.value, BOOK_SORT_FIELDS)
 
     apply_cache_control(response, cache)
-    # A list, not a set: source_header_value_for counts one contributing
-    # source per element it iterates, matching X-Libex-Source's own
-    # "count per contributing source when more than one produced elements
-    # in the body" -- a set would collapse a repeated ASIN in the body to
-    # one count and understate the tally, the same undercount
-    # source_header_value_for's own docstring treats as a fabricated-
-    # provenance failure rather than a harmless simplification.
-    body_keys = [book["asin"] for book in data]
-    stamp_facts_headers(response, facts, has_entities=bool(data), body_keys=body_keys)
+    stamp_facts_headers(response, facts, entities=data)
 
     return await build_large_list_response(
         BulkBookResponse,

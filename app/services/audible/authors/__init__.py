@@ -130,9 +130,19 @@ class AuthorBooksResult(NamedTuple):
 # cleared around the single await point in get_author_books below, with no
 # other await between the membership check and the insert, so two requests
 # arriving on the same event loop tick can never both become the leader.
-# Per-process only: with one uvicorn worker today this collapses every
-# concurrent request in that worker onto one walk; a second worker process
-# holds its own separate map and would still run its own independent walk.
+# Per-process only: each worker process holds its own separate map, so a
+# single popular author's key expiring can still produce one independent
+# walk per worker rather than the one walk this coalescing achieves within
+# a process. That is not free -- a walk is hundreds of upstream requests
+# (179 measured for Agatha Christie, 651 for Conan Doyle; see client.py's
+# AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT docstring), so the worst case
+# scales with the number of worker processes rather than staying at one.
+# Two things keep that from actually biting: expiry is staggered per
+# author -- each entry's TTL runs from its own walk finishing, not a
+# shared clock, so workers rarely land on the same author's expiry at once
+# -- and this route sets Cache-Control with an s-maxage aligned to that
+# same expiry (authors/router.py), so the edge absorbs repeat traffic
+# before most of it ever reaches this map at all.
 _author_books_inflight: dict[tuple[str, str], asyncio.Task[AuthorBooksResult]] = {}
 
 # ============================================================

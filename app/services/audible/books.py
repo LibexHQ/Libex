@@ -849,9 +849,16 @@ async def _get_books_by_asins_unsettled(
             # its requested ASINs have no such record -- Audible answers
             # those with a hollow, titleless stub rather than a 404 (see
             # _filter_products), and that stub is already gone from `result`
-            # by the time it lands here. A chunk ASIN with no matching
-            # product in what came back genuinely does not exist, the same
-            # as a chunk that raised NotFoundException above.
+            # by the time it lands here. But `result` is _filter_products'
+            # output, and that function drops two disjoint categories: the
+            # titleless stub above, and any product whose
+            # publication_datetime equals UNRELEASED_PLACEHOLDER. A chunk
+            # ASIN with no matching product in `result` could be either one
+            # -- a genuinely nonexistent ASIN, or a title Audible returned in
+            # full that simply hasn't released yet, filtered out before this
+            # comparison ever runs. Both are structurally indistinguishable
+            # here, and both are correctly absent from the body either way:
+            # the ASIN is not present in what this function returns.
             returned_asins = {p.get("asin") for p in result}
             stub_asins = [a for a in chunk if a not in returned_asins]
             if stub_asins:

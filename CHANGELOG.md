@@ -42,8 +42,11 @@ capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
   `X-Libex-Complete` reads `false`, with `X-Libex-Incomplete-Reason` naming
   why, whenever the body actually falls short of what was requested: a
   requested ASIN Audible has no record of at all, including one it answers
-  with a titleless placeholder for rather than a 404 (`hydration-not-found`
-  either way), or part of the request failing outright with the DB or cache
+  with a titleless placeholder for rather than a 404; a title Audible does
+  return in full but hasn't released yet, which Libex deliberately filters
+  out of the body, and which the same check then can't tell apart from a
+  genuinely nonexistent ASIN once it's gone (`hydration-not-found` for all
+  three); or part of the request failing outright with the DB or cache
   backstop unable to recover every ASIN that failed (`hydration-failed`).
   `/book/{asin}` shares the same fetch path underneath, but coverage of a
   single requested book is all or nothing: either it comes back — from

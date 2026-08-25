@@ -17,6 +17,7 @@ from fastapi import Response
 from app.core.response_headers import (
     HEADER_COMPLETE,
     HEADER_INCOMPLETE_REASON,
+    HEADER_REQUEST_ID,
     HEADER_SOURCE,
     SOURCE_MIXED,
     SOURCES,
@@ -29,7 +30,34 @@ from app.core.response_headers import (
 # from what response_headers.py actually recognizes as valid, the same
 # reason the sort/filter enums are built from their own service allow-lists
 # rather than copied by hand.
+#
+# X-Request-Id is stamped on every response LoggingMiddleware sees --
+# 404s, 500s, and /health included -- not only the ones below, but there is
+# no per-request hook this file (or middleware.py, which stamps it) can use
+# to add it to the OpenAPI schema for a path it doesn't own; the schema is
+# built once, at startup, from route decorators alone. Declaring it here
+# documents it on every route that already opts into this shared block --
+# every entity route with something to say about provenance or
+# completeness, which is also where a caller is most likely to be reading
+# when a request needs to be reported. It understates the header's real
+# reach, deliberately: a caller who reads the description on one of these
+# routes and assumes the header appears only there would be wrong, but a
+# caller who never sees it documented anywhere would have no way to learn
+# it exists at all. The description below says so directly rather than
+# implying this list is exhaustive.
 FACTS_RESPONSE_HEADERS = {
+    HEADER_REQUEST_ID: {
+        "description": (
+            "A random id minted fresh for this response, never taken from "
+            "anything the caller sends. Quote it back when reporting a "
+            "problem -- it is the one handle that lets a specific request "
+            "be found in Libex's own logs, without exposing anything about "
+            "who made it. Stamped on every response Libex returns, not "
+            "only the ones, like this one, that declare it in their "
+            "documented headers."
+        ),
+        "schema": {"type": "string"},
+    },
     HEADER_SOURCE: {
         "description": (
             "Where the entity element(s) in this response came from: "
@@ -45,15 +73,44 @@ FACTS_RESPONSE_HEADERS = {
         "schema": {"type": "string"},
     },
     HEADER_COMPLETE: {
-        "description": "Whether this response is known to be complete.",
+        "description": (
+            "Whether the response body contains every element the caller "
+            "asked for. \"true\" means it does. \"false\" means at least "
+            "one requested element is missing from the body -- not merely "
+            "that something went wrong somewhere internally on the way to "
+            "a complete answer -- and X-Libex-Incomplete-Reason names why."
+        ),
         "schema": {"type": "string", "enum": ["true", "false"]},
     },
     HEADER_INCOMPLETE_REASON: {
         "description": (
             "Present only when X-Libex-Complete is false. Comma-joined "
-            "subset of the closed reason vocabulary: discovery-incomplete, "
-            "hydration-deadline, hydration-failed, hydration-not-found -- "
-            "in that fixed order, one or more joined by \", \"."
+            "subset of the closed reason vocabulary, in this fixed order "
+            "regardless of which was recorded first, one or more joined by "
+            "\", \": "
+            "hydration-not-found -- Audible has no record of the "
+            "requested ASIN, or returned a titleless placeholder for it "
+            "instead of a book. Also covers a title Audible does return in "
+            "full but hasn't released yet, which Libex filters out of the "
+            "body before this check can tell it apart from a genuinely "
+            "nonexistent ASIN. Retrying will not surface a nonexistent "
+            "title; one still pending release may appear on a later "
+            "request once it is out. "
+            "hydration-failed -- Libex could not reach Audible for part of "
+            "the request, and neither its stored database copy nor its "
+            "cache covered what was missed. Retrying later, once Audible "
+            "is reachable again, may succeed where this one did not. "
+            "hydration-deadline -- the request ran out of its time budget "
+            "before every element could be fetched, and the same fallback "
+            "that covers hydration-failed didn't cover this shortfall "
+            "either. Not emitted by any route today -- the one caller that "
+            "imposes such a deadline reports completeness through a "
+            "separate, coarser check instead of this header. "
+            "discovery-incomplete -- reserved for the catalogue walk that "
+            "enumerates which elements exist ending before it finished, "
+            "before any element it found was fetched. Not emitted by any "
+            "route today -- nothing currently wires a walk's own shortfall "
+            "into this header."
         ),
         "schema": {"type": "string"},
     },
@@ -64,8 +121,11 @@ FACTS_RESPONSE_HEADERS = {
 # discovery walk's own success, not through anything this module's
 # X-Libex-Source/X-Libex-Incomplete-Reason machinery tracks. Declaring the
 # full FACTS_RESPONSE_HEADERS block on them would document two headers
-# they never send. This is the subset they actually do.
+# they never send. This is the subset they actually do -- X-Request-Id
+# included, since that one is never tied to ResponseFacts at all and these
+# two routes carry it exactly like every other response does.
 COMPLETE_ONLY_RESPONSE_HEADERS = {
+    HEADER_REQUEST_ID: FACTS_RESPONSE_HEADERS[HEADER_REQUEST_ID],
     HEADER_COMPLETE: FACTS_RESPONSE_HEADERS[HEADER_COMPLETE],
 }
 

@@ -765,16 +765,27 @@ async def test_author_profile_source_header_reflects_the_recorded_source(async_c
 # Neither route ever opens a ResponseFacts -- completeness here comes from
 # _mark_completeness, working off the discovery walk and the hydration
 # count, not from anything record_source/record_source_keys touches. So
-# X-Libex-Source is never on the wire for either route, and their OpenAPI
-# declaration (COMPLETE_ONLY_RESPONSE_HEADERS) must say exactly that:
-# X-Libex-Complete alone, not the full three-header set every
-# ResponseFacts-backed route declares.
+# X-Libex-Source (and X-Libex-Incomplete-Reason, which only ever
+# accompanies it) is never on the wire for either route, and their OpenAPI
+# declaration (COMPLETE_ONLY_RESPONSE_HEADERS) must say exactly that: no
+# source or incomplete-reason header, whatever else it does declare.
+#
+# It is deliberately not an exact-set check against
+# COMPLETE_ONLY_RESPONSE_HEADERS's current membership -- X-Request-Id
+# joined that dict for a reason unrelated to this contract (it is stamped
+# by middleware on every response, not something these two routes opt
+# into), and a strict `set(headers) == {...}` here already broke once,
+# for a header this test was never written to defend. Asserting the
+# absence this test actually cares about survives the next universal
+# header the same way.
 
 
-def test_get_books_by_author_declares_only_the_completeness_header_in_openapi():
+def test_get_books_by_author_declares_no_source_or_incomplete_reason_header_in_openapi():
     schema = app.openapi()
     headers = schema["paths"]["/author/books/{asin}"]["get"]["responses"]["200"]["headers"]
-    assert set(headers) == {"X-Libex-Complete"}
+    assert "X-Libex-Complete" in headers
+    assert "X-Libex-Source" not in headers
+    assert "X-Libex-Incomplete-Reason" not in headers
 
 
 @pytest.mark.asyncio

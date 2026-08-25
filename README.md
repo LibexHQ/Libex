@@ -178,6 +178,14 @@ disclosed transparently.
   in the `X-Request-Id` response header, so you can quote one request in a bug
   report. It's never taken from a header you send, and it isn't reused between
   requests
+- The `Host` header — which hostname the request came in on, currently useful
+  only for telling `libex.lostcartographer.xyz` traffic apart from
+  `libexdb.com` traffic during the migration
+- Whether the response was complete and, if not, why, plus where the data in
+  it came from (Audible, cache, DB, or a mix) — the same `X-Libex-Complete`,
+  `X-Libex-Incomplete-Reason` and `X-Libex-Source` values described under
+  Response headers below, describing what Libex sent back rather than who
+  asked for it
 - Errors and exceptions. An unhandled error logs its message so a broken deploy
   can be diagnosed; if a message was built from something you sent, that text
   appears in that one line
@@ -217,6 +225,10 @@ what a task actually did.
 ---
 
 ## API Behavior
+
+**Response headers:** Every response carries `X-Request-Id`, a fresh id for quoting a specific request in a bug report. The book, series and author endpoints also carry `X-Libex-Complete` (whether the body holds everything you asked for) and, when it doesn't, `X-Libex-Incomplete-Reason`; most of them also carry `X-Libex-Source` (where the data in the body came from — Audible, cache, DB, or a mix). All four are exposed through CORS for browser JavaScript to read. Full contract in `/docs`.
+
+**Caching:** The book, series and author endpoints, plus `/quick-search`, default to serving Libex's stored copy (`cache=true`), which can be up to `CACHE_TTL` seconds old. Pass `cache=false` on any of them to force a live Audible fetch instead.
 
 **HTML content:** `description` and `summary` fields on book responses, `description` on author responses, and `description` on series responses are returned as plain text with HTML stripped.
 

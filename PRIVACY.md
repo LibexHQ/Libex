@@ -497,12 +497,18 @@ If you believe something identifying about you has ended up in a log anyway —
 an unhandled error that captured text you sent, most plausibly — tell me, and
 quote the `X-Request-Id` from that response if you still have it, because that
 is what tells me which line to look at. What I can then do depends on where
-the copies of that line are: the ones on my own server I can delete outright,
-and the copy in Axiom falls under the same caveat as the paragraph above — a
-hosted store whose internals aren't mine, so I'll tell you what I actually
-managed rather than promise it in advance. Every copy expires on the schedule
-above regardless. That is the one realistic case, and it is worth saying out
-loud rather than hiding behind "we hold nothing about you."
+the copies of that line are. The ones on my own server — the rotating file and
+the container's own output — are mine to delete, and I will delete them.
+
+The copy in Axiom is a different answer, and the honest one is no. It sits in
+a store I query rather than administer, and whether one event can be taken
+back out of it is not something I've established — so I'm not going to tell
+you in advance that it will be. What I can tell you is what the schedule above
+says: that copy expires with everything else. If it turns out a single event
+can be removed after all, then you get more than this page promised rather
+than less, which is the direction I'd rather be wrong in. That is the one
+realistic case, and it is worth saying out loud rather than hiding behind "we
+hold nothing about you."
 
 **Objection, portability, rectification:** these all need data about you to
 act on, and there isn't any. Cloudflare is a separate matter and holds your

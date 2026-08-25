@@ -279,7 +279,20 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 
         # Stamped before the /health branch below returns, so /health
         # carries it too -- this identifies the request, not the work the
-        # request triggered, and /health is a request like any other.
+        # request triggered, and /health is a request like any other. Also
+        # stamped on the 404s and 500s call_next hands back above, and on
+        # every route this file never imports -- unconditionally, on
+        # whatever response reaches this line, with no route-level opt-in.
+        # That reach can't be reflected in the OpenAPI schema from here:
+        # the schema is built once, at startup, from route decorators, and
+        # this middleware runs per-request and owns no path of its own to
+        # attach documentation to. The one place a caller reading /docs can
+        # learn this header exists is facts_headers.py's
+        # FACTS_RESPONSE_HEADERS/COMPLETE_ONLY_RESPONSE_HEADERS, on the
+        # routes that already declare one of those blocks for other
+        # reasons -- an incomplete accounting of where the header actually
+        # appears, but the widest one available without documentation
+        # per route that has nothing else to say about its own headers.
         response.headers[HEADER_REQUEST_ID] = request_id
 
         if request.url.path == "/health":

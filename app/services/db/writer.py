@@ -367,10 +367,23 @@ async def upsert_author(session: AsyncSession, author: dict) -> int | None:
                 )
                 await nested.commit()
             except (IntegrityError, AsyncpgUniqueViolation):
-                # A concurrent request upgraded between our SELECT and UPDATE.
-                # The data is correct — undo the failed statement and return
-                # the existing id.
+                # A concurrent request already upgraded a row (or inserted a
+                # new one) to this exact (asin, region, name) between our
+                # SELECT and this UPDATE, colliding with
+                # authors_asin_region_name_unique. Our UPDATE lost the race
+                # and was rolled back — null_id still has asin IS NULL, so
+                # returning it would link the caller's book to a permanent
+                # asin-less duplicate instead of the row the winner produced.
+                # Re-query for the winner's row and return that id instead.
                 await nested.rollback()
+                winner = await session.execute(
+                    select(Author.id).where(
+                        Author.asin == a_asin,
+                        Author.region == a_region,
+                        Author.name == a_name,
+                    )
+                )
+                return winner.scalar_one_or_none()
             return null_id
 
         # No null-asin row — standard upsert on the unique constraint.

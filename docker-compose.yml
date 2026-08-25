@@ -3,8 +3,20 @@ services:
     image: ghcr.io/libexhq/libex:latest
     container_name: libex
     restart: unless-stopped
+    # PORT is the published host port and nothing else. Inside the container the
+    # app always listens on 3333: the Dockerfile CMD passes --port 3333, uvicorn
+    # reads no PORT variable (0.46.0 checks only WEB_CONCURRENCY and
+    # FORWARDED_ALLOW_IPS), and no code in app/ reads settings.port. It is
+    # deliberately not in the environment block below, where it would name a
+    # listen port it does not set.
     ports:
       - "${PORT:-3333}:3333"
+    # This block is an allowlist, not a passthrough. A name absent from here is
+    # not readable in the container no matter what .env or the Portainer stack
+    # environment sets, and the app sees only its own compiled-in default --
+    # silently, because pydantic has a default for every one of these. Adding a
+    # setting to app/core/config.py is therefore only half of wiring it up; it
+    # is not configurable until it also appears below.
     environment:
       - DATABASE_URL=postgresql+asyncpg://${DB_USER:-libex}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-libex}
       - CACHE_ENABLED=${CACHE_ENABLED:-true}
@@ -14,10 +26,10 @@ services:
       # Audible requests leave by the container's own address -- the same
       # IP the public API answers on.
       - AUDIBLE_PROXY_URL=${AUDIBLE_PROXY_URL:-}
-      - PORT=${PORT:-3333}
       # The only place the worker count is set. The image's CMD passes no
-      # --workers, which is what keeps it the only place; adding that flag would
-      # set the count without setting this, and the two would drift silently.
+      # --workers, which is what keeps it the only place: uvicorn reads
+      # WEB_CONCURRENCY only when workers is None (config.py, 0.46.0), so the
+      # flag would not sit alongside this value, it would silently beat it.
       #
       # More than one worker routes around a blocked event loop -- the kernel
       # hands new connections to whichever child is still calling accept().
@@ -33,9 +45,7 @@ services:
       # dividing the per-process limits: 10 is also one request's fan-out width.
       #
       # Set to 1 to restore single-process behaviour with no rebuild.
-      # MUST be 1 while SEEDER_ENABLED is true -- the seeder loop starts in
-      # every worker and nothing claims the entities it walks, so six workers
-      # walk the same ones six times over.
+      # MUST be 1 while SEEDER_ENABLED is true -- see the seeder block below.
       - WEB_CONCURRENCY=${WEB_CONCURRENCY:-6}
       - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
@@ -45,8 +55,66 @@ services:
       # non-empty, so a blank dataset would silently drop a set token.
       - AXIOM_TOKEN=${AXIOM_TOKEN:-}
       - AXIOM_DATASET=${AXIOM_DATASET:-libex}
+      # Seeder. Off by default: a fresh self-hosted instance should serve what
+      # it is asked for and nothing else until its operator opts in.
+      #
+      # Every default below repeats app/core/config.py exactly, which is what
+      # makes them safe. These are not second opinions -- an interpolated value
+      # always reaches the app, so an unset variable here would send an empty
+      # string that overrides the compiled default rather than falling back to
+      # it. SEEDER_REGIONS is the one where that bites: the seeder splits it on
+      # commas and drops empties, so a blank value yields no regions and the
+      # walk runs forever over nothing.
+      #
+      # WEB_CONCURRENCY MUST be 1 whenever this is true. run_seeder and
+      # run_new_releases_seeder are started from the lifespan in app/main.py,
+      # which runs once per worker, and nothing claims the entities they walk.
+      # Six workers walk the same catalog six times over and SEEDER_REQUEST_DELAY
+      # is per-process, so the delay Audible actually sees is a sixth of what is
+      # set here. Nothing in the image enforces the pairing; it is on the
+      # operator setting the flag.
+      - SEEDER_ENABLED=${SEEDER_ENABLED:-false}
+      - SEEDER_INTERVAL_HOURS=${SEEDER_INTERVAL_HOURS:-24}
+      - SEEDER_REQUEST_DELAY=${SEEDER_REQUEST_DELAY:-1.0}
+      - SEEDER_REGIONS=${SEEDER_REGIONS:-us}
+      - SEEDER_NEW_RELEASES_INTERVAL_HOURS=${SEEDER_NEW_RELEASES_INTERVAL_HOURS:-24}
+      - SEEDER_REFRESH_ENABLED=${SEEDER_REFRESH_ENABLED:-false}
+      # The base64 PBKDF2 hash the /internal/seed/narrators bearer token is
+      # checked against, never the token itself. Empty disables the endpoint
+      # outright -- the auth check returns false before it looks at the header --
+      # so an unset value fails closed rather than open. Generate with
+      # `python -m app.api.routes.internal.router`.
+      - SEED_SECRET=${SEED_SECRET:-}
+      # Deprecation/Sunset/Link headers announcing a move to another host, per
+      # RFC 9745 and RFC 8594. Off and empty by default, and that default is
+      # load-bearing rather than tidy: these name somebody else's hostname and
+      # dates, so a self-hoster who inherited a populated set would tell their
+      # own callers to migrate to an instance that is not theirs.
+      #
+      # Enabling requires MIGRATION_NEW_HOST, MIGRATION_ANNOUNCED and
+      # MIGRATION_SUNSET together -- both dates ISO YYYY-MM-DD, sunset not
+      # before announced. app/core/migration_notice.py logs which one is
+      # missing and serves no notice rather than serving a partial one, so a
+      # half-configured set is inert, not broken. MIGRATION_INFO_URL is the
+      # only optional member.
+      - MIGRATION_NOTICE_ENABLED=${MIGRATION_NOTICE_ENABLED:-false}
+      - MIGRATION_NEW_HOST=${MIGRATION_NEW_HOST:-}
+      - MIGRATION_ANNOUNCED=${MIGRATION_ANNOUNCED:-}
+      - MIGRATION_SUNSET=${MIGRATION_SUNSET:-}
+      - MIGRATION_INFO_URL=${MIGRATION_INFO_URL:-}
+    # ./logs is the portable default and resolves next to this file, which is
+    # what a fresh clone needs. LOGS_PATH exists so a deployment that keeps its
+    # logs somewhere else -- an absolute path on a dedicated mount -- expresses
+    # that in its environment instead of editing this line, because an edited
+    # line is a stack that no longer matches the repo and drifts from it
+    # silently afterwards.
+    #
+    # /app/logs is the only path the image expects to be writable: the
+    # Dockerfile creates it and chowns it to the libex user, and app/core/
+    # logging.py writes libex.log there. Nothing reads or writes any other host
+    # path, so no second bind is needed.
     volumes:
-      - ./logs:/app/logs
+      - ${LOGS_PATH:-./logs}:/app/logs
     depends_on:
       postgres:
         condition: service_healthy
@@ -54,7 +122,23 @@ services:
       - default
       - libex-proxy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3333/health"]
+      # Interpolation applies to the whole file, including inside this argument
+      # list -- verified against Compose 2.40.3, which also resolves the default
+      # when the variable is set but empty.
+      #
+      # localhost keeps the check inside the container, which is the portable
+      # answer and the only one a fresh clone can rely on. Setting
+      # HEALTHCHECK_HOST to the Docker host's address instead sends it out and
+      # back through the published port, so the check also proves the port
+      # binding works rather than only that the process answers itself.
+      #
+      # The port stays 3333 because that is the container's port, which never
+      # moves. PORT relocates the host side only, so a deployment that both
+      # changes PORT and points this at the host address would check a port
+      # nothing is published on -- leave HEALTHCHECK_HOST at localhost in that
+      # case. Unhealthy is a reported status here, not an action: Docker does
+      # not restart on it, and restart: unless-stopped covers exit, not wedge.
+      test: ["CMD", "curl", "-f", "http://${HEALTHCHECK_HOST:-localhost}:3333/health"]
       interval: 30s
       timeout: 10s
       retries: 3

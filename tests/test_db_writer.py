@@ -147,29 +147,42 @@ async def test_upsert_author_upgrade_returns_null_row_id():
 @pytest.mark.asyncio
 async def test_upsert_author_upgrade_race_condition_returns_id():
     """
-    When a concurrent request upgraded between our SELECT and UPDATE,
-    IntegrityError is caught and the null row id is returned.
+    When a concurrent request upgraded between our SELECT and UPDATE, the
+    IntegrityError is caught and the WINNER's row id is returned — not the
+    null-asin row's id. Returning the null row would link the caller's book
+    to a permanent asin-less duplicate instead of the row the winner produced,
+    since our own UPDATE never took effect. null_id and winner_id are
+    deliberately different values so a test that let either one through would
+    fail: if the test scripted both as 42, asserting `result == 42` would pass
+    whether the fix returned the ghost or the canonical row.
     """
+    null_id = 42
+    winner_id = 99
     session = _session(
-        _scalar(None),
-        _scalar(42),
-        IntegrityError("duplicate", {}, Exception()),
+        _scalar(None),           # step 1: no fully-upgraded row yet
+        _scalar(null_id),        # step 2: null-asin row found
+        IntegrityError("duplicate", {}, Exception()),  # UPDATE loses the race
+        _scalar(winner_id),      # re-query after rollback finds the winner's row
     )
     result = await upsert_author(session, {
         "asin": "B000APHM1K",
         "name": "Vince Flynn",
         "region": "us",
     })
-    assert result == 42
+    assert result == winner_id
+    assert result != null_id
 
 
 @pytest.mark.asyncio
 async def test_upsert_author_upgrade_race_condition_rolls_back_to_savepoint():
     """IntegrityError during upgrade rolls the failed UPDATE back to its SAVEPOINT."""
+    null_id = 42
+    winner_id = 99
     session = _session(
         _scalar(None),
-        _scalar(42),
+        _scalar(null_id),
         IntegrityError("duplicate", {}, Exception()),
+        _scalar(winner_id),
     )
     await upsert_author(session, {
         "asin": "B000APHM1K",
@@ -188,10 +201,13 @@ async def test_upsert_author_upgrade_race_condition_spares_the_transaction():
     books before it commits — and would do it silently, since the race is
     swallowed and never reaches the caller.
     """
+    null_id = 42
+    winner_id = 99
     session = _session(
         _scalar(None),
-        _scalar(42),
+        _scalar(null_id),
         IntegrityError("duplicate", {}, Exception()),
+        _scalar(winner_id),
     )
     await upsert_author(session, {
         "asin": "B000APHM1K",
@@ -203,18 +219,25 @@ async def test_upsert_author_upgrade_race_condition_spares_the_transaction():
 
 @pytest.mark.asyncio
 async def test_upsert_author_upgrade_race_condition_does_not_reraise():
-    """IntegrityError during upgrade is swallowed — does not propagate."""
+    """
+    IntegrityError during upgrade is swallowed — does not propagate — and the
+    function still resolves to the winner's row rather than merely returning
+    "something" non-None.
+    """
+    null_id = 42
+    winner_id = 99
     session = _session(
         _scalar(None),
-        _scalar(42),
+        _scalar(null_id),
         IntegrityError("duplicate", {}, Exception()),
+        _scalar(winner_id),
     )
     result = await upsert_author(session, {
         "asin": "B000APHM1K",
         "name": "Vince Flynn",
         "region": "us",
     })
-    assert result is not None
+    assert result == winner_id
 
 
 # ============================================================

@@ -116,7 +116,59 @@ async def lifespan(app: FastAPI):
 # stayed silent on.
 migration_notice = build_migration_notice(settings)
 
-_BASE_DESCRIPTION = "Open, unrestricted Audible metadata API for the audiobook automation community."
+_BASE_DESCRIPTION = """Open, unrestricted Audible metadata API for the audiobook automation community.
+
+## Response headers
+
+Every response carries **`X-Request-Id`** — an id minted fresh for that response
+alone, never taken from anything the caller sent. Quote it back when reporting
+a problem.
+
+The book, series and author routes also report on the data in the body:
+
+- **`X-Libex-Source`** — where the elements in the body came from: `audible`,
+  `cache`, or `db` alone, or `mixed; audible=2; cache=1` when more than one
+  contributed. Not sent by the two `/author/books` routes, which carry
+  `X-Libex-Complete` below but never this one.
+- **`X-Libex-Complete`** — whether the body holds every element that was
+  asked for. `true` means it does; `false` means at least one requested
+  element is missing — not that something merely went wrong internally along
+  the way.
+- **`X-Libex-Incomplete-Reason`** — present only when `X-Libex-Complete` is
+  `false`:
+
+  | Reason | What happened | Worth retrying? |
+  |---|---|---|
+  | `hydration-not-found` | Audible has no record of the ASIN, or answered with a titleless placeholder instead of a book — also covers a title Audible returns in full but hasn't released yet | No for a genuinely missing ASIN; an unreleased one may appear once it's out |
+  | `hydration-failed` | Libex couldn't reach Audible for part of the request, and neither its stored DB copy nor its cache covered the gap | Yes, once Audible is reachable again |
+  | `hydration-deadline` | The request ran out of its time budget before every element was fetched | Not currently emitted by any route — the one caller that imposes such a deadline reports completeness through a separate, coarser check instead |
+  | `discovery-incomplete` | Reserved for a catalogue walk that ends before it finishes enumerating what exists | Not currently emitted by any route |
+
+All four headers are exposed through CORS, so browser JavaScript can read them
+directly off the response.
+
+### What a response actually tells you
+
+- **200 with `X-Libex-Complete: true`** — the body has everything that was
+  asked for.
+- **200 with `X-Libex-Complete: false`** — still a real, usable answer, just
+  short one or more of the requested elements.
+- **404** is not a quieter version of an incomplete 200. On a single-entity
+  route (`/book/{asin}`, `/series/{asin}`, `/author/{asin}`), a missing
+  element fails the whole request rather than returning a partial body —
+  which is why those routes always read `true` at 200.
+- On the bulk `/book` route, ASINs Audible didn't have are listed in
+  **`notFound`**, computed before filtering — a book that was found and then
+  removed by a filter parameter is never reported as missing.
+- The two series-books routes (`/series/books/{asin}`, `/series/{asin}/books`)
+  carry **no `notFound` field at all** — `X-Libex-Complete` and
+  `X-Libex-Incomplete-Reason` are the only signal that a book is missing.
+
+## Caching
+
+The book, series and author routes default to `cache=true`, serving Libex's
+stored copy when one exists. Pass `cache=false` on any of them to force a
+live Audible fetch instead."""
 
 if migration_notice is not None:
     # Served from both hostnames off one description built at import time, so this can't

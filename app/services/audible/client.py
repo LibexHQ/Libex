@@ -4,9 +4,10 @@ Handles headers, region mapping, and the shared httpx session.
 All Audible service files call through this client exclusively.
 
 DESIGN PHILOSOPHY: Audible-first.
-Every request hits Audible directly for fresh data.
-Cache is used only as a fallback when Audible is unavailable.
-This ensures data accuracy and freshness at all times.
+Every call that reaches this client goes straight to Audible -- it holds
+no cache of its own and never consults one. Whether a request reaches this
+client at all, or is answered from a cache first, is decided by the caller
+before it gets here.
 """
 
 # Standard library

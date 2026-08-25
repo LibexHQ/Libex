@@ -16,7 +16,8 @@ from app.core.config import get_settings, check_retired_env_vars
 from app.core.logging import setup_logging, stop_axiom_listener
 from app.core.exceptions import LibexException
 from app.core.middleware import setup_middleware
-from app.core.migration_notice import build_migration_notice, is_new_host_request
+from app.core.migration_notice import build_migration_notice, is_new_host_request, MIGRATION_HEADER_NAMES
+from app.core.response_headers import HEADER_REQUEST_ID, EXPOSED_HEADER_NAMES
 
 
 # Database
@@ -269,7 +270,27 @@ async def libex_exception_handler(request: Request, exc: LibexException) -> JSON
 
 @app.exception_handler(Exception)
 async def generic_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    logger.error(f"Unhandled exception: {exc}", exc_info=True)
+    # Read once, up front, and reused below for both the log line and the
+    # header rather than each computing its own -- an id on the header that
+    # names no log line is worse than no header at all, since an operator or
+    # a bug report goes looking for a line that was never written, and a
+    # header naming a different id than the log line would be worse still.
+    # This is the one and only read: request.state is shared across every
+    # Request object built from the same ASGI scope, so what LoggingMiddleware
+    # set on it before call_next survives even though this handler runs in
+    # ServerErrorMiddleware, entirely outside that middleware. getattr rather
+    # than a direct attribute read: a 500 raised before LoggingMiddleware's
+    # dispatch ever ran reaches this handler with no request_id set, and that
+    # is one log line and one response with a field missing, not a second
+    # failure stacked on the first -- never a fresh uuid minted here to paper
+    # over that gap, which would silently produce the exact mismatch this
+    # comment exists to avoid.
+    request_id = getattr(request.state, "request_id", None)
+    logger.error(
+        f"Unhandled exception: {exc}",
+        exc_info=True,
+        extra={"request_id": request_id} if request_id is not None else {},
+    )
     response = JSONResponse(
         status_code=500,
         content={"error": "Internal server error", "status_code": 500},
@@ -281,6 +302,29 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
     # bypass the notice.
     if migration_notice is not None and not is_new_host_request(migration_notice, request.url.hostname):
         response.headers.update(migration_notice.headers)
+
+    if request_id is not None:
+        response.headers[HEADER_REQUEST_ID] = request_id
+
+    # ServerErrorMiddleware sits outside CORSMiddleware too, so an unhandled
+    # 500 otherwise carries no CORS headers at all — a browser discards the
+    # entire response before any JS reaches the body, let alone a header.
+    # Exposing headers without also allowing the origin would change
+    # nothing, so both are set by hand here, the same way the migration
+    # headers above already have to be.
+    #
+    # Restricted to requests that actually carried an Origin header: a
+    # same-origin page and a non-browser caller (curl, a server-side fetch)
+    # never send one and were never going to hit a CORS check in the first
+    # place, so stamping this on every 500 regardless would be pure noise.
+    # The exposed set mirrors what setup_middleware exposes on every other
+    # response, so a browser sees the same allowlist whether the request
+    # succeeded or failed.
+    if request.headers.get("origin") is not None:
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Expose-Headers"] = ", ".join(
+            dict.fromkeys((*EXPOSED_HEADER_NAMES, *MIGRATION_HEADER_NAMES))
+        )
     return response
 
 # ============================================================

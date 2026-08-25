@@ -16,6 +16,8 @@ from app.db.session import get_session
 
 # Routes
 from app.api.routes.books.schemas import BookResponse, BulkBookResponse, ChapterResponse
+from app.api.routes.cache_param import CacheStandardParam, apply_cache_control
+from app.api.routes.facts_headers import FACTS_RESPONSE_HEADERS, stamp_facts_headers
 from app.api.routes.large_response import build_large_list_response
 from app.api.routes.sort_params import BookSortField, SortOrder
 from app.api.routes.filter_params import LiveBookFilters
@@ -29,6 +31,7 @@ from app.services.filtering import filter_dicts
 # Core
 from app.core.exceptions import NotFoundException
 from app.core.middleware import is_valid_asin, valid_region
+from app.core.response_headers import ResponseFacts
 
 router = APIRouter(prefix="/book", tags=["Books"])
 
@@ -51,11 +54,12 @@ async def get_books_by_sku(
         raise NotFoundException(f"No books found for SKU: {sku}")
     return books
 
-@router.get("/{asin}", response_model=BookResponse)
+@router.get("/{asin}", response_model=BookResponse, responses={200: {"headers": FACTS_RESPONSE_HEADERS}})
 async def get_book(
     asin: Annotated[str, Path(description="Audible ASIN")],
+    response: Response,
     region: str = Depends(valid_region),
-    cache: Annotated[bool, Query(description="Return cached data if available")] = False,
+    cache: CacheStandardParam = True,
     session: AsyncSession = Depends(get_session),
 ) -> BookResponse:
     """
@@ -64,41 +68,56 @@ async def get_book(
     """
     if not is_valid_asin(asin):
         raise NotFoundException(f"Invalid ASIN format: {asin}")
-    data = await get_book_by_asin(asin, region, session, cache)
+    facts = ResponseFacts()
+    data = await get_book_by_asin(asin, region, session, cache, facts=facts)
+    apply_cache_control(response, cache)
+    stamp_facts_headers(response, facts, has_entities=True)
     return BookResponse(**data)
 
 
-@router.get("/{asin}/chapters", response_model=ChapterResponse)
+@router.get("/{asin}/chapters", response_model=ChapterResponse, responses={200: {"headers": FACTS_RESPONSE_HEADERS}})
 async def get_book_chapters(
     asin: Annotated[str, Path(description="Audible ASIN")],
+    response: Response,
     region: str = Depends(valid_region),
     session: AsyncSession = Depends(get_session),
 ) -> ChapterResponse:
     """Get chapter information for a book by ASIN."""
     if not is_valid_asin(asin):
         raise NotFoundException(f"Invalid ASIN format: {asin}")
-    data = await get_chapters(asin, region, session)
+    facts = ResponseFacts()
+    data = await get_chapters(asin, region, session, facts=facts)
+    stamp_facts_headers(response, facts, has_entities=True)
     return ChapterResponse(**data)
 
 
-@router.get("/chapters/{asin}", response_model=ChapterResponse, include_in_schema=False)
+@router.get(
+    "/chapters/{asin}",
+    response_model=ChapterResponse,
+    include_in_schema=False,
+    responses={200: {"headers": FACTS_RESPONSE_HEADERS}},
+)
 async def get_book_chapters_legacy(
     asin: Annotated[str, Path(description="Audible ASIN")],
+    response: Response,
     region: str = Depends(valid_region),
     session: AsyncSession = Depends(get_session),
 ) -> ChapterResponse:
     """Legacy endpoint. Use /book/{asin}/chapters instead."""
     if not is_valid_asin(asin):
         raise NotFoundException(f"Invalid ASIN format: {asin}")
-    data = await get_chapters(asin, region, session)
+    facts = ResponseFacts()
+    data = await get_chapters(asin, region, session, facts=facts)
+    stamp_facts_headers(response, facts, has_entities=True)
     return ChapterResponse(**data)
 
 
-@router.get("", response_model=BulkBookResponse)
+@router.get("", response_model=BulkBookResponse, responses={200: {"headers": FACTS_RESPONSE_HEADERS}})
 async def get_books_bulk(
     asins: Annotated[list[str], Query(description="ASINs — comma-separated, repeated params, or both. Max 1000.")],
+    response: Response,
     region: str = Depends(valid_region),
-    cache: Annotated[bool, Query(description="Return cached data if available")] = False,
+    cache: CacheStandardParam = True,
     filters: LiveBookFilters = Depends(),
     sort: Annotated[BookSortField | None, Query(description="Field to sort the returned books by")] = None,
     order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
@@ -126,7 +145,8 @@ async def get_books_bulk(
     if len(asin_list) > 1000:
         raise NotFoundException("Maximum 1000 ASINs per request")
 
-    data = await get_books_by_asins(asin_list, region, session, cache)
+    facts = ResponseFacts()
+    data = await get_books_by_asins(asin_list, region, session, cache, facts=facts)
 
     # notFound reflects what Audible didn't have — computed before filtering, so
     # a book that was found but filtered out is not reported as missing.
@@ -136,6 +156,9 @@ async def get_books_bulk(
     data = filter_dicts(data, filters.as_kwargs())
     data = sort_dicts(data, sort.value if sort is not None else None, order.value, BOOK_SORT_FIELDS)
 
+    apply_cache_control(response, cache)
+    stamp_facts_headers(response, facts, entities=data)
+
     return await build_large_list_response(
         BulkBookResponse,
         len(data),
@@ -143,4 +166,5 @@ async def get_books_bulk(
             books=[BookResponse(**book) for book in data],
             notFound=not_found,
         ),
+        injected_response=response,
     )

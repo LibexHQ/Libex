@@ -52,7 +52,7 @@ Libex exists to be a permanent, community-owned alternative:
 - **MIT licensed** — no restrictions, fork it, build on it, use it however you want
 - **No usage restrictions** — works with any software, any workflow
 - **Drop-in replacement** — compatible with AudiMeta's API endpoints
-- **Audible-first** — always fetches fresh data, the local database is a fallback not a crutch
+- **Audible-first** — Audible is the source of truth; the local database is a fallback and a cache, not a crutch
 - **Persistent local library** — every book, author, and series ever requested is stored and queryable
 - **All regions** — full support for all Audible markets without language restrictions
 - **Self-hostable** — one `docker compose up` and you're running
@@ -174,6 +174,10 @@ disclosed transparently.
 - The process id of the worker that handled the request — a number belonging to
   the server, identical for every request that worker serves, and unrelated to
   who sent any of them
+- A request id — a random value minted fresh for each request and echoed back
+  in the `X-Request-Id` response header, so you can quote one request in a bug
+  report. It's never taken from a header you send, and it isn't reused between
+  requests
 - Errors and exceptions. An unhandled error logs its message so a broken deploy
   can be diagnosed; if a message was built from something you sent, that text
   appears in that one line
@@ -189,12 +193,14 @@ per-endpoint visibility, a bad release breaks things silently. None of that
 requires knowing who you are.
 
 **Who can see the logs:**
-Only the instance maintainer has access to the Axiom dataset. Logs are retained
-for 30 days and then automatically deleted by Axiom. The public instance also
-sits behind Cloudflare, which sees every request in order to terminate TLS —
-including your real IP, which is outside Libex's control. Axiom and Cloudflare
-receive this data only to provide those services; we don't sell your data or
-hand it to anyone else.
+The instance maintainer is the only one with query access to the Axiom
+dataset, but Axiom itself holds it too — a vendor storing your data on its own
+infrastructure is a third party with access to it, not just the maintainer.
+Logs are retained for 30 days and then automatically deleted by Axiom. The
+public instance also sits behind Cloudflare, which sees every request in
+order to terminate TLS — including your real IP, which is outside Libex's
+control. Axiom and Cloudflare receive this data only to provide those
+services; we don't sell your data or hand it to anyone else.
 
 **The API docs are served locally.** The interactive docs at `/docs` and
 `/redoc` are rendered from assets Libex ships — not from a CDN. Opening them

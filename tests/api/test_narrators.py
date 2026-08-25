@@ -154,3 +154,25 @@ async def test_get_narrator_books_rejects_limit_above_fifty(async_client):
     """limit is still rejected above 50."""
     response = await async_client.get("/narrator/books?name=Scott+Brick&region=us&limit=51")
     assert response.status_code == 422
+
+# ============================================================
+# CACHE PARAMETER -- inert, stays False by default
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_narrator_books_cache_omitted_defaults_to_false_and_gets_no_store(async_client):
+    with patch("app.api.routes.narrators.router.search", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        response = await async_client.get("/narrator/books?name=Scott+Brick&region=us")
+    assert response.headers["cache-control"] == "no-store"
+    # search() has no cache argument at all on this route.
+    assert "cache" not in mock.call_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_narrator_books_cache_true_sends_no_cache_control_header(async_client):
+    with patch("app.api.routes.narrators.router.search", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        response = await async_client.get("/narrator/books?name=Scott+Brick&region=us&cache=true")
+    assert "cache-control" not in response.headers

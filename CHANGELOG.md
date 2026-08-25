@@ -10,6 +10,120 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.17.0]
+
+### Added
+- **Four new response headers report request identity, data provenance, and
+  completeness, and are readable from browser JavaScript for the first
+  time.** `X-Request-Id` is a random id minted fresh for every response —
+  never taken from an id you send — so a specific request can be quoted back
+  in a bug report; `PRIVACY.md` now documents it, including what it does and
+  doesn't let anyone find out about you. `X-Libex-Source` names where the
+  entity data in the response actually came from: `audible`, `cache` or `db`
+  alone, or `mixed; audible=2; cache=1` (one count per contributing source)
+  when a bulk or list response drew from more than one. It's absent whenever
+  a response carries no entity to attribute a source to, or when the source
+  of what it does carry can't be fully established — a partial tally is
+  never sent. On a route that can filter its results, the header names only
+  the sources of what's actually in the body, never a tally taken before
+  filtering removed some of it. `X-Libex-Source` is new on `/book/{asin}`,
+  `/book` (bulk), `/book/{asin}/chapters` (and its legacy alias
+  `/book/chapters/{asin}`), `/series/{asin}`, `/series/books/{asin}`,
+  `/series/{asin}/books`, and `/author/{asin}`.
+
+  `X-Libex-Complete` and `X-Libex-Incomplete-Reason` are stamped on that same
+  set of routes now too. `X-Libex-Complete` already existed, on the two
+  `/author/books` routes only, since 1.15.0, through a separate completeness
+  check this doesn't touch. It asserts element coverage: `false` means the
+  body is missing one or more elements the caller asked for, never merely
+  that something went wrong internally on the way to a complete answer. On
+  `/book` (bulk), `/series/books/{asin}` and `/series/{asin}/books` — the
+  routes that resolve more than one book through Libex's shared fetch path —
+  `X-Libex-Complete` reads `false`, with `X-Libex-Incomplete-Reason` naming
+  why, whenever the body actually falls short of what was requested: a
+  requested ASIN Audible has no record of at all, including one it answers
+  with a titleless placeholder for rather than a 404; a title Audible does
+  return in full but hasn't released yet, which Libex deliberately filters
+  out of the body, and which the same check then can't tell apart from a
+  genuinely nonexistent ASIN once it's gone (`hydration-not-found` for all
+  three); or part of the request failing outright with the DB or cache
+  backstop unable to recover every ASIN that failed (`hydration-failed`).
+  `/book/{asin}` shares the same fetch path underneath, but coverage of a
+  single requested book is all or nothing: either it comes back — from
+  Audible, or recovered whole from the DB or cache backstop during an
+  outage — and the route always reads `true`, or it doesn't and the request
+  is a plain 404 with no facts headers at all. There is no in-between
+  response for a single-ASIN request to be incomplete about.
+  `/book/{asin}/chapters` (and its legacy alias), `/series/{asin}` and
+  `/author/{asin}` still always read `true` for the same reason — each
+  resolves one entity through a path with nothing partial to report; it
+  either answers in full or the request 404s. `discovery-incomplete` and
+  `hydration-deadline` remain part of the fixed vocabulary but aren't
+  triggered by anything shipping today — the one caller that imposes a
+  hydration deadline, the `/author/books` walk-then-hydrate routes, marks
+  completeness through its own separate check and never opens this ledger
+  at all.
+
+- **`cache` is now a real parameter on `/quick-search` and its
+  Audiobookshelf-compatible twin, `/{region}/quick-search/search`.**
+  Neither route took it before. Once suggestions resolve to a list of
+  ASINs, it governs the same thing it does on `/book/{asin}`: Libex's stored
+  copy of a book is served when one exists, and `false` forces a fresh
+  Audible fetch. Defaults to `true`.
+
+### Changed
+- **`cache` now defaults to `true` instead of `false` on six existing
+  routes: `/book/{asin}`, `/book` (bulk), `/series/{asin}`,
+  `/series/books/{asin}`, `/series/{asin}/books`, and `/author/{asin}`.** A
+  request that omits the parameter now gets Libex's stored copy when one
+  exists — at most 24 hours old — instead of always reaching Audible fresh.
+  No field, response shape or status code moved, and nothing on the response
+  says the data came from a cache unless you read the new `X-Libex-Source`
+  header above. If you need a guaranteed-live answer on every request, pass
+  `?cache=false` explicitly — it still forces a fresh Audible fetch exactly
+  as it always has. `/search` and `/narrator/books` are unaffected — both
+  fetch live regardless of the value, and it stays `false` by default on
+  them. Separately, and worth knowing now that eight routes default to
+  reading it: the `CACHE_ENABLED` environment variable, set to `true` in the
+  shipped `docker-compose.yml`, has never actually governed anything in
+  Libex — it parses into a setting nothing reads. An operator who sets it to
+  `false` expecting to disable caching gets no such effect and, as of this
+  release, more caching than before, not less.
+
+- **Passing `cache=false` now marks the response `Cache-Control: no-store`
+  on every route that takes the parameter**, not only the two
+  `/author/books` routes that already did this. Most of these routes
+  previously sent no `Cache-Control` header at all, so an explicit request
+  for a fresh answer could still be handed back stale by anything caching in
+  front of Libex on the very next identical request. Passing `cache=true`,
+  or omitting it on a route that now defaults to it, sends no
+  `Cache-Control` header, the same as before.
+
+### Fixed
+- **`/series/books/{asin}` and its `/series/{asin}/books` alias now honour
+  `cache` for the books they return, not only for the series' own list of
+  book ASINs.** Passing `cache=true` only ever affected which read resolved
+  that ASIN list; fetching each book in it was unconditionally live on every
+  request regardless of the flag, so a caller relying on `cache` for this
+  route got no benefit from it past the ASIN lookup — every request
+  re-fetched every book in the series fresh from Audible and rewrote it to
+  cache, even when the series itself hadn't changed since the last call.
+  Confirmed in production logs: three requests to the same series, roughly
+  1.5 seconds each, zero cache hits on any of them, and 45 redundant writes
+  back to cache for books nothing about the request had changed. `cache`
+  now governs book hydration on these two routes the same way it governs
+  the ASIN lookup — `true` (the default; see Changed above) serves Libex's
+  stored copy of each book, up to 24 hours old, when one exists, and
+  `false` still forces every book fetched live, exactly as it always has.
+
+- **`X-Libex-Complete`, on the wire since 1.15.0, was invisible to browser
+  JavaScript.** `fetch()` and `XMLHttpRequest` hide any response header a
+  server doesn't name in `Access-Control-Expose-Headers`, and Libex never
+  named it there — so a browser-based caller had no way to read a header
+  the two `/author/books` routes have been sending for a full minor version.
+  It's included in the header-exposure registry added above and is now
+  readable from JS, along with the other three headers described there.
+
 ## [1.16.0]
 
 ### Added

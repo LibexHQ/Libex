@@ -3,9 +3,13 @@ Audible authors service.
 Fetches author metadata directly from the Audible API.
 
 DESIGN PHILOSOPHY: Audible-first.
-Always fetches fresh data from Audible.
-Writes every result to the relational DB for persistence.
-Falls back to DB when Audible is unavailable.
+Audible is the source of truth. get_author fetches a profile fresh or from
+cache and writes what Audible returns to the relational DB and the cache.
+get_author_books unions a live Audible discovery walk with what the DB
+already holds for that author, and caches the union only once the walk has
+actually finished -- a walk cut short by its own time budget is returned
+incomplete rather than cached partial, and is finished off the request
+instead.
 """
 
 # Standard library
@@ -20,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # Core
 from app.core.exceptions import NotFoundException
 from app.core.logging import get_logger
+from app.core.response_headers import ResponseFacts, SOURCE_AUDIBLE, SOURCE_CACHE, SOURCE_DB, record_source
 from app.core.utils import strip_html
 
 # Services
@@ -125,9 +130,19 @@ class AuthorBooksResult(NamedTuple):
 # cleared around the single await point in get_author_books below, with no
 # other await between the membership check and the insert, so two requests
 # arriving on the same event loop tick can never both become the leader.
-# Per-process only: with one uvicorn worker today this collapses every
-# concurrent request in that worker onto one walk; a second worker process
-# holds its own separate map and would still run its own independent walk.
+# Per-process only: each worker process holds its own separate map, so a
+# single popular author's key expiring can still produce one independent
+# walk per worker rather than the one walk this coalescing achieves within
+# a process. That is not free -- a walk is hundreds of upstream requests
+# (179 measured for Agatha Christie, 651 for Conan Doyle; see client.py's
+# AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT docstring), so the worst case
+# scales with the number of worker processes rather than staying at one.
+# Two things keep that from actually biting: expiry is staggered per
+# author -- each entry's TTL runs from its own walk finishing, not a
+# shared clock, so workers rarely land on the same author's expiry at once
+# -- and this route sets Cache-Control with an s-maxage aligned to that
+# same expiry (authors/router.py), so the edge absorbs repeat traffic
+# before most of it ever reaches this map at all.
 _author_books_inflight: dict[tuple[str, str], asyncio.Task[AuthorBooksResult]] = {}
 
 # ============================================================
@@ -225,10 +240,20 @@ async def get_author(
     region: str,
     session: AsyncSession,
     use_cache: bool = False,
+    *,
+    facts: ResponseFacts | None = None,
 ) -> dict[str, Any]:
     """
     Fetches author profile by ASIN.
     Audible-first, writes to DB, falls back to DB then cache.
+
+    Single-source by construction -- cache, then audible, then db, then
+    cache again, never more than one per call -- so facts takes exactly one
+    record_source per return path. get_author_books, which shares this
+    module, is deliberately not given the same treatment: it resolves to an
+    ASIN list unioned from up to four sources at once, not one dict a single
+    token could describe, and the books it names are attributed by whichever
+    call the route makes to get_books_by_asins afterward.
     """
     if use_cache:
         cached = await cache.get(session, author_key(asin, region))
@@ -249,6 +274,7 @@ async def get_author(
         # transparently.
         await session.rollback()
         if cached:
+            record_source(facts, SOURCE_CACHE)
             return cached
 
     try:
@@ -269,6 +295,7 @@ async def get_author(
             "region": region,
         })
 
+        record_source(facts, SOURCE_AUDIBLE)
         return normalized
 
     except NotFoundException:
@@ -277,11 +304,13 @@ async def get_author(
         # Try DB first
         db_result = await get_author_from_db(session, asin, region)
         if db_result:
+            record_source(facts, SOURCE_DB)
             return db_result
 
         # Fall back to cache
         cached = await cache.get(session, author_key(asin, region))
         if cached:
+            record_source(facts, SOURCE_CACHE)
             return cached
 
         raise NotFoundException("Audible unavailable and no cached author data found")

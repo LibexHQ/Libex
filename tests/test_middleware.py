@@ -15,7 +15,7 @@ from pathlib import Path
 
 # Third party
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from httpx import ASGITransport, AsyncClient
 
 # Local
@@ -30,6 +30,7 @@ from app.core.middleware import (
     _SLOW_HEALTH_MS,
     LoggingMiddleware,
 )
+from app.core.response_headers import HEADER_COMPLETE, HEADER_INCOMPLETE_REASON, HEADER_SOURCE
 
 
 # ============================================================
@@ -477,6 +478,36 @@ async def _request(caplog, path, headers=None, client=("1.2.3.4", 1234)):
     return [r for r in caplog.records if r.getMessage() == "Request completed"]
 
 
+def _app_with_facts_headers():
+    """A route that stamps the same three response headers a real
+    ResponseFacts-backed route stamps, without pulling in a full facts/
+    service stack -- what's under test is the middleware reading them back,
+    not who wrote them."""
+    app = FastAPI()
+    app.add_middleware(LoggingMiddleware)
+
+    @app.get("/probe")
+    async def probe(response: Response):
+        response.headers[HEADER_COMPLETE] = "false"
+        response.headers[HEADER_INCOMPLETE_REASON] = "hydration-failed"
+        response.headers[HEADER_SOURCE] = "cache"
+        return {"ok": True}
+
+    @app.get("/bare")
+    async def bare():
+        return {"ok": True}
+
+    return app
+
+
+async def _request_with_facts_headers(caplog, path):
+    transport = ASGITransport(app=_app_with_facts_headers(), client=("1.2.3.4", 1234))
+    with caplog.at_level(logging.INFO):
+        async with AsyncClient(transport=transport, base_url="http://t") as ac:
+            await ac.get(path)
+    return [r for r in caplog.records if r.getMessage() == "Request completed"]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("headers", [
     {},
@@ -520,6 +551,40 @@ async def test_caller_authored_query_is_redacted_in_the_record(caplog):
     assert "Some" not in record.query
     assert "region=us" in record.query
     assert "name=REDACTED" in record.query
+
+
+# ============================================================
+# COMPLETE / INCOMPLETE-REASON / SOURCE -- read from the response, not computed
+# ============================================================
+# These three fields on "Request completed" only ever read whatever a route
+# already stamped on the response object this middleware is holding -- see
+# the comment at the log call in middleware.py. Exact key names: `complete`,
+# `incompleteReason`, `source`, matching that line's existing mixed style
+# (userAgent, took, host alongside camelCase and bare words).
+
+
+@pytest.mark.asyncio
+async def test_facts_headers_are_carried_onto_the_log_record_verbatim(caplog):
+    records = await _request_with_facts_headers(caplog, "/probe")
+    record = records[0]
+
+    assert record.complete == "false"
+    assert record.incompleteReason == "hydration-failed"
+    assert record.source == "cache"
+
+
+@pytest.mark.asyncio
+async def test_facts_header_fields_are_present_but_empty_when_never_stamped(caplog):
+    """Keys are always present, empty string when the header was never
+    stamped -- a route with nothing to attribute (an internal route, a
+    request served entirely from cache before any service line fires) must
+    not produce a sparse, sometimes-absent field."""
+    records = await _request_with_facts_headers(caplog, "/bare")
+    record = records[0]
+
+    assert record.complete == ""
+    assert record.incompleteReason == ""
+    assert record.source == ""
 
 
 @pytest.mark.asyncio

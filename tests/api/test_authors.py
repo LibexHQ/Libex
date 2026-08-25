@@ -17,6 +17,7 @@ from httpx import AsyncClient, ASGITransport
 # Local
 from app.main import app
 from app.core.exceptions import NotFoundException
+from app.core.response_headers import SOURCE_DB, record_source
 from app.services.audible.authors import AuthorBooksResult
 
 MOCK_AUTHOR = {
@@ -315,20 +316,25 @@ async def test_get_author_books_legacy_route_defaults_to_serving_cache_too(async
 
 
 @pytest.mark.asyncio
-async def test_the_author_profile_route_still_defaults_to_no_cache(async_client):
-    """The flipped default is scoped to the books walk, not to every route
-    that happens to take a cache flag. /author/{asin} fetches one author
-    profile in one request -- it is not the hundreds-of-requests walk the
-    flip exists to stop paying for -- so its default was deliberately left
-    alone. Pinned so that "flip the cache default" is not later applied to
-    this route as a consistency tidy-up without that being an actual
-    decision."""
+async def test_the_author_profile_route_now_defaults_to_cache(async_client):
+    """This carve-out was deliberately overridden, not quietly deleted.
+
+    /author/{asin} used to be pinned to default False on the grounds that a
+    single profile fetch is not the hundreds-of-requests walk /author/books
+    flipped to stop paying for -- that reasoning was sound on its own terms
+    and is still true. It has been overridden on different grounds: the
+    product decision is that every query caches so that something fetched
+    once serves later requests, whoever asks -- cross-endpoint reuse, not
+    walk cost, and that covers this route regardless of how cheap any one
+    call is. The old pin is recorded here, still with its own reasoning
+    attached, as a decision that was revisited on new grounds rather than
+    a pin that just vanished."""
     with patch("app.api.routes.authors.router.get_author", new_callable=AsyncMock) as mock_author:
         mock_author.return_value = MOCK_AUTHOR
         response = await async_client.get("/author/B000APF21M")
 
     assert response.status_code == 200
-    assert mock_author.call_args[0][3] is False
+    assert mock_author.call_args[0][3] is True
 
 
 @pytest.mark.asyncio
@@ -712,3 +718,90 @@ async def test_get_author_books_rejects_invalid_asin(async_client):
     response = await async_client.get("/author/books/not-an-asin")
     assert response.status_code == 404
     assert "Invalid ASIN" in response.json()["error"]
+
+
+# ============================================================
+# /author/{asin} -- CACHE-CONTROL AND X-LIBEX-SOURCE
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_author_profile_cache_false_marks_the_response_no_store(async_client):
+    with patch("app.api.routes.authors.router.get_author", new_callable=AsyncMock) as mock_author:
+        mock_author.return_value = MOCK_AUTHOR
+        response = await async_client.get("/author/B000APF21M?cache=false")
+
+    assert mock_author.call_args[0][3] is False
+    assert response.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.asyncio
+async def test_author_profile_cache_true_sends_no_cache_control_header(async_client):
+    with patch("app.api.routes.authors.router.get_author", new_callable=AsyncMock) as mock_author:
+        mock_author.return_value = MOCK_AUTHOR
+        response = await async_client.get("/author/B000APF21M?cache=true")
+
+    assert "cache-control" not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_author_profile_source_header_reflects_the_recorded_source(async_client):
+    async def fake_get_author(asin, region, session, cache, *, facts=None):
+        record_source(facts, SOURCE_DB)
+        return MOCK_AUTHOR
+
+    with patch("app.api.routes.authors.router.get_author", side_effect=fake_get_author):
+        response = await async_client.get("/author/B000APF21M")
+
+    assert response.headers["x-libex-source"] == "db"
+    assert response.headers["x-libex-complete"] == "true"
+
+
+# ============================================================
+# /author/books/{asin} and /author/{asin}/books -- HEADERS DECLARED MATCH
+# HEADERS EMITTED
+# ============================================================
+#
+# Neither route ever opens a ResponseFacts -- completeness here comes from
+# _mark_completeness, working off the discovery walk and the hydration
+# count, not from anything record_source/record_source_keys touches. So
+# X-Libex-Source is never on the wire for either route, and their OpenAPI
+# declaration (COMPLETE_ONLY_RESPONSE_HEADERS) must say exactly that:
+# X-Libex-Complete alone, not the full three-header set every
+# ResponseFacts-backed route declares.
+
+
+def test_get_books_by_author_declares_only_the_completeness_header_in_openapi():
+    schema = app.openapi()
+    headers = schema["paths"]["/author/books/{asin}"]["get"]["responses"]["200"]["headers"]
+    assert set(headers) == {"X-Libex-Complete"}
+
+
+@pytest.mark.asyncio
+async def test_get_books_by_author_never_emits_x_libex_source(async_client):
+    with patch("app.api.routes.authors.router.get_author_books", new_callable=AsyncMock) as mock_books, \
+         patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
+        mock_books.return_value = AuthorBooksResult(["B08G9PRS1K"], True)
+        mock_asins.return_value = [MOCK_BOOK]
+        response = await async_client.get("/author/books/B000APF21M")
+
+    assert response.status_code == 200
+    assert "x-libex-source" not in response.headers
+    assert response.headers["x-libex-complete"] == "true"
+
+
+@pytest.mark.asyncio
+async def test_get_books_by_author_primary_never_emits_x_libex_source(async_client):
+    """The legacy twin (/author/{asin}/books) must not diverge -- it is
+    excluded from the OpenAPI schema (include_in_schema=False) so the
+    declaration check above can't reach it, but the response it actually
+    sends still has to match the same contract."""
+    with patch("app.api.routes.authors.router.get_author_books", new_callable=AsyncMock) as mock_books, \
+         patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
+        mock_books.return_value = AuthorBooksResult(["B08G9PRS1K"], True)
+        mock_asins.return_value = [MOCK_BOOK]
+        response = await async_client.get("/author/B000APF21M/books")
+
+    assert response.status_code == 200
+    assert "x-libex-source" not in response.headers
+    assert response.headers["x-libex-complete"] == "true"

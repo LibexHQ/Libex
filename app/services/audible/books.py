@@ -3,9 +3,36 @@ Audible books service.
 Fetches book metadata directly from the Audible API.
 
 DESIGN PHILOSOPHY: Audible-first.
-Always fetches fresh data from Audible.
-Writes every result to the relational DB for persistence.
-Falls back to DB when Audible is unavailable.
+Audible is the source of truth, and every result normalized from it is
+written to the relational DB for persistence.
+
+One cohesive job lives here: turning a list of ASINs into books, by whatever
+mix of Audible, the relational DB, and the cache it takes to answer without
+handing back less than a caller could have gotten a moment ago. Fetching,
+normalizing Audible's raw product shape into AudiMeta's exact DTO, and
+falling back through DB and cache are not three jobs in a trenchcoat -- the
+fallback ladder in get_books_by_asins hands back DB rows and cache hits
+alongside freshly normalized Audible products in the very same list, and the
+tri-state flag settling that every return path goes through has to treat
+whichever of the three produced a given element identically. A seam drawn
+between fetch and fallback would need each side holding the internals of the
+shape the other one produces, which is a shared contract stretched across
+two files rather than a boundary.
+
+A second cluster shares the module without sharing that job:
+_normalize_chapters, get_chapters, fetch_and_store_chapters, and
+_mark_chapters_checked fetch a book's chapter listing from Audible's own
+/1.0/content/{asin}/metadata endpoint, normalize it into TrackContentDto
+rather than BookDto, and persist it to its own table (Track) under its own
+cache key -- never touching get_books_by_asins' fallback ladder, its DB
+backstop, its facts ledger, or the tri-state flag settling above. The one
+real tie to the rest of the module is _mark_chapters_checked stamping
+chapters_checked_at on the same Book row the ladder resolves, coordinating
+with the standalone chapters backfill so neither re-checks what the other
+already covered; past that one column, the cluster is its own job, sharing
+an ASIN and a file with the ladder above rather than a boundary. The module
+stays long because it holds one long job and one short one that happens to
+touch the same row.
 """
 
 # Standard library
@@ -25,6 +52,18 @@ from app.db.models import Book
 # Core
 from app.core.exceptions import NotFoundException
 from app.core.logging import get_logger
+from app.core.response_headers import (
+    REASON_HYDRATION_DEADLINE,
+    REASON_HYDRATION_FAILED,
+    REASON_HYDRATION_NOT_FOUND,
+    ResponseFacts,
+    SOURCE_AUDIBLE,
+    SOURCE_CACHE,
+    SOURCE_DB,
+    record_incomplete,
+    record_source,
+    record_source_keys,
+)
 from app.core.utils import strip_html, strip_image_size_suffix
 
 # Services
@@ -558,6 +597,22 @@ async def _fetch_chunk(asins: list[str], region: str) -> list[dict[str, Any]]:
     return _filter_products(products)
 
 
+def _has_uncovered(asins: list[str], covered: set[str]) -> bool:
+    """
+    True when at least one of `asins` is absent from `covered`.
+
+    The one predicate every hydration-incomplete site in
+    _get_books_by_asins_unsettled shares: a loss class earns its incomplete
+    reason only when it actually owns an ASIN missing from what the function
+    is about to hand back, never merely because that class experienced a
+    loss internally. `covered` is always the ASIN set already present in the
+    result about to be returned (a DB backstop, a DB fallback, a cache
+    fallback) -- never a count, since two same-sized sets can still miss
+    each other entirely.
+    """
+    return any(asin not in covered for asin in asins)
+
+
 # ============================================================
 # PUBLIC API
 # ============================================================
@@ -569,6 +624,8 @@ async def get_books_by_asins(
     use_cache: bool = False,
     high_concurrency: bool = False,
     deadline: float | None = None,
+    *,
+    facts: ResponseFacts | None = None,
 ) -> list[dict[str, Any]]:
     """
     Public entry point. Delegates to _get_books_by_asins_unsettled and settles
@@ -582,9 +639,13 @@ async def get_books_by_asins(
     Settling once here, on the outside, covers all of them from a single place
     and can't be silently bypassed by a return path added inside later; the
     alternative was inserting the same call at each of those points.
+
+    facts is threaded straight through, unexamined -- it is
+    _get_books_by_asins_unsettled's own return points, not this wrapper's
+    settling step, that know which source produced which element.
     """
     books = await _get_books_by_asins_unsettled(
-        asins, region, session, use_cache, high_concurrency, deadline
+        asins, region, session, use_cache, high_concurrency, deadline, facts=facts
     )
     return _settle_flags_list(books)
 
@@ -596,6 +657,8 @@ async def _get_books_by_asins_unsettled(
     use_cache: bool = False,
     high_concurrency: bool = False,
     deadline: float | None = None,
+    *,
+    facts: ResponseFacts | None = None,
 ) -> list[dict[str, Any]]:
     """
     Fetches one or more books by ASIN from Audible.
@@ -613,6 +676,14 @@ async def _get_books_by_asins_unsettled(
     default pool. Every other caller (single/small ASIN lists from the book,
     series, and search routes, and the seeder) defaults to False and is
     unaffected.
+
+    facts, when given, is credited at every return point below with exactly
+    which source each returned element came from -- this is the one function
+    in the module where a single response can genuinely mix cache, fresh
+    Audible, and DB-backstop elements, so the tally is built at each
+    source-segmented concatenation rather than inferred afterwards from the
+    merged list, which by that point no longer carries where any one element
+    came from.
     """
     if not asins:
         raise NotFoundException("No ASINs provided")
@@ -623,6 +694,7 @@ async def _get_books_by_asins_unsettled(
     if use_cache and len(unique_asins) == 1:
         cached = await cache.get(session, book_key(unique_asins[0], region))
         if cached:
+            record_source_keys(facts, SOURCE_CACHE, [b["asin"] for b in [cached]])
             return [cached]
 
     # Batch cache: one lookup for the whole list, only fetch misses from
@@ -647,6 +719,7 @@ async def _get_books_by_asins_unsettled(
 
         # All ASINs found in cache
         if not fetch_asins:
+            record_source_keys(facts, SOURCE_CACHE, [b["asin"] for b in cached_results])
             return cached_results
 
     # A connection is held for work, not for a request. Either cache read
@@ -727,6 +800,10 @@ async def _get_books_by_asins_unsettled(
             results: list[Any] = []
             for task in tasks:
                 if task.cancelled():
+                    # Not recorded here: a cancelled chunk's ASINs still have
+                    # the DB backstop below to answer from, and only the
+                    # residue that backstop can't cover is an actual gap in
+                    # what this function returns.
                     results.append(HydrationDeadlineExceeded())
                 elif task.exception() is not None:
                     results.append(task.exception())
@@ -737,6 +814,7 @@ async def _get_books_by_asins_unsettled(
 
         all_products: list[dict[str, Any]] = []
         not_found_asins: list[str] = []
+        deadline_asins: list[str] = []
         transient_failed_asins: list[str] = []
         transient_errors: list[Exception] = []
 
@@ -755,15 +833,37 @@ async def _get_books_by_asins_unsettled(
                 # not a reason to discard everything else that already
                 # succeeded.
                 not_found_asins.extend(chunk)
+                record_incomplete(facts, REASON_HYDRATION_NOT_FOUND)
                 continue
             if isinstance(result, Exception):
                 transient_failed_asins.extend(chunk)
                 transient_errors.append(result)
+                if isinstance(result, HydrationDeadlineExceeded):
+                    deadline_asins.extend(chunk)
                 logger.warning(
                     f"Hydration chunk {idx + 1}/{len(chunks)} failed for "
                     f"{len(chunk)} ASINs ({region}): {type(result).__name__}: {result}"
                 )
                 continue
+            # A batch chunk's own response is always a 200 even when some of
+            # its requested ASINs have no such record -- Audible answers
+            # those with a hollow, titleless stub rather than a 404 (see
+            # _filter_products), and that stub is already gone from `result`
+            # by the time it lands here. But `result` is _filter_products'
+            # output, and that function drops two disjoint categories: the
+            # titleless stub above, and any product whose
+            # publication_datetime equals UNRELEASED_PLACEHOLDER. A chunk
+            # ASIN with no matching product in `result` could be either one
+            # -- a genuinely nonexistent ASIN, or a title Audible returned in
+            # full that simply hasn't released yet, filtered out before this
+            # comparison ever runs. Both are structurally indistinguishable
+            # here, and both are correctly absent from the body either way:
+            # the ASIN is not present in what this function returns.
+            returned_asins = {p.get("asin") for p in result}
+            stub_asins = [a for a in chunk if a not in returned_asins]
+            if stub_asins:
+                not_found_asins.extend(stub_asins)
+                record_incomplete(facts, REASON_HYDRATION_NOT_FOUND)
             all_products.extend(result)
 
         if not_found_asins or transient_failed_asins:
@@ -800,6 +900,19 @@ async def _get_books_by_asins_unsettled(
         db_backstop_results: list[dict[str, Any]] = []
         if transient_failed_asins:
             db_backstop_results = await get_books_from_db(session, transient_failed_asins)
+            # The backstop covers what the DB actually had; anything still
+            # missing after it is a real shortfall the caller has to be told
+            # about, not just an internal retry detail -- and which reason it
+            # carries follows the ASIN, not the query: a deadline chunk the
+            # backstop couldn't cover is still a deadline loss, not a generic
+            # hydration failure, even though both walked the same query.
+            backstop_asins = {b["asin"] for b in db_backstop_results}
+            deadline_set = set(deadline_asins)
+            other_failed_asins = [a for a in transient_failed_asins if a not in deadline_set]
+            if _has_uncovered(deadline_asins, backstop_asins):
+                record_incomplete(facts, REASON_HYDRATION_DEADLINE)
+            if _has_uncovered(other_failed_asins, backstop_asins):
+                record_incomplete(facts, REASON_HYDRATION_FAILED)
 
         normalized = await _normalize_products(all_products, region)
 
@@ -817,6 +930,9 @@ async def _get_books_by_asins_unsettled(
             "region": region,
         })
 
+        record_source_keys(facts, SOURCE_CACHE, [b["asin"] for b in cached_results])
+        record_source_keys(facts, SOURCE_AUDIBLE, [b["asin"] for b in normalized])
+        record_source_keys(facts, SOURCE_DB, [b["asin"] for b in db_backstop_results])
         return cached_results + normalized + db_backstop_results
 
     except NotFoundException:
@@ -829,6 +945,11 @@ async def _get_books_by_asins_unsettled(
         # Try relational DB first for the misses
         db_results = await get_books_from_db(session, fetch_asins)
         if db_results:
+            record_source_keys(facts, SOURCE_CACHE, [b["asin"] for b in cached_results])
+            record_source_keys(facts, SOURCE_DB, [b["asin"] for b in db_results])
+            db_asins = {b["asin"] for b in db_results}
+            if _has_uncovered(fetch_asins, db_asins):
+                record_incomplete(facts, REASON_HYDRATION_FAILED)
             return cached_results + db_results
 
         # Fall back to cache for the misses -- one lookup, same as the
@@ -841,6 +962,24 @@ async def _get_books_by_asins_unsettled(
             if hit:
                 fallback_results.append(hit)
         if fallback_results or cached_results:
+            # Both segments are cache reads -- cached_results from the
+            # pre-fetch batch lookup, fallback_results from this outage
+            # fallback's own -- so they're one source, one token, added
+            # together rather than as two separate calls.
+            record_source_keys(
+                facts,
+                SOURCE_CACHE,
+                [b["asin"] for b in cached_results] + [b["asin"] for b in fallback_results],
+            )
+            # fetch_asins is what this fallback owed an answer for -- always
+            # non-empty here, since an empty one would have returned via the
+            # all-cache-hits path above before any of this outage handling
+            # ran. cached_results predates fetch_asins by construction and
+            # never overlaps it, so the coverage test reads only against
+            # fallback_results, not the two summed.
+            fallback_asins = {b["asin"] for b in fallback_results}
+            if _has_uncovered(fetch_asins, fallback_asins):
+                record_incomplete(facts, REASON_HYDRATION_FAILED)
             return cached_results + fallback_results
 
         raise NotFoundException("Audible unavailable and no cached data found")
@@ -851,9 +990,11 @@ async def get_book_by_asin(
     region: str,
     session: AsyncSession,
     use_cache: bool = False,
+    *,
+    facts: ResponseFacts | None = None,
 ) -> dict[str, Any]:
     """Fetches a single book by ASIN."""
-    books = await get_books_by_asins([asin], region, session, use_cache)
+    books = await get_books_by_asins([asin], region, session, use_cache, facts=facts)
     if not books:
         raise NotFoundException(f"Book not found: {asin}")
     return books[0]
@@ -863,10 +1004,17 @@ async def get_chapters(
     asin: str,
     region: str,
     session: AsyncSession,
+    *,
+    facts: ResponseFacts | None = None,
 ) -> dict[str, Any]:
     """
     Fetches chapter information for a book by ASIN.
     Returns data matching AudiMeta's TrackContentDto format.
+
+    Single-source by construction -- audible, then db, then cache, never more
+    than one per call -- so facts takes exactly one record_source per return
+    path rather than the per-element tally _get_books_by_asins_unsettled
+    needs.
     """
     try:
         path = f"/1.0/content/{asin}/metadata"
@@ -892,6 +1040,7 @@ async def get_chapters(
             "region": region,
         })
 
+        record_source(facts, SOURCE_AUDIBLE)
         return result
 
     except NotFoundException:
@@ -901,11 +1050,13 @@ async def get_chapters(
         # Try DB first
         db_result = await get_track_from_db(session, asin)
         if db_result:
+            record_source(facts, SOURCE_DB)
             return db_result
 
         # Fall back to cache
         cached = await cache.get(session, chapters_key(asin, region))
         if cached:
+            record_source(facts, SOURCE_CACHE)
             return cached
 
         raise NotFoundException("Audible unavailable and no cached chapter data found")

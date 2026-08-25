@@ -19,10 +19,10 @@ answer is "I can't do that," it says so.
 > **A note on what this is.** I'm not a lawyer, and this is a description of
 > how the software actually behaves, not legal advice and not a set of
 > borrowed clauses. Everything in the "What gets recorded" section can be
-> checked against the source — it's all in `app/core/middleware.py` and
-> `app/core/logging.py`. Where something is a setting in a third party's
-> console rather than a line of code, I've said so instead of pretending
-> otherwise.
+> checked against the source — it's all in `app/core/middleware.py`,
+> `app/core/logging.py`, and the error handler at the foot of `app/main.py`.
+> Where something is a setting in a third party's console rather than a line
+> of code, I've said so instead of pretending otherwise.
 
 ---
 
@@ -51,17 +51,22 @@ rather not raise in public, the email published in
 On every request that isn't `/health`, the public instance writes one log line
 containing: the method, the path, the response status, how long it took, your
 user agent, the host header you used, the number of the server process that
-handled it, and the *names* of the query parameters you sent. Parameter values
-are allowlisted — structural options like `region` and `limit` keep their
-values, anything you typed is replaced with `REDACTED`, and a parameter name
-Libex doesn't recognise is thrown away rather than written down.
+handled it, the *names* of the query parameters you sent, and three fields
+describing the response that went back — where Libex found the data, whether
+it was complete, and if not, why. Parameter values are allowlisted —
+structural options like `region` and `limit` keep their values, anything you
+typed is replaced with `REDACTED`, and a parameter name Libex doesn't
+recognise is thrown away rather than written down.
 
 `/health` writes nothing at all, unless the check itself took more than a
 second — then it writes one warning holding a duration, a status and the word
 `/health`, and nothing else.
 
-**No IP address. Nothing you searched for. No cookie, no identifier, nothing
-that links one of your requests to another.**
+**No IP address. Nothing you searched for. No cookie, and nothing that links
+one of your requests to another.** Each response does carry an `X-Request-Id`
+header, so you can quote a specific request back to me — it is generated fresh
+for that one request, ignored if you send one of your own, and connects to
+nothing beyond that single request.
 
 Those lines go to the container's stdout — warnings and errors to stderr — to
 a rotating file on the server, and to **Axiom**, a third-party log service.
@@ -88,7 +93,10 @@ One log line per request, built in `LoggingMiddleware.dispatch`:
 | `status` | The HTTP status returned. | Finding what's broken. |
 | `took` | How long the request took, in milliseconds. | Performance. |
 | `host` | The `Host` header — which of the two hostnames you used. | The only way to tell old-host traffic from new-host traffic while both addresses serve the same container during the move to `libexdb.com`. |
-| `request_id` | A random UUID generated for that one request. | Gives a log entry something to be referred to by. It is not derived from anything about you, is not returned to you, is not reused, and is not attached to any other line — it identifies a log entry, not a person and not a session. |
+| `source` | Where the catalogue data in the response came from: `cache`, `db` or `audible`, or `mixed` with a count per source when one response drew on more than one. Empty when the response carried no catalogue entity to attribute. It is the same value that response's `X-Libex-Source` header carries, so you were handed it too. | How much traffic the cache is actually absorbing, and when Libex is falling back to its own database because Audible is unreachable. It sits on the one line every request produces, so those two questions can be answered per endpoint without piecing it together from the cache and database lines described further down. |
+| `complete` | `true` or `false` — whether Libex believes it returned everything that was asked for. Empty on responses that don't report completeness at all. The same value as that response's `X-Libex-Complete` header. | Lets me count incomplete responses instead of waiting for someone to report one. |
+| `incompleteReason` | When `complete` is `false`, why: one or more of `discovery-incomplete`, `hydration-deadline`, `hydration-failed` and `hydration-not-found`, and nothing else. Empty otherwise. The same value as that response's `X-Libex-Incomplete-Reason` header. | Separates "Audible was too slow" from "Audible doesn't have it" — different problems with different fixes, and indistinguishable without this. |
+| `request_id` | A random UUID generated for that one request, and sent back to you in that response's `X-Request-Id` header. | Gives a log entry something to be referred to by, and gives you the same reference to quote in a bug report. It is generated on the server and never echoed from a header you sent, isn't derived from anything about you, isn't reused, and isn't attached to any other line — every request gets a fresh, unrelated value. It identifies one log entry, not a person and not a session. There's more on it just below the table. |
 | `pid` | The number the operating system gave the worker process that handled the request, e.g. `pid=14`. | The API runs as several worker processes. When one of them gets into trouble, this is the only thing that tells me whether it's one process failing over and over or several failing occasionally — once the lines are pooled together the two look identical. It's a number belonging to my server: the same on every request that worker handles, changed only when the process restarts, and which worker takes a request is the kernel's choice, not yours. |
 
 `pid` is the one field in that table that isn't added by the middleware. It's
@@ -99,8 +107,55 @@ listed here rather than left to be discovered because a field that turns up in
 the logs and appears in no disclosure is exactly the thing this page exists to
 prevent, whether or not it says anything about a person. This one doesn't.
 
+**`source`, `complete` and `incompleteReason` describe the answer, not the
+asker.** Unlike the user agent and the host header, these three are not read
+from anything you sent. They are read back off the response Libex has just
+finished building, and they are the same three `X-Libex-*` headers that
+response carries — so nothing is written down about your request that your
+request didn't already get told. Their values come from a fixed vocabulary
+written into the source: `cache`, `db`, `audible`, `mixed`, `true`, `false`,
+the four incomplete reasons above, and counts. A value outside that list is
+rejected where it is recorded rather than written to a log, so there is no
+route by which text you typed reaches one of these fields.
+
+The one thing `source` does imply beyond my own server: `cache` means the
+same catalogue item had been fetched recently enough to still be stored. That
+says something about how busy a title is, not about who asked for it — there
+is nothing in the line, or anywhere else, to tie it to a person, and the
+value was on the header of the response you received, so it is not something
+the log knows and you don't.
+
+**`X-Request-Id`, and its honest limits.** Every response carries this header,
+so when something misbehaves you can quote the id and I can search for that
+one request instead of guessing at it from a rough time and a rough path.
+Two things it deliberately is not. It is never read *off* an incoming
+request — send an `X-Request-Id` of your own and it is ignored, a fresh one is
+generated — so neither you nor anyone else can use it to tie your requests to
+each other. And it is stored against nothing: handing yesterday's id back to
+me tomorrow would not associate the two, because there is nothing for it to be
+associated with.
+
+What the id points at depends on how the request ended. Ordinarily it names
+the request line described in the table above. When a request fails with an
+error nobody anticipated, no request line is written for it at all: the line
+carrying that id is the error line instead, holding the exception's message
+and its stack trace and none of the fields in that table — no path, no query,
+no user agent, no host header. That is also the one line that can carry text
+you sent, in the incidental way described
+[below](#what-you-type-is-not-recorded-either). The id on the response is read
+back from the request rather than minted a second time, so the header and the
+line always carry the same value, and quoting it gets me to the error itself.
+
+Two edges where there is no id at all. A request that fails before one has
+been generated gets none, and nothing is invented afterwards to fill the gap —
+the response goes out without the header and no line claims an id it doesn't
+have. And a browser's automatic `OPTIONS` preflight is answered before any of
+this runs: no id on it, and nothing written down for it either.
+
 **`/health` is almost never logged.** It returns before any of the above
 happens, so an uptime monitor hitting it every minute produces nothing at all.
+The response still carries an `X-Request-Id`, but on a healthy `/health`
+nothing is written under it.
 
 The one exception is slowness. If the check takes longer than a second, one
 warning is written recording the path (`/health`), the status it returned, and
@@ -280,15 +335,20 @@ Stated plainly, because the absences matter as much as the list above:
   no fingerprinting. Axiom is the only third party Libex ships log records to.
 - **No cross-request identifier.** Nothing persists between your requests and
   nothing links two of them together. There is no address, no cookie, no
-  session, no fingerprint. The one value that does repeat across lines is the
+  session, no fingerprint. The `X-Request-Id` you get back is not one either —
+  it is minted per request, never read off an incoming one, and stored against
+  nothing. The one value that does repeat across lines is the
   worker `pid` described above, and it can't do that job: it's shared by every
   request that worker handled, from everyone, so two lines carrying the same
   one is not evidence they came from the same person. It says which of my
   processes was on duty, not who was calling.
 - **No request bodies.** Every public endpoint is a `GET` and none of them
   accept a body.
-- **No `Authorization` header, no `Referer`, no `Cookie` header.** Only the
-  headers named in the table above are ever read for logging.
+- **No `Authorization` header, no `Referer`, no `Cookie` header.** Of the
+  headers you send, only the two named in the table above — your user agent
+  and the host header — are ever read for logging. The `source`, `complete`
+  and `incompleteReason` fields are headers too, but they are ones Libex put
+  on its own response, not ones you sent.
 - **No caller data in the database at all.** Libex's Postgres database holds
   Audible metadata — books, authors, narrators, series, genres, chapters — and
   a cache of Audible responses. What a cache entry is keyed by describes what
@@ -316,8 +376,9 @@ is the authority, not this page.
 
 **Axiom** receives the log records described above. An event there carries the
 fields in that table, plus the things every log line has anyway: a timestamp,
-the level, which part of Libex wrote it, the message text, and the worker
-`pid`. Nothing outside that list is sent. What it holds describes requests,
+the level, which part of Libex wrote it, the message text — which on an error
+line includes the stack trace that came with it — and the worker `pid`.
+Nothing outside that list is sent. What it holds describes requests,
 not requesters: no address, and nothing you typed.
 Axiom is a hosted log service; it stores and indexes those records so I can
 query them. I'm the only person I've given access to that dataset — but Axiom
@@ -387,30 +448,43 @@ written most carefully. If you're in the EU or the UK, data protection law
 gives you rights over personal data about you. Here is what those rights run
 into in a service with no accounts.
 
-**The problem, stated once.** There is no identifier in Libex's logs that
-belongs to you — not a weak one, not a shared one, none. No address is
-recorded, nothing you typed is recorded on any routine path, and nothing links
-one of your requests to another. There is no login you could use to prove
-which lines were yours, and no line that is yours in the first place. The one
-way your text can land in a log anyway — an error message that carried it
-without meaning to — is covered under deletion below.
+**The problem, stated once.** Nothing recorded in Libex's logs points back to
+you. No address is recorded, nothing you typed is recorded on any routine
+path, and nothing links one of your requests to another. There is no login you
+could use to prove which lines were yours, and nothing in a line that says
+whose it is. The one thing that names a request of yours is the
+`X-Request-Id` you were handed, and it only works in one direction: you can
+hand it to me and I can find that line, but nothing lets me go the other way,
+from a person to their requests. The other way your text can land in a log —
+an error message that carried it without meaning to — is covered under
+deletion below.
 
 That isn't an evasion. It's the direct consequence of collecting nothing, and
 it cuts both ways: it is also the reason I could not build a profile of you if
 I wanted to.
 
-**Access — what I can do:** nothing, and for a good reason. There is no field
-in any log line that could be matched to you. Even if you told me your IP
-address it would not help, because no line written since addresses were removed
-has one in it. What a log line about your request looks like is described
-exactly by the table above — that is the complete and honest answer to an
-access request here. For records written before that release, see the note
-under deletion.
+**Access — what I can do:** almost nothing, and for a good reason. Nothing in
+a log line identifies you, so there is no way to find your lines from anything
+you could tell me about yourself. Telling me your IP address wouldn't help,
+because no line written since addresses were removed has one in it.
+
+The one exception is an id you kept. Quote an `X-Request-Id` back to me and,
+for as long as that line survives the retention above, I can find the one line
+it belongs to and tell you exactly what is in it. That is worth less than it
+sounds — what is in it is the table above and nothing else, no address and
+nothing you typed — and it proves nothing about whose request it was, since an
+id is just a value and whoever holds it can quote it. It is still a real thing
+I can do, and claiming I can do nothing at all would be tidier than it is
+true. What a log line about your request looks like is described exactly by
+that table either way. For records written before addresses were removed, see
+the note under deletion.
 
 **Deletion — what I can do:** there is nothing identifying to delete. No
-record in the logs is attributable to you, so there is no set of rows that
-constitutes "your data" to remove. Records age out on the retention schedule
-regardless.
+record in the logs identifies you, so there is no set of rows that constitutes
+"your data" to remove. An id you kept names one line, but what that line holds
+is the table above — a method, a path, a status, a duration, a user agent, a
+host header — so there is nothing about you in it to take out. Records age out
+on the retention schedule regardless.
 
 One limit on that, in time rather than in kind: records written *before* the
 release that stopped logging addresses still carry the address they captured,
@@ -420,8 +494,14 @@ log store whose internals aren't mine — what I can tell you is that nothing ne
 is being written that way, and the old records expire on the schedule above.
 
 If you believe something identifying about you has ended up in a log anyway —
-an unhandled error that captured text you sent, most plausibly — tell me and I
-will remove it. That is the one realistic case, and it is worth saying out
+an unhandled error that captured text you sent, most plausibly — tell me, and
+quote the `X-Request-Id` from that response if you still have it, because that
+is what tells me which line to look at. What I can then do depends on where
+the copies of that line are: the ones on my own server I can delete outright,
+and the copy in Axiom falls under the same caveat as the paragraph above — a
+hosted store whose internals aren't mine, so I'll tell you what I actually
+managed rather than promise it in advance. Every copy expires on the schedule
+above regardless. That is the one realistic case, and it is worth saying out
 loud rather than hiding behind "we hold nothing about you."
 
 **Objection, portability, rectification:** these all need data about you to

@@ -1,122 +1,18 @@
 """
-Corpus repair tool. Kept, not spent.
+Corpus repair tool. Re-fetches every book already stored and rewrites it
+through the normal fetch/normalize/persist path, so a writer or normalizer
+fix reaches existing rows -- the seeder never revisits a released title, so
+without a pass here a fix only applies to new books. Not bulk-scraping: it
+only re-reads ASINs already in the `books` table and acquires nothing new.
 
-Reach for this whenever a writer or normalizer fix lands: it only repairs rows
-written after it deploys, and the seeder never revisits a released title, so
-without a pass here the existing corpus keeps the old value forever.
+Walks `books` keyset-paginated on `asin`, grouping each page by region before
+chunking, since a book ASIN resolves only in its own marketplace. Concurrency
+ramps from REFRESH_CONCURRENCY_START on clean latency evidence up to
+REFRESH_CONCURRENCY_MAX, and steps back down on degradation. Any 429, or a
+sustained run of 5xx, aborts outright -- this is a one-off with no deadline,
+and a fresh VPN exit is a minute of work.
 
-Re-fetches every book already stored and rewrites it through the normal
-fetch/normalize/persist path, so fields that were never written, or that have
-drifted since the row was first stored, are repaired in place.
-
-WHY THIS IS NOT BULK-SCRAPING. The no-bulk-scraping rule is about seeding a
-catalog Libex does not have — walking Audible's catalog to acquire records.
-This walks Libex's own `books` table and re-reads only ASINs already stored,
-which every one of those rows was legitimately fetched for at least once
-already. It acquires nothing new: an ASIN that is not in the table is never
-requested, and the pass ends when the table ends.
-
-PRECONDITION. Run only after the writer fix this pass exists to repair is
-merged and deployed — the script hands normalized books to the same writer
-the API uses and writes nothing itself, so running it against an undeployed
-fix spends the exit budget rewriting every row with the field still unset.
-
-HOW IT WALKS THE CORPUS.
-- `books.asin` is the table's sole PRIMARY KEY, and `region` is a plain column
-  with no index on it. So the walk is keyset-paginated on `asin` alone —
-  an index-ordered range scan, one seek per page — and NOT on (region, asin),
-  which has no index to serve it and would cost a full scan plus a top-N sort
-  of 1.1M rows on every page. Ordering on the primary key is unique and total,
-  so the cursor is exactly as stable as the composite would have been.
-- Region is grouped WITHIN each page, never assumed. A page is read as
-  (asin, region) pairs, split by region, and each region's ASINs chunked
-  separately, because a book ASIN resolves only in its own marketplace: the
-  same title is a different ASIN in every region. A pass that chunked across
-  regions, or passed one region for everything, would 404 most of what it
-  asked for and silently repair only the part of the corpus that happened to
-  match.
-- Pages are large (REFRESH_PAGE_SIZE, default 25000) so that the ragged last
-  chunk each region contributes per page is a rounding error rather than a
-  cost: at 25000 rows a page produces at most eleven short chunks against
-  roughly five hundred full ones. Residual ASINs are deliberately NOT carried
-  across a page boundary — that would make the page cursor a lie, since a
-  crash would skip whatever was being carried.
-
-CHECKPOINTING AND RESTART. The cursor only advances past a page once every
-chunk dispatched from it has both been fetched AND had its background write
-finish running — not merely queued for it, since the persist queue is
-fire-and-forget and a chunk's write can still be in flight after its fetch
-returns. That is a guarantee the write ran to completion, not that every row
-it touched landed: a book Postgres permanently rejects fails inside the
-writer's own per-book catch and is logged rather than raised, so a chunk can
-finish, and the cursor can advance past it, with one row still unwritten. It
-is written
-to the log at every page boundary and again on exit, on its own line, prefixed
-`RESUME CURSOR:`. A stop request (SIGTERM/SIGINT) that arrives mid-page, or a
-persist drain that doesn't finish, leaves the cursor at the previous page
-boundary rather than claiming a page whose dispatch or writes never finished.
-Restart with `--resume-from <asin>` (or REFRESH_RESUME_FROM) and the walk
-continues from there. There is no state file and no state table on purpose:
-keyset ordering on the primary key is stable, so a single scalar is the entire
-state, and a one-off container that gets deleted afterwards should not leave a
-row behind in a schema that will outlive it. The cost of that choice is
-bounded — a restart re-does at most one page, which is a minute or two of work.
-
-PACING. It opens conservatively and climbs on evidence, rather than starting
-wide. A brand-new exit IP whose first packets are dozens of simultaneous TLS
-handshakes to api.audible.com is the shape that trips an edge heuristic, and
-the endpoint is the one thing this run cannot replace cheaply mid-flight. So
-concurrency starts at REFRESH_CONCURRENCY_START, climbs by REFRESH_RAMP_STEP
-every REFRESH_RAMP_INTERVAL clean chunks, and holds at whatever level stops
-being clean, capped by REFRESH_CONCURRENCY_MAX. The only measured evidence
-available is a ladder that ran 250 concurrent against Audible with zero 429s
-and zero 5xx — but on a DIRECT path, not through a VPN exit. That makes the
-upstream the known quantity and the exit the unmeasured one, which is exactly
-why the ramp reads the exit's own behaviour instead of trusting the ladder.
-The concurrency gate is global — one exit serves every region — but the
-latency signal that drives it is tracked per region, so a throttled
-marketplace's evidence isn't diluted by ten healthy ones and doesn't drag the
-climb down for them either. See _Ramp's own docstring for the mechanics.
-
-DEGRADATION VERSUS THROTTLING — they are different signals and get different
-answers.
-- Degradation (a region's latency climbing relative to its own best) means
-  "you are at the rate". It stops the climb and steps back down one rung.
-  Backing off here is what lets the run finish fast.
-- A 429, at any level, in any region, aborts the run. So does a sustained
-  run of 5xx. Pushing through a throttle wastes the endpoint and repairs
-  nothing; this is a one-off with no deadline, and a fresh AirVPN exit is a
-  minute of work. The exit line carries the cursor, so a restart on a new
-  endpoint loses at most one page.
-
-HOW FAILURE IS DETECTED AT ALL. get_books_by_asins does not raise on a
-throttled chunk — by design, it falls back to the stored rows and returns
-something that looks exactly like a successful refresh. That is correct
-behaviour for a live request and useless for this run, which needs to know
-whether the row it just handled was actually re-read. Two observers cover it,
-neither of which changes any application behaviour:
-- audible_get is wrapped for the life of this process with a pass-through that
-  records each request's latency and outcome into a per-chunk ContextVar. One
-  chunk is exactly one Audible request, so this gives per-chunk truth: a chunk
-  that fell back to the database is counted as failed, not repaired.
-- A logging handler watches for the throttle line audible_get emits on every
-  429 and 5xx it sees, including ones a retry then absorbed — those never
-  become an exception and are otherwise invisible. It keys on the structured
-  fields (status_code together with attempts_left), which that one call site
-  is the only emitter of, rather than on message text.
-
-BACKPRESSURE. Persistence is a background queue with a bounded backlog; past
-that bound it SHEDS, dropping books silently. In normal API traffic the queue
-drains far faster than requests can fill it, so the bound is never approached
-— but this run's entire purpose is to fill it as fast as an event loop can,
-and a shed book here is a book the pass reports as repaired and did not
-repair. So the dispatcher waits whenever the queued-book count is above
-BACKLOG_HIGH_WATER, derived from persist_queue's own shed limit (see that
-constant's own comment) so every chunk already in flight can land without
-crossing it. A shed that gets through anyway is still counted and reported in
-the exit summary, never silently absorbed into a clean-looking run.
-
-RUN IT (its own container, its own AirVPN endpoint — AUDIBLE_PROXY_URL must
+RUN IT (its own container, its own AirVPN endpoint -- AUDIBLE_PROXY_URL must
 name it explicitly; the run refuses to start unless its hostname contains
 "refresh", see _verify_dedicated_proxy):
 
@@ -132,137 +28,60 @@ Both networks are needed: libex-proxy reaches the VPN sidecar, and the app
 stack's own network is the only place the `postgres` host in DATABASE_URL
 resolves. Its real name is the stack's, not necessarily libex_default --
 `docker inspect libex --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}'`
-prints both of them; the one that is not libex-proxy is the stack's.
-Repeating --network on run needs Engine 25.0 or newer; on older
-ones use docker create, then docker network connect, then docker start, so the
-second network is attached before the run reads its first page.
+prints both; whichever is not libex-proxy is the stack's. Repeating
+--network on `docker run` needs Engine 25.0+; on older ones use docker
+create, docker network connect, then docker start.
 
 Drop --dry-run for the real run. `docker stop -t 600 libex-refresh-corpus`
-finishes the chunks in flight, prints the resume cursor, and exits. -t must be
-STRICTLY GREATER than DRAIN_TIMEOUT_SECONDS -- matching it exactly is not
-enough. A SIGTERM first waits out the in-flight fetches (up to three attempts
-at a 30s timeout, plus capped backoffs -- roughly 110s worst case) before a
-page's drain even starts; that wait is over by the time any drain begins, so
-it does not stack with what follows. What does stack is a SIGTERM landing
-while a page-boundary drain is already running: that drain runs to its own
-timeout, and the exit drain in the `finally` block then runs to its own
-timeout right after, so the pair of them -- not the fetch wait -- sets the
-true worst case at up to DRAIN_TIMEOUT_SECONDS x 2 (~600s). -t is a deadline
-rather than a delay -- docker stop returns as soon as the process exits -- so
-a generous value costs nothing on a healthy stop and only bounds the
-pathological one. Docker's own default 10s grace ends in SIGKILL before a
-page's drain can finish, and the run then falls back to the previous page's
-resume cursor rather than the current one.
+finishes chunks in flight, prints the resume cursor, and exits. -t must be
+STRICTLY GREATER than DRAIN_TIMEOUT_SECONDS -- a SIGTERM landing mid-drain
+can run one page's drain and then the exit drain back to back, up to
+DRAIN_TIMEOUT_SECONDS x 2 (~600s worst case). Docker's default 10s grace
+ends in SIGKILL before a drain finishes, which rewinds the resume cursor a
+page.
 
-ENVIRONMENT. Everything this container reads. The first two are required --
-the run refuses to start without a proxy it recognises as its own. The rest
-have working defaults, env-overridable so a live run can be adjusted without
-a rebuild.
+Restart with `--resume-from <asin>` (or REFRESH_RESUME_FROM), using the ASIN
+from the last `RESUME CURSOR:` log line.
 
-    DATABASE_URL                      the same database the app uses. Unset
-                                      does NOT fail here -- the app's settings
-                                      default it to a localhost URL, so the run
-                                      dies on a connection error inside the
-                                      container rather than a clear one. Read
-                                      through those settings rather than by
-                                      this script, and by the
-                                      `alembic upgrade head` the image
-                                      entrypoint runs before this script gets
-                                      control -- so launching this container
-                                      migrates that database. Needs the app
-                                      stack's own network as well as
-                                      libex-proxy; see RUN IT above for how to
-                                      find its name.
-    AUDIBLE_PROXY_URL                 this run's own dedicated exit. Its
-                                      HOSTNAME MUST CONTAIN "refresh" --
-                                      _verify_dedicated_proxy checks for that
-                                      substring and nothing else, so a
-                                      genuinely dedicated exit named without
-                                      the word is refused exactly as the shared
-                                      production one is.
-    REFRESH_RESUME_FROM       (unset) ASIN to resume AFTER, exclusive -- the walk
-                                      restarts at the next one. --resume-from is
-                                      the same setting and wins over it.
+ENVIRONMENT.
 
-    LOG_LEVEL                 INFO    INFO is what this run needs, and DEBUG
-                                      only adds noise (httpx and httpcore are
-                                      muted separately, so it leaks no caller
-                                      URLs). WARNING and above drop the RESUME
-                                      CURSOR line a restart depends on, which is
-                                      logged at INFO. ERROR additionally kills
-                                      BOTH log-driven aborts below: their
-                                      detector is a handler on the throttle
-                                      record, which is emitted at WARNING.
-                                      DEBUG=true forces DEBUG whatever this says.
-    AXIOM_TOKEN               (unset) set means every line of this run ships to
-                                      Axiom as well as stdout. Copying another
-                                      stack's environment is the easy way to
-                                      inherit it without meaning to.
-    AXIOM_DATASET             libex   the dataset those lines land in.
-    LOG_RETENTION_DAYS        7       rotation of the log file inside the
-                                      container; 0 keeps everything. The handler
-                                      is attached whether or not a logs volume is
-                                      mounted -- a mount changes where the file
-                                      survives, not whether it is written -- and
-                                      the run command above mounts none.
+    DATABASE_URL                      required. Same database the app uses.
+                                       Needs the app stack's own network as
+                                       well as libex-proxy; see RUN IT above.
+    AUDIBLE_PROXY_URL                 required. Hostname must contain "refresh".
+    REFRESH_RESUME_FROM        (unset) ASIN to resume after (exclusive).
+    LOG_LEVEL                  INFO    WARNING+ drops the RESUME CURSOR line
+                                       and both the 429 and 5xx aborts, which
+                                       key off a WARNING-level log record.
+    AXIOM_TOKEN                (unset) set to also ship logs to Axiom.
+    AXIOM_DATASET               libex
+    LOG_RETENTION_DAYS          7      0 keeps everything.
+    CACHE_TTL                          86400   seconds until a cached book expires.
+    REFRESH_PAGE_SIZE                  25000   rows per keyset page.
+    REFRESH_CONCURRENCY_START          6       opening ramp rung.
+    REFRESH_CONCURRENCY_MAX            48      ramp ceiling.
+    REFRESH_RAMP_STEP                  6       width added per climb.
+    REFRESH_RAMP_INTERVAL              150     clean chunks required per climb.
+    REFRESH_LATENCY_WINDOW             60      latency samples per rolling window.
+    REFRESH_DEGRADE_P95_RATIO          2.0     p95-vs-best-p95 ratio that steps
+                                                the ramp down and freezes it.
+    REFRESH_ABORT_5XX_WITHIN           20      5xx count that aborts the run.
+    REFRESH_ABORT_5XX_WINDOW_SECONDS   120.0   window that count is measured over.
+    REFRESH_ABORT_CHUNK_FAILURE_RATE   0.25    sustained chunk-failure rate that aborts.
+    REFRESH_ABORT_CHUNK_FAILURE_MIN    40      chunks required before that rate is judged.
+    REFRESH_DB_WRITE_CONCURRENCY       8       concurrent background persist transactions.
+    REFRESH_BACKLOG_HIGH_WATER         2550    queued books above which dispatch waits;
+                                                derived from CONCURRENCY_MAX, so it falls
+                                                as that rises -- the run refuses to start
+                                                if the derivation leaves no headroom at all.
+    REFRESH_DRAIN_TIMEOUT_SECONDS      300.0   bound on waiting for the persist queue,
+                                                between pages and at exit. `docker stop -t`
+                                                must exceed this.
+    REFRESH_PROGRESS_EVERY             100     chunks between progress lines.
 
-    CACHE_TTL                         86400   seconds until a cached book expires.
-                                              This run writes one cache row per
-                                              book through the normal persist
-                                              path, so a full pass restamps the
-                                              whole corpus's expiry horizon.
-
-    REFRESH_PAGE_SIZE                 25000   rows per keyset page
-    REFRESH_CONCURRENCY_START         6       opening ramp rung
-    REFRESH_CONCURRENCY_MAX           48      ramp ceiling
-    REFRESH_RAMP_STEP                 6       width added per climb
-    REFRESH_RAMP_INTERVAL             150     clean chunks required per climb
-    REFRESH_LATENCY_WINDOW            60      latency samples per rolling window.
-                                              Also sets the degrade warmup at
-                                              three times this, so raising it
-                                              delays the check below as well.
-    REFRESH_DEGRADE_P95_RATIO         2.0     p95-against-best-p95 ratio that
-                                              steps the ramp back down AND
-                                              freezes the climb for good -- a
-                                              run that trips it spends the rest
-                                              of its life at that rung.
-    REFRESH_ABORT_5XX_WITHIN          20      5xx count that aborts the run. Shares
-                                              the throttle detector with the 429
-                                              abort, so LOG_LEVEL=ERROR disables
-                                              this one too.
-    REFRESH_ABORT_5XX_WINDOW_SECONDS  120.0   window that count is measured over
-    REFRESH_ABORT_CHUNK_FAILURE_RATE  0.25    sustained chunk-failure rate that aborts
-    REFRESH_ABORT_CHUNK_FAILURE_MIN   40      chunks required before that rate is judged
-    REFRESH_DB_WRITE_CONCURRENCY      8       concurrent background persist
-                                              transactions. Bounded by the app
-                                              engine's pool (pool_size 10 plus
-                                              max_overflow 10), which is not
-                                              env-tunable, so past roughly 16
-                                              the writers queue on pool_timeout
-                                              instead of going faster.
-    REFRESH_BACKLOG_HIGH_WATER        2550    queued books above which dispatch
-                                              waits. Derived as the persist
-                                              queue's own capacity (5000) minus
-                                              (CONCURRENCY_MAX + 1) chunks, so
-                                              it FALLS as CONCURRENCY_MAX rises:
-                                              at 99 or more the derivation
-                                              leaves no room for a single chunk
-                                              and the run refuses to start
-                                              unless this is also set.
-    REFRESH_DRAIN_TIMEOUT_SECONDS     300.0   bound on waiting for the persist
-                                              queue, between pages and again at
-                                              exit. `docker stop -t` must be
-                                              STRICTLY GREATER than this value,
-                                              not merely equal to it -- see the
-                                              -t 600 above for the arithmetic
-                                              behind why. SIGKILL mid-drain
-                                              rewinds the resume cursor by a
-                                              page.
-    REFRESH_PROGRESS_EVERY            100     chunks between progress lines
-
-Any 429 ends the run outright, whatever the abort thresholds above are set
-to. Both that and the 5xx abort need LOG_LEVEL at WARNING or more verbose to see
-anything at all, and the resume cursor needs INFO -- see LOG_LEVEL above.
+Exit codes: 0 clean, 1 aborted (429, sustained 5xx, or chunk-failure rate), 2
+finished without aborting but a shed batch or a drain timeout means not
+everything landed.
 """
 
 # Standard library
@@ -315,51 +134,36 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-# The bulk catalog endpoint returns at most 50 products per request, which is
-# what books.py chunks its own hydration at. Not a rate knob and not tunable:
-# a larger value would silently return 50 anyway and drop the rest.
+# The bulk catalog endpoint returns at most 50 products per request. Not
+# tunable: a larger value would silently return 50 anyway and drop the rest.
 CHUNK_SIZE = 50
 
-# Rows read per keyset page. Large enough that the short chunk each region
-# contributes at the end of a page is negligible, small enough that a restart
-# re-does a minute of work rather than an hour. 25000 rows is about 4MB of
-# (asin, region) tuples.
+# Rows read per keyset page. Large enough that the short per-region tail
+# chunk at the end of a page is negligible, small enough that a restart
+# re-does a minute of work rather than an hour.
 PAGE_SIZE = _env_int("REFRESH_PAGE_SIZE", 25000)
 
-# The ramp. Opens below the API's own per-process steady-state fan-out width
-# (10, see AUDIBLE_CONCURRENCY_LIMIT), climbs on clean evidence, and holds
-# wherever it stops being clean. MAX is a default ceiling, not a measured one:
-# 48 is roughly a fifth of the largest concurrency measured clean anywhere,
-# and that measurement was not through a VPN exit. Raise it live if the
-# endpoint is visibly bored.
+# The ramp. Opens below AUDIBLE_CONCURRENCY_LIMIT, climbs on clean evidence,
+# and holds wherever it stops being clean. MAX is a default ceiling, not a
+# measured one -- raise it live if the endpoint is visibly bored.
 CONCURRENCY_START = _env_int("REFRESH_CONCURRENCY_START", 6)
 CONCURRENCY_MAX = _env_int("REFRESH_CONCURRENCY_MAX", 48)
 RAMP_STEP = _env_int("REFRESH_RAMP_STEP", 6)
 RAMP_INTERVAL = _env_int("REFRESH_RAMP_INTERVAL", 150)
 
 # Degradation. Latency is sampled per Audible request over a rolling window,
-# kept separately per region -- a level's p95 is compared against the best
-# p95 that SAME region has recorded, never pooled across regions. Past this
-# ratio in any one region, the run steps back down a rung and stops climbing
-# for good — that region has told us where the shared exit's rate is.
+# kept separately per region -- a level's p95 is compared only against that
+# region's own best. Past this ratio, the run steps back down a rung and
+# stops climbing for good.
 LATENCY_WINDOW = _env_int("REFRESH_LATENCY_WINDOW", 60)
 DEGRADE_P95_RATIO = _env_float("REFRESH_DEGRADE_P95_RATIO", 2.0)
 
 # Latency samples a region must contribute before the degrade check above is
-# allowed to act on it.
-#
-# Measured on the first live pass, 2026-08-18: the ramp froze at the opening
-# rung 1.3 minutes in, with no exit problem at all. best_p95 takes any new
-# minimum, so the first full window sets the bar -- and consecutive early
-# windows vary widely. The samples that froze that run were 1104ms, 546ms,
-# 469ms, 663ms and 795ms: 1104/469 is 2.35, past the ratio, on nothing but
-# ordinary jitter. The freeze is permanent, so a run that trips it spends its
-# whole life at CONCURRENCY_START.
-#
-# Three windows rather than one, so the baseline is a settled minimum rather
-# than whichever window happened to land first. It only delays the check --
-# a genuinely degrading exit still trips it, just after the ramp has seen
-# enough to know what normal looks like.
+# allowed to act on it. Three windows rather than one, so the baseline is a
+# settled minimum rather than whichever window happened to land first --
+# a single window froze a real run at CONCURRENCY_START on nothing but
+# first-window jitter. This only delays the check; a genuinely degrading
+# exit still trips it once the ramp knows what normal looks like.
 DEGRADE_WARMUP_SAMPLES = LATENCY_WINDOW * 3
 
 # Abort thresholds. Any 429 ends the run outright. 5xx is allowed to be noise
@@ -374,37 +178,25 @@ ABORT_CHUNK_FAILURE_RATE = _env_float("REFRESH_ABORT_CHUNK_FAILURE_RATE", 0.25)
 ABORT_CHUNK_FAILURE_MIN = _env_int("REFRESH_ABORT_CHUNK_FAILURE_MIN", 40)
 
 # Concurrent background persist transactions. The application default is 2,
-# sized so the seeder cannot starve the API's connection pool — a constraint
-# that does not exist in a dedicated container whose pool serves nothing else.
-# Bounded by that pool: app/db/session.py sizes it at pool_size 10 plus
-# max_overflow 10, so 8 writers leave headroom for the pager and for a chunk
-# that falls back to a database read.
+# sized so the seeder cannot starve the API's connection pool -- a constraint
+# that doesn't exist in a dedicated container. Bounded by app/db/session.py's
+# pool (pool_size 10 + max_overflow 10); 8 leaves headroom for the pager.
 DB_WRITE_CONCURRENCY = _env_int("REFRESH_DB_WRITE_CONCURRENCY", 8)
 
 # Queued-book count above which the dispatcher stops handing out new chunks.
-# Derived from persist_queue's own shed limit rather than restated, so every
-# chunk already in flight (at most CONCURRENCY_MAX x CHUNK_SIZE books) can
-# land without reaching it. CONCURRENCY_MAX is env-tunable, so a hardcoded
-# margin here would re-break the moment it's raised.
-#
-# The reserve is (CONCURRENCY_MAX + 1) chunks, not CONCURRENCY_MAX: the
-# dispatcher checks this water mark BEFORE gate.acquire() (see
-# _wait_for_backlog's call site), so at the instant a check passes, up to
-# CONCURRENCY_MAX chunks can already be in flight and the chunk being checked
-# is additional to them — it has not acquired a gate slot yet. Reserving only
-# CONCURRENCY_MAX chunks' worth left that one extra chunk's books able to push
-# the queue past backlog_capacity() before _spawn's own shed check ever saw
-# them coming. See _verify_backlog_headroom for what happens when this
-# arithmetic goes negative.
+# Derived from persist_queue's own shed limit so every chunk already in
+# flight can land without reaching it. The reserve is (CONCURRENCY_MAX + 1)
+# chunks, not CONCURRENCY_MAX: the dispatcher checks this water mark BEFORE
+# gate.acquire(), so the chunk being checked hasn't taken a slot yet either.
+# See _verify_backlog_headroom for what happens when this goes negative.
 BACKLOG_HIGH_WATER = _env_int(
     "REFRESH_BACKLOG_HIGH_WATER",
     persist_queue.backlog_capacity() - (CONCURRENCY_MAX + 1) * CHUNK_SIZE,
 )
 
 # How long to wait for the persist queue to empty before giving up on it --
-# used both between pages (so the resume cursor never advances past writes
-# that haven't landed) and once at exit. Bounded rather than indefinite: a
-# genuinely stuck queue should stop the run, not hang the container forever.
+# used both between pages and once at exit. Bounded rather than indefinite:
+# a genuinely stuck queue should stop the run, not hang the container forever.
 DRAIN_TIMEOUT_SECONDS = _env_float("REFRESH_DRAIN_TIMEOUT_SECONDS", 300.0)
 
 PROGRESS_EVERY = _env_int("REFRESH_PROGRESS_EVERY", 100)
@@ -414,11 +206,9 @@ PROGRESS_EVERY = _env_int("REFRESH_PROGRESS_EVERY", 100)
 # PER-CHUNK OBSERVATION
 # ============================================================
 
-# One script-level chunk is exactly one Audible request, so a per-chunk record
-# populated by the audible_get wrapper is per-request truth. It lives in a
-# ContextVar because asyncio copies the current context when a task is
-# created, so each chunk task gets its own record with nothing threaded
-# through get_books_by_asins' signature.
+# One script-level chunk is exactly one Audible request, so a per-chunk
+# record populated by the audible_get wrapper is per-request truth. Lives in
+# a ContextVar so each chunk task gets its own record automatically.
 _chunk_observation: ContextVar[dict[str, Any] | None] = ContextVar(
     "_refresh_chunk_observation", default=None
 )
@@ -429,12 +219,10 @@ def _install_audible_observer() -> None:
     Wraps the audible_get name the books service resolves, for this process
     only, with a pass-through that times the call and records its outcome.
 
-    Observes; never changes anything. Every exception is re-raised unchanged
-    and every successful response is returned unchanged, so the books service
-    behaves byte for byte as it does in the API. It exists because
-    get_books_by_asins deliberately hides a failed fetch behind stored data —
-    correct for a live request, and the one thing this run must be able to
-    see.
+    Observes; never changes anything -- exceptions and responses are
+    unchanged. Exists because get_books_by_asins hides a failed fetch behind
+    stored data, correct for a live request but the one thing this run must
+    be able to see.
     """
     original = books_service.audible_get
 
@@ -461,25 +249,18 @@ def _install_persist_shed_observer(run: "_Run") -> None:
     """
     Wraps persist_queue._spawn, for this process only, to detect a shed batch.
 
-    _spawn is the one place a background write is admitted or dropped, and it
-    returns nothing either way -- run.books_refreshed already counted these
-    books as repaired at fetch time (see _refresh_chunk), before persistence
-    ever runs, so without this a shed batch is indistinguishable from a
-    landed one in every line this script emits. The before/after delta in
-    _queued_books is what tells them apart: an admitted batch raises it by
-    `books`, a shed one leaves it untouched (persist_queue._record_shed runs
-    and _spawn returns before touching the counter).
+    run.books_refreshed already counted these books as repaired at fetch
+    time, before persistence runs, so without this a shed batch is
+    indistinguishable from a landed one. The before/after delta in
+    _queued_books tells them apart: an admitted batch raises it by `books`,
+    a shed one leaves it untouched.
     """
     original = persist_queue._spawn
 
     def observed(make_coro, books: int) -> None:
-        # Deliberately the private counter, not queued_books(): this observer
-        # is watching persist_queue's own internal bookkeeping (the same
-        # variable _spawn itself mutates) to catch a shed batch by its
-        # absence of effect, not asking the module a legitimate public
-        # question about queue depth the way every other read site here
-        # does. Reading the accessor here would read the same value while
-        # pretending this call site were the same kind of caller as those.
+        # The private counter, not queued_books(): this watches
+        # persist_queue's own internal bookkeeping to catch a shed batch by
+        # its absence of effect, not asking a public question about depth.
         before = persist_queue._queued_books
         original(make_coro, books)
         if persist_queue._queued_books == before:
@@ -490,19 +271,10 @@ def _install_persist_shed_observer(run: "_Run") -> None:
 
 class _ThrottleSentinel(logging.Handler):
     """
-    Watches for the throttle line audible_get emits on every 429 and 5xx it
-    receives, including the ones a retry then absorbed.
-
-    An absorbed 429 never becomes an exception and never reaches the observer
-    above, so this is the only place it is visible — and an absorbed 429 is
-    precisely the early warning worth stopping on. It keys on the structured
-    fields rather than the message text: status_code together with
-    attempts_left is emitted by exactly one call site in the codebase (the
-    retry branch of audible_get), which makes the coupling a field contract
-    rather than a string match.
-
-    Records only counts and timestamps. Nothing from the log record is
-    retained or re-emitted.
+    Watches for the throttle line audible_get emits on every 429/5xx,
+    including ones a retry absorbed -- otherwise invisible to the observer
+    above. Keys on the structured fields (status_code with attempts_left),
+    emitted by exactly one call site, rather than message text.
     """
 
     def __init__(self) -> None:
@@ -536,13 +308,12 @@ class _ThrottleSentinel(logging.Handler):
 
 class _Gate:
     """
-    A concurrency gate whose limit moves while tasks are waiting on it.
+    A concurrency gate whose limit can move while tasks wait on it.
 
-    asyncio.Semaphore cannot shrink — releasing extra permits grows it, but
-    nothing takes permits back — and the ramp needs to step down as readily
-    as it steps up. A condition variable over an active count does both, and
-    a step down takes effect as tasks finish rather than by cancelling work
-    already in flight.
+    asyncio.Semaphore can't shrink -- releasing extra permits grows it, but
+    nothing takes permits back. A condition variable over an active count
+    can, and a step down takes effect as tasks finish rather than by
+    cancelling work already in flight.
     """
 
     def __init__(self, limit: int) -> None:
@@ -596,28 +367,17 @@ class _RegionSignal:
 
 class _Ramp:
     """
-    Climbs the shared gate on evidence from every region and steps it down on
-    degradation in any one.
+    Climbs the shared gate on evidence from every region and steps it down
+    on degradation in any one.
 
-    The gate stays global -- every region leaves by the same VPN exit, and
-    that exit is the ceiling being protected -- but the signal driving it is
-    tracked per region: each gets its own latency window, its own best p95,
-    and its own clean streak, so a throttled marketplace's evidence isn't
-    diluted by ten healthy ones' samples, and a slow-but-stable region (judged
-    only against its own baseline, never another's) doesn't drag the climb
-    down for everyone either. A region past DEGRADE_P95_RATIO relative to its
-    own best steps the gate down and freezes the climb for the rest of the
-    run -- one bad region is enough, matching the single-stream design this
-    replaces. A step up requires every region that has reported enough
-    samples to judge (its window is full) to be independently clean for
-    RAMP_INTERVAL chunks at once; a region with too little traffic to fill a
-    window contributes to neither decision. Latency is the signal because it
-    moves before errors do -- an exit at its rate answers more slowly for a
-    while before it answers with a status code.
-
-    What this does NOT measure: TLS handshake time on its own, which would
-    need a hook inside the HTTP client. The end-to-end request time it samples
-    includes it, so a handshake slowdown shows up here — just not separably.
+    The gate stays global -- every region leaves by the same VPN exit -- but
+    the signal driving it is tracked per region: each gets its own latency
+    window, best p95, and clean streak, so one throttled marketplace's
+    evidence isn't diluted by healthy ones and a slow-but-stable region isn't
+    judged against another's baseline. A region past DEGRADE_P95_RATIO
+    relative to its own best steps the gate down and freezes the climb for
+    the rest of the run. A step up requires every region with a full window
+    to be independently clean for RAMP_INTERVAL chunks at once.
     """
 
     def __init__(self, gate: _Gate) -> None:
@@ -651,11 +411,8 @@ class _Ramp:
         if signal.best_p95 is None or p95 < signal.best_p95:
             signal.best_p95 = p95
 
-        # Warming up: keep letting best_p95 settle toward a real minimum, but
-        # do not let this region freeze the ramp yet. Climbing stays allowed,
-        # which is why this gates only the degrade branch below rather than
-        # returning -- a cold exit that is genuinely fast should not be held
-        # at the opening rung waiting for permission to leave it.
+        # Warming up: let best_p95 settle before this region can freeze the
+        # ramp. Climbing stays allowed -- this only gates the degrade branch.
         warming_up = signal.samples < DEGRADE_WARMUP_SAMPLES
 
         if not warming_up and not self._frozen and p95 > signal.best_p95 * DEGRADE_P95_RATIO:
@@ -673,20 +430,9 @@ class _Ramp:
                 signal.clean_streak = 0
             return
         new_limit = min(CONCURRENCY_MAX, self._gate.limit + RAMP_STEP)
-        # Reset before the await, not after, mirroring _step_down's own
-        # self._frozen = True as its first statement. set_limit acquires the
-        # gate's shared condition variable -- the same lock every concurrent
-        # chunk contends on through gate.acquire()/release() -- so this await
-        # genuinely suspends under load. A concurrent record() that runs
-        # while it's suspended must not still see every region as clean, or
-        # it independently re-satisfies the same "all warm regions clean"
-        # check and calls _step_up() again before this climb has even
-        # landed, stacking several climbs onto what should have been one
-        # (reproduced: 30 concurrent record() calls against a contended gate
-        # produced 30 _step_up() calls instead of 1). Nothing yields between
-        # reading the pre-reset state and applying it here, so no other
-        # decision can act on a stale streak -- the same guarantee
-        # self._frozen already gives _step_down.
+        # Reset before the await so a concurrent record() that runs while
+        # this is suspended can't independently re-satisfy "all regions
+        # clean" and call _step_up() again before this climb has landed.
         for signal in self._regions.values():
             signal.clean_streak = 0
             signal.latencies.clear()
@@ -939,15 +685,10 @@ def _log_progress(run: _Run, gate: _Gate, ramp: _Ramp, remaining_books: int) -> 
 
 def _proxy_host_for_log(proxy: str | None) -> str:
     """
-    Best-effort hostname for a log line -- never the raw AUDIBLE_PROXY_URL.
-
-    httpx's proxy= accepts credentials embedded in the URL
-    (http://user:pass@host:port), and Settings stores the value as a plain
-    str, not a SecretStr, so nothing that reaches a log record may be the
-    full value. The hostname is the diagnostically useful part -- which exit
-    this run is using -- and carries no secret, so that's what gets logged
-    instead. Must never raise: a logging call taking the whole run down over
-    a malformed env var would turn a cosmetic problem into an outage.
+    Best-effort hostname for a log line -- never the raw AUDIBLE_PROXY_URL,
+    since httpx's proxy= accepts embedded credentials
+    (http://user:pass@host:port) and Settings stores this as a plain str.
+    Never raises -- a malformed value becomes "(unparseable)".
     """
     if not proxy:
         return "direct"
@@ -960,48 +701,12 @@ def _proxy_host_for_log(proxy: str | None) -> str:
 
 def _verify_dedicated_proxy() -> None:
     """
-    Refuses to start unless AUDIBLE_PROXY_URL both is set and names this run's
-    own exit, never the shared one _raise_process_limits' 48-wide ceiling
-    exists to protect.
-
-    Checked against the hostname, not a literal URL, because the real
-    production proxy value is infrastructure this app never carries in
-    source and has no secret to compare against. "refresh" in the hostname is
-    the convention this script's own module docstring and RUN IT example
-    already commit to (libex-refresh-vpn), the same way
-    scripts/backfill_chapters.py names its own dedicated exit
-    (libex-backfill-vpn) -- an operator who leaves the variable unset, or
-    reuses the shared value, fails this on hostname alone, before a single
-    request goes out or a limit gets raised.
-
-    The failure message names the hostname only, never the full value:
-    httpx's proxy= accepts credentials embedded in the URL
-    (http://user:pass@host:port) and nothing in Settings forbids
-    AUDIBLE_PROXY_URL being configured that way, so the one path that fires
-    on operator misconfiguration must not be the one that echoes back
-    whatever the operator typed, including a possible credential. The
-    hostname is what "refresh" is actually checked against and is enough to
-    tell the operator what failed; they already know what they set.
-
-    Logged, not just raised: SystemExit propagates straight out of the
-    process without ever touching the libex logger, so on its own it would
-    survive only as stderr text -- in a container that runs unattended, the
-    highest-severity startup condition this script has would be the one
-    piece of evidence that never reaches the rotating file handler or
-    Axiom. The log call is made first, with the same hostname-only
-    discipline as the SystemExit message, so the raw value can't reach it
-    either.
-
-    Hostname extraction goes through _proxy_host_for_log rather than a bare
-    httpx.URL(proxy).host, deliberately: a value that is set but malformed
-    (a typo'd port is the realistic case -- a Portainer env field is free
-    text) makes httpx.URL raise InvalidURL, and that must fail exactly like
-    an unset or wrongly-named value -- logged and refused -- not escape as
-    an uncaught traceback that skips both the log line and the deliberate
-    SystemExit message. _proxy_host_for_log already turns that same
-    exception into "(unparseable)", which reads fine as a proxy_host value
-    and correctly fails the "refresh" in host check below, so there is no
-    second try/except to keep in sync with the first.
+    Refuses to start unless AUDIBLE_PROXY_URL is set and its hostname
+    contains "refresh" -- protects the shared exit from
+    _raise_process_limits' 48-wide ceiling. Checked against the hostname
+    only, since the real proxy value may carry embedded credentials and must
+    never reach a log line or exception message. Logged before the
+    SystemExit, since SystemExit alone never reaches the log handlers.
     """
     proxy = os.environ.get("AUDIBLE_PROXY_URL", "")
     host = _proxy_host_for_log(proxy) if proxy else ""
@@ -1023,28 +728,14 @@ def _verify_dedicated_proxy() -> None:
 def _verify_backlog_headroom() -> None:
     """
     Refuses to start when BACKLOG_HIGH_WATER leaves no room to ever admit a
-    chunk -- checked against the actual resolved constant, not just its
-    default derivation, so an explicit REFRESH_BACKLOG_HIGH_WATER override is
-    judged on what it actually resolves to rather than assumed bad or good.
+    chunk. At REFRESH_CONCURRENCY_MAX = 99 (unbounded above), the default
+    derivation already consumes the whole backlog_capacity() in reserve,
+    going negative past that -- and _wait_for_backlog would then block
+    forever on a water mark it can never satisfy.
 
-    _env_int applies no floor to REFRESH_CONCURRENCY_MAX, and the module
-    docstring explicitly invites raising it "if the endpoint is visibly
-    bored," citing 250 as measured clean elsewhere. At the default derivation,
-    CONCURRENCY_MAX = 99 already consumes the whole 5000-book
-    backlog_capacity() in reserve, leaving a high water of zero; above that it
-    goes negative. _wait_for_backlog then loops on `queued_books() >
-    BACKLOG_HIGH_WATER`, which is true even at a queue depth of zero -- the
-    dispatcher logs one line, hands out no chunks, and sits until SIGTERM,
-    against a rented dedicated exit, on a run whose whole point is to finish
-    unattended overnight.
-
-    Refuses rather than clamping with max(...): a clamp would leave the guard
-    present but silently useless -- the operator raises the knob, sees no
-    error, and gets a run with no backpressure at all instead of a run that
-    is merely slower to open up. Requires at least one full chunk of
-    headroom, not merely a positive water mark, so the dispatcher always has
-    room to admit the next chunk rather than immediately blocking on one it
-    just let through.
+    Refuses rather than clamping with max(...): a clamp would leave the
+    guard present but silently useless. Requires at least one full chunk of
+    headroom, not merely a positive water mark.
     """
     if BACKLOG_HIGH_WATER < CHUNK_SIZE:
         reserve = (CONCURRENCY_MAX + 1) * CHUNK_SIZE
@@ -1063,30 +754,16 @@ def _verify_backlog_headroom() -> None:
 
 def _raise_process_limits() -> None:
     """
-    Widens the two application limits that would otherwise cap this run below
-    anything the ramp could reach — in this process only, before anything has
-    built a client, a semaphore or a session.
+    Widens the two application limits that would otherwise cap this run
+    below anything the ramp could reach -- in this process only, before
+    anything has built a client, a semaphore or a session.
 
-    Both are sized for the API process and both are correct there. Neither
-    constraint exists in a dedicated one-off container:
-    - AUDIBLE_CONCURRENCY_LIMIT is a slice of what a SHARED exit IP tolerates
-      and, separately, the fan-out width of one live request. This container
-      has an exit to itself and serves no requests, so the ramp is the only
-      thing that should be deciding the width.
-    - The shared client's connection pool is sized off that same limit, so
-      leaving it alone would queue the ramp's requests behind 35 connections
-      no matter what the semaphore allowed.
-    - Background persist concurrency is 2 so the seeder cannot starve the
-      API's connection pool. Nothing shares this pool, and at 2 the write side
-      becomes the run's ceiling well before Audible does.
-
-    Rebinding module attributes is deliberate and is confined to this one
-    function. The alternative is making three application constants
-    environment-driven for the sake of a script that gets deleted after one
-    night, which is a permanent change to production code paying for a
-    temporary need. The asserts are the safety: both application objects are
-    built lazily on first use, so this is only correct before first use, and a
-    later caller would silently get the old limits instead.
+    Both are sized for the API process; neither constraint applies to a
+    dedicated one-off container, so they're rebound here rather than made
+    environment-driven in application code for a script that gets deleted
+    after one night. The asserts are the safety: both application objects
+    are built lazily on first use, so a later caller would otherwise
+    silently get the old limits.
     """
     assert audible_client._audible_client is None, "Audible client already built"
     assert audible_client._audible_semaphore is None, "Audible semaphore already built"

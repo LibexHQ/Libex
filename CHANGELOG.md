@@ -42,6 +42,12 @@ capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
   retired `SEEDER_ENABLED` variable, which pointed operators at the old
   profile, now names the new stack instead. No endpoint, parameter, response
   shape, field or status code moved.
+- **The documented chapter-backfill launch command now reaches the
+  database.** The `docker run` example in `scripts/backfill_chapters.py`
+  joined only the VPN-exit network, but the `DATABASE_URL` it also sets
+  points at the `postgres` hostname, which resolves only on the API stack's
+  own network. A container started exactly as documented could not connect
+  to the database. The example now joins both networks.
 
 ## [1.18.0]
 

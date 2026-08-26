@@ -3,133 +3,47 @@ services:
     image: ghcr.io/libexhq/libex:latest
     container_name: libex
     restart: unless-stopped
-    # PORT is the published host port and nothing else. Inside the container the
-    # app always listens on 3333: the Dockerfile CMD passes --port 3333, uvicorn
-    # reads no PORT variable (0.46.0 checks only WEB_CONCURRENCY and
-    # FORWARDED_ALLOW_IPS), and no code in app/ reads settings.port. It is
-    # deliberately not in the environment block below, where it would name a
-    # listen port it does not set.
+    # the published host port only -- inside the container the app always
+    # listens on 3333 (Dockerfile CMD --port 3333) and reads no PORT variable.
     ports:
       - "${PORT:-3333}:3333"
-    # This block is an allowlist, not a passthrough. A name absent from here is
-    # not readable in the container no matter what .env or the Portainer stack
-    # environment sets, and the app sees only its own compiled-in default --
-    # silently, because pydantic has a default for every one of these. Adding a
-    # setting to app/core/config.py is therefore only half of wiring it up; it
-    # is not configurable until it also appears below.
+    # an allowlist, not a passthrough: a name absent here is not readable in the
+    # container and the app silently takes its compiled-in default, so adding a
+    # setting to app/core/config.py is only half of wiring it up.
     environment:
       - DATABASE_URL=postgresql+asyncpg://${DB_USER:-libex}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-libex}
       - CACHE_ENABLED=${CACHE_ENABLED:-true}
       - CACHE_TTL=${CACHE_TTL:-86400}
       - DEFAULT_REGION=${DEFAULT_REGION:-us}
-      # Optional, and empty is a working deployment. Unset means outbound
-      # Audible requests leave by the container's own address -- the same
+      # empty is a working deployment: Audible requests then leave by the same
       # IP the public API answers on.
       - AUDIBLE_PROXY_URL=${AUDIBLE_PROXY_URL:-}
-      # A literal, not an interpolation, and deliberately not a knob. The
-      # worker count is the multiplier on every per-process budget in the
-      # codebase, and each of those budgets was sized against this exact
-      # number rather than derived from it at runtime:
-      #
-      #   - app/db/session.py holds pool_size 10 + max_overflow 10 per
-      #     process, so six workers reach 120 connections. That is the whole
-      #     reason the postgres service below runs max_connections=200; at 12
-      #     the demand is 240 against 197 usable slots.
-      #   - Both Audible concurrency limits in services/audible/client.py
-      #     (10 and 25) are per-process and neither is divided by this number,
-      #     because dividing them caused a live 504 outage. Six workers put
-      #     6 x (10 + 25) = 210 requests in flight at worst, all leaving by
-      #     one exit IP. A ladder measured 250 clean -- but on a direct path,
-      #     not through the proxy this deployment leaves by, whose shared exit
-      #     has never been measured.
-      #   - app/services/db/persist_queue.py's backlog cap is per worker:
-      #     about 45 MB each, 269 MB across the six at worst case.
-      #
-      # None of those announce themselves when this number moves. They surface
-      # later as connections refused, a throttled exit IP, or memory -- so the
-      # value changes when Libex changes it, with that arithmetic re-checked
-      # and the proxy ladder run first. It is a maintainer decision taken in
-      # the repo, not an operator one taken in a stack environment, which is
-      # why there is nothing here to override: changing it means editing this
-      # line, and editing this line means reading this.
-      #
-      # This stays uvicorn's own variable rather than a --workers flag in the
-      # Dockerfile CMD: uvicorn reads WEB_CONCURRENCY only when workers is
-      # None (0.46.0, config.py), so a flag would not sit alongside this line,
-      # it would silently beat it -- and this line is where the arithmetic is.
-      #
-      # More than one worker routes around a blocked event loop -- the kernel
-      # hands new connections to whichever child is still calling accept().
-      # It does NOT recover one: uvicorn's liveness probe is answered by a
-      # daemon thread, so a wedged worker keeps replying and is never replaced.
-      #
-      # No longer paired with the seeder, which is the headline of the change
-      # that removed the line that used to sit here ("MUST be 1 while
-      # SEEDER_ENABLED is true"). Both seeder loops were started from
-      # app/main.py's lifespan, which runs once per worker: six workers meant
-      # six uncoordinated walks of the same catalog, and SEEDER_REQUEST_DELAY,
-      # being per-process, paced Audible at a sixth of the interval it named.
-      # The seeder is now a single process in a stack of its own, defined in
-      # docker-compose.seeder.yml, so seeding and six workers are no longer
-      # mutually exclusive and this number answers to the arithmetic above
-      # and nothing else.
+      # a literal, deliberately not a knob -- every per-process budget was sized
+      # against this number. the db pool is 10 + 10 per worker, so six workers
+      # reach the 120 connections postgres below runs max_connections=200 for;
+      # the Audible concurrency limits and persist_queue's backlog cap are per
+      # worker too. moving it means redoing that arithmetic here, not in a stack.
       - WEB_CONCURRENCY=6
       - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      # An empty token means stdout only. The dataset default repeats the
-      # one in app/core/config.py rather than deferring to it: an empty
-      # value here overrides that default, and logging.py needs both
-      # non-empty, so a blank dataset would silently drop a set token.
+      # empty token means stdout only. the dataset default repeats config.py's
+      # because an empty value here overrides it and logging.py needs both.
       - AXIOM_TOKEN=${AXIOM_TOKEN:-}
       - AXIOM_DATASET=${AXIOM_DATASET:-libex}
-      # No SEEDER_* here, deliberately. app/services/seeder.py is the only
-      # reader of those settings and this container no longer runs it -- they
-      # are set in docker-compose.seeder.yml instead, the separate stack that
-      # runs the seeder, where they govern the two catalogue-walk loops that
-      # container runs: which regions each walks, how often each cycles on
-      # its own interval, how long both pause between Audible requests, and
-      # whether the new-releases loop also re-fetches upcoming pre-orders.
-      # Passing them here would name knobs that do nothing in this process,
-      # which is exactly the confusion docker-entrypoint.sh already avoids by
-      # printing WEB_CONCURRENCY only for a uvicorn command.
-      #
-      # SEEDER_ENABLED is not among them anywhere: whether the seeder runs is
-      # now whether that stack is deployed.
-      #
-      # The base64 PBKDF2 hash the /internal/seed/narrators bearer token is
-      # checked against, never the token itself. Empty disables the endpoint
-      # outright -- the auth check returns false before it looks at the header --
-      # so an unset value fails closed rather than open. Generate with
+      # the PBKDF2 hash /internal/seed/narrators checks the bearer token
+      # against, never the token. empty disables the endpoint. generate with
       # `python -m app.api.routes.internal.router`.
       - SEED_SECRET=${SEED_SECRET:-}
-      # Deprecation/Sunset/Link headers announcing a move to another host, per
-      # RFC 9745 and RFC 8594. Off and empty by default, and that default is
-      # load-bearing rather than tidy: these name somebody else's hostname and
-      # dates, so a self-hoster who inherited a populated set would tell their
-      # own callers to migrate to an instance that is not theirs.
-      #
-      # Enabling requires MIGRATION_NEW_HOST, MIGRATION_ANNOUNCED and
-      # MIGRATION_SUNSET together -- both dates ISO YYYY-MM-DD, sunset not
-      # before announced. app/core/migration_notice.py logs which one is
-      # missing and serves no notice rather than serving a partial one, so a
-      # half-configured set is inert, not broken. MIGRATION_INFO_URL is the
-      # only optional member.
+      # Deprecation/Sunset/Link headers, empty by default because they name
+      # somebody else's hostname and dates. NEW_HOST, ANNOUNCED and SUNSET are
+      # required together -- a partial set serves no notice at all.
       - MIGRATION_NOTICE_ENABLED=${MIGRATION_NOTICE_ENABLED:-false}
       - MIGRATION_NEW_HOST=${MIGRATION_NEW_HOST:-}
       - MIGRATION_ANNOUNCED=${MIGRATION_ANNOUNCED:-}
       - MIGRATION_SUNSET=${MIGRATION_SUNSET:-}
       - MIGRATION_INFO_URL=${MIGRATION_INFO_URL:-}
-    # ./logs is the portable default and resolves next to this file, which is
-    # what a fresh clone needs. LOGS_PATH exists so a deployment that keeps its
-    # logs somewhere else -- an absolute path on a dedicated mount -- expresses
-    # that in its environment instead of editing this line, because an edited
-    # line is a stack that no longer matches the repo and drifts from it
-    # silently afterwards.
-    #
-    # /app/logs is the only path the image expects to be writable: the
-    # Dockerfile creates it and chowns it to the libex user, and app/core/
-    # logging.py writes libex.log there. Nothing reads or writes any other host
-    # path, so no second bind is needed.
+      # no SEEDER_* here: the seeder runs in its own stack, docker-compose.seeder.yml.
+    # /app/logs is the only path the image expects to be writable.
     volumes:
       - ${LOGS_PATH:-./logs}:/app/logs
     depends_on:
@@ -139,21 +53,8 @@ services:
       - default
       - libex-proxy
     healthcheck:
-      # Interpolation applies to the whole file, including inside this argument
-      # list -- verified against Compose 2.40.3, which also resolves the default
-      # when the variable is set but empty.
-      #
-      # localhost keeps the check inside the container, which is the portable
-      # answer and the only one a fresh clone can rely on. Setting
-      # HEALTHCHECK_HOST to the Docker host's address instead sends it out and
-      # back through the published port, so the check also proves the port
-      # binding works rather than only that the process answers itself.
-      #
-      # The port stays 3333 because that is the container's port, which never
-      # moves. PORT relocates the host side only, so a deployment that both
-      # changes PORT and points this at the host address would check a port
-      # nothing is published on -- leave HEALTHCHECK_HOST at localhost in that
-      # case. Unhealthy is a reported status here, not an action: Docker does
+      # 3333 is the container's port and never moves; PORT relocates the host
+      # side only. unhealthy is a reported status, not an action -- Docker does
       # not restart on it, and restart: unless-stopped covers exit, not wedge.
       test: ["CMD", "curl", "-f", "http://${HEALTHCHECK_HOST:-localhost}:3333/health"]
       interval: 30s
@@ -165,71 +66,14 @@ services:
     image: postgres:16-alpine
     container_name: libex-postgres
     restart: unless-stopped
-    # Raised from the image default of 100 because the API is now six worker
-    # processes, each holding its own SQLAlchemy pool. app/db/session.py sizes
-    # that pool at pool_size 10 + max_overflow 10, so six workers can hold 120
-    # connections at full stretch. PostgreSQL 16 keeps superuser_reserved_
-    # connections (default 3) back from max_connections and reserved_
-    # connections (default 0) on top, so the default 100 leaves 97 for the
-    # libex role -- 120 does not fit in that at all, which is what makes this
-    # setting load-bearing rather than precautionary. 200 leaves 197 usable, so
-    # 120 fits with 77 spare for psql, a backup, or an operator diagnosing why
-    # it is at 120 in the first place.
-    #
-    # The seeder adds to that whenever its own stack is deployed. It is one
-    # more process running the same engine from app/db/session.py, so up to
-    # 20 more connections: 140 of the 197 at full stretch, 57 spare. It fits,
-    # but it is 20 that were not in the sum when 200 was chosen, and each of
-    # the other standalone containers built on this image
-    # (scripts/refresh_corpus.py, scripts/backfill_chapters.py) is another 20
-    # for as long as it runs. None of them are in this file: each is its own
-    # Portainer stack with its own VPN exit, so none of them appear in a
-    # `docker compose ps` here and none can be ordered after this service
-    # by depends_on -- the connection budget is the only thing that still
-    # couples them to this line, and nothing enforces it.
-    #
-    # The same arithmetic in reverse is what a WEB_CONCURRENCY=1 deployment
-    # should know: 10 + 10 is sized so that six processes fit, so one process
-    # holds 20 connections rather than the 120 that six do. Ample for a single
-    # process -- and single-process is no longer something seeding asks for,
-    # now that the seeder is its own container rather than a task in every
-    # worker. A deployment that wants more headroom than 20 raises
-    # pool_size/max_overflow in app/db/session.py, not anything here.
-    # pool_timeout (30s) does not move with the worker count either way.
-    #
-    # Measured on this exact image (16.14), not estimated: the fixed cost of
-    # the extra 100 slots is 5MB of shared memory at startup -- shared_memory_
-    # size reports 143MB at max_connections=100 and 148MB at 200, with
-    # shared_buffers unchanged. The slots are potential, not resident; a
-    # backend costs about 2.4MB only once something actually connects
-    # (measured: 6 backends at 34MB, 106 backends at 276MB for the whole
-    # container). Libex's own ceiling of 120 held connections is past both
-    # measured points, so extrapolating that slope puts it near 310MB of
-    # Postgres on a 51GB host -- projected, not measured.
-    #
-    # Set here rather than in postgresql.conf on the volume so the value ships
-    # through the image pipeline with the arithmetic that justifies it, instead
-    # of living only on the server where nothing in the repo records it.
+    # six API workers hold 20 connections each at full stretch, and the image
+    # default of 100 leaves only 97 for the libex role. every other container on
+    # this image -- the seeder stack, refresh_corpus, backfill_chapters -- is
+    # another 20 on top while it runs, and nothing enforces that budget.
     command: ["postgres", "-c", "max_connections=200"]
-    # Load-bearing, not a convenience -- but for one of the stacks named
-    # above, not all of them. docker-compose.seeder.yml is a separate Compose
-    # project that joins libex-proxy and nothing else, so the `postgres` alias
-    # on this stack's default network does not resolve there and no spelling
-    # of the hostname will make it; its DATABASE_URL reaches the database at
-    # DB_HOST:5432 instead, and removing this line takes that stack offline.
-    # The corpus refresh takes the opposite route rather than this one:
-    # scripts/refresh_corpus.py documents joining this stack's own default
-    # network as a second --network -- and documents how to look up its real
-    # project-derived name -- which resolves `postgres` directly and needs no
-    # published port at all. So this line is the seeder stack's dependency
-    # specifically, not one shared by every container built on this image.
-    #
-    # Narrowing it to loopback ("127.0.0.1:5432:5432") does not restrict that
-    # access, it removes it: a container in another stack has its own network
-    # namespace and reaches the host by a routable address, never by the
-    # host's own loopback, so a loopback-only bind is invisible to every one
-    # of them. Restricting exposure means a host firewall on the Docker bridge
-    # subnets, not a narrower bind here.
+    # load-bearing for the seeder stack: a separate Compose project, so the
+    # `postgres` alias does not resolve there and it connects at DB_HOST:5432
+    # instead. a loopback-only bind would remove that access, not narrow it.
     ports:
       - "5432:5432"
     environment:

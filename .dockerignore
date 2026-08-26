@@ -38,6 +38,7 @@
 !alembic.ini
 !app/
 !constraints.txt
+!docker-compose.seeder.yml
 !docker-compose.yml
 !docker-entrypoint.sh
 !migrations/

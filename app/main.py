@@ -95,9 +95,9 @@ async def lifespan(app: FastAPI):
     # neither coroutine claims the entities it walks, so all six ran the same
     # catalog walk concurrently and SEEDER_REQUEST_DELAY, being per-process,
     # paced Audible at a sixth of the interval it names. It now runs as a
-    # single process in its own container (scripts/seed.py, the `seeder`
-    # profile in docker-compose.yml), so whether it runs is a deployment
-    # decision rather than a flag this process reads.
+    # single process in its own container (scripts/seed.py, its own stack in
+    # docker-compose.seeder.yml), so whether it runs is a deployment decision
+    # rather than a flag this process reads.
     purge_task = asyncio.create_task(_cache_purge_loop())
 
     yield

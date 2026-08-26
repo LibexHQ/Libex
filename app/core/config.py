@@ -20,7 +20,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "Libex"
-    app_version: str = "1.18.0"
+    app_version: str = "1.18.1"
     debug: bool = False
     host: str = "0.0.0.0"
     port: int = 3333
@@ -83,8 +83,8 @@ RETIRED_ENV_VARS: dict[str, str] = {
     ),
     "SEEDER_ENABLED": (
         "Retired in 1.18.0 — the seeder runs as its own container "
-        "(scripts/seed.py, the `seeder` profile in docker-compose.yml), so "
-        "starting that container is what enables it. Safe to remove."
+        "(scripts/seed.py, its own stack in docker-compose.seeder.yml), so "
+        "deploying that stack is what enables it. Safe to remove."
     ),
 }
 

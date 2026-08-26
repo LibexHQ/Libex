@@ -79,10 +79,28 @@ and nothing about any Settings field outside that named set being on its
 "correct" service -- only the five explicitly listed seeder-only names get
 that per-service check; a hypothetical future setting shared by both
 services, or one that should move but doesn't have a SEEDER_ONLY_SETTINGS
-entry, is invisible to this file until someone adds it there. It also has no
-opinion on DB_HOST: docker-compose.seeder.yml requires it and .env.example
-deliberately does not document it (it is meaningless to the API stack), so
-neither direction here expects to see it anywhere in .env.example.
+entry, is invisible to this file until someone adds it there.
+
+A separate blind spot exists in principle: a name that appears only as a
+`${NAME...}` interpolation token, is never a Settings field (so directions 1
+and 3 never see it, since they only look at Settings fields and
+`environment:` blocks) and is never assigned in .env.example (so direction 2
+never sees it either, since it only iterates names .env.example actually
+assigns) would be invisible to every direction in this file at once. DB_HOST
+used to be exactly that name, required by docker-compose.seeder.yml's
+DATABASE_URL, until the seeder started reaching postgres by container name
+over a shared network instead and DB_HOST left both compose files' text
+entirely -- at which point a docstring paragraph describing it as a
+deliberate, named exception kept describing it, with nothing here to notice
+that the variable it described no longer existed anywhere. DB_BIND
+(docker-compose.yml's `ports: ["${DB_BIND:-127.0.0.1}:5432:5432"]`) looked
+like it might become the next such name, but it is documented in
+.env.example, which means direction 2 already confirms it resolves to a
+real interpolation reference -- it is not in this blind spot. As of this
+writing no name in either compose file actually sits outside all three
+directions at once; if one appears, the incident above is the shape to
+watch for: a docstring naming an exception with nothing mechanical tying
+that name to its continued existence.
 
 Three deliberate, narrow exceptions that check a value, not just a name:
 
@@ -466,10 +484,18 @@ def test_env_example_names_are_reachable_in_compose():
     of docker-compose.yml alone would now read every one of them as a
     genuine gap.
 
-    DB_HOST is not part of what this checks: it is required by
-    docker-compose.seeder.yml but deliberately absent from .env.example
-    (meaningless to the API stack this file otherwise documents), so it
-    never enters env_example_names in the first place.
+    DB_HOST is no longer an exception this direction has to reason about:
+    the seeder used to require it (docker-compose.seeder.yml's DATABASE_URL),
+    and .env.example deliberately never documented it, so it sat outside
+    env_example_names entirely -- but the seeder now reaches postgres by
+    container name over a shared network instead of a published host port,
+    and DB_HOST does not appear in either compose file any more. DB_BIND
+    (the postgres `ports:` bind address in docker-compose.yml) needs no
+    carve-out either: it is assigned in .env.example, referenced as
+    `${DB_BIND:-127.0.0.1}` in docker-compose.yml, and this direction checks
+    it exactly like any other name -- it is not a Settings field, but this
+    direction has never required one; direction 1 is the one that reasons
+    about Settings fields, not this one.
     """
     compose_text = _load_compose_text()
     seeder_compose_text = _load_seeder_compose_text()

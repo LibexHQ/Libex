@@ -111,9 +111,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    networks:
-      - default
-      - libex-proxy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3333/health"]
       interval: 30s
@@ -126,14 +123,19 @@ services:
     container_name: libex-postgres
     restart: unless-stopped
     command: ["postgres", "-c", "max_connections=200"]
+    # loopback by default — connect from the same machine, or over an SSH
+    # tunnel, or set DB_BIND=0.0.0.0 to reach it from elsewhere.
     ports:
-      - "5432:5432"
+      - "${DB_BIND:-127.0.0.1}:5432:5432"
     environment:
       POSTGRES_DB: ${DB_NAME:-libex}
       POSTGRES_USER: ${DB_USER:-libex}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
+    networks:
+      - default
+      - libex-db
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-libex}"]
       interval: 10s
@@ -141,8 +143,8 @@ services:
       retries: 5
 
 networks:
-  libex-proxy:
-    name: libex-proxy
+  libex-db:
+    name: libex-db
     driver: bridge
 ```
 
@@ -407,6 +409,7 @@ Copy `.env.example` to `.env` and configure:
 | `DB_PASSWORD` | — | **Required.** PostgreSQL password |
 | `DB_NAME` | `libex` | PostgreSQL database name |
 | `DB_USER` | `libex` | PostgreSQL username |
+| `DB_BIND` | `127.0.0.1` | Interface Postgres's published port binds to. Loopback only reaches from the same machine (or over an SSH tunnel); set to `0.0.0.0` to reach it from elsewhere — only the Postgres password guards it |
 | `PORT` | `3333` | Host port the API is exposed on |
 | `CACHE_TTL` | `86400` | Default cache TTL in seconds (24 hours); some endpoints use their own TTL |
 | `LOG_LEVEL` | `INFO` | Log verbosity — `DEBUG`, `INFO`, `WARNING`, or `ERROR` |
@@ -420,11 +423,10 @@ Copy `.env.example` to `.env` and configure:
 
 ### Seeder stack (`docker-compose.seeder.yml`)
 
-The seeder is not part of the API stack — it deploys as its own stack, with its own environment. See **Database seeder** under Self-Hosting Notes below for what it does.
+The seeder is not part of the API stack — it deploys as its own stack, with its own environment, on the **same Docker host** as the API stack (it reaches Postgres over a Docker network the API stack creates, which doesn't cross hosts). See **Database seeder** under Self-Hosting Notes below for what it does.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DB_HOST` | — | **Required.** The Docker host's address, where the API stack publishes Postgres on port 5432 |
 | `DB_PASSWORD` | — | **Required.** The same password the API stack's `DB_PASSWORD` carries |
 | `SEEDER_PROXY_URL` | — | **Required.** The seeder's own outbound proxy, separate from the API stack's `AUDIBLE_PROXY_URL` so it never shares the API's exit IP. Its hostname must contain `seeder` or the seeder refuses to start |
 | `DB_USER` | `libex` | PostgreSQL username |
@@ -441,7 +443,7 @@ The seeder is not part of the API stack — it deploys as its own stack, with it
 | `AXIOM_TOKEN` | — | Axiom API token (optional — leave blank for stdout only) |
 | `AXIOM_DATASET` | `libex` | Axiom dataset name |
 
-`DB_HOST`, `DB_PASSWORD`, and `SEEDER_PROXY_URL` have no default in `docker-compose.seeder.yml` — a missing one fails the stack deploy naming the variable, rather than starting a container that can't connect.
+`DB_PASSWORD` and `SEEDER_PROXY_URL` have no default in `docker-compose.seeder.yml` — a missing one fails the stack deploy naming the variable, rather than starting a container that can't connect.
 
 ---
 
@@ -473,7 +475,7 @@ Libex is API-compatible with AudiMeta. To migrate:
   Requires `SEEDER_PROXY_URL` — its hostname must contain `seeder`, or the seeder refuses to start rather than risk sending sustained, unattended traffic out through the API's own exit IP.
 
   To turn it off, stop or remove the `docker-compose.seeder.yml` stack. It's a separate stack, so this has no effect on the API.
-- **VPN proxy:** Set `AUDIBLE_PROXY_URL` to route the API's own outbound Audible requests through a proxy. Only Audible requests are affected — API serving, database connections, and logging are completely unaffected. The seeder uses its own separate `SEEDER_PROXY_URL` instead (see above), so its traffic never shares the API's exit IP. Any HTTP, HTTPS, or SOCKS5 proxy works. The API stack's compose file creates a `libex-proxy` Docker network automatically — connect your VPN proxy container(s) to it, then point the relevant variable at it. Leave blank to disable. The seeder stack joins this same network rather than creating its own, so it can't deploy until the API stack has created it
+- **VPN proxy:** Set `AUDIBLE_PROXY_URL` (API stack) or `SEEDER_PROXY_URL` (seeder stack) to route that stack's outbound Audible requests through a proxy. Only Audible requests are affected — API serving, database connections, and logging are unaffected either way, and the two variables are independent so the stacks never share an exit IP. Any HTTP, HTTPS, or SOCKS5 proxy works. Add your VPN proxy container as a service in the same compose file as the stack that needs it — it's reachable there by service name over that stack's own default network, no extra network to create. Leave the variable blank to disable
 
 ---
 

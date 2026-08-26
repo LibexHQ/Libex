@@ -49,9 +49,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    networks:
-      - default
-      - libex-proxy
     healthcheck:
       # 3333 is the container's port and never moves; PORT relocates the host
       # side only. unhealthy is a reported status, not an action -- Docker does
@@ -71,17 +68,22 @@ services:
     # this image -- the seeder stack, refresh_corpus, backfill_chapters -- is
     # another 20 on top while it runs, and nothing enforces that budget.
     command: ["postgres", "-c", "max_connections=200"]
-    # load-bearing for the seeder stack: a separate Compose project, so the
-    # `postgres` alias does not resolve there and it connects at DB_HOST:5432
-    # instead. a loopback-only bind would remove that access, not narrow it.
+    # loopback: the seeder stack reaches this container over libex-db, so the
+    # host port is only for your own psql/DBeaver, directly or via an ssh tunnel.
+    # DB_BIND=0.0.0.0 widens it, with only the postgres password in front.
     ports:
-      - "5432:5432"
+      - "${DB_BIND:-127.0.0.1}:5432:5432"
     environment:
       POSTGRES_DB: ${DB_NAME:-libex}
       POSTGRES_USER: ${DB_USER:-libex}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
+    # libex-db carries the seeder stack's traffic; default must stay listed or
+    # libex above loses its route here.
+    networks:
+      - default
+      - libex-db
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-libex}"]
       interval: 10s
@@ -89,6 +91,8 @@ services:
       retries: 5
 
 networks:
-  libex-proxy:
-    name: libex-proxy
+  # created here, joined by the seeder stack as external. the pinned name is the
+  # cross-stack contract -- unpinned, compose prefixes it with the project name.
+  libex-db:
+    name: libex-db
     driver: bridge

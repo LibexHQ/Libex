@@ -63,7 +63,15 @@ services:
       # It does NOT recover one: uvicorn's liveness probe is answered by a
       # daemon thread, so a wedged worker keeps replying and is never replaced.
       #
-      # MUST be 1 while SEEDER_ENABLED is true -- see the seeder block below.
+      # No longer paired with the seeder, which is the headline of the change
+      # that removed the line that used to sit here ("MUST be 1 while
+      # SEEDER_ENABLED is true"). Both seeder loops were started from
+      # app/main.py's lifespan, which runs once per worker: six workers meant
+      # six uncoordinated walks of the same catalog, and SEEDER_REQUEST_DELAY,
+      # being per-process, paced Audible at a sixth of the interval it named.
+      # The seeder is now a single process in the libex-seeder service below,
+      # so seeding and six workers are no longer mutually exclusive and this
+      # number answers to the arithmetic above and nothing else.
       - WEB_CONCURRENCY=6
       - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
@@ -73,30 +81,20 @@ services:
       # non-empty, so a blank dataset would silently drop a set token.
       - AXIOM_TOKEN=${AXIOM_TOKEN:-}
       - AXIOM_DATASET=${AXIOM_DATASET:-libex}
-      # Seeder. Off by default: a fresh self-hosted instance should serve what
-      # it is asked for and nothing else until its operator opts in.
+      # No SEEDER_* here, deliberately. app/services/seeder.py is the only
+      # reader of those settings and this container no longer runs it -- they
+      # are set on the libex-seeder service below instead, where they govern
+      # the two catalogue-walk loops that container runs: which regions each
+      # walks, how often each cycles on its own interval, how long both pause
+      # between Audible requests, and whether the new-releases loop also
+      # re-fetches upcoming pre-orders. Passing them here would name knobs that
+      # do nothing in this process, which is exactly the confusion
+      # docker-entrypoint.sh already avoids by printing WEB_CONCURRENCY only
+      # for a uvicorn command.
       #
-      # Every default below repeats app/core/config.py exactly, which is what
-      # makes them safe. These are not second opinions -- an interpolated value
-      # always reaches the app, so an unset variable here would send an empty
-      # string that overrides the compiled default rather than falling back to
-      # it. SEEDER_REGIONS is the one where that bites: the seeder splits it on
-      # commas and drops empties, so a blank value yields no regions and the
-      # walk runs forever over nothing.
+      # SEEDER_ENABLED is not among them anywhere: whether the seeder runs is
+      # now whether that container is running.
       #
-      # WEB_CONCURRENCY MUST be 1 whenever this is true. run_seeder and
-      # run_new_releases_seeder are started from the lifespan in app/main.py,
-      # which runs once per worker, and nothing claims the entities they walk.
-      # Six workers walk the same catalog six times over and SEEDER_REQUEST_DELAY
-      # is per-process, so the delay Audible actually sees is a sixth of what is
-      # set here. Nothing in the image enforces the pairing; it is on the
-      # operator setting the flag.
-      - SEEDER_ENABLED=${SEEDER_ENABLED:-false}
-      - SEEDER_INTERVAL_HOURS=${SEEDER_INTERVAL_HOURS:-24}
-      - SEEDER_REQUEST_DELAY=${SEEDER_REQUEST_DELAY:-1.0}
-      - SEEDER_REGIONS=${SEEDER_REGIONS:-us}
-      - SEEDER_NEW_RELEASES_INTERVAL_HOURS=${SEEDER_NEW_RELEASES_INTERVAL_HOURS:-24}
-      - SEEDER_REFRESH_ENABLED=${SEEDER_REFRESH_ENABLED:-false}
       # The base64 PBKDF2 hash the /internal/seed/narrators bearer token is
       # checked against, never the token itself. Empty disables the endpoint
       # outright -- the auth check returns false before it looks at the header --
@@ -162,6 +160,171 @@ services:
       retries: 3
       start_period: 40s
 
+  # The seeder, as one process of its own rather than one per API worker.
+  #
+  # Behind a profile, so a plain `docker compose up -d` does not start it: it
+  # runs only when the profile is enabled (`docker compose --profile seeder up
+  # -d`, or COMPOSE_PROFILES=seeder in the stack environment), or when this
+  # service is named directly on the command line, which Compose treats as
+  # enabling its own profile. Verified against Compose 2.40.3: `config` omits
+  # this service entirely, `--profile seeder config` includes it.
+  #
+  # Running this container IS the enable decision -- there is no SEEDER_ENABLED
+  # any more. A flag read inside the one container whose only job is to seed
+  # has exactly one possible effect: the process starts, both workers return
+  # immediately, and it exits 0 having done nothing, with nothing in the log to
+  # say why.
+  libex-seeder:
+    # The same image as the API, on purpose: scripts/seed.py imports
+    # app/services/seeder.py, so a separately built seeder image would be a
+    # second copy of the application that can drift from the one serving
+    # traffic. One image, two commands.
+    image: ghcr.io/libexhq/libex:latest
+    container_name: libex-seeder
+    profiles:
+      - seeder
+    # The forever loop, NOT `--once`. --once exits cleanly after a single cycle
+    # of each worker and restart: unless-stopped reads a clean exit as
+    # something to restart, so the pair would run cycles back to back with none
+    # of SEEDER_INTERVAL_HOURS' pacing between them. The loop sleeps that
+    # interval itself, which leaves the restart policy covering what it should:
+    # a crash, and a host reboot. --once stays available for a supervised, run
+    # it and watch it invocation (`docker compose run --rm libex-seeder python
+    # -m scripts.seed --once`), which is what it was built for.
+    command: ["python", "-m", "scripts.seed"]
+    # Matches the API service. Docker delays each restart by double the last,
+    # from 100ms up to a one-minute ceiling, and resets that delay once a
+    # container has stayed up 10 seconds (docker.com, "Start containers
+    # automatically" / `docker run --restart`, read 2026-08-25). A permanently
+    # misconfigured run -- scripts/seed.py refusing to start because
+    # AUDIBLE_PROXY_URL names no seeder exit -- therefore retries indefinitely
+    # rather than backing off forever, logging its refusal every time. Noisy
+    # and visible, which is the failure mode to prefer over a container that
+    # quietly stays down.
+    restart: unless-stopped
+    # An allowlist, like the libex service's own block above, and shorter on
+    # purpose: this container serves nothing, so it gets nothing that only
+    # matters to serving.
+    environment:
+      # The same database the API reads. The whole point of the seeder is to
+      # fill the tables the /db/* endpoints answer from, so this interpolates
+      # from the same three variables rather than offering its own.
+      - DATABASE_URL=postgresql+asyncpg://${DB_USER:-libex}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-libex}
+      # AUDIBLE_PROXY_URL on this side because that is the name
+      # app/services/audible/client.py reads. SEEDER_PROXY_URL on the host side
+      # because no spelling of AUDIBLE_PROXY_URL in a .env or a stack
+      # environment may reach this container: the seeder's traffic is the
+      # traffic that must never leave by the exit the public API answers on,
+      # and a shared name is one copied stack environment away from doing
+      # exactly that.
+      #
+      # Empty is not a working deployment here, unlike the API service:
+      # scripts/seed.py refuses to start unless this names a host containing
+      # "seeder", which is the actual containment -- this line only makes the
+      # wrong value hard to supply by accident.
+      #
+      # Deliberately not ${SEEDER_PROXY_URL:?}. Compose resolves interpolation
+      # for the whole file before it filters by profile, so a required variable
+      # here would break `docker compose up`, `config` and `ps` for everyone
+      # running without the seeder profile at all.
+      - AUDIBLE_PROXY_URL=${SEEDER_PROXY_URL:-}
+      # Read by the cache writes on the persist path (app/services/db/writer.py,
+      # persist_queue.py), which the seeder drives just as the API does -- the
+      # two write into one cache table, so they take one TTL from one variable.
+      - CACHE_TTL=${CACHE_TTL:-86400}
+      # The seeder's own settings, read only by app/services/seeder.py, which
+      # only this container runs. Every default repeats app/core/config.py
+      # exactly, for the same reason the libex block gives: an interpolated
+      # value always arrives, so an unset variable sends an empty string that
+      # overrides the compiled default rather than falling back to it.
+      # SEEDER_REGIONS is where that bites -- the seeder splits it on commas
+      # and drops empties, so a blank value yields no regions and the walk
+      # loops forever over nothing.
+      - SEEDER_INTERVAL_HOURS=${SEEDER_INTERVAL_HOURS:-24}
+      - SEEDER_REQUEST_DELAY=${SEEDER_REQUEST_DELAY:-1.0}
+      - SEEDER_REGIONS=${SEEDER_REGIONS:-us}
+      - SEEDER_NEW_RELEASES_INTERVAL_HOURS=${SEEDER_NEW_RELEASES_INTERVAL_HOURS:-24}
+      - SEEDER_REFRESH_ENABLED=${SEEDER_REFRESH_ENABLED:-false}
+      # Same token and dataset as the API. Seeder lines are identifiable there
+      # by their "Seeder: " message prefix, which every one of them carries.
+      - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - AXIOM_TOKEN=${AXIOM_TOKEN:-}
+      - AXIOM_DATASET=${AXIOM_DATASET:-libex}
+      # WEB_CONCURRENCY is absent and must stay absent. It is uvicorn's
+      # variable and this container runs `python -m scripts.seed`, so it would
+      # govern nothing; docker-entrypoint.sh matches on the command and prints
+      # the "Starting uvicorn with WEB_CONCURRENCY=..." line only for uvicorn,
+      # so nothing announces it here either. The seeder is one process because
+      # it is one container, and that is the only place the number lives.
+    # No ports: this container answers nothing.
+    #
+    # No healthcheck: there is no endpoint to probe, and Docker takes no action
+    # on an unhealthy container anyway (restart: unless-stopped covers exit,
+    # not wedge) -- so a healthcheck here would only produce a status nothing
+    # reads. The seeder's own progress lines are the signal.
+    #
+    # No log volume, deliberately, though the file handler would survive being
+    # shared: app/core/logging.py's MultiProcessTimedRotatingFileHandler
+    # serialises rotation with an flock, which holds across containers on one
+    # host because it is one inode. The reason is legibility -- the line format
+    # is "time - libex - LEVEL - message" with nothing naming which container
+    # wrote it, so a shared bind would interleave hours of catalogue-walk
+    # output into the API's own libex.log with no way to separate them again.
+    # This container's log is `docker logs libex-seeder`, plus Axiom above.
+    #
+    # Ten seconds above scripts/seed.py's DRAIN_TIMEOUT_SECONDS (300), and
+    # that margin is the whole of it. SIGTERM cancels both worker loops between
+    # committed units of work, then the script waits for persist_queue's
+    # fire-and-forget writes to land before it exits; Compose's default
+    # 10-second grace would SIGKILL in the middle of that drain, abandoning
+    # queued writes silently. An idle stop still returns at once -- the drain
+    # returns immediately on an empty queue -- so this is a ceiling on the bad
+    # case, not a delay added to every stop.
+    #
+    # The 300 it sits above is a default, not a constant: scripts/seed.py reads
+    # DRAIN_TIMEOUT_SECONDS from SEEDER_DRAIN_TIMEOUT_SECONDS at import. Raise
+    # that beyond this number and the two inverting is not a warning but a
+    # SIGKILL landing mid-drain -- the precise abandonment this line exists to
+    # prevent. Raising one means raising the other in the same edit. What makes
+    # that hard to trip by accident today is that the name appears in neither
+    # environment block, and there is no env_file and no ENV in the Dockerfile,
+    # so it cannot reach the container from .env or a stack environment at all;
+    # adding it above is the moment this number has to move with it.
+    #
+    # A literal for the reason WEB_CONCURRENCY is one. Interpolating it would
+    # give two coupled numbers a knob each, settable from a stack environment
+    # nobody diffs against the repo, which is how they end up inverted with
+    # nothing recording that they were ever related.
+    stop_grace_period: 310s
+    # A blast-radius guard, not a tuning value: this container shares a host
+    # with the API and Postgres, and its work is an unbounded catalogue walk.
+    # persist_queue caps its own backlog at 5000 books, measured at about 45 MB
+    # in app/services/db/persist_queue.py, and one process's pool and HTTP
+    # buffers sit on top of that; 1g is chosen to be well clear of that
+    # arithmetic, NOT measured against a live seeder run. Interpolated rather
+    # than hardcoded precisely because it is unmeasured -- if it turns out low,
+    # the container is OOM-killed and restarted in a loop, and raising
+    # SEEDER_MEM_LIMIT in the stack environment fixes it without a rebuild.
+    mem_limit: ${SEEDER_MEM_LIMIT:-1g}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      # Waits for the API, whose entrypoint has by then finished `alembic
+      # upgrade head`. Both containers run the same entrypoint and so both run
+      # that upgrade; alembic takes no lock of its own, so starting them
+      # together would race the same DDL -- the same race the entrypoint's own
+      # comment describes for workers. Ordering them is the whole reason for
+      # this dependency; the seeder does not otherwise talk to the API.
+      libex:
+        condition: service_healthy
+    networks:
+      # Both are needed: libex-proxy is where the seeder's dedicated VPN
+      # sidecar lives, and default is where the `postgres` host in DATABASE_URL
+      # resolves.
+      - default
+      - libex-proxy
+
   postgres:
     image: postgres:16-alpine
     container_name: libex-postgres
@@ -177,13 +340,22 @@ services:
     # 120 fits with 77 spare for psql, a backup, or an operator diagnosing why
     # it is at 120 in the first place.
     #
+    # The seeder adds to that whenever its profile is enabled. libex-seeder is
+    # one more process running the same engine from app/db/session.py, so up to
+    # 20 more connections: 140 of the 197 at full stretch, 57 spare. It fits,
+    # but it is 20 that were not in the sum when 200 was chosen, and each of
+    # the other standalone containers built on this image
+    # (scripts/refresh_corpus.py, scripts/backfill_chapters.py) is another 20
+    # for as long as it runs.
+    #
     # The same arithmetic in reverse is what a WEB_CONCURRENCY=1 deployment
     # should know: 10 + 10 is sized so that six processes fit, so one process
     # holds 20 connections rather than the 120 that six do. Ample for a single
-    # process, and the README points seeder users at WEB_CONCURRENCY=1 -- but a
-    # deployment that wants more headroom than 20 raises pool_size/max_overflow
-    # in app/db/session.py, not anything here. pool_timeout (30s) does not move
-    # with the worker count either way.
+    # process -- and single-process is no longer something seeding asks for,
+    # now that the seeder is its own container rather than a task in every
+    # worker. A deployment that wants more headroom than 20 raises
+    # pool_size/max_overflow in app/db/session.py, not anything here.
+    # pool_timeout (30s) does not move with the worker count either way.
     #
     # Measured on this exact image (16.14), not estimated: the fixed cost of
     # the extra 100 slots is 5MB of shared memory at startup -- shared_memory_

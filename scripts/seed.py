@@ -1,152 +1,48 @@
 """
 Standalone seeder entry point.
 
-app/main.py's FastAPI lifespan used to start run_seeder() and
-run_new_releases_seeder() as background tasks, but lifespan runs once PER
-WORKER PROCESS and WEB_CONCURRENCY runs six of them. Neither coroutine
-coordinates across processes -- each opens with the same
-`await asyncio.sleep(30)`, so all six workers wake within milliseconds of each
-other and run byte-identical `last_seeded_at IS NULL OR < cutoff` selections
-before any of them has stamped a single row: the stamp only lands after the
-FULL Audible walk for that entity, minutes to hours later, so it dedupes
-nothing between the six. SEEDER_REQUEST_DELAY paces one process's own
-requests; it says nothing about what five siblings are doing at the same
-moment, so the delay Audible actually sees between requests is one sixth of
-what is configured, and the request volume landing on one exit IP is six
-times what a single run would produce. This script exists so the seeder runs
-as ONE process, in its own container, on its own exit -- exactly once, not
-once per worker.
-
-Running this container IS the enable decision. There is no separate flag:
-either the container is running or the seeder is not, so a leftover
-SEEDER_ENABLED in the environment (retired alongside this move) has no effect
-either way -- checking it here would let the container start, both coroutines
-return immediately, and the process exit 0 having done nothing, with nothing
-in the log to say why.
-
-WHAT THIS SUPPLIES THAT THE LIFESPAN GAVE FOR FREE.
-- Log handlers: get_logger() alone attaches none, so main() calls
-  setup_logging() before anything else, the same as every other standalone
-  script in this directory.
-- Proxy containment: _verify_dedicated_proxy(), mirroring the "backfill" and
-  "refresh" checks scripts/backfill_chapters.py and scripts/refresh_corpus.py
-  already make -- refuses to start unless AUDIBLE_PROXY_URL names a
-  seeder-dedicated exit, so this run's traffic can never land on the shared
-  exit the live service depends on.
-- Clean shutdown: see _Stopper below. Without a SIGTERM handler, `docker stop`
-  hard-kills mid-request and the persist queue this script drains (see next)
-  never gets the chance to.
-- --once: a single supervised cycle of each worker rather than the forever
-  loop, threaded through as a plain parameter on run_seeder and
-  run_new_releases_seeder (app/services/seeder.py) rather than built here, so
-  the same behavior is available to anything else that imports those
-  coroutines directly.
-
-WHAT ACTUALLY STOPS THE LOOPS. Both run_seeder and run_new_releases_seeder are
-a bare `while True`, with no stop flag of their own -- the lifespan tore them
-down with asyncio.Task.cancel() on shutdown, and nothing else ever unwinds
-them. _Stopper mirrors that exactly: SIGTERM/SIGINT cancels both tasks
-directly rather than setting a flag they poll, since neither loop polls one.
-Every unit of work inside them is already its own bounded transaction --
-each phase in app/services/seeder.py opens `async with SessionFactory() as
-session:` per author, per series, per chunk of books, and commits before the
-next `await` that could be cancelled -- so a cancellation lands between two
-already-committed units, never inside one: the session's own `__aexit__`
-rolls back whatever that one unit hadn't committed yet, and Postgres never
-sees a transaction left dangling on a connection nothing is driving anymore.
-
-WHAT CANCELLATION DOES NOT COVER, AND WHY THIS DRAINS THE PERSIST QUEUE.
-get_books_by_asins and fetch_author_books_by_name -- the two calls that do
-almost all of this script's writing -- persist through
-app/services/db/persist_queue.py's fire-and-forget background tasks
-(persist_books_background, persist_author_background, and so on): the
-coroutine that queues a write returns as soon as the task is SPAWNED, not
-once it lands, and _spawn's task is a sibling of run_seeder's own task, not a
-child it awaits. Cancelling run_seeder therefore does nothing to a write
-already in flight in one of those sibling tasks, and asyncio.run() abandons
-any task still pending when the coroutine it was given returns -- silently,
-with no exception and no log line, which is exactly the "chunk half-persisted"
-failure mode the brief for this script named as the thing to rule out. Ruled
-out here by draining: after both workers are cancelled (or, under --once,
-finish on their own), this script waits on persist_queue.queued_books() to
-reach zero, bounded by DRAIN_TIMEOUT_SECONDS, before it disposes the engine
-and exits. fetch_and_store_chapters (the seeder's chapter-gathering path,
-called from _gather_chapters) needs none of this: it writes through its own
-session directly, INSIDE the coroutine that calls it, with its own commit --
-never through persist_queue -- so it depends on nothing this script or the
-lifespan ever supplied, and a cancellation there is covered by the same
-per-unit commit boundary as everything else in the loops.
+Runs the seeder's author/series/narrator expansion and new-releases scan as
+one process in its own container, on its own dedicated exit. app/main.py's
+lifespan used to start these as background tasks in every worker process,
+which meant six uncoordinated walks of the same catalog and Audible traffic
+at six times the configured pace. Running this container is the enable
+decision -- there is no separate flag.
 
 RUN IT (its own container, its own dedicated exit -- AUDIBLE_PROXY_URL must
 name it explicitly; the run refuses to start unless its hostname contains
 "seeder", see _verify_dedicated_proxy). docker-compose.seeder.yml is the
-canonical way to run this now: its own Portainer stack, its own dedicated VPN
-exit, and its own DATABASE_URL, which reaches Postgres by the Docker host's
-published port rather than the `postgres` hostname the app stack resolves on
-its own network -- that file's `networks:` section and its DATABASE_URL
-comment say why: this stack joins only libex-proxy, and the app stack's
-default network is a project-scoped name this file has no way to depend on.
-See it for the full required and optional environment this container reads
-through Compose interpolation, on top of everything below that this script
-reads directly.
-
-A supervised, run it and watch it invocation for a single cycle goes
-through that same stack file rather than a bare `docker run`, so it inherits
-the stack's network and DATABASE_URL instead of re-deriving them --
-docker-compose.seeder.yml's own comment above its `command:` line gives this
-exact form:
+canonical way to run this: its own Portainer stack, its own VPN exit, and
+its own DATABASE_URL, which reaches Postgres at the Docker host's published
+port (DB_HOST:5432) rather than the `postgres` hostname the app stack
+resolves on its own network, since this stack joins only libex-proxy.
 
     docker compose -f docker-compose.seeder.yml run --rm libex-seeder \\
       python -m scripts.seed --once
 
+--once runs a single supervised cycle of each worker then exits, instead of
+looping forever -- use it for a supervised, watch-it invocation; the compose
+file's own `command:` runs the forever loop.
+
 Stop the long-running form with `docker stop libex-seeder` (or
 `docker compose -f docker-compose.seeder.yml stop`) -- SIGTERM cancels both
 worker loops between committed units of work and drains the persist queue
-before exiting. Nothing needs adding by hand the way a raw `docker run`
-deployment would: the stack's `stop_grace_period: 310s` is baked into the
-container at creation and honoured by a bare `docker stop` with no -t,
-comfortably above DRAIN_TIMEOUT_SECONDS for the same reason that file's own
-comment gives -- a SIGKILL landing mid-drain abandons whatever was still
-queued, silently.
+before exiting. The stack's `stop_grace_period: 310s` covers that; a shorter
+grace would SIGKILL mid-drain and silently abandon queued writes. A drain
+that doesn't finish within SEEDER_DRAIN_TIMEOUT_SECONDS is reported and the
+process exits non-zero anyway (see main's exit-code comment).
 
-ENVIRONMENT. Everything this script itself reads directly. app/services/seeder.py
-reads its own settings (SEEDER_REGIONS, SEEDER_INTERVAL_HOURS,
-SEEDER_REQUEST_DELAY, SEEDER_NEW_RELEASES_INTERVAL_HOURS,
-SEEDER_REFRESH_ENABLED) through app.core.config as it always has; none of
-those are read here.
+ENVIRONMENT. app/services/seeder.py reads its own settings (SEEDER_REGIONS,
+SEEDER_INTERVAL_HOURS, SEEDER_REQUEST_DELAY, SEEDER_NEW_RELEASES_INTERVAL_HOURS,
+SEEDER_REFRESH_ENABLED) through app.core.config; this script reads:
 
-    DATABASE_URL               the same database the app uses, read by
-                               app.db.session at import time through the
-                               app's own settings. The image entrypoint runs
-                               `alembic upgrade head` against it before this
-                               script gets control.
-    AUDIBLE_PROXY_URL          this run's own dedicated exit. Its hostname
-                               must contain "seeder" -- _verify_dedicated_proxy
-                               checks for that substring and nothing else, the
-                               same convention scripts/backfill_chapters.py
-                               ("backfill") and scripts/refresh_corpus.py
-                               ("refresh") already commit to for their own
-                               exits.
-    SEEDER_DRAIN_TIMEOUT_SECONDS
-                               300.0   bound on waiting for the persist queue
-                                       to empty at shutdown. A drain that
-                                       doesn't finish within this is reported
-                                       and the process still exits (non-zero;
-                                       see main's exit-code comment) rather
-                                       than hanging past what `docker stop -t`
-                                       will wait for.
-    LOG_LEVEL                  INFO    DEBUG, INFO, WARNING or ERROR. WARNING
-                                       and above drop this script's own
-                                       progress lines, which are logged at
-                                       INFO. DEBUG=true forces DEBUG whatever
-                                       this says.
-    AXIOM_TOKEN                (unset) set means every line of this run ships
-                                       to Axiom as well as stdout. Copying
-                                       another stack's environment is the easy
-                                       way to inherit it without meaning to.
-    AXIOM_DATASET               libex  the dataset those lines land in.
-    LOG_RETENTION_DAYS          7      rotation of the log file inside the
-                                       container; 0 keeps everything.
+    DATABASE_URL                   required. Read by app.db.session at import.
+    AUDIBLE_PROXY_URL              required. Hostname must contain "seeder".
+    SEEDER_DRAIN_TIMEOUT_SECONDS   300.0   bound on waiting for the persist
+                                           queue to empty at shutdown.
+    LOG_LEVEL                      INFO    DEBUG, INFO, WARNING or ERROR.
+    AXIOM_TOKEN                    (unset) set to also ship logs to Axiom.
+    AXIOM_DATASET                   libex
+    LOG_RETENTION_DAYS              7      0 keeps everything.
 """
 
 # Standard library
@@ -180,8 +76,9 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-# Bound on waiting for the persist queue to drain at shutdown -- see the
-# module docstring's persist-queue section for why a drain is needed at all.
+# Bound on waiting for the persist queue to drain at shutdown -- both
+# workers write through persist_queue's fire-and-forget background tasks,
+# which cancellation never reaches, so this wait is what does.
 DRAIN_TIMEOUT_SECONDS = _env_float("SEEDER_DRAIN_TIMEOUT_SECONDS", 300.0)
 
 
@@ -189,15 +86,10 @@ DRAIN_TIMEOUT_SECONDS = _env_float("SEEDER_DRAIN_TIMEOUT_SECONDS", 300.0)
 
 def _proxy_host_for_log(proxy: str | None) -> str:
     """
-    Best-effort hostname for a log line -- never the raw AUDIBLE_PROXY_URL.
-
-    httpx's proxy= accepts credentials embedded in the URL
-    (http://user:pass@host:port), and Settings stores the value as a plain
-    str, not a SecretStr, so nothing that reaches a log record may be the
-    full value. The hostname is the diagnostically useful part -- which exit
-    this run is using -- and carries no secret, so that's what gets logged
-    instead. Must never raise: a logging call taking the whole run down over
-    a malformed env var would turn a cosmetic problem into an outage.
+    Best-effort hostname for a log line -- never the raw AUDIBLE_PROXY_URL,
+    since httpx's proxy= accepts embedded credentials
+    (http://user:pass@host:port) and Settings stores this as a plain str.
+    Never raises -- a malformed value becomes "(unparseable)".
     """
     if not proxy:
         return "direct"
@@ -210,39 +102,13 @@ def _proxy_host_for_log(proxy: str | None) -> str:
 
 def _verify_dedicated_proxy() -> None:
     """
-    Refuses to start unless AUDIBLE_PROXY_URL both is set and names this
-    run's own exit.
-
-    Without this, an unset value reaches httpx.AsyncClient as proxy=None and
-    this script's Audible traffic egresses DIRECT FROM THE CONTAINER -- the
-    same public address the live service answers on. A value copied from
-    another stack points this run at whatever exit that stack uses, and if
-    that is the live service's own shared exit, six workers' worth of request
-    volume (the exact failure mode this script exists to remove) lands right
-    back on it under a different name.
-
-    Checked against the hostname, not a literal URL, because the real
-    production proxy value is infrastructure this app never carries in
-    source and has no secret to compare against. "seeder" in the hostname is
-    this script's own convention, the same way scripts/backfill_chapters.py
-    and scripts/refresh_corpus.py each commit to their own word in their
-    module docstrings and RUN IT examples -- an operator who leaves the
-    variable unset, or reuses the shared/live value, fails this on hostname
-    alone, before a single request goes out.
-
-    The failure message names the hostname only, never the full value: proxy=
-    credentials embedded in the URL must never reach a log line or an
-    exception message, so hostname extraction goes through
-    _proxy_host_for_log rather than a bare httpx.URL(proxy).host, which turns
-    a malformed value into "(unparseable)" instead of letting InvalidURL
-    escape as an uncaught traceback that skips the deliberate SystemExit
-    below.
-
-    Logged, not just raised: SystemExit propagates straight out of the
-    process without ever touching the libex logger, so on its own it would
-    survive only as stderr text -- in a container that runs unattended, the
-    highest-severity startup condition this script has would be the one
-    piece of evidence that never reaches the rotating file handler or Axiom.
+    Refuses to start unless AUDIBLE_PROXY_URL is set and its hostname
+    contains "seeder" -- otherwise this script's Audible traffic would
+    egress from the container's own address, the same one the live service
+    answers on. Checked against the hostname only, since the real proxy
+    value may carry embedded credentials and must never reach a log line or
+    exception message. Logged before the SystemExit, since SystemExit alone
+    never reaches the log handlers.
     """
     proxy = os.environ.get("AUDIBLE_PROXY_URL", "")
     host = _proxy_host_for_log(proxy) if proxy else ""
@@ -269,16 +135,9 @@ class _Stopper:
     Cancels every tracked task, once, on SIGTERM/SIGINT.
 
     run_seeder and run_new_releases_seeder loop with a bare `while True` and
-    poll no stop flag of their own -- app/main.py's lifespan tore them down
-    with Task.cancel() on shutdown, and this is the same mechanism applied
-    from a standalone process, since nothing else here can unwind them. Each
-    signal handler call is synchronous (Python requires that of anything
-    registered through signal.signal), and Task.cancel() is itself a
-    non-blocking, immediately-safe call to make from one -- it only schedules
-    a CancelledError at the task's next suspension point, it does not run
-    that task's cleanup itself. Idempotent: a second signal while the first
-    is still being handled logs nothing further and calls cancel() again on
-    tasks that are, by then, most likely already done.
+    poll no stop flag of their own, so this is the same Task.cancel()
+    mechanism app/main.py's lifespan used to apply on shutdown. Idempotent:
+    a second signal calls cancel() again on tasks already done by then.
     """
 
     def __init__(self) -> None:
@@ -302,13 +161,10 @@ async def _drain_persist_queue(timeout: float) -> bool:
     Waits for persist_queue's backlog to empty. Returns whether it actually
     did.
 
-    See the module docstring's persist-queue section for why this exists at
-    all: both workers write through persist_queue's fire-and-forget
-    background tasks, which cancelling run_seeder/run_new_releases_seeder
-    does not reach, and asyncio.run() abandons anything still pending when
-    the coroutine it was given returns. Mirrors
-    scripts/refresh_corpus.py's own _drain_persist_queue, which answers the
-    identical question against the identical module.
+    Both workers write through persist_queue's fire-and-forget background
+    tasks, which cancelling run_seeder/run_new_releases_seeder never reaches,
+    and asyncio.run() abandons anything still pending when the coroutine it
+    was given returns -- this wait is what closes that gap.
     """
     started = time.monotonic()
     while persist_queue.queued_books() > 0:
@@ -347,12 +203,9 @@ async def _run(once: bool) -> int:
     signal.signal(signal.SIGTERM, stopper.request)
     signal.signal(signal.SIGINT, stopper.request)
 
-    # A worker's own internal try/except already absorbs a cycle failure and
-    # logs it (see app/services/seeder.py's run_seeder and
-    # run_new_releases_seeder), so anything that still escapes to here is
-    # either a cancellation from _Stopper or a genuine bug in the worker
-    # itself -- both are worth distinguishing in the exit code below, not
-    # swallowed by gather.
+    # A worker's own internal try/except already absorbs a cycle failure, so
+    # anything that still escapes to here is a cancellation from _Stopper or
+    # a genuine bug -- worth distinguishing in the exit code, not swallowed.
     results = await asyncio.gather(seeder_task, releases_task, return_exceptions=True)
     failures = [
         exc for exc in results
@@ -366,9 +219,8 @@ async def _run(once: bool) -> int:
 
     # Both workers have stopped queuing new writes at this point (cancelled,
     # or -- under --once -- finished on their own), but writes already
-    # in-flight through persist_queue's fire-and-forget tasks are not
-    # awaited by either worker -- see the module docstring's persist-queue
-    # section for why this wait is the only thing that reaches them.
+    # in-flight through persist_queue's fire-and-forget tasks are awaited by
+    # neither -- this wait is what reaches them.
     drained = await _drain_persist_queue(DRAIN_TIMEOUT_SECONDS)
 
     await engine.dispose()
@@ -388,10 +240,7 @@ async def _run(once: bool) -> int:
     # 0: clean (finished --once, or a plain stop request that drained fully).
     # 1: aborted -- a worker raised something its own try/except didn't
     # already absorb. 2: stopped without aborting but the persist queue
-    # didn't drain within DRAIN_TIMEOUT_SECONDS -- distinct from 1 so a
-    # supervisor can tell "a worker broke" apart from "finished, but check
-    # the log for what didn't land", the same split
-    # scripts/refresh_corpus.py's own exit code makes for the identical queue.
+    # didn't drain within DRAIN_TIMEOUT_SECONDS.
     if failures:
         return 1
     if not drained:
@@ -414,13 +263,9 @@ def main() -> None:
     # attached and a standalone script emits nothing at all.
     setup_logging()
 
-    # Same call app/main.py's lifespan makes, run here for the same reason:
-    # this container is the one an operator is most likely to still have a
-    # stale SEEDER_ENABLED set on, and without this call that variable would
-    # warn about nothing here even though the CHANGELOG says it's safe to
-    # leave and self-explaining. Must run after setup_logging() -- a warning
-    # logged before handlers are attached goes nowhere -- and before the run
-    # starts.
+    # Warns if a stale SEEDER_ENABLED is still set. Must run after
+    # setup_logging() -- a warning logged before handlers are attached goes
+    # nowhere -- and before the run starts.
     check_retired_env_vars()
 
     exit_code = asyncio.run(_run(args.once))

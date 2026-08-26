@@ -618,11 +618,15 @@ async def _refresh_upcoming(region: str, delay: float) -> dict[str, int]:
 # MAIN LOOP
 # ============================================================
 
-async def run_seeder() -> None:
-    if not settings.seeder_enabled:
-        logger.info("Seeder: disabled")
-        return
+async def run_seeder(once: bool = False) -> None:
+    """
+    Runs the author/series/narrator expansion cycle on settings.seeder_interval_hours,
+    forever by default.
 
+    once, False by default, runs exactly one cycle and returns instead of looping —
+    the standalone entry point's --once (scripts/seed.py) uses this for a single
+    supervised pass. False preserves the original forever-loop behavior exactly.
+    """
     regions = [r.strip() for r in settings.seeder_regions.split(",") if r.strip()]
     interval = settings.seeder_interval_hours * 3600
     delay = settings.seeder_request_delay
@@ -671,21 +675,25 @@ async def run_seeder() -> None:
         except Exception as e:
             logger.error(f"Seeder: cycle failed: {e}")
 
+        if once:
+            return
+
         await asyncio.sleep(interval)
 
 
-async def run_new_releases_seeder() -> None:
+async def run_new_releases_seeder(once: bool = False) -> None:
     """
     Independent worker that scans new releases on its own interval.
 
     Runs separately from the main expansion cycle (run_seeder) so new content
     can be picked up more often than the heavier author/series/narrator walks.
-    Shares the same enable flag, regions, and request delay; only the interval
-    is its own. The two workers run independently and may occasionally overlap.
-    """
-    if not settings.seeder_enabled:
-        return
+    Shares the same regions and request delay; only the interval is its own.
+    The two workers run independently and may occasionally overlap.
 
+    once, False by default, runs exactly one cycle and returns instead of
+    looping — see run_seeder's own once for the standalone entry point that
+    uses it. False preserves the original forever-loop behavior exactly.
+    """
     regions = [r.strip() for r in settings.seeder_regions.split(",") if r.strip()]
     interval = settings.seeder_new_releases_interval_hours * 3600
     delay = settings.seeder_request_delay
@@ -721,5 +729,8 @@ async def run_new_releases_seeder() -> None:
 
         except Exception as e:
             logger.error(f"Seeder: new releases cycle failed: {e}")
+
+        if once:
+            return
 
         await asyncio.sleep(interval)

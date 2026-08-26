@@ -21,10 +21,9 @@ from app.core.response_headers import HEADER_REQUEST_ID, EXPOSED_HEADER_NAMES
 
 
 # Database
-from app.db.session import engine
+from app.db.session import engine, AsyncSessionFactory
 
 # Services
-from app.services.seeder import run_seeder, run_new_releases_seeder, SessionFactory
 from app.services.cache.manager import purge_expired
 
 # Routes
@@ -54,7 +53,7 @@ async def _cache_purge_loop():
     while True:
         await asyncio.sleep(3600)
         try:
-            async with SessionFactory() as session:
+            async with AsyncSessionFactory() as session:
                 count = await purge_expired(session)
                 if count:
                     logger.info(f"Cache purge: removed {count} expired entries")
@@ -90,16 +89,20 @@ async def lifespan(app: FastAPI):
     # Warn about any retired env vars still set (never crashes)
     check_retired_env_vars()
 
-    # Start background tasks
-    seeder_task = asyncio.create_task(run_seeder())
-    new_releases_task = asyncio.create_task(run_new_releases_seeder())
+    # The seeder is deliberately not started here. run_seeder and
+    # run_new_releases_seeder used to be launched from this lifespan, which
+    # runs once per worker process — WEB_CONCURRENCY runs six of them, and
+    # neither coroutine claims the entities it walks, so all six ran the same
+    # catalog walk concurrently and SEEDER_REQUEST_DELAY, being per-process,
+    # paced Audible at a sixth of the interval it names. It now runs as a
+    # single process in its own container (scripts/seed.py, the `seeder`
+    # profile in docker-compose.yml), so whether it runs is a deployment
+    # decision rather than a flag this process reads.
     purge_task = asyncio.create_task(_cache_purge_loop())
 
     yield
 
     # Shutdown
-    seeder_task.cancel()
-    new_releases_task.cancel()
     purge_task.cancel()
     await engine.dispose()
     logger.info("Libex shutting down")

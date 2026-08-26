@@ -20,7 +20,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "Libex"
-    app_version: str = "1.17.0"
+    app_version: str = "1.18.0"
     debug: bool = False
     host: str = "0.0.0.0"
     port: int = 3333
@@ -47,7 +47,6 @@ class Settings(BaseSettings):
     axiom_dataset: str = "libex"
 
     # Seeder
-    seeder_enabled: bool = False
     seeder_interval_hours: int = 24
     seeder_request_delay: float = 1.0
     seeder_regions: str = "us"
@@ -81,6 +80,11 @@ RETIRED_ENV_VARS: dict[str, str] = {
     "SEEDER_NEW_RELEASES_DAYS": (
         "Retired in 1.4.0 — the new-releases seeder now collects all reachable "
         "releases per genre rather than a fixed day window. Safe to remove."
+    ),
+    "SEEDER_ENABLED": (
+        "Retired in 1.18.0 — the seeder runs as its own container "
+        "(scripts/seed.py, the `seeder` profile in docker-compose.yml), so "
+        "starting that container is what enables it. Safe to remove."
     ),
 }
 

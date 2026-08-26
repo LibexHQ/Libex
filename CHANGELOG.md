@@ -10,6 +10,41 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.18.0]
+
+Nothing here changes the API itself: no endpoint, parameter, response shape,
+field or status code moved. What changed is how the seeder — the background
+process that keeps Libex's own catalog current — is deployed and run.
+
+### Added
+- **The seeder now runs as its own container, not inside the API process.**
+  It used to start from the API's own startup routine, which runs once per
+  worker process — the bundled compose file runs six — and neither of its two
+  loops claimed the authors, series or narrators it walked, so all six woke
+  within moments of each other and worked through the identical due-for-
+  refresh list before any of them had recorded finishing: one seeding cycle
+  made six times the intended number of Audible requests, at a sixth of
+  `SEEDER_REQUEST_DELAY`'s configured spacing, from a single address, without
+  covering any more ground than one process alone would have. It has been off
+  in production for over a month as a result. The seeder now ships as
+  `libex-seeder`, a separate container behind the compose file's `seeder`
+  profile (`docker compose --profile seeder up -d`, or
+  `COMPOSE_PROFILES=seeder` in the stack environment) that runs as a single
+  process, on its own dedicated Audible exit (`SEEDER_PROXY_URL`, kept apart
+  from the API's own `AUDIBLE_PROXY_URL` so the two kinds of traffic can never
+  share an exit by accident). Stopping it (`docker stop`) waits for any writes
+  already queued from the current cycle to land before the process exits,
+  rather than killing them mid-write. Because the seeder is now its own
+  process, `WEB_CONCURRENCY` no longer has to stay at `1` to run it safely —
+  the two used to be mutually exclusive and are not any more.
+
+### Removed
+- **`SEEDER_ENABLED`** is retired. Whether the seeder runs is now whether the
+  `libex-seeder` container is running, not a flag the API process reads —
+  starting that container is the enable decision. If `SEEDER_ENABLED` is
+  still set, Libex logs a one-time warning at startup and ignores it — safe
+  to remove from your environment.
+
 ## [1.17.0]
 
 ### Added

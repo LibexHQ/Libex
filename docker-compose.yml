@@ -26,27 +26,45 @@ services:
       # Audible requests leave by the container's own address -- the same
       # IP the public API answers on.
       - AUDIBLE_PROXY_URL=${AUDIBLE_PROXY_URL:-}
-      # The only place the worker count is set. The image's CMD passes no
-      # --workers, which is what keeps it the only place: uvicorn reads
-      # WEB_CONCURRENCY only when workers is None (config.py, 0.46.0), so the
-      # flag would not sit alongside this value, it would silently beat it.
+      # A literal, not an interpolation, and deliberately not a knob. The
+      # worker count is the multiplier on every per-process budget in the
+      # codebase, and each of those budgets was sized against this exact
+      # number rather than derived from it at runtime:
+      #
+      #   - app/db/session.py holds pool_size 10 + max_overflow 10 per
+      #     process, so six workers reach 120 connections. That is the whole
+      #     reason the postgres service below runs max_connections=200; at 12
+      #     the demand is 240 against 197 usable slots.
+      #   - Both Audible concurrency limits in services/audible/client.py
+      #     (10 and 25) are per-process and neither is divided by this number,
+      #     because dividing them caused a live 504 outage. Six workers put
+      #     6 x (10 + 25) = 210 requests in flight at worst, all leaving by
+      #     one exit IP. A ladder measured 250 clean -- but on a direct path,
+      #     not through the proxy this deployment leaves by, whose shared exit
+      #     has never been measured.
+      #   - app/services/db/persist_queue.py's backlog cap is per worker:
+      #     about 45 MB each, 269 MB across the six at worst case.
+      #
+      # None of those announce themselves when this number moves. They surface
+      # later as connections refused, a throttled exit IP, or memory -- so the
+      # value changes when Libex changes it, with that arithmetic re-checked
+      # and the proxy ladder run first. It is a maintainer decision taken in
+      # the repo, not an operator one taken in a stack environment, which is
+      # why there is nothing here to override: changing it means editing this
+      # line, and editing this line means reading this.
+      #
+      # This stays uvicorn's own variable rather than a --workers flag in the
+      # Dockerfile CMD: uvicorn reads WEB_CONCURRENCY only when workers is
+      # None (0.46.0, config.py), so a flag would not sit alongside this line,
+      # it would silently beat it -- and this line is where the arithmetic is.
       #
       # More than one worker routes around a blocked event loop -- the kernel
       # hands new connections to whichever child is still calling accept().
       # It does NOT recover one: uvicorn's liveness probe is answered by a
       # daemon thread, so a wedged worker keeps replying and is never replaced.
       #
-      # Both Audible concurrency limits in services/audible/client.py are
-      # per-process and neither is divided, so this number multiplies their sum:
-      # 6 x (10 + 25) = 210 in flight at worst. A ladder measured 250 clean --
-      # but on a direct path, not through the proxy this deployment leaves by,
-      # whose shared exit has never been measured. Do not raise this without
-      # running that ladder through the proxy first, and do not make room by
-      # dividing the per-process limits: 10 is also one request's fan-out width.
-      #
-      # Set to 1 to restore single-process behaviour with no rebuild.
       # MUST be 1 while SEEDER_ENABLED is true -- see the seeder block below.
-      - WEB_CONCURRENCY=${WEB_CONCURRENCY:-6}
+      - WEB_CONCURRENCY=6
       - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       # An empty token means stdout only. The dataset default repeats the

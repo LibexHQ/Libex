@@ -48,6 +48,13 @@ directory, or the `/app/data` mount that exposed the Postgres data directory
 to the API container. A green run here means the three files agree on which
 settings exist. It says nothing about whether they are wired to the right
 values.
+
+One deliberate, narrow exception: `test_web_concurrency_is_a_hardened_literal`
+below does check a value, not just a name, because for WEB_CONCURRENCY
+specifically a value regression -- `- WEB_CONCURRENCY=6` quietly becoming
+`- WEB_CONCURRENCY=${WEB_CONCURRENCY:-6}` again -- is invisible to all three
+name-only directions above; they would pass identically either way. See that
+test's docstring for why the value matters.
 """
 
 # Standard library
@@ -115,7 +122,10 @@ COMPOSE_KNOBS_WITHOUT_SETTINGS: dict[str, str] = {
         "read directly from the OS environment by uvicorn (0.46.0 checks "
         "WEB_CONCURRENCY only when --workers is absent) -- never a Settings "
         "field. See docker-compose.yml's own comment block and the "
-        "Dockerfile CMD comment."
+        "Dockerfile CMD comment. Also deliberately fixed rather than "
+        "operator-tunable -- every per-process budget in the codebase is "
+        "sized against this exact number rather than derived from it at "
+        "runtime; see test_web_concurrency_is_a_hardened_literal below."
     ),
 }
 
@@ -276,4 +286,82 @@ def test_compose_environment_has_no_dead_knobs():
         "dead knob from docker-compose.yml, or if something outside "
         "Settings genuinely consumes it (like uvicorn reading "
         "WEB_CONCURRENCY), document it in COMPOSE_KNOBS_WITHOUT_SETTINGS."
+    )
+
+
+def test_web_concurrency_is_a_hardened_literal():
+    """
+    WEB_CONCURRENCY is the one name in this file that is deliberately NOT
+    a knob at all, operator-facing or otherwise -- unlike every other entry
+    in docker-compose.yml's libex `environment:` block, it must be a bare
+    literal (`WEB_CONCURRENCY=<int>`), never `${WEB_CONCURRENCY:-<int>}`
+    interpolation, and it must not reappear in .env.example.
+
+    This is arithmetic, not a style preference, and none of it fails loudly
+    if it silently doubles: docker-compose.yml's own comment above this line
+    records that the count is the multiplier on every per-process budget in
+    the codebase -- the connection pool (pool_size 10 + max_overflow 10 per
+    process) is sized so the worker count fits under Postgres's own
+    max_connections=200, the two Audible concurrency limits in
+    services/audible/client.py are deliberately NOT divided by worker count
+    (dividing them caused a live 504 outage, so raising the count multiplies
+    outbound concurrency on one exit IP instead), and persist_queue.py's
+    backlog cap is ~45 MB per worker. Turning this back into an
+    operator-tunable knob lets any one of those be silently exceeded by
+    whatever a stack environment happens to set, with nothing in the app
+    warning that it happened.
+
+    This is also a guard against a regression that already shipped once:
+    reverting the line to `${WEB_CONCURRENCY:-6}` reads as ordinary
+    consistency with every other entry in this block, which is exactly how
+    it got in. None of the three name-parity directions above catch it --
+    `_libex_environment_names` (used by all three) splits each entry on
+    `=` and keeps only the name, so `WEB_CONCURRENCY=6` and
+    `WEB_CONCURRENCY=${WEB_CONCURRENCY:-6}` are indistinguishable to every
+    other test in this file. If this test starts failing because the count
+    itself is being deliberately changed, that is a real checkpoint, not
+    friction: update the literal in docker-compose.yml and this test
+    together, having re-checked the pool/concurrency/backlog arithmetic in
+    docker-compose.yml's comment first, rather than reintroducing
+    interpolation or a default.
+    """
+    compose_text = _load_compose_text()
+    compose = yaml.safe_load(compose_text)
+    env_list = compose["services"]["libex"]["environment"]
+    entries = [item for item in env_list if item.partition("=")[0] == "WEB_CONCURRENCY"]
+
+    assert entries, (
+        "WEB_CONCURRENCY is missing entirely from docker-compose.yml's "
+        "libex `environment:` block. It is not optional: uvicorn defaults "
+        "to a single worker without it, and the multi-worker crash recovery "
+        "docker-compose.yml's own comment describes (a wedged event loop is "
+        "routed around, not recovered, by additional workers) depends on "
+        "there being more than one."
+    )
+    entry = entries[0]
+    assert re.fullmatch(r"WEB_CONCURRENCY=\d+", entry), (
+        f"docker-compose.yml's WEB_CONCURRENCY entry is {entry!r}, not a "
+        "bare integer literal. WEB_CONCURRENCY is deliberately NOT an "
+        "operator-tunable knob: the worker count is the multiplier on the "
+        "connection pool (sized against Postgres's max_connections=200), "
+        "the Audible concurrency limits (deliberately not divided by worker "
+        "count after a live 504 outage), and persist_queue.py's per-worker "
+        "backlog cap -- see the comment above this line in docker-compose.yml "
+        "for the arithmetic. Raising it via `${WEB_CONCURRENCY:-N}` "
+        "interpolation lets a stack environment exceed all three silently. "
+        "If the count is being deliberately changed, edit the literal "
+        "directly (re-checking that arithmetic first); do not reintroduce "
+        "interpolation."
+    )
+
+    env_example_names = _env_example_names()
+    assert "WEB_CONCURRENCY" not in env_example_names, (
+        "WEB_CONCURRENCY has reappeared in .env.example. It is deliberately "
+        "absent: docker-compose.yml sets it as a bare literal, so a "
+        ".env.example entry would document a knob that does not exist and "
+        "invite an operator to set a value docker-compose.yml silently "
+        "never reads. If the value ever becomes operator-configurable "
+        "again that is a deliberate, arithmetic-checked reversal of the "
+        "decision this test guards -- update this test in the same change, "
+        "do not just add the line back to .env.example."
     )

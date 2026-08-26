@@ -398,6 +398,8 @@ For the **complete** list across all categories, use the **DB** endpoints (`/db/
 
 ## Configuration
 
+### API stack (`docker-compose.yml`)
+
 Copy `.env.example` to `.env` and configure:
 
 | Variable | Default | Description |
@@ -411,17 +413,35 @@ Copy `.env.example` to `.env` and configure:
 | `LOG_RETENTION_DAYS` | `7` | Days of rotated logs to keep. `0` = infinite, no rotation |
 | `AXIOM_TOKEN` | — | Axiom API token (optional — leave blank for stdout only) |
 | `AXIOM_DATASET` | `libex` | Axiom dataset name |
+| `AUDIBLE_PROXY_URL` | — | Proxy URL for outbound Audible requests only. Supports `http://`, `https://`, `socks5://`. API serving is unaffected |
+| `SEED_SECRET` | — | PBKDF2 hash for the internal seed endpoint. Empty = endpoint disabled. Generate with `python -m app.api.routes.internal.router` |
+
+`DATABASE_URL` is constructed automatically by docker-compose from `DB_NAME`, `DB_USER`, and `DB_PASSWORD`. Only set it manually if running outside of Docker.
+
+### Seeder stack (`docker-compose.seeder.yml`)
+
+The seeder is not part of the API stack — it deploys as its own stack, with its own environment. See **Database seeder** under Self-Hosting Notes below for what it does.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DB_HOST` | — | **Required.** The Docker host's address, where the API stack publishes Postgres on port 5432 |
+| `DB_PASSWORD` | — | **Required.** The same password the API stack's `DB_PASSWORD` carries |
+| `SEEDER_PROXY_URL` | — | **Required.** The seeder's own outbound proxy, separate from the API stack's `AUDIBLE_PROXY_URL` so it never shares the API's exit IP. Its hostname must contain `seeder` or the seeder refuses to start |
+| `DB_USER` | `libex` | PostgreSQL username |
+| `DB_NAME` | `libex` | PostgreSQL database name |
+| `CACHE_TTL` | `86400` | Shared with the API stack — both write into the same cache table |
 | `SEEDER_INTERVAL_HOURS` | `24` | Hours between seeder cycles |
 | `SEEDER_REQUEST_DELAY` | `1.0` | Seconds between Audible requests during seeding |
 | `SEEDER_REGIONS` | `us` | Comma-separated regions to seed (e.g. `us,uk,de`) |
 | `SEEDER_NEW_RELEASES_INTERVAL_HOURS` | `24` | Hours between new-releases worker runs |
 | `SEEDER_REFRESH_ENABLED` | `false` | Re-fetch upcoming pre-orders as their release date approaches |
-| `SEEDER_PROXY_URL` | — | **Required to run the seeder.** The seeder's own outbound proxy, separate from `AUDIBLE_PROXY_URL` so it never shares the API's exit IP. Its hostname must contain `seeder` or the seeder refuses to start |
 | `SEEDER_MEM_LIMIT` | `1g` | Memory ceiling for the seeder container. Sized against its worst-case backlog, not measured against a live run — raise it if the container is repeatedly OOM-killed and restarted rather than assuming a bug |
-| `AUDIBLE_PROXY_URL` | — | Proxy URL for outbound Audible requests only. Supports `http://`, `https://`, `socks5://`. API serving is unaffected |
-| `SEED_SECRET` | — | PBKDF2 hash for the internal seed endpoint. Empty = endpoint disabled. Generate with `python -m app.api.routes.internal.router` |
+| `LOG_RETENTION_DAYS` | `7` | Days of rotated logs to keep. `0` = infinite, no rotation |
+| `LOG_LEVEL` | `INFO` | Log verbosity — `DEBUG`, `INFO`, `WARNING`, or `ERROR` |
+| `AXIOM_TOKEN` | — | Axiom API token (optional — leave blank for stdout only) |
+| `AXIOM_DATASET` | `libex` | Axiom dataset name |
 
-`DATABASE_URL` is constructed automatically by docker-compose from `DB_NAME`, `DB_USER`, and `DB_PASSWORD`. Only set it manually if running outside of Docker.
+`DB_HOST`, `DB_PASSWORD`, and `SEEDER_PROXY_URL` have no default in `docker-compose.seeder.yml` — a missing one fails the stack deploy naming the variable, rather than starting a container that can't connect.
 
 ---
 
@@ -443,17 +463,17 @@ Libex is API-compatible with AudiMeta. To migrate:
 - Cache TTL varies by what is cached, defaulting to `CACHE_TTL` seconds (default 24 hours) unless an endpoint sets its own; expired entries are purged automatically
 - Logs directory: `./logs` (relative to your compose file) — Libex writes a rotating log file to `./logs/libex.log` on the host
 - Log rotation is daily. `LOG_RETENTION_DAYS=7` keeps 7 days of backups. Set to `0` for infinite retention with no rotation
-- **Database seeder:** Off by default. It runs as its own container (`libex-seeder`), not inside the API, behind the `seeder` compose profile — start it with `docker compose --profile seeder up -d`, or set `COMPOSE_PROFILES=seeder` in your stack environment. It expands the local DB so the `/db/*` endpoints have more to return, and runs two independent workers in that one container:
+- **Database seeder:** Off by default, and not part of `docker-compose.yml` at all. It's a separate stack, `docker-compose.seeder.yml`, running its own container (`libex-seeder`) with its own VPN exit — deploy it as its own Portainer stack, after the API stack is up. (Both stacks run the same startup migration, and there's no ordering between separate stacks to prevent two migrations racing each other.) It expands the local DB so the `/db/*` endpoints have more to return, and runs two independent workers in that one container:
   - **Expansion** walks author, series, and narrator relationships to discover books you haven't requested yet. Each cycle compounds — a single book fetch can seed hundreds of related books over time. Runs every `SEEDER_INTERVAL_HOURS` (default 24).
   - **New releases** scans Audible's recent catalog by release date so fresh titles get picked up automatically. It runs on its own worker and its own interval (`SEEDER_NEW_RELEASES_INTERVAL_HOURS`, default 24), so you can have it run more often than the heavier expansion work without waiting behind it. It walks every category in Audible's taxonomy by release date, going as deep as the catalog allows per category.
   - **Upcoming refresh** (optional, `SEEDER_REFRESH_ENABLED`, default off) re-fetches pre-orders you already have as their release date nears, since details like the date, cover, narrator, and runtime firm up over time. It refreshes more often the closer a book gets — roughly yearly when far out, down to daily inside the last two weeks — and leaves already-released books alone. Runs as a second phase of the new-releases worker.
 
-  Both workers share the same regions and rate limit. They run independently and rate-limit themselves to one Audible request per `SEEDER_REQUEST_DELAY` seconds (default 1.0). Configure `SEEDER_REGIONS` to seed multiple markets (e.g. `us,uk,de`)
+  Both workers share the same regions and rate limit. They run independently and rate-limit themselves to one Audible request per `SEEDER_REQUEST_DELAY` seconds (default 1.0). Configure `SEEDER_REGIONS` to seed multiple markets (e.g. `us,uk,de`). See **Configuration** above for the seeder stack's full environment.
 
   Requires `SEEDER_PROXY_URL` — its hostname must contain `seeder`, or the seeder refuses to start rather than risk sending sustained, unattended traffic out through the API's own exit IP.
 
-  To turn it off, use `docker compose stop libex-seeder`. `docker compose --profile seeder down` also stops the API — Compose's `down` with a profile stops every profileless service too, not just the profiled one.
-- **VPN proxy:** Set `AUDIBLE_PROXY_URL` to route the API's own outbound Audible requests through a proxy. Only Audible requests are affected — API serving, database connections, and logging are completely unaffected. The seeder uses its own separate `SEEDER_PROXY_URL` instead (see above), so its traffic never shares the API's exit IP. Any HTTP, HTTPS, or SOCKS5 proxy works. The compose file creates a `libex-proxy` Docker network automatically — connect your VPN proxy container(s) to it, then point the relevant variable at it. Leave blank to disable
+  To turn it off, stop or remove the `docker-compose.seeder.yml` stack. It's a separate stack, so this has no effect on the API.
+- **VPN proxy:** Set `AUDIBLE_PROXY_URL` to route the API's own outbound Audible requests through a proxy. Only Audible requests are affected — API serving, database connections, and logging are completely unaffected. The seeder uses its own separate `SEEDER_PROXY_URL` instead (see above), so its traffic never shares the API's exit IP. Any HTTP, HTTPS, or SOCKS5 proxy works. The API stack's compose file creates a `libex-proxy` Docker network automatically — connect your VPN proxy container(s) to it, then point the relevant variable at it. Leave blank to disable. The seeder stack joins this same network rather than creating its own, so it can't deploy until the API stack has created it
 
 ---
 

@@ -79,27 +79,35 @@ per-unit commit boundary as everything else in the loops.
 
 RUN IT (its own container, its own dedicated exit -- AUDIBLE_PROXY_URL must
 name it explicitly; the run refuses to start unless its hostname contains
-"seeder", see _verify_dedicated_proxy):
+"seeder", see _verify_dedicated_proxy). docker-compose.seeder.yml is the
+canonical way to run this now: its own Portainer stack, its own dedicated VPN
+exit, and its own DATABASE_URL, which reaches Postgres by the Docker host's
+published port rather than the `postgres` hostname the app stack resolves on
+its own network -- that file's `networks:` section and its DATABASE_URL
+comment say why: this stack joins only libex-proxy, and the app stack's
+default network is a project-scoped name this file has no way to depend on.
+See it for the full required and optional environment this container reads
+through Compose interpolation, on top of everything below that this script
+reads directly.
 
-    docker run -d --name libex-seeder \\
-      --network libex-proxy \\
-      --network libex_default \\
-      -e DATABASE_URL=<same as the app> \\
-      -e AUDIBLE_PROXY_URL=http://libex-seeder-vpn:8888 \\
-      ghcr.io/libexhq/libex:latest \\
-      python -m scripts.seed --once     # one supervised cycle; drop --once to run forever
+A supervised, run it and watch it invocation for a single cycle goes
+through that same stack file rather than a bare `docker run`, so it inherits
+the stack's network and DATABASE_URL instead of re-deriving them --
+docker-compose.seeder.yml's own comment above its `command:` line gives this
+exact form:
 
-Both networks are needed: libex-proxy reaches the VPN sidecar, and the app
-stack's own network is the only place the `postgres` host in DATABASE_URL
-resolves -- the same two-network requirement scripts/refresh_corpus.py's own
-RUN IT section documents in full, including how to find the stack network's
-real name when it isn't literally `libex_default`.
+    docker compose -f docker-compose.seeder.yml run --rm libex-seeder \\
+      python -m scripts.seed --once
 
-Stop with `docker stop libex-seeder` -- SIGTERM cancels both worker loops
-between committed units of work and drains the persist queue before exiting;
-`docker stop -t` should stay comfortably above DRAIN_TIMEOUT_SECONDS for the
-same reason scripts/refresh_corpus.py's own docstring gives for its drain: a
-SIGKILL that lands mid-drain abandons whatever was still queued, silently.
+Stop the long-running form with `docker stop libex-seeder` (or
+`docker compose -f docker-compose.seeder.yml stop`) -- SIGTERM cancels both
+worker loops between committed units of work and drains the persist queue
+before exiting. Nothing needs adding by hand the way a raw `docker run`
+deployment would: the stack's `stop_grace_period: 310s` is baked into the
+container at creation and honoured by a bare `docker stop` with no -t,
+comfortably above DRAIN_TIMEOUT_SECONDS for the same reason that file's own
+comment gives -- a SIGKILL landing mid-drain abandons whatever was still
+queued, silently.
 
 ENVIRONMENT. Everything this script itself reads directly. app/services/seeder.py
 reads its own settings (SEEDER_REGIONS, SEEDER_INTERVAL_HOURS,

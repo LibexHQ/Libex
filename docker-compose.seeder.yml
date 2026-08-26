@@ -1,0 +1,259 @@
+# The seeder, as a Portainer stack of its own.
+#
+# NOT an overlay for docker-compose.yml. It is never combined with that file by
+# `-f docker-compose.yml -f docker-compose.seeder.yml`, and it redefines nothing
+# from it: it is a whole, separate Compose project, pasted into its own stack
+# with its own environment, exactly as the chapter backfill
+# (scripts/backfill_chapters.py) and the corpus refresh
+# (scripts/refresh_corpus.py) already run. Each of those has its own VPN exit
+# and its own lifecycle, and a Libex code change redeploys the API stack without
+# touching any of them.
+#
+# That separation is the whole reason this is a second file rather than a
+# service behind a `seeder` profile in the first one. A profiled service pasted
+# into a stack of its own deploys nothing at all -- Compose filters it out and
+# reports success, so the stack comes up empty and looks fine (verified against
+# Compose 2.40.3: a profiled service alone in a file yields `services: {}` and
+# exit 0 from `docker compose config`).
+#
+# STACK ENVIRONMENT. Everything this file interpolates, and nothing else reaches
+# the container -- the `environment:` block below is an allowlist, so a name set
+# in the stack environment that does not appear there is not readable inside.
+#
+#   Required. Each is `${NAME:?...}` with no default, so a missing one fails the
+#   stack deploy with a message naming it, rather than deploying a container
+#   that cannot work. A failed stack update in Portainer leaves the previous
+#   container running, which is the right way round for this.
+#
+#     DB_HOST            the Docker host's address, where the API stack
+#                        publishes Postgres on 5432. See DATABASE_URL below.
+#     DB_PASSWORD        the same password the API stack's DB_PASSWORD carries.
+#     SEEDER_PROXY_URL   this stack's own dedicated exit. See AUDIBLE_PROXY_URL
+#                        below for why the host-side name is not
+#                        AUDIBLE_PROXY_URL.
+#
+#   Every other name this file interpolates is optional, and each one carries
+#   its default inline at the `${NAME:-default}` that reads it -- mostly in
+#   `environment:` below, with SEEDER_MEM_LIMIT on `mem_limit:` instead. Those
+#   defaults are deliberately not restated up here: a prose copy is a second
+#   statement of the same value that nothing checks against the first, and the
+#   only thing keeping the two in step is whoever edits one remembering the
+#   other. The required three are listed because an operator needs them before
+#   opening the file at all; a default is already visible at the line it
+#   governs.
+#
+# DEPLOY IT AFTER THE API STACK IS UP, and after a redeploy of that stack has
+# settled. Both stacks run this image, so both run docker-entrypoint.sh, which
+# runs `alembic upgrade head` before handing off to the command. Alembic takes
+# no lock of its own, so two containers starting that migration at the same
+# moment race the same DDL. In one file that ordering was a `depends_on:
+# libex: condition: service_healthy`; across stacks there is no such
+# primitive, and this sentence is what replaces it. It is the same ordering the
+# backfill and refresh stacks already depend on informally, and the same race
+# docker-entrypoint.sh's own comment describes for uvicorn workers.
+
+# The Compose project name, which would otherwise default to the directory this
+# file sits in -- `libex`, the same project `docker compose` derives for
+# docker-compose.yml beside it. Sharing a project name locally makes each file's
+# containers look like orphans of the other's project, which `up --remove-orphans`
+# acts on. Portainer names the project after the stack and overrides this (the
+# -p flag and COMPOSE_PROJECT_NAME both take precedence over this field), so it
+# changes nothing there; it is here for running the file by hand from a clone.
+name: libex-seeder
+
+services:
+  libex-seeder:
+    # The same image as the API, on purpose: scripts/seed.py imports
+    # app/services/seeder.py, so a separately built seeder image would be a
+    # second copy of the application that can drift from the one serving
+    # traffic. One image, two commands, two stacks.
+    image: ghcr.io/libexhq/libex:latest
+    container_name: libex-seeder
+    # The forever loop, NOT `--once`. --once exits cleanly after a single cycle
+    # of each worker and restart: unless-stopped reads a clean exit as
+    # something to restart, so the pair would run cycles back to back with none
+    # of SEEDER_INTERVAL_HOURS' pacing between them. The loop sleeps that
+    # interval itself, which leaves the restart policy covering what it should:
+    # a crash, and a host reboot. --once stays available for a supervised, run
+    # it and watch it invocation:
+    #
+    #   docker compose -f docker-compose.seeder.yml run --rm libex-seeder \
+    #     python -m scripts.seed --once
+    #
+    # which is what it was built for.
+    command: ["python", "-m", "scripts.seed"]
+    # Matches the API service. Docker delays each restart by double the last,
+    # from 100ms up to a one-minute ceiling, and resets that delay once a
+    # container has stayed up 10 seconds (docker.com, "Start containers
+    # automatically" / `docker run --restart`, read 2026-08-25). A run that is
+    # misconfigured in a way the interpolation above cannot catch -- a
+    # SEEDER_PROXY_URL that is set but names no seeder exit, which
+    # scripts/seed.py refuses to start on -- therefore retries indefinitely
+    # rather than backing off forever, logging its refusal every time. Noisy
+    # and visible, which is the failure mode to prefer over a container that
+    # quietly stays down.
+    restart: unless-stopped
+    # An allowlist, like the libex service's block in docker-compose.yml, and
+    # shorter on purpose: this container serves nothing, so it gets nothing
+    # that only matters to serving.
+    environment:
+      # The same database the API stack serves from, reached across a stack
+      # boundary. This is a separate Compose project, so the `postgres` alias
+      # that resolves on the API stack's own default network does not resolve
+      # here and no spelling of the hostname will make it. DB_HOST is the
+      # Docker host's address instead, and 5432 is the port the API stack's
+      # postgres service publishes there -- that `ports:` line is what makes
+      # this reachable at all, and docker-compose.yml says so beside it.
+      #
+      # 5432 is a literal because the publishing side is a literal: the API
+      # stack publishes "5432:5432" with no knob, so a DB_PORT here would be a
+      # second place to set one number and the two would drift apart silently.
+      # If that ever becomes configurable, it becomes configurable in both
+      # files in the same edit.
+      #
+      # Unverified from here: whether this host's firewall permits the
+      # libex-proxy bridge subnet to reach the published port. It is reachable
+      # by default -- a container on a user-defined bridge routes to the host
+      # like any other outside address -- but a host firewall filtering the
+      # Docker subnets would block it, and that is a property of the server,
+      # not of this file.
+      - DATABASE_URL=postgresql+asyncpg://${DB_USER:-libex}:${DB_PASSWORD:?set DB_PASSWORD in this stack's environment -- the same value the API stack uses}@${DB_HOST:?set DB_HOST to the Docker host address where the API stack publishes postgres on 5432}:5432/${DB_NAME:-libex}
+      # AUDIBLE_PROXY_URL on this side because that is the name
+      # app/services/audible/client.py reads. SEEDER_PROXY_URL on the host side
+      # because no spelling of AUDIBLE_PROXY_URL in this stack's environment
+      # may reach this container: the seeder's traffic is the traffic that must
+      # never leave by the exit the public API answers on, and a shared name is
+      # one pasted stack environment away from doing exactly that. Separate
+      # stacks make that likelier, not less likely -- the API stack's
+      # environment is the obvious thing to copy when filling this one in.
+      #
+      # Required, unlike the API service's own AUDIBLE_PROXY_URL, where empty
+      # is a working deployment. It was `${SEEDER_PROXY_URL:-}` while the
+      # seeder was a profiled service in docker-compose.yml, because Compose
+      # resolves interpolation for the whole file before it filters by profile,
+      # so a required variable there broke `up`, `config` and `ps` for everyone
+      # running without the profile. There is no profile and no shared file any
+      # more, so that constraint is gone and the loud form is available again.
+      #
+      # This only makes the wrong value hard to supply by accident. The actual
+      # containment is scripts/seed.py, which refuses to start unless this
+      # names a host containing "seeder".
+      - AUDIBLE_PROXY_URL=${SEEDER_PROXY_URL:?set SEEDER_PROXY_URL to this stack's own VPN exit -- its hostname must contain "seeder" or scripts/seed.py refuses to start}
+      # Read by the cache writes on the persist path (app/services/db/writer.py,
+      # persist_queue.py), which the seeder drives just as the API does -- the
+      # two write into one cache table, so they take one TTL from one variable.
+      # One value, two stacks: set it here to whatever the API stack sets, or
+      # leave both unset and take the shared default.
+      - CACHE_TTL=${CACHE_TTL:-86400}
+      # The seeder's own settings, read only by app/services/seeder.py, which
+      # only this container runs. Every default repeats app/core/config.py
+      # exactly, for the same reason docker-compose.yml's libex block gives: an
+      # interpolated value always arrives, so an unset variable sends an empty
+      # string that overrides the compiled default rather than falling back to
+      # it. SEEDER_REGIONS is where that bites -- the seeder splits it on
+      # commas and drops empties, so a blank value yields no regions and the
+      # walk loops forever over nothing.
+      - SEEDER_INTERVAL_HOURS=${SEEDER_INTERVAL_HOURS:-24}
+      - SEEDER_REQUEST_DELAY=${SEEDER_REQUEST_DELAY:-1.0}
+      - SEEDER_REGIONS=${SEEDER_REGIONS:-us}
+      - SEEDER_NEW_RELEASES_INTERVAL_HOURS=${SEEDER_NEW_RELEASES_INTERVAL_HOURS:-24}
+      - SEEDER_REFRESH_ENABLED=${SEEDER_REFRESH_ENABLED:-false}
+      # Same token and dataset as the API. Seeder lines are identifiable there
+      # by their "Seeder: " message prefix, which every one of them carries --
+      # which is what makes one shared dataset workable across two stacks.
+      - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - AXIOM_TOKEN=${AXIOM_TOKEN:-}
+      - AXIOM_DATASET=${AXIOM_DATASET:-libex}
+      # WEB_CONCURRENCY is absent and must stay absent. It is uvicorn's
+      # variable and this container runs `python -m scripts.seed`, so it would
+      # govern nothing; docker-entrypoint.sh matches on the command and prints
+      # the "Starting uvicorn with WEB_CONCURRENCY=..." line only for uvicorn,
+      # so nothing announces it here either. The seeder is one process because
+      # it is one container, and that is the only place the number lives.
+      #
+      # No SEED_SECRET, MIGRATION_* or PORT either: all four belong to serving
+      # requests, and this container serves none.
+    # No ports: this container answers nothing.
+    #
+    # No healthcheck: there is no endpoint to probe, and Docker takes no action
+    # on an unhealthy container anyway (restart: unless-stopped covers exit,
+    # not wedge) -- so a healthcheck here would only produce a status nothing
+    # reads. The seeder's own progress lines are the signal. Nothing depends on
+    # this service either, now that it is alone in its stack, so there is not
+    # even a depends_on condition left for a healthcheck to feed.
+    #
+    # No log volume, deliberately, though the file handler would survive being
+    # shared: app/core/logging.py's MultiProcessTimedRotatingFileHandler
+    # serialises rotation with an flock, which holds across containers on one
+    # host because it is one inode -- across stacks as much as within one. The
+    # reason is legibility -- the line format is "time - libex - LEVEL -
+    # message" with nothing naming which container wrote it, so a shared bind
+    # would interleave hours of catalogue-walk output into the API's own
+    # libex.log with no way to separate them again. This container's log is
+    # `docker logs libex-seeder`, plus Axiom above.
+    #
+    # Ten seconds above scripts/seed.py's DRAIN_TIMEOUT_SECONDS (300), and
+    # that margin is the whole of it. SIGTERM cancels both worker loops between
+    # committed units of work, then the script waits for persist_queue's
+    # fire-and-forget writes to land before it exits; Compose's default
+    # 10-second grace would SIGKILL in the middle of that drain, abandoning
+    # queued writes silently. An idle stop still returns at once -- the drain
+    # returns immediately on an empty queue -- so this is a ceiling on the bad
+    # case, not a delay added to every stop.
+    #
+    # The 300 it sits above is a default, not a constant: scripts/seed.py reads
+    # DRAIN_TIMEOUT_SECONDS from SEEDER_DRAIN_TIMEOUT_SECONDS at import. Raise
+    # that beyond this number and the two inverting is not a warning but a
+    # SIGKILL landing mid-drain -- the precise abandonment this line exists to
+    # prevent. Raising one means raising the other in the same edit. What makes
+    # that hard to trip by accident is that the name appears in no environment
+    # block, and there is no env_file and no ENV in the Dockerfile, so it
+    # cannot reach the container from this stack's environment at all; adding
+    # it above is the moment this number has to move with it.
+    #
+    # A literal, and for the same reason WEB_CONCURRENCY is one in
+    # docker-compose.yml. Interpolating it would give two coupled numbers a
+    # knob each, settable from a stack environment nobody diffs against the
+    # repo, which is how they end up inverted with nothing recording that they
+    # were ever related.
+    stop_grace_period: 310s
+    # A blast-radius guard, not a tuning value: this container shares a host
+    # with the API and Postgres, and its work is an unbounded catalogue walk.
+    # persist_queue caps its own backlog at 5000 books, measured at about 45 MB
+    # in app/services/db/persist_queue.py, and one process's pool and HTTP
+    # buffers sit on top of that; 1g is chosen to be well clear of that
+    # arithmetic, NOT measured against a live seeder run. Interpolated rather
+    # than hardcoded precisely because it is unmeasured -- if it turns out low,
+    # the container is OOM-killed and restarted in a loop, and raising
+    # SEEDER_MEM_LIMIT in this stack's environment fixes it without a rebuild.
+    mem_limit: ${SEEDER_MEM_LIMIT:-1g}
+    # No depends_on. Both services it used to name -- postgres and libex --
+    # live in the API stack, and Compose refuses to deploy a project whose
+    # depends_on points at a service the project does not define (verified
+    # against Compose 2.40.3: `depends on undefined service "libex"`, exit 1).
+    # What those two conditions bought is bought differently now: waiting for
+    # Postgres is handled by this container restarting until the database
+    # answers, and ordering the alembic run behind the API's is the deploy
+    # instruction in this file's header.
+    networks:
+      # One network, not two. libex-proxy is where this stack's dedicated VPN
+      # sidecar lives; the API stack's default network -- which used to be the
+      # second entry, and the only place the `postgres` hostname resolved -- is
+      # not joined at all, because DATABASE_URL reaches Postgres by the host
+      # address instead. That is what makes this deployable as a stack: the
+      # API stack's default network is named after that stack's project and is
+      # not a name this file can rely on.
+      - libex-proxy
+
+networks:
+  # Created by the API stack (docker-compose.yml declares it with an explicit
+  # `name:`, so its name is not project-prefixed and is the same name from
+  # here). external: true means this stack joins it and never creates or
+  # removes it -- so tearing this stack down leaves the API's own attachment to
+  # it untouched, and deploying this stack before the API stack has ever run
+  # fails with a clear "network libex-proxy not found" rather than silently
+  # creating a second, empty network the VPN sidecar is not on.
+  libex-proxy:
+    name: libex-proxy
+    external: true

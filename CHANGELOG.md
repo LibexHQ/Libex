@@ -10,6 +10,39 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.18.1]
+
+### Fixed
+- **The seeder now deploys as its own stack, not a profile inside the API's
+  compose file.** 1.18.0 shipped it as `libex-seeder`, a service in
+  `docker-compose.yml` behind a `seeder` compose profile — but each of
+  Libex's standalone scripts deploys as its own stack with its own VPN exit,
+  the way `scripts/backfill_chapters.py` and `scripts/refresh_corpus.py`
+  already run, and a compose profile can't express that: pasted alone into a
+  stack of its own, a profile-gated service deploys nothing. Checked with
+  `docker compose config`, the file resolves to `services: {}` and exits 0;
+  run for real with `docker compose up -d`, it instead errors with "no
+  service selected" and exits 1. Either way, following the 1.18.0 README to
+  enable it this way did not produce a running seeder.
+
+  `libex-seeder` and the `seeder` profile are gone from `docker-compose.yml`.
+  In their place is a new file, `docker-compose.seeder.yml`, meant to be
+  pasted into a stack of its own — no profile, and no `depends_on` on the API
+  or the database, since Compose refuses a dependency on a service outside
+  the file it's deploying. It reaches Postgres through a new required
+  `DB_HOST` variable — the Docker host's address, at the API stack's
+  published `5432` — instead of the `postgres` hostname that only resolved
+  on the API stack's own network, and joins the API stack's existing
+  `libex-proxy` network rather than creating one of its own.
+  `COMPOSE_PROFILES=seeder` and `--profile seeder` no longer do anything;
+  deploying `docker-compose.seeder.yml` is what starts the seeder now, and
+  stopping or removing that stack is what stops it. `.env.example` and the
+  README's configuration table document the seeder stack's environment
+  separately from the API's own. The one-time startup warning for the
+  retired `SEEDER_ENABLED` variable, which pointed operators at the old
+  profile, now names the new stack instead. No endpoint, parameter, response
+  shape, field or status code moved.
+
 ## [1.18.0]
 
 Nothing here changes the API itself: no endpoint, parameter, response shape,

@@ -13,21 +13,20 @@ RUN IT (its own container, its own dedicated VPN exit -- AUDIBLE_PROXY_URL
 must name it explicitly; the run refuses to start unless its hostname
 contains "backfill", see _verify_dedicated_proxy):
 
+    docker network create libex-backfill-net              # once; the sidecar joins it too
     docker run -d --name libex-chapter-backfill \\
-      --network libex-proxy \\
-      --network libex_default \\
+      --network libex-backfill-net \\
+      --network libex-db \\
       -e AUDIBLE_PROXY_URL=http://libex-backfill-vpn:8888 \\
-      -e DATABASE_URL=<same as the app> \\
+      -e DATABASE_URL=<same as the app, host libex-postgres> \\
       ghcr.io/libexhq/libex:latest \\
       python -m scripts.backfill_chapters --limit 5     # dry run; drop --limit for the real run
 
-Both networks are needed: libex-proxy reaches the VPN sidecar, and the app
-stack's own network is the only place the `postgres` host in DATABASE_URL
-resolves. Its real name is the stack's, not necessarily libex_default --
-`docker inspect libex --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}'`
-prints both; whichever is not libex-proxy is the stack's. Repeating
---network on `docker run` needs Engine 25.0+; on older ones use docker
-create, docker network connect, then docker start.
+Both networks are still needed, for different things: libex-db (external,
+created by the API stack) is where libex-postgres resolves -- no discovery
+step required. The other is this run's own; attach libex-backfill-vpn to it
+too. Repeating --network on `docker run` needs Engine 25.0+; on older ones
+use docker create, docker network connect, then docker start.
 
 Stop with `docker stop libex-chapter-backfill` -- it finishes in-flight
 books, commits them, and exits cleanly (exit 0; exit 1 means the ratchet or
@@ -35,7 +34,7 @@ the NONE-rate guard aborted the run).
 
 ENVIRONMENT.
 
-    DATABASE_URL               required. Same database the app uses.
+    DATABASE_URL               required. Same database the app uses, host libex-postgres.
     AUDIBLE_PROXY_URL          required. Hostname must contain "backfill".
     LOG_LEVEL                  INFO    DEBUG, INFO, WARNING or ERROR. WARNING+
                                        drops the RESUME CURSOR line and the

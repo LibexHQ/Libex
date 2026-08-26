@@ -12,9 +12,8 @@ RUN IT (its own container, its own dedicated exit -- AUDIBLE_PROXY_URL must
 name it explicitly; the run refuses to start unless its hostname contains
 "seeder", see _verify_dedicated_proxy). docker-compose.seeder.yml is the
 canonical way to run this: its own Portainer stack, its own VPN exit, and
-its own DATABASE_URL, which reaches Postgres at the Docker host's published
-port (DB_HOST:5432) rather than the `postgres` hostname the app stack
-resolves on its own network, since this stack joins only libex-proxy.
+its own DATABASE_URL, which reaches Postgres at libex-postgres:5432 over
+libex-db, the network the API stack creates and this stack joins as external.
 
     docker compose -f docker-compose.seeder.yml run --rm libex-seeder \\
       python -m scripts.seed --once

@@ -1,10 +1,9 @@
 # The seeder, as a Portainer stack of its own -- a separate Compose project,
 # never combined with docker-compose.yml by `-f`. Deploy it after the API
-# stack: both run `alembic upgrade head` on start and nothing orders them
-# across stacks.
+# stack: both run `alembic upgrade head` on start, nothing orders them across
+# stacks, and the API stack is what creates the libex-db network below.
 #
-# Required in this stack's environment, no defaults: DB_HOST (the Docker host
-# address the API stack publishes postgres on), DB_PASSWORD, SEEDER_PROXY_URL.
+# Required in this stack's environment, no defaults: DB_PASSWORD, SEEDER_PROXY_URL.
 
 # pinned so this file gets its own project, not `libex` shared with docker-compose.yml.
 name: libex-seeder
@@ -19,9 +18,10 @@ services:
     command: ["python", "-m", "scripts.seed"]
     restart: unless-stopped
     environment:
-      # a separate project, so the API stack's `postgres` alias does not resolve
-      # here. 5432 is a literal because the publishing side is one.
-      - DATABASE_URL=postgresql+asyncpg://${DB_USER:-libex}:${DB_PASSWORD:?set DB_PASSWORD in this stack's environment -- the same value the API stack uses}@${DB_HOST:?set DB_HOST to the Docker host address where the API stack publishes postgres on 5432}:5432/${DB_NAME:-libex}
+      # `postgres` does resolve across projects on libex-db, but it is generic: a
+      # postgres service in this stack would answer to it too, and dns round-robins
+      # the two. libex-postgres is a container_name, which docker keeps unique.
+      - DATABASE_URL=postgresql+asyncpg://${DB_USER:-libex}:${DB_PASSWORD:?set DB_PASSWORD in this stack's environment -- the same value the API stack uses}@libex-postgres:5432/${DB_NAME:-libex}
       # AUDIBLE_PROXY_URL is the name the client reads; the host-side name is
       # SEEDER_PROXY_URL so a pasted API stack environment cannot send seeder
       # traffic out by the exit the public API answers on.
@@ -46,11 +46,16 @@ services:
     stop_grace_period: 310s
     # unmeasured guard, interpolated so an OOM loop is fixable without a rebuild.
     mem_limit: ${SEEDER_MEM_LIMIT:-1g}
+    # default listed explicitly: naming any network drops the implicit one, and
+    # this stack's own VPN sidecar lives there.
     networks:
-      - libex-proxy
+      - default
+      - libex-db
 
 networks:
   # created by the API stack; this one joins it and never creates or removes it.
-  libex-proxy:
-    name: libex-proxy
+  # created by hand it comes out unlabelled, and the API stack then rejects it
+  # ("incorrect label com.docker.compose.network"): `docker network rm libex-db`.
+  libex-db:
+    name: libex-db
     external: true

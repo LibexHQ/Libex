@@ -10,6 +10,60 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.18.2]
+
+No endpoint, parameter, response shape, field or status code moved — every
+change here is to how the API stack, the seeder stack, and Postgres reach
+each other.
+
+### Changed
+- **A VPN proxy no longer needs a network created ahead of time.**
+  `AUDIBLE_PROXY_URL` (API stack) and `SEEDER_PROXY_URL` (seeder stack) used
+  to require connecting a proxy container to `libex-proxy`, a network the API
+  stack created and the seeder stack joined as external — coupling the two
+  stacks together for VPN alone, even for an operator running no seeder at
+  all. A proxy container is now added directly as a service in whichever
+  compose file needs it, and reached there by service name over that stack's
+  own default network — no shared network to create or join for a proxy.
+  `libex-proxy` no longer exists; a proxy container currently attached to it
+  needs to move into the compose file of the stack it serves. This does not
+  remove the seeder's deploy-order dependency on the API stack: the seeder
+  still joins a network the API stack creates first, `libex-db`, described
+  under Fixed below — the requirement's cause moved from the VPN network to
+  the database network, it did not disappear. It also gives up the one thing
+  `libex-proxy` offered that nothing here replaces: attaching a VPN sidecar
+  used to need no edit to a repo-tracked file, only a container joined to an
+  existing, otherwise-empty network; a proxy is now a service definition in
+  `docker-compose.yml` or `docker-compose.seeder.yml`, so a git-backed
+  Portainer stack needs a fork to add one.
+
+### Removed
+- **`DB_HOST`** is retired, one release after it was introduced. The seeder
+  now reaches Postgres directly over the `libex-db` network described below,
+  at its container name, instead of a Docker host address configured through
+  this variable. Safe to remove from the seeder stack's environment.
+
+### Fixed
+- **The seeder reaches Postgres over a private Docker network instead of the
+  host's published port.** 1.18.1 had it connect through `DB_HOST:5432` — the
+  Docker host's own address — which meant Postgres had to publish port 5432
+  to every interface so a container in the seeder's own Compose project
+  could reach it at all. The API stack now creates a `libex-db` bridge
+  network, and the seeder stack joins it as external, reaching Postgres
+  directly at its container name, `libex-postgres:5432`.
+
+### Security
+- **Postgres's published port now binds to loopback by default instead of
+  every interface.** `"5432:5432"` accepted a connection from anywhere that
+  could reach the host; `${DB_BIND:-127.0.0.1}:5432:5432` accepts one only
+  from the host itself. This is a behaviour change an existing operator will
+  feel: anyone reaching Postgres from another machine — a GUI client over a
+  LAN or VPN, without an SSH tunnel — loses that access on upgrade, with
+  nothing warning them; the container starts fine and the port simply stops
+  answering. Set `DB_BIND=0.0.0.0` to restore the previous, all-interfaces
+  behaviour. The seeder is unaffected either way, since it now reaches
+  Postgres over `libex-db` rather than this port.
+
 ## [1.18.1]
 
 ### Fixed

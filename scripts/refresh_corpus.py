@@ -16,21 +16,20 @@ RUN IT (its own container, its own AirVPN endpoint -- AUDIBLE_PROXY_URL must
 name it explicitly; the run refuses to start unless its hostname contains
 "refresh", see _verify_dedicated_proxy):
 
+    docker network create libex-refresh-net              # once; the sidecar joins it too
     docker run -d --name libex-refresh-corpus \\
-      --network libex-proxy \\
-      --network libex_default \\
-      -e DATABASE_URL=<same as the app> \\
+      --network libex-refresh-net \\
+      --network libex-db \\
+      -e DATABASE_URL=<same as the app, host libex-postgres> \\
       -e AUDIBLE_PROXY_URL=http://libex-refresh-vpn:8888 \\
       ghcr.io/libexhq/libex:latest \\
       python -m scripts.refresh_corpus --dry-run     # prints the plan, calls nothing
 
-Both networks are needed: libex-proxy reaches the VPN sidecar, and the app
-stack's own network is the only place the `postgres` host in DATABASE_URL
-resolves. Its real name is the stack's, not necessarily libex_default --
-`docker inspect libex --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}'`
-prints both; whichever is not libex-proxy is the stack's. Repeating
---network on `docker run` needs Engine 25.0+; on older ones use docker
-create, docker network connect, then docker start.
+Both networks are still needed, for different things: libex-db (external,
+created by the API stack) is where libex-postgres resolves -- no discovery
+step required. The other is this run's own; attach libex-refresh-vpn to it
+too. Repeating --network on `docker run` needs Engine 25.0+; on older ones
+use docker create, docker network connect, then docker start.
 
 Drop --dry-run for the real run. `docker stop -t 600 libex-refresh-corpus`
 finishes chunks in flight, prints the resume cursor, and exits. -t must be
@@ -45,9 +44,8 @@ from the last `RESUME CURSOR:` log line.
 
 ENVIRONMENT.
 
-    DATABASE_URL                      required. Same database the app uses.
-                                       Needs the app stack's own network as
-                                       well as libex-proxy; see RUN IT above.
+    DATABASE_URL                      required. Same database the app uses,
+                                       host libex-postgres; see RUN IT above.
     AUDIBLE_PROXY_URL                 required. Hostname must contain "refresh".
     REFRESH_RESUME_FROM        (unset) ASIN to resume after (exclusive).
     LOG_LEVEL                  INFO    WARNING+ drops the RESUME CURSOR line

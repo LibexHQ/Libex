@@ -1387,6 +1387,354 @@ async def test_get_db_stats_cache_write_error_still_returns_live_counts():
 
 
 # ============================================================
+# get_db_stats — region scoping
+# ============================================================
+
+
+def _region_stats_side_effect(books=100, authors=200, narrators=999, series=300,
+                               chapters=400, series_region_unknown=5):
+    """The execute() side-effect queue for one full region-scoped live
+    query: cache miss, then books/authors/narrators/series/chapters in the
+    order get_db_stats issues them, then seriesRegionUnknown, then the
+    cache write."""
+    return [
+        _cache_miss_result(),
+        _stats_count_result(books),
+        _stats_count_result(authors),
+        _stats_count_result(narrators),
+        _stats_count_result(series),
+        _stats_count_result(chapters),
+        _stats_count_result(series_region_unknown),
+        MagicMock(),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_no_region_returns_exactly_the_original_five_keys():
+    """
+    The drop-in guarantee: region=None must return precisely the key set
+    get_db_stats has always returned. seriesRegionUnknown only exists for a
+    region-scoped call — its presence here would mean an unscoped caller
+    silently gets a shape it never asked for and no schema pinned it against.
+    """
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=[
+        _cache_miss_result(),
+        _stats_count_result(150),
+        _stats_count_result(42),
+        _stats_count_result(85),
+        _stats_count_result(18),
+        _stats_count_result(7),
+        MagicMock(),
+    ])
+
+    result = await get_db_stats(session, region=None)
+
+    assert set(result.keys()) == {"books", "authors", "narrators", "series", "booksWithChapters"}
+    assert "seriesRegionUnknown" not in result
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_no_region_cache_key_is_unsuffixed():
+    """A region=None call must read and write the bare `db_stats` cache key
+    -- any suffix here would mean the existing, unscoped cache population
+    silently stops being read on the next deploy."""
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=[
+        _cache_miss_result(),
+        _stats_count_result(150),
+        _stats_count_result(42),
+        _stats_count_result(85),
+        _stats_count_result(18),
+        _stats_count_result(7),
+        MagicMock(),
+    ])
+
+    await get_db_stats(session, region=None)
+
+    cache_read_stmt = session.execute.call_args_list[0][0][0]
+    cache_write_stmt = session.execute.call_args_list[6][0][0]
+    assert cache_read_stmt.compile().params["key_1"] == "db_stats"
+    assert cache_write_stmt.compile().params["key"] == "db_stats"
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_region_scoped_cache_key_carries_the_region():
+    """The region-scoped cache key must be `db_stats:<region>` -- this is
+    the only thing standing between a US and a DE request sharing a cache
+    row."""
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=_region_stats_side_effect())
+
+    await get_db_stats(session, region="us")
+
+    cache_read_stmt = session.execute.call_args_list[0][0][0]
+    cache_write_stmt = session.execute.call_args_list[7][0][0]
+    assert cache_read_stmt.compile().params["key_1"] == "db_stats:us"
+    assert cache_write_stmt.compile().params["key"] == "db_stats:us"
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_different_regions_use_different_cache_keys():
+    """Two different regions must never resolve to the same cache key --
+    the specific failure mode this guards is one region's counts being
+    served back under another region's badge."""
+    us_session = AsyncMock()
+    us_session.execute = AsyncMock(side_effect=_region_stats_side_effect())
+    de_session = AsyncMock()
+    de_session.execute = AsyncMock(side_effect=_region_stats_side_effect())
+
+    await get_db_stats(us_session, region="us")
+    await get_db_stats(de_session, region="de")
+
+    us_key = us_session.execute.call_args_list[7][0][0].compile().params["key"]
+    de_key = de_session.execute.call_args_list[7][0][0].compile().params["key"]
+
+    assert us_key == "db_stats:us"
+    assert de_key == "db_stats:de"
+    assert us_key != de_key
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_region_cache_entry_is_never_served_to_a_different_region():
+    """
+    Behavioral proof, not just a key-string check: a cache row written for
+    one region must be invisible to a request for another region, even
+    though both carry the full region-scoped key set (books/authors/
+    narrators/series/booksWithChapters/seriesRegionUnknown) and so cannot be
+    told apart by shape the way a stale global entry is. A shared session
+    and an in-memory store keyed by the literal cache key is what actually
+    proves isolation here -- an AsyncMock side_effect queue would hand back
+    whatever is queued next regardless of which key either call used, so it
+    would pass even if both regions silently shared one row.
+    """
+
+    class _KeyedCacheSession:
+        def __init__(self):
+            self.store: dict[str, dict] = {}
+
+        @staticmethod
+        def _is_cache_select(stmt):
+            return "FROM cache" in str(stmt)
+
+        @staticmethod
+        def _is_cache_insert(stmt):
+            return hasattr(stmt, "table") and getattr(stmt.table, "name", None) == "cache"
+
+        async def execute(self, stmt):
+            result = MagicMock()
+            if self._is_cache_insert(stmt):
+                params = stmt.compile().params
+                self.store[params["key"]] = dict(params["value"])
+                return result
+            if self._is_cache_select(stmt):
+                key = stmt.compile().params["key_1"]
+                cached = self.store.get(key)
+                result.scalar_one_or_none.return_value = (
+                    MagicMock(value=cached) if cached is not None else None
+                )
+                return result
+            # A live count query. The region actually bound into the
+            # statement (if any) picks which region's canned figures come
+            # back, so a query issued for "de" cannot accidentally answer
+            # with "us" figures either.
+            region = stmt.compile().params.get("region_1")
+            figures = {"us": 100, "de": 111}.get(region, 999)
+            result.scalar_one.return_value = figures
+            return result
+
+        async def rollback(self):
+            pass
+
+        async def commit(self):
+            pass
+
+    session = _KeyedCacheSession()
+
+    us_result = await get_db_stats(session, region="us")
+    de_result = await get_db_stats(session, region="de")
+    us_result_again = await get_db_stats(session, region="us")
+
+    assert us_result["books"] == 100
+    assert de_result["books"] == 111
+    assert us_result_again == us_result
+    assert set(session.store.keys()) == {"db_stats:us", "db_stats:de"}
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_region_scoped_second_call_reads_cache_without_live_queries():
+    """
+    Behavioral proof that a fresh, key-complete region cache entry is
+    actually read back on a later call, not merely written and left unread.
+    test_get_db_stats_region_cache_entry_is_never_served_to_a_different_region
+    only asserts the *values* agree across repeated calls for the same
+    region -- that assertion still holds even if every call silently
+    recomputes from a live query instead of hitting the cache, since
+    recomputing returns the same canned figures. It cannot tell a real cache
+    hit apart from a permanent miss that happens to answer identically.
+
+    This asserts the thing that distinguishes them: the count of live count
+    queries issued must not grow on the second call. Validating a
+    region-scoped entry's shape against the wrong key set (_STAT_KEYS
+    instead of _REGION_STAT_KEYS) makes a six-key region entry never match
+    a five-key expected set, so the cache is treated as permanently missing
+    and every request pays the live count queries again -- exactly the
+    silent-recompute failure mode this guards against.
+    """
+
+    class _KeyedCacheSessionCountingLiveQueries:
+        def __init__(self):
+            self.store: dict[str, dict] = {}
+            self.live_query_count = 0
+
+        @staticmethod
+        def _is_cache_select(stmt):
+            return "FROM cache" in str(stmt)
+
+        @staticmethod
+        def _is_cache_insert(stmt):
+            return hasattr(stmt, "table") and getattr(stmt.table, "name", None) == "cache"
+
+        async def execute(self, stmt):
+            result = MagicMock()
+            if self._is_cache_insert(stmt):
+                params = stmt.compile().params
+                self.store[params["key"]] = dict(params["value"])
+                return result
+            if self._is_cache_select(stmt):
+                key = stmt.compile().params["key_1"]
+                cached = self.store.get(key)
+                result.scalar_one_or_none.return_value = (
+                    MagicMock(value=cached) if cached is not None else None
+                )
+                return result
+            self.live_query_count += 1
+            result.scalar_one.return_value = 100
+            return result
+
+        async def rollback(self):
+            pass
+
+        async def commit(self):
+            pass
+
+    session = _KeyedCacheSessionCountingLiveQueries()
+
+    first_result = await get_db_stats(session, region="us")
+    queries_after_first_call = session.live_query_count
+    assert queries_after_first_call == 6  # books, authors, narrators, series, chapters, seriesRegionUnknown
+
+    second_result = await get_db_stats(session, region="us")
+
+    assert session.live_query_count == queries_after_first_call
+    assert second_result == first_result
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_region_scoped_filters_books_authors_series_by_region():
+    """books, authors and series must each be scoped by their own `region`
+    column when a region is given."""
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=_region_stats_side_effect())
+
+    await get_db_stats(session, region="us")
+
+    books_stmt = session.execute.call_args_list[1][0][0]
+    authors_stmt = session.execute.call_args_list[2][0][0]
+    series_stmt = session.execute.call_args_list[4][0][0]
+
+    for stmt, table in ((books_stmt, "books"), (authors_stmt, "authors"), (series_stmt, "series")):
+        compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert f"FROM {table}" in compiled
+        assert f"{table}.region = 'us'" in compiled
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_region_scoped_books_with_chapters_joins_tracks_to_books():
+    """booksWithChapters has no region column of its own -- it must join
+    tracks to books on asin and filter on Book.region, not on some
+    nonexistent tracks.region."""
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=_region_stats_side_effect())
+
+    await get_db_stats(session, region="us")
+
+    chapters_stmt = session.execute.call_args_list[5][0][0]
+    compiled = str(chapters_stmt.compile(compile_kwargs={"literal_binds": True}))
+
+    assert "FROM tracks" in compiled
+    assert "JOIN books" in compiled
+    assert "books.asin = tracks.asin" in compiled or "tracks.asin = books.asin" in compiled
+    assert "books.region = 'us'" in compiled
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_narrators_stays_global_when_region_given():
+    """
+    narrators is deliberately never scoped by region -- the Narrator table
+    has no region column and its primary key is the narrator's name, so
+    there is no per-region narrator to count. This pins that as intentional:
+    the narrators statement issued during a region-scoped call must be
+    identical to the unscoped one, not silently start filtering through
+    book_narrator/books the next time someone assumes every stat here
+    should be region-aware.
+    """
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=_region_stats_side_effect(narrators=85))
+
+    result = await get_db_stats(session, region="us")
+
+    narrators_stmt = session.execute.call_args_list[3][0][0]
+    compiled = str(narrators_stmt.compile(compile_kwargs={"literal_binds": True}))
+
+    assert compiled == "SELECT count(*) AS count_1 \nFROM narrators"
+    assert result["narrators"] == 85
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_region_scoped_adds_series_region_unknown():
+    """A region-scoped response carries seriesRegionUnknown -- the count of
+    series rows with no recorded region, which fall out of every per-region
+    series count and so would otherwise disappear with nothing showing the
+    per-region total is short."""
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=_region_stats_side_effect(
+        series=300, series_region_unknown=5,
+    ))
+
+    result = await get_db_stats(session, region="us")
+
+    assert result["seriesRegionUnknown"] == 5
+    assert result["series"] == 300
+
+    series_region_unknown_stmt = session.execute.call_args_list[6][0][0]
+    compiled = str(series_region_unknown_stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert "FROM series" in compiled
+    assert "series.region IS NULL" in compiled
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_region_scoped_fallback_on_exception_includes_series_region_unknown():
+    """The all-zeros DB-error fallback for a region-scoped call must carry
+    seriesRegionUnknown too, or a live outage degrades a region response
+    into one the region-aware cache-key-set check would then treat as
+    permanently stale."""
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=Exception("DB error"))
+
+    result = await get_db_stats(session, region="us")
+
+    assert result == {
+        "books": 0,
+        "authors": 0,
+        "narrators": 0,
+        "series": 0,
+        "booksWithChapters": 0,
+        "seriesRegionUnknown": 0,
+    }
+
+
+# ============================================================
 # _get_series_positions_batch — chunked IN query
 # ============================================================
 # The batch reads series positions for every book its caller holds, and

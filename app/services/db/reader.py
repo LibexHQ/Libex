@@ -1425,11 +1425,14 @@ STATS_CACHE_TTL_SECONDS = 300
 # value written by older code silently rendering zero for a stat added later:
 # a hit whose keys don't match this set is treated as a miss and recomputed,
 # rather than served as-is with StatsResponse's per-field `= 0` default
-# papering over the gap.
+# papering over the gap. The region-scoped set carries one extra key —
+# seriesRegionUnknown — since a region-scoped cache entry has no meaning under
+# the global key set and vice versa.
 _STAT_KEYS = frozenset({"books", "authors", "narrators", "series", "booksWithChapters"})
+_REGION_STAT_KEYS = _STAT_KEYS | {"seriesRegionUnknown"}
 
 
-async def get_db_stats(session: AsyncSession) -> dict[str, int]:
+async def get_db_stats(session: AsyncSession, region: str | None = None) -> dict[str, int]:
     """
     Returns counts of books, authors, narrators, series, and books with stored
     chapter data in the local DB. booksWithChapters counts rows in the tracks
@@ -1437,29 +1440,66 @@ async def get_db_stats(session: AsyncSession) -> dict[str, int]:
     merely been checked — checked includes ISBN-keyed records and bundle ASINs
     that will never have chapters, which would overstate what Libex holds.
 
-    Cached for STATS_CACHE_TTL_SECONDS; a cache miss falls back to the live
+    `region=None` (the default) returns exactly what this function has always
+    returned: the same five keys, the same global counts, the same cache key.
+
+    Passing a region scopes books, authors, booksWithChapters and series to
+    it. Two counts cannot follow:
+
+    - narrators has no region column at all — the name is the primary key,
+      and a narrator is not owned by any one marketplace. A region-scoped
+      call still returns the global narrator count rather than a wrong or
+      empty per-region figure.
+    - series.region is nullable, so a per-region series count is a *subset*
+      of the global one — rows with no recorded region fall out of every
+      per-region total, and per-region counts will not sum to the global
+      count. That gap is surfaced rather than left to look like a complete
+      total: a region-scoped response carries an extra seriesRegionUnknown
+      key, the count of series rows with no region at all, so a caller can
+      see what its "series" figure is missing instead of trusting a number
+      that quietly means something narrower than it appears to.
+
+    booksWithChapters is scoped by joining tracks to books on asin, since
+    tracks itself carries no region column.
+
+    Cached for STATS_CACHE_TTL_SECONDS, one entry per region plus one for the
+    global figure — see cache.stats_key(). A cache miss falls back to the live
     query, and so does a cache error — but a cache error at the database level
     leaves the session's transaction aborted, so it must be rolled back before
     the live query can run on the same session, and a cache write failure
     never fails the request.
     """
-    key = cache.stats_key()
+    key = cache.stats_key(region)
+    expected_keys = _STAT_KEYS if region is None else _REGION_STAT_KEYS
     try:
         cached = await cache.get(session, key)
-        if cached is not None and set(cached) == _STAT_KEYS:
+        if cached is not None and set(cached) == expected_keys:
             return cached
     except Exception as e:
         logger.warning(f"Cache read failed for stats: {e}")
         await session.rollback()
 
     try:
-        books = await session.execute(select(func.count()).select_from(Book))
-        authors = await session.execute(select(func.count()).select_from(Author))
+        books_stmt = select(func.count()).select_from(Book)
+        authors_stmt = select(func.count()).select_from(Author)
+        series_stmt = select(func.count()).select_from(Series)
+        chapters_stmt = select(func.count()).select_from(Track)
+
+        if region is not None:
+            books_stmt = books_stmt.where(Book.region == region)
+            authors_stmt = authors_stmt.where(Author.region == region)
+            series_stmt = series_stmt.where(Series.region == region)
+            chapters_stmt = (
+                chapters_stmt
+                .join(Book, Book.asin == Track.asin)
+                .where(Book.region == region)
+            )
+
+        books = await session.execute(books_stmt)
+        authors = await session.execute(authors_stmt)
         narrators = await session.execute(select(func.count()).select_from(Narrator))
-        series = await session.execute(select(func.count()).select_from(Series))
-        books_with_chapters = await session.execute(
-            select(func.count()).select_from(Track)
-        )
+        series = await session.execute(series_stmt)
+        books_with_chapters = await session.execute(chapters_stmt)
 
         stats = {
             "books": books.scalar_one(),
@@ -1468,9 +1508,18 @@ async def get_db_stats(session: AsyncSession) -> dict[str, int]:
             "series": series.scalar_one(),
             "booksWithChapters": books_with_chapters.scalar_one(),
         }
+
+        if region is not None:
+            series_region_unknown = await session.execute(
+                select(func.count()).select_from(Series).where(Series.region.is_(None))
+            )
+            stats["seriesRegionUnknown"] = series_region_unknown.scalar_one()
     except Exception as e:
         logger.warning(f"DB read failed for stats: {e}")
-        return {"books": 0, "authors": 0, "narrators": 0, "series": 0, "booksWithChapters": 0}
+        fallback = {"books": 0, "authors": 0, "narrators": 0, "series": 0, "booksWithChapters": 0}
+        if region is not None:
+            fallback["seriesRegionUnknown"] = 0
+        return fallback
 
     try:
         await cache.set(session, key, stats, ttl_seconds=STATS_CACHE_TTL_SECONDS)

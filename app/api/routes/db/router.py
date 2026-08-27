@@ -5,6 +5,7 @@ Only returns books that have been fetched and stored previously.
 """
 
 # Standard library
+from datetime import datetime, timezone
 from typing import Annotated, Any
 
 # Third party
@@ -78,6 +79,7 @@ class StatsResponse(BaseModel):
 
 @router.get("/stats", response_model=StatsResponse)
 async def get_stats(
+    response: Response,
     region: Annotated[
         str | None,
         Query(
@@ -92,11 +94,49 @@ async def get_stats(
     ] = None,
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    """Get counts of books, authors, narrators, series, and books with chapters in the local DB."""
+    """
+    Get counts of books, authors, narrators, series, and books with chapters
+    in the local DB.
+
+    Public, unauthenticated, and hit hard by shields.io on every README
+    render -- 37 fetches across 9 distinct origin URLs (5 global badges plus
+    8 regions, each region's 4 counts sharing one `?region=xx` response via
+    different JSONPaths) fired at once by one page load. Cache-Control has
+    to be set explicitly here: left unset, Cloudflare never caches this
+    route -- `cf-cache-status: BYPASS` was measured on every call -- and
+    those badges render "inaccessible" instead of a number.
+
+    s-maxage and max-age carry the same value. There is a blast-radius gap
+    between an edge copy and a browser copy -- the same one author-books
+    cites, where an edge copy is purgeable and a browser copy is not --
+    but it is safe to ignore here because the value handed to both is
+    bounded above by STATS_CACHE_TTL_SECONDS: neither copy can ever be told
+    to hold stale data longer than that ceiling permits.
+
+    The value itself is the real remaining life of the cache entry
+    get_db_stats already read or wrote, carried back on the result rather
+    than re-read independently here (see DbStatsResult): quoting the full
+    TTL regardless of how far into its life the underlying entry already is
+    would tell the edge to hold a copy for a fresh window measured from
+    whenever it happened to ask, which can leave the edge serving a copy
+    well after origin has already moved on to a newer one. When nothing
+    trustworthy was stored -- the DB-failure fallback, or a cache-write
+    failure after an otherwise successful query -- get_db_stats reports
+    that as no expiry at all, and the response is marked no-store rather
+    than handed the longest freshness Libex offers.
+    """
     if region is not None:
         region = validate_region(region)
-    stats = await get_db_stats(session, region)
-    return {**stats, "region": region}
+    result = await get_db_stats(session, region)
+
+    if result.cache_expires_at is None:
+        response.headers["Cache-Control"] = "no-store"
+    else:
+        remaining = (result.cache_expires_at - datetime.now(timezone.utc)).total_seconds()
+        edge_seconds = max(0, int(remaining))
+        response.headers["Cache-Control"] = f"public, max-age={edge_seconds}, s-maxage={edge_seconds}"
+
+    return {**result.stats, "region": region}
 
 
 @router.get("/book", response_model=list[BookResponse])

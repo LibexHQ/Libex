@@ -72,13 +72,17 @@ async def test_live_query_failure_leaves_no_stats_row_in_cache(db_session):
 
     result = await get_db_stats(wrapped)
 
-    assert result == {
+    assert result.stats == {
         "books": 0,
         "authors": 0,
         "narrators": 0,
         "series": 0,
         "booksWithChapters": 0,
     }
+    # No live cache entry backs the degraded fallback, so the router must
+    # translate this into Cache-Control: no-store rather than quoting a
+    # lifetime for a value nothing wrote.
+    assert result.cache_expires_at is None
 
     row = await db_session.execute(
         select(Cache).where(Cache.key == cache_module.stats_key())

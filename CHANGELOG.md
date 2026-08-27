@@ -10,6 +10,29 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.19.0]
+
+### Added
+- **`GET /db/stats` takes an optional `region` query parameter, scoping its
+  counts to a single Audible marketplace.** Passing a region scopes `books`,
+  `authors`, `series` and `booksWithChapters` to it. `narrators` does not
+  scope — the table is keyed by narrator name rather than by region, so the
+  same narrator is the same row in every marketplace, and the count stays
+  global whether or not `region` is given. A region also adds
+  `seriesRegionUnknown` to the response: `series.region` can be null, and
+  those rows fall out of every per-region series count, so a scoped response
+  reports how many series it had to exclude for that reason instead of a
+  total that looks complete but isn't. Every response, scoped or not, now
+  carries both a `region` field (`null` on a plain call) and a
+  `seriesRegionUnknown` field (`null` unless a region was given) — additive,
+  so a caller reading only the fields it already knew about is unaffected,
+  but one pinning the exact key set of the old response will see two new
+  keys where it didn't before. Scoping is backed by two new indexes,
+  `books(region, asin)` and `series(region)`; the migration that creates
+  them takes a brief `SHARE` lock on `books` on deploy — writes pause, reads
+  do not, for the few seconds the index build takes at the current corpus
+  size.
+
 ## [1.18.3]
 
 No endpoint, parameter, response shape, field or status code moved — every

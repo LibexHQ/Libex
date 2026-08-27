@@ -16,6 +16,10 @@
 [![Narrators](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats&query=%24.narrators&label=Narrators&color=blue)](https://libexdb.com/db/stats)
 [![Series](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats&query=%24.series&label=Series&color=purple)](https://libexdb.com/db/stats)
 
+**Books indexed per region** — regions join this line as they're seeded
+
+[![US](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dus&query=%24.books&label=US&color=orange)](https://libexdb.com/db/stats?region=us)
+
 Open, unrestricted Audible metadata API for the audiobook automation community.
 
 </div>
@@ -297,7 +301,7 @@ ABS will then call `/us/search?title=...&author=...` which returns the `{"matche
 | GET | `/db/vvab` | Get all virtual voice audiobooks (AI-narrated) from local DB |
 | GET | `/db/new-releases` | Get recently released books from local DB, newest first |
 | GET | `/db/coming-soon` | Get upcoming books from local DB, soonest first |
-| GET | `/db/stats` | Get counts of books, authors, narrators, series, and books with chapters in local DB |
+| GET | `/db/stats` | Get counts of books, authors, narrators, series, and books with chapters in local DB. Pass `region` to scope books, authors, series, and booksWithChapters to one region — narrators has no region column so it stays global, and a scoped response also carries `seriesRegionUnknown` (series with no recorded region, excluded from every per-region count) |
 | GET | `/db/author/{asin}` | Get author from local DB |
 | GET | `/db/author/{asin}/books` | Get author's books from local DB |
 | GET | `/db/narrator` | Search narrators by name from local DB |

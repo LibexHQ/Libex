@@ -746,6 +746,17 @@ def test_docs_pages_render(client, path):
     assert client.get(path).status_code == 200
 
 
+def test_redoc_page_carries_the_noscript_notice(client):
+    """The one piece of upstream's own ReDoc template kept when this page was
+    rewritten to own the logo, the theme and the version line -- everything
+    else in it is new, which is exactly what makes this easy for a tidy-up of
+    that rewrite to drop without noticing. Without it, a visitor with
+    JavaScript disabled gets a blank page and no explanation of why."""
+    html = client.get("/redoc").text
+    assert "<noscript>" in html
+    assert "ReDoc requires Javascript to function" in html
+
+
 # Every src/href the pages emit. A named-host check only catches the three
 # hosts someone thought of; this catches a fourth.
 _ASSET_URL = re.compile(r'(?:src|href)="([^"]+)"')

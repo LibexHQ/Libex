@@ -1,0 +1,56 @@
+/*
+ * Libex's ReDoc skin.
+ *
+ * Almost nothing is here on purpose. ReDoc takes a theme object at init and
+ * that is where the sidebar, the right panel and the accent colour are set --
+ * see the /redoc route. Those are supported options keyed by name, so they
+ * survive a bundle bump; a rule written against a class name only survives
+ * while that name does. ReDoc renders through styled-components, so most of
+ * its class names are content hashes that change between builds, and only a
+ * handful are written by hand and stable.
+ *
+ * What is left is the two things the theme object cannot express, both of
+ * which need one of those stable names.
+ *
+ * No url() and no @import: opening /redoc must contact nothing but Libex, and
+ * a stylesheet is fetched and then acts on its own, so a single absolute URL
+ * here would send a visitor's address somewhere the page never named.
+ */
+
+/*
+ * ReDoc has no option for hiding the API title, and the page does not need it:
+ * the logo directly above says Libex, and the version now sits under the logo
+ * where a reader looks for it rather than in the middle of the first heading.
+ * Left alone it renders "Libex (1.17.0)" as an h1 over the introduction.
+ *
+ * .api-info is one of the hand-written class names, and the h1 is the first
+ * thing inside it -- ReDoc builds that heading as `title + " " + <span>(ver)</span>`,
+ * so hiding the heading takes the parenthesised version with it, which is the
+ * form this replaces.
+ *
+ * Failure here is visible rather than silent: if a later bundle renames the
+ * class or stops using an h1, the rule stops matching and the old heading
+ * comes back. That is a page that looks wrong, not a page that breaks.
+ */
+.api-info h1 {
+  display: none;
+}
+
+/*
+ * The version, placed under the logo by the /redoc route rather than by a
+ * rule here -- the logo's own wrapper carries a hashed class, so there is
+ * nothing stable to hang a ::after on.
+ *
+ * Sized and coloured to be findable and not read first: the sidebar's job is
+ * the operation list. #8b98a5 against the #0f1720 sidebar is around 6:1,
+ * which clears AA for text this size while still reading as secondary.
+ */
+.libex-version {
+  margin: -0.35rem 0 0.6rem;
+  padding: 0 1.25rem;
+  font-family: Roboto, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 0.72rem;
+  font-weight: 400;
+  letter-spacing: 0.06em;
+  color: #8b98a5;
+}

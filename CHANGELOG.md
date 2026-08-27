@@ -10,6 +10,35 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.19.2]
+
+### Fixed
+- **The seeder no longer marks an author, series or narrator as seeded when
+  the books it just discovered were never actually written to storage.**
+  Background writes go through a queue that silently sheds newly-fetched
+  books once its backlog passes 5,000, and the seeder was stamping the
+  entity as seeded regardless of whether that happened — a book could be
+  fetched from Audible and dropped by the queue while the entity that found
+  it was marked current, and it would not be looked at again for 7 days. The
+  write outcome now travels back from the persist queue to the seeder, and
+  an entity is only stamped when everything it found was actually queued for
+  storage; if any part of the batch was shed, or a chunk raised an error
+  instead of ever reaching the queue, the entity is left stale so the next
+  cycle retries it. This failure was silent — self-hosters who saw
+  discovered-book counts outpace what actually landed in the database, or
+  books that took much longer than expected to show up despite being logged
+  as discovered, were most likely seeing this rather than slow seeding.
+
+### Changed
+- **The seeder's own background-write concurrency goes from 2 to 4.** This
+  only affects the dedicated seeder process, not the API — the limit of 2
+  exists in the shared persist-queue code to stop background writes from
+  starving the API's own request-path connection pool, but the seeder has
+  run in its own container with its own connection pool since 1.18.x, so
+  that concern no longer applies to it and the old ceiling was leaving
+  capacity unused. A self-hoster watching database activity may see up to
+  twice as many concurrent writes coming from the seeder as before.
+
 ## [1.19.1]
 
 ### Fixed

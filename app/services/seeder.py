@@ -17,9 +17,12 @@ STRATEGY:
 Each phase compounds the next — new books bring in new series, authors,
 and narrators that get expanded in subsequent cycles.
 
-Entities are stamped with last_seeded_at after processing. The seeder
-skips entities checked within the last 7 days, so only new and stale
-entities are processed each cycle.
+Entities are stamped with last_seeded_at after processing, unless
+_fetch_and_persist reports that the background persist queue shed a chunk
+of the books it just fetched from Audible — an unstamped entity is picked
+up again next cycle instead of going quiet with its books unwritten. The
+seeder skips entities checked within the last 7 days, so only new and
+stale entities are processed each cycle.
 
 All phases use the standard catalog API (no screen endpoints).
 Rate-limited by a configurable delay between Audible requests.
@@ -44,6 +47,7 @@ from app.core.logging import get_logger
 # Services
 from app.services.audible.authors import fetch_author_books_by_name
 from app.services.audible.books import fetch_and_store_chapters, get_books_by_asins
+from app.services.db.persist_queue import PersistOutcome
 
 logger = get_logger()
 settings = get_settings()
@@ -154,19 +158,39 @@ async def _gather_chapters(asins: list[str], region: str, delay: float) -> None:
         await asyncio.sleep(0)
 
 
-async def _fetch_and_persist(missing: list[str], region: str, delay: float) -> None:
+async def _fetch_and_persist(missing: list[str], region: str, delay: float) -> bool:
+    """
+    Fetches and persists ASINs in 50-wide chunks, paced by delay.
+
+    Returns False if any chunk of this call did not reach storage, whether
+    the background persist queue shed it or the fetch/persist call raised
+    before it could report an outcome at all -- get_books_by_asins raises
+    NotFoundException when a chunk's ASINs are in neither Audible, the DB,
+    nor the cache, and a chunk that raised persisted nothing just as surely
+    as one the queue shed. Both are treated as not-admitted so whichever
+    entity discovered these books (an author, series, or narrator) is not
+    stamped as seeded over books that never reached storage -- or they stay
+    invisible for SEED_STALE_DAYS with nothing left pointing back at them.
+    Returns True only when every chunk both completed and was admitted.
+    """
+    all_admitted = True
     for i in range(0, len(missing), 50):
         chunk = missing[i:i + 50]
+        outcome: list[PersistOutcome] = []
         try:
             async with SessionFactory() as session:
-                await get_books_by_asins(chunk, region, session)
+                await get_books_by_asins(chunk, region, session, persist_outcome=outcome)
         except Exception:
-            pass
+            all_admitted = False
+        if PersistOutcome.SHED in outcome:
+            all_admitted = False
         await asyncio.sleep(delay)
         await asyncio.sleep(0)
 
         # Gather chapters for the newly-persisted books (paced, best-effort).
         await _gather_chapters(chunk, region, delay)
+
+    return all_admitted
 
 
 # ============================================================
@@ -202,16 +226,28 @@ async def _expand_authors(region: str, delay: float) -> dict[str, int]:
             book_asins, _ = await fetch_author_books_by_name(author_name, region)
             await asyncio.sleep(delay)
 
+            persisted = True
             if book_asins:
                 async with SessionFactory() as session:
                     missing = await _get_missing_asins(session, book_asins)
                 if missing:
-                    await _fetch_and_persist(missing, region, delay)
+                    persisted = await _fetch_and_persist(missing, region, delay)
                     stats["books_discovered"] += len(missing)
                     logger.info(f"Seeder: {author_name} — {len(missing)} new books")
 
-            await _stamp_author(author_id)
-            stats["authors_processed"] += 1
+            if persisted:
+                await _stamp_author(author_id)
+                stats["authors_processed"] += 1
+            else:
+                # The persist queue shed at least one chunk of this author's new
+                # books -- they were fetched from Audible but never reached
+                # storage. Not stamping leaves the author stale, so the next
+                # cycle finds it again and retries rather than the missing
+                # books going unnoticed for SEED_STALE_DAYS.
+                logger.warning(
+                    f"Seeder: not stamping author {author_name} — persist queue "
+                    "shed a chunk of its new books, will retry next cycle"
+                )
 
             if stats["authors_processed"] % 100 == 0:
                 logger.info(f"Seeder: author progress {stats['authors_processed']}/{total}, {stats['books_discovered']} new books so far")
@@ -271,16 +307,26 @@ async def _expand_series(region: str, delay: float) -> dict[str, int]:
             if not book_asins:
                 book_asins = [r["asin"] for r in relationships if r.get("asin") and r.get("sort")]
 
+            persisted = True
             if book_asins:
                 async with SessionFactory() as session:
                     missing = await _get_missing_asins(session, book_asins)
                 if missing:
-                    await _fetch_and_persist(missing, region, delay)
+                    persisted = await _fetch_and_persist(missing, region, delay)
                     stats["books_discovered"] += len(missing)
                     logger.info(f"Seeder: series {series_asin} — {len(missing)} new books")
 
-            await _stamp_series(series_asin)
-            stats["series_processed"] += 1
+            if persisted:
+                await _stamp_series(series_asin)
+                stats["series_processed"] += 1
+            else:
+                # See _expand_authors' identical guard: a shed chunk means these
+                # books never reached storage, so the series is left stale for
+                # the next cycle to retry rather than stamped over the gap.
+                logger.warning(
+                    f"Seeder: not stamping series {series_asin} — persist queue "
+                    "shed a chunk of its new books, will retry next cycle"
+                )
 
             if stats["series_processed"] % 100 == 0:
                 logger.info(f"Seeder: series progress {stats['series_processed']}/{total}, {stats['books_discovered']} new books so far")
@@ -345,16 +391,26 @@ async def _expand_narrators(region: str, delay: float) -> dict[str, int]:
                     )
                 ]
 
+            persisted = True
             if book_asins:
                 async with SessionFactory() as session:
                     missing = await _get_missing_asins(session, book_asins)
                 if missing:
-                    await _fetch_and_persist(missing, region, delay)
+                    persisted = await _fetch_and_persist(missing, region, delay)
                     stats["books_discovered"] += len(missing)
                     logger.info(f"Seeder: {narrator_name} — {len(missing)} new books")
 
-            await _stamp_narrator(narrator_name)
-            stats["narrators_processed"] += 1
+            if persisted:
+                await _stamp_narrator(narrator_name)
+                stats["narrators_processed"] += 1
+            else:
+                # See _expand_authors' identical guard: a shed chunk means these
+                # books never reached storage, so the narrator is left stale
+                # for the next cycle to retry rather than stamped over the gap.
+                logger.warning(
+                    f"Seeder: not stamping narrator {narrator_name} — persist "
+                    "queue shed a chunk of its new books, will retry next cycle"
+                )
 
             if stats["narrators_processed"] % 100 == 0:
                 logger.info(f"Seeder: narrator progress {stats['narrators_processed']}/{total}, {stats['books_discovered']} new books so far")
@@ -483,6 +539,12 @@ async def _scan_new_releases(region: str, delay: float) -> dict[str, int]:
     transient Audible error) is logged and skipped — it increments the error
     count but does NOT abort the scan, so the rest of the walk and the books
     already collected are preserved.
+
+    _fetch_and_persist's admission signal is not checked here, unlike the
+    expansion phases: there is no entity to withhold a stamp from, and a shed
+    chunk's ASINs are simply found again — every genre is re-walked from
+    scratch each cycle, with nothing recording that a given ASIN was already
+    seen.
     """
     stats = {"books_discovered": 0, "pages_scanned": 0, "errors": 0}
 
@@ -587,6 +649,11 @@ async def _refresh_upcoming(region: str, delay: float) -> dict[str, int]:
     Books are processed oldest-first (by updated_at) so the most stale get
     priority, and refreshing a book updates its updated_at — which drops it out
     of the next cycle's selection until it ages back past its tier threshold.
+
+    _fetch_and_persist's admission signal is not checked here, unlike the
+    expansion phases: there is no entity to withhold a stamp from, and
+    selection keys directly on Book.updated_at, which a shed chunk leaves
+    unmoved — the book stays selected and gets retried next cycle.
     """
     stats = {"books_refreshed": 0, "errors": 0}
 

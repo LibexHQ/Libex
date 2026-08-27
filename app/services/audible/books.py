@@ -70,7 +70,11 @@ from app.core.utils import strip_html, strip_image_size_suffix
 from app.services.audible.client import audible_get, author_books_concurrency, REGION_MAP
 from app.services.cache import manager as cache
 from app.services.cache.manager import book_key, chapters_key
-from app.services.db.persist_queue import persist_books_background, persist_track_background
+from app.services.db.persist_queue import (
+    PersistOutcome,
+    persist_books_background,
+    persist_track_background,
+)
 from app.services.db.writer import upsert_track
 from app.services.db.reader import get_books_from_db, get_track_from_db
 
@@ -626,6 +630,7 @@ async def get_books_by_asins(
     deadline: float | None = None,
     *,
     facts: ResponseFacts | None = None,
+    persist_outcome: list[PersistOutcome] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Public entry point. Delegates to _get_books_by_asins_unsettled and settles
@@ -643,9 +648,27 @@ async def get_books_by_asins(
     facts is threaded straight through, unexamined -- it is
     _get_books_by_asins_unsettled's own return points, not this wrapper's
     settling step, that know which source produced which element.
+
+    persist_outcome is the same out-parameter idiom as facts, kept as its own
+    plain list rather than folded into ResponseFacts: whether the background
+    write queue admitted or shed this call's books is an internal storage
+    fact a caller like the seeder needs to gate a retry decision on, not a
+    caller-facing hydration fact the way ResponseFacts' tally and incomplete-
+    reason set are -- those feed X-Libex-Incomplete-Reason, which persistence
+    shedding has nothing to do with. None (the default) costs every existing
+    caller nothing, the same as facts=None. When given, gets at most one
+    PersistOutcome appended -- this function's own fetch path calls
+    persist_books_background at most once per invocation.
     """
     books = await _get_books_by_asins_unsettled(
-        asins, region, session, use_cache, high_concurrency, deadline, facts=facts
+        asins,
+        region,
+        session,
+        use_cache,
+        high_concurrency,
+        deadline,
+        facts=facts,
+        persist_outcome=persist_outcome,
     )
     return _settle_flags_list(books)
 
@@ -659,6 +682,7 @@ async def _get_books_by_asins_unsettled(
     deadline: float | None = None,
     *,
     facts: ResponseFacts | None = None,
+    persist_outcome: list[PersistOutcome] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Fetches one or more books by ASIN from Audible.
@@ -684,6 +708,16 @@ async def _get_books_by_asins_unsettled(
     source-segmented concatenation rather than inferred afterwards from the
     merged list, which by that point no longer carries where any one element
     came from.
+
+    persist_outcome, when given, records whether the background write queue
+    admitted or shed the books freshly fetched from Audible in this call --
+    see get_books_by_asins for why this rides its own list rather than
+    ResponseFacts. Populated only where persist_books_background is actually
+    called below (the all_products branch of the main success path); every
+    other return -- an all-cache-hit early return, a not-found-only result,
+    the Audible-unavailable fallback -- has nothing freshly fetched to
+    persist and leaves the list untouched, exactly as it would if the caller
+    hadn't asked.
     """
     if not asins:
         raise NotFoundException("No ASINs provided")
@@ -918,7 +952,9 @@ async def _get_books_by_asins_unsettled(
 
         if all_products:
             # Persist to DB and cache in the background
-            persist_books_background(normalized, region)
+            outcome = persist_books_background(normalized, region)
+            if persist_outcome is not None:
+                persist_outcome.append(outcome)
 
         logger.info("Requested books from Audible", extra={
             "requested_num": len(fetch_asins),

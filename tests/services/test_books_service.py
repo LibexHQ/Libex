@@ -1639,3 +1639,117 @@ async def test_an_abandoned_chunk_falls_through_to_the_stored_copy():
     returned = {b["asin"] for b in books}
     assert any(a.startswith("B0FAST") for a in returned), "lost the chunk that landed"
     assert any(a.startswith("B0SLOW") for a in returned), "lost the stored fallback"
+
+
+# ============================================================
+# PERSIST OUTCOME -- persist_outcome OUT-PARAMETER
+# ============================================================
+# get_books_by_asins' persist_outcome mirrors the facts idiom above: a list
+# a caller can pass in to learn something this call decided internally, with
+# None costing every existing caller nothing. What it reports is whether the
+# background persist queue admitted or shed the books this call just fetched
+# from Audible -- see app.services.db.persist_queue.PersistOutcome. The seeder
+# is the caller that actually gates on it (see tests/services/test_seeder_
+# shed_awareness.py); these tests pin the plumbing in this module alone.
+#
+# The shed case below forces app.services.db.persist_queue's real backlog
+# state full rather than mocking persist_books_background's return value, so
+# the assertion is against the real admission decision, not a stand-in for
+# it. That is safe to do without touching Postgres or the network: a shed
+# batch returns out of _spawn before any task is created (see PersistOutcome
+# and _spawn's own docstrings), so nothing here ever reaches _BackgroundSession.
+# The admitted case, by contrast, does mock persist_books_background -- an
+# admitted call schedules a real background write, and this module's own
+# tests never let that write actually run against a real engine.
+
+@pytest.mark.asyncio
+async def test_get_books_by_asins_persist_outcome_records_a_real_forced_shed():
+    """Forces app.services.db.persist_queue's actual backlog to capacity --
+    the same technique tests/services/test_persist_queue.py uses to force
+    shedding deterministically, rather than waiting on 5000 real books --
+    and asserts persist_outcome is populated with the queue's own, genuine
+    SHED decision. persist_books_background is not mocked: this is the one
+    test in this module that lets the real admission check run."""
+    import app.services.db.persist_queue as pq
+    from app.services.audible.books import get_books_by_asins
+    from app.services.db.persist_queue import PersistOutcome
+
+    asin = "B0SHED0001"
+    session = AsyncMock()
+    session.rollback = AsyncMock()
+    outcome: list[PersistOutcome] = []
+
+    original_queued = pq._queued_books
+    pq._queued_books = pq._PERSIST_BACKLOG_MAX_BOOKS
+    try:
+        with patch(
+            "app.services.audible.books.audible_get",
+            new=AsyncMock(return_value={"product": _hydration_product(asin)}),
+        ):
+            result = await get_books_by_asins(
+                [asin], "us", session, persist_outcome=outcome
+            )
+    finally:
+        pq._queued_books = original_queued
+        pq._inflight.clear()
+
+    assert result[0]["asin"] == asin
+    assert outcome == [PersistOutcome.SHED]
+    # A shed batch never reaches _spawn's task-creation branch.
+    assert pq._inflight == set()
+
+
+@pytest.mark.asyncio
+async def test_get_books_by_asins_persist_outcome_records_admitted():
+    """The normal, non-degraded case: persist_books_background reports
+    ADMITTED and the out-parameter carries that value through unchanged.
+    Mocked rather than exercised against the real queue -- an admitted call
+    schedules a real background write, which this module's tests never let
+    run against a real engine."""
+    from app.services.audible.books import get_books_by_asins
+    from app.services.db.persist_queue import PersistOutcome
+
+    asin = "B0ADMIT001"
+    session = AsyncMock()
+    session.rollback = AsyncMock()
+    outcome: list[PersistOutcome] = []
+
+    with patch(
+        "app.services.audible.books.audible_get",
+        new=AsyncMock(return_value={"product": _hydration_product(asin)}),
+    ), patch(
+        "app.services.audible.books.persist_books_background",
+        return_value=PersistOutcome.ADMITTED,
+    ) as mock_persist:
+        result = await get_books_by_asins(
+            [asin], "us", session, persist_outcome=outcome
+        )
+
+    assert result[0]["asin"] == asin
+    mock_persist.assert_called_once()
+    assert outcome == [PersistOutcome.ADMITTED]
+
+
+@pytest.mark.asyncio
+async def test_get_books_by_asins_persist_outcome_defaults_to_none_harmlessly():
+    """Every existing caller that doesn't pass persist_outcome at all --
+    every book route -- must be unaffected: the call still fetches, still
+    persists, and raises nothing for not asking."""
+    from app.services.audible.books import get_books_by_asins
+    from app.services.db.persist_queue import PersistOutcome
+
+    asin = "B0NOARG001"
+    session = AsyncMock()
+    session.rollback = AsyncMock()
+
+    with patch(
+        "app.services.audible.books.audible_get",
+        new=AsyncMock(return_value={"product": _hydration_product(asin)}),
+    ), patch(
+        "app.services.audible.books.persist_books_background",
+        return_value=PersistOutcome.ADMITTED,
+    ) as mock_persist:
+        result = await get_books_by_asins([asin], "us", session)
+
+    assert result[0]["asin"] == asin
+    mock_persist.assert_called_once()

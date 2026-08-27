@@ -80,6 +80,24 @@ def _env_float(name: str, default: float) -> float:
 # which cancellation never reaches, so this wait is what does.
 DRAIN_TIMEOUT_SECONDS = _env_float("SEEDER_DRAIN_TIMEOUT_SECONDS", 300.0)
 
+# Concurrent background persist transactions. persist_queue's own default of
+# 2 is sized for the API process, protecting its request-path queries from
+# its own background writes -- a constraint that doesn't apply here: this
+# process has run in its own container against its own connection pool
+# (pool_size=10 + max_overflow=10, wholly its own) since 1.18.x. 4 is not
+# that pool's ceiling, it's a deliberately modest slice of it: persist is
+# fire-and-forget, so a single worker loop can queue several chunk writes
+# without waiting for an earlier one to finish, and run_seeder and
+# run_new_releases_seeder both queue independently of each other -- the
+# pacing behind SEEDER_REQUEST_DELAY does not bound how many writes are in
+# flight at once, only how fast new ones are queued. The semaphore this
+# constant feeds is what actually caps concurrency, at a value comfortably
+# inside the pool and below scripts/refresh_corpus.py's own
+# DB_WRITE_CONCURRENCY (default 8), which is sized for a very different
+# workload -- a ramp that drives up to 48 concurrent Audible fetches -- and
+# is not a precedent for what this steadier one needs.
+SEEDER_DB_WRITE_CONCURRENCY = 4
+
 
 # --- proxy containment (unchanged pattern; see LIBEX_LESSONS_HARD_WON.md) ---
 
@@ -273,4 +291,18 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # Only here, never inside main() or _run(): set_bg_write_concurrency_limit
+    # asserts the background write semaphore doesn't exist yet, true only
+    # before anything has attempted a background write. Real production
+    # never violates that -- module import has just finished and nothing
+    # has run yet -- but main() and _run() are both called directly, for
+    # real, by this script's own tests (tests/scripts/test_seed.py), and
+    # persist_queue's concurrency limit is process-global with no reset
+    # between tests. Calling this from anywhere reachable at test-collection
+    # or test-execution time would permanently move it off the documented
+    # default of 2 for every later test in the same pytest run that assumes
+    # it -- tests/services/test_persist_queue.py exercises that default
+    # directly. This guard is what confines the effect to a real
+    # `python -m scripts.seed` invocation.
+    persist_queue.set_bg_write_concurrency_limit(SEEDER_DB_WRITE_CONCURRENCY)
     main()

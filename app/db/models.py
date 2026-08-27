@@ -19,6 +19,7 @@ from sqlalchemy import (
     Table,
     Column,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -197,6 +198,16 @@ class Author(Base):
         UniqueConstraint("asin", "region", "name", name="authors_asin_region_name_unique"),
         Index("authors_asin_region_name_index", "asin", "region", "name"),
         Index("authors_region_name_index", "region", "name"),
+        # Partial unique index: at most one null-asin row per (name, region).
+        # Postgres treats NULLs as distinct in a plain unique constraint, so
+        # this can't be a UniqueConstraint — it has to be a filtered index.
+        Index(
+            "uq_authors_name_region_null_asin",
+            "name",
+            "region",
+            unique=True,
+            postgresql_where=text("asin IS NULL"),
+        ),
     )
 
     def __repr__(self) -> str:
@@ -393,6 +404,7 @@ author_book = Table(
     Column("author_id", Integer, ForeignKey("authors.id", ondelete="CASCADE"), nullable=False),
     Column("book_asin", String(12), ForeignKey("books.asin", ondelete="CASCADE"), nullable=False),
     Index("book_author_index", "book_asin", "author_id"),
+    UniqueConstraint("author_id", "book_asin", name="uq_author_book"),
 )
 
 book_narrator = Table(
@@ -401,6 +413,7 @@ book_narrator = Table(
     Column("narrator_name", Text, ForeignKey("narrators.name", ondelete="CASCADE"), nullable=False),
     Column("book_asin", String(12), ForeignKey("books.asin", ondelete="CASCADE"), nullable=False),
     Index("book_narrator_index", "book_asin", "narrator_name"),
+    UniqueConstraint("book_asin", "narrator_name", name="uq_book_narrator"),
 )
 
 book_series = Table(
@@ -410,6 +423,7 @@ book_series = Table(
     Column("series_asin", String(12), ForeignKey("series.asin", ondelete="CASCADE"), nullable=False),
     Column("position", String(100), nullable=True),
     Index("book_series_index", "book_asin", "series_asin"),
+    UniqueConstraint("book_asin", "series_asin", name="uq_book_series"),
 )
 
 book_genre = Table(
@@ -419,6 +433,7 @@ book_genre = Table(
     Column("genre_asin", String(12), ForeignKey("genres.asin", ondelete="CASCADE"), nullable=False),
     Index("book_genre_index", "book_asin", "genre_asin"),
     Index("genre_book_index", "genre_asin", "book_asin"),
+    UniqueConstraint("book_asin", "genre_asin", name="uq_book_genre"),
 )
 
 author_genre = Table(
@@ -428,6 +443,7 @@ author_genre = Table(
     Column("genre_asin", String(12), ForeignKey("genres.asin", ondelete="CASCADE"), nullable=False),
     Index("author_genre_index", "genre_asin", "author_id"),
     Index("genre_author_index", "author_id", "genre_asin"),
+    UniqueConstraint("author_id", "genre_asin", name="uq_author_genre"),
 )
 
 series_author = Table(

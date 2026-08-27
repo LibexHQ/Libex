@@ -59,9 +59,46 @@ def test_static_mount_serves_the_committed_logos(client, name):
 
 def test_openapi_info_carries_the_logo(client):
     """The exact object ReDoc reads. Asserting the values, not their presence:
-    a key holding the wrong URL renders nothing, same as no key at all."""
+    a key holding the wrong URL renders nothing, same as no key at all.
+
+    logo-dark.png rather than logo.png because /redoc's sidebar is dark. The
+    pairing itself is pinned by the test below; this one pins the object."""
     spec = client.get("/openapi.json").json()
-    assert spec["info"]["x-logo"] == {"url": "/static/logo.png", "altText": "Libex"}
+    assert spec["info"]["x-logo"] == {"url": "/static/logo-dark.png", "altText": "Libex"}
+
+
+def _relative_luminance(hex_colour):
+    """WCAG relative luminance, 0 (black) to 1 (white)."""
+    channels = []
+    for pair in (hex_colour.lstrip("#")[i:i + 2] for i in (0, 2, 4)):
+        c = int(pair, 16) / 255
+        channels.append(c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4)
+    r, g, b = channels
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def test_logo_variant_matches_the_sidebar_it_sits_on(client):
+    """
+    The one failure this pairing has, and it is silent: ReDoc renders the logo
+    against the sidebar, the two are set in different places -- `info.x-logo`
+    in the OpenAPI override, the colour in the theme object -- and nothing but
+    this connects them. Change one and the logo goes dark-on-dark or
+    light-on-light: still a 200, still a valid document, still a rendered page,
+    just an invisible logo that only a human looking at the page would catch.
+
+    Deliberately derived rather than hardcoded to the current pair, so it keeps
+    holding through a repaint instead of having to be edited alongside one.
+    """
+    sidebar = main_module._REDOC_THEME["theme"]["sidebar"]["backgroundColor"]
+    logo = client.get("/openapi.json").json()["info"]["x-logo"]["url"]
+
+    wants_dark_variant = _relative_luminance(sidebar) < 0.5
+    expected = "/static/logo-dark.png" if wants_dark_variant else "/static/logo.png"
+
+    assert logo == expected, (
+        f"sidebar {sidebar} is {'dark' if wants_dark_variant else 'light'}, "
+        f"so the logo should be {expected}, not {logo}"
+    )
 
 
 def test_openapi_logo_url_is_served(client):

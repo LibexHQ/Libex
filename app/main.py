@@ -3,10 +3,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 import asyncio
+import json
 
 # Third party
 from fastapi import FastAPI, Request
-from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
+from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -253,17 +254,29 @@ _FAVICON = "/static/favicon.png"
 # time after, so the document is built once rather than per request, and the
 # key is added to the object that is cached.
 #
-# The logo `info.x-logo` names is Libex's own: logo.png is the dark-on-light
-# artwork, which is the one that reads against ReDoc's near-white (#fafafa)
-# sidebar. The bundle has no prefers-color-scheme handling, so ReDoc cannot
-# select between the two files the way the README's <picture> does — this one
-# is pinned regardless of the visitor's theme.
+# The logo `info.x-logo` names is Libex's own, and which of the two files it
+# names is decided by the sidebar behind it: the /redoc route sets that sidebar
+# to #0f1720, so logo-dark.png is the pairing -- the same file the README's
+# <picture> serves under prefers-color-scheme: dark. logo.png is the
+# dark-on-light artwork and would be close to invisible there.
+#
+# The two move together. Changing the sidebar colour in the theme object
+# without changing this line, or the reverse, is how the logo goes dark-on-dark.
+#
+# The bundle has no prefers-color-scheme handling, so ReDoc cannot select
+# between the two files the way the README does; this one is pinned regardless
+# of the visitor's theme, which is why the sidebar is pinned dark rather than
+# following it.
+#
+# altText is what the version line below the logo is anchored to -- the route
+# finds the image by its alt attribute, the logo's own wrapper carrying a
+# hashed class with nothing stable to select on.
 _fastapi_openapi = app.openapi
 
 
 def _openapi_with_logo() -> dict[str, Any]:
     schema = _fastapi_openapi()
-    schema["info"]["x-logo"] = {"url": "/static/logo.png", "altText": "Libex"}
+    schema["info"]["x-logo"] = {"url": "/static/logo-dark.png", "altText": "Libex"}
     return schema
 
 
@@ -297,20 +310,107 @@ async def swagger_ui() -> HTMLResponse:
     )
 
 
+# ReDoc's appearance is set by a theme object handed to Redoc.init, and
+# get_redoc_html emits `<redoc spec-url=...>` -- the web component form, which
+# takes no options. Reaching the theme means owning the page, so this template
+# replaces upstream's rather than calling it.
+#
+# What that costs: upstream's template is no longer tracked, so a FastAPI
+# release that changes it changes nothing here and the two drift silently. The
+# parts worth keeping were carried over deliberately -- the <noscript> notice,
+# so a visitor with JavaScript off is told why the page is blank instead of
+# being handed a blank page, and the body reset, inlined rather than moved into
+# the stylesheet so it applies before that sheet has been fetched.
+#
+# Every URL below is same-origin and relative, which is the whole reason these
+# assets are served from here: opening /redoc must contact nothing but Libex.
+# Upstream's template names three third parties, and with_google_fonts=False
+# only silenced one of them.
+#
+# Colours are the logo's own, sampled from the artwork rather than picked to
+# taste: #001414 near-black navy and the #f06400-#f08c00 orange it carries.
+# The sidebar sits at the navy end and the accent at the orange one, so the
+# page reads as the same thing the logo does. Contrast against the sidebar was
+# measured, not eyeballed -- 11.1:1 for menu text, 7.9:1 for the accent, 6.1:1
+# for the version line, all clear of AA.
+#
+# The sidebar being dark is what pins `info.x-logo` to logo-dark.png above.
+# Those two values are a pair and are wrong separately.
+_REDOC_THEME: dict[str, Any] = {
+    "theme": {
+        "colors": {"primary": {"main": "#f79320"}},
+        "sidebar": {
+            # 260px is the default, and the operation names in this API are
+            # long enough to wrap at it.
+            "width": "300px",
+            "backgroundColor": "#0f1720",
+            "textColor": "#c3ccd6",
+            "activeTextColor": "#f79320",
+        },
+        "rightPanel": {
+            # 40% is the default. The samples on this API are wide -- a
+            # BookDto with every field populated is the common case, not the
+            # exceptional one -- and at 40% they wrap into unreadability while
+            # the description column beside them runs half empty.
+            "width": "46%",
+            "backgroundColor": "#111b26",
+            "textColor": "#e6edf3",
+        },
+    }
+}
+
+
 @app.get("/redoc", include_in_schema=False)
 async def redoc() -> HTMLResponse:
-    # with_google_fonts=False is what makes every URL in the emitted page
-    # same-origin; the other three are pointed at Libex by the arguments above
-    # it. Upstream's template is used rather than a local copy so its
-    # <noscript> notice keeps reaching visitors who would otherwise be handed a
-    # blank page with no explanation.
-    return get_redoc_html(
-        openapi_url=app.openapi_url,
-        title=f"{app.title} - ReDoc",
-        redoc_js_url="/static/docs/redoc.standalone.js",
-        redoc_favicon_url=_FAVICON,
-        with_google_fonts=False,
-    )
+    # json.dumps rather than an f-string: these three values are interpolated
+    # into executing JavaScript, and dumps is what guarantees the result is a
+    # JS literal whatever the strings contain. app.version comes from settings
+    # and app.openapi_url from the FastAPI() call, so neither is caller-shaped
+    # today -- but the escaping is the reason that stays true rather than
+    # something to re-derive if either ever comes from somewhere else.
+    #
+    # The version is placed by script rather than CSS because there is nothing
+    # stable to select: ReDoc wraps the logo in a styled-components div whose
+    # class is a content hash. The image's alt attribute is the anchor instead,
+    # set by `info.x-logo`'s altText above. If ReDoc ever stops rendering it,
+    # the guard drops the line and the rest of the page is unaffected.
+    html = f"""<!DOCTYPE html>
+<html>
+  <head>
+    <title>{app.title} - ReDoc</title>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="shortcut icon" href="{_FAVICON}">
+    <link rel="stylesheet" href="/static/redoc-libex.css">
+    <style>body {{ margin: 0; padding: 0; }}</style>
+  </head>
+  <body>
+    <noscript>
+      ReDoc requires Javascript to function. Please enable it to browse the documentation.
+    </noscript>
+    <div id="redoc"></div>
+    <script src="/static/docs/redoc.standalone.js"></script>
+    <script>
+      Redoc.init(
+        {json.dumps(app.openapi_url)},
+        {json.dumps(_REDOC_THEME)},
+        document.getElementById("redoc"),
+        function () {{
+          var img = document.querySelector('.menu-content img[alt="Libex"]');
+          if (!img) {{ return; }}
+          var block = img.closest("a") || img;
+          var wrapper = block.parentNode;
+          if (!wrapper || !wrapper.parentNode) {{ return; }}
+          var line = document.createElement("div");
+          line.className = "libex-version";
+          line.textContent = "v" + {json.dumps(app.version)};
+          wrapper.parentNode.insertBefore(line, wrapper.nextSibling);
+        }}
+      );
+    </script>
+  </body>
+</html>"""
+    return HTMLResponse(html)
 
 # ============================================================
 # EXCEPTION HANDLERS

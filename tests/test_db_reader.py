@@ -6,7 +6,7 @@ All DB interactions are mocked — we test our logic not SQLAlchemy.
 
 # Standard library
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 # Third party
@@ -1209,13 +1209,19 @@ async def test_get_db_stats_returns_counts_for_all_five_metrics():
 
     result = await get_db_stats(session)
 
-    assert result == {
+    assert result.stats == {
         "books": 150,
         "authors": 42,
         "narrators": 85,
         "series": 18,
         "booksWithChapters": 7,
     }
+    # A fresh live query followed by a successful cache write: the caller
+    # gets a real expiry to quote, not the None that means "nothing was
+    # actually persisted."
+    assert result.cache_expires_at is not None
+    remaining = (result.cache_expires_at - datetime.now(timezone.utc)).total_seconds()
+    assert 0 < remaining <= 300
 
 
 @pytest.mark.asyncio
@@ -1262,18 +1268,22 @@ async def test_get_db_stats_fallback_on_exception_includes_books_with_chapters()
 
     result = await get_db_stats(session)
 
-    assert result == {
+    assert result.stats == {
         "books": 0,
         "authors": 0,
         "narrators": 0,
         "series": 0,
         "booksWithChapters": 0,
     }
+    # The all-zeros fallback is never backed by a live cache entry -- the
+    # router must treat this as no-store, never quote a lifetime for it.
+    assert result.cache_expires_at is None
 
 
 @pytest.mark.asyncio
 async def test_get_db_stats_returns_cached_value_without_querying_counts():
-    """A fresh, key-complete cache hit skips all five count queries."""
+    """A fresh, key-complete cache hit skips all five count queries, and
+    carries the entry's own expiry back out rather than inventing one."""
     session = AsyncMock()
     cached = {
         "books": 150,
@@ -1282,13 +1292,15 @@ async def test_get_db_stats_returns_cached_value_without_querying_counts():
         "series": 18,
         "booksWithChapters": 7,
     }
+    cached_expires_at = datetime.now(timezone.utc) + timedelta(seconds=123)
     hit = MagicMock()
-    hit.scalar_one_or_none.return_value = MagicMock(value=cached)
+    hit.scalar_one_or_none.return_value = MagicMock(value=cached, expires_at=cached_expires_at)
     session.execute = AsyncMock(return_value=hit)
 
     result = await get_db_stats(session)
 
-    assert result == cached
+    assert result.stats == cached
+    assert result.cache_expires_at == cached_expires_at
     assert session.execute.call_count == 1
 
 
@@ -1317,7 +1329,7 @@ async def test_get_db_stats_stale_cache_shape_is_treated_as_miss():
 
     result = await get_db_stats(session)
 
-    assert result == {
+    assert result.stats == {
         "books": 150,
         "authors": 42,
         "narrators": 85,
@@ -1351,7 +1363,7 @@ async def test_get_db_stats_cache_read_error_falls_back_to_live_query():
 
     result = await get_db_stats(session)
 
-    assert result == {
+    assert result.stats == {
         "books": 150,
         "authors": 42,
         "narrators": 85,
@@ -1363,7 +1375,9 @@ async def test_get_db_stats_cache_read_error_falls_back_to_live_query():
 
 @pytest.mark.asyncio
 async def test_get_db_stats_cache_write_error_still_returns_live_counts():
-    """A cache write failure must not fail the request — the live result still returns."""
+    """A cache write failure must not fail the request — the live result
+    still returns, but with no expiry to quote, since nothing was actually
+    persisted for a header to describe."""
     session = AsyncMock()
     session.execute = AsyncMock(side_effect=[
         _cache_miss_result(),
@@ -1377,7 +1391,8 @@ async def test_get_db_stats_cache_write_error_still_returns_live_counts():
 
     result = await get_db_stats(session)
 
-    assert result == {
+    assert result.cache_expires_at is None
+    assert result.stats == {
         "books": 150,
         "authors": 42,
         "narrators": 85,
@@ -1430,8 +1445,8 @@ async def test_get_db_stats_no_region_returns_exactly_the_original_five_keys():
 
     result = await get_db_stats(session, region=None)
 
-    assert set(result.keys()) == {"books", "authors", "narrators", "series", "booksWithChapters"}
-    assert "seriesRegionUnknown" not in result
+    assert set(result.stats.keys()) == {"books", "authors", "narrators", "series", "booksWithChapters"}
+    assert "seriesRegionUnknown" not in result.stats
 
 
 @pytest.mark.asyncio
@@ -1555,9 +1570,9 @@ async def test_get_db_stats_region_cache_entry_is_never_served_to_a_different_re
     de_result = await get_db_stats(session, region="de")
     us_result_again = await get_db_stats(session, region="us")
 
-    assert us_result["books"] == 100
-    assert de_result["books"] == 111
-    assert us_result_again == us_result
+    assert us_result.stats["books"] == 100
+    assert de_result.stats["books"] == 111
+    assert us_result_again.stats == us_result.stats
     assert set(session.store.keys()) == {"db_stats:us", "db_stats:de"}
 
 
@@ -1627,7 +1642,7 @@ async def test_get_db_stats_region_scoped_second_call_reads_cache_without_live_q
     second_result = await get_db_stats(session, region="us")
 
     assert session.live_query_count == queries_after_first_call
-    assert second_result == first_result
+    assert second_result.stats == first_result.stats
 
 
 @pytest.mark.asyncio
@@ -1688,7 +1703,7 @@ async def test_get_db_stats_narrators_stays_global_when_region_given():
     compiled = str(narrators_stmt.compile(compile_kwargs={"literal_binds": True}))
 
     assert compiled == "SELECT count(*) AS count_1 \nFROM narrators"
-    assert result["narrators"] == 85
+    assert result.stats["narrators"] == 85
 
 
 @pytest.mark.asyncio
@@ -1704,8 +1719,8 @@ async def test_get_db_stats_region_scoped_adds_series_region_unknown():
 
     result = await get_db_stats(session, region="us")
 
-    assert result["seriesRegionUnknown"] == 5
-    assert result["series"] == 300
+    assert result.stats["seriesRegionUnknown"] == 5
+    assert result.stats["series"] == 300
 
     series_region_unknown_stmt = session.execute.call_args_list[6][0][0]
     compiled = str(series_region_unknown_stmt.compile(compile_kwargs={"literal_binds": True}))
@@ -1724,7 +1739,7 @@ async def test_get_db_stats_region_scoped_fallback_on_exception_includes_series_
 
     result = await get_db_stats(session, region="us")
 
-    assert result == {
+    assert result.stats == {
         "books": 0,
         "authors": 0,
         "narrators": 0,
@@ -1732,6 +1747,7 @@ async def test_get_db_stats_region_scoped_fallback_on_exception_includes_series_
         "booksWithChapters": 0,
         "seriesRegionUnknown": 0,
     }
+    assert result.cache_expires_at is None
 
 
 # ============================================================

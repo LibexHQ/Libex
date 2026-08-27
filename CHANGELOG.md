@@ -10,6 +10,23 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.19.1]
+
+### Fixed
+- **`GET /db/stats` now sends `Cache-Control`, so an edge or browser can
+  actually cache it.** The endpoint already cached its result server-side
+  for up to five minutes, but sent no caching header of its own, so every
+  request bypassed the edge (`cf-cache-status: BYPASS` on every call) and
+  reached the origin regardless. Responses now carry
+  `public, max-age=<n>, s-maxage=<n>`, where `<n>` is however much life is
+  actually left on the underlying five-minute cache entry rather than a flat
+  re-quote of the full window — a cached copy expires when the origin entry
+  does, instead of potentially outliving it. When there is nothing
+  trustworthy behind the response — the all-zeros fallback returned when the
+  live database query fails, or a successful query whose result failed to
+  cache — the response instead sends `Cache-Control: no-store`, so neither
+  zeros nor an unconfirmed result get held anywhere.
+
 ## [1.19.0]
 
 ### Added

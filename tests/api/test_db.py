@@ -5,9 +5,12 @@ DB reader is mocked — we test our routing logic not SQLAlchemy.
 """
 
 # Standard library
+from datetime import datetime, timezone, timedelta
 from unittest.mock import AsyncMock, patch
 
 # Third party
+import re
+
 import pytest
 from httpx import AsyncClient, ASGITransport
 
@@ -15,6 +18,7 @@ from httpx import AsyncClient, ASGITransport
 from app.main import app
 import app.api.routes.large_response as large_response_module
 from app.api.routes.large_response import LARGE_RESPONSE_THREAD_THRESHOLD
+from app.services.db.reader import DbStatsResult
 
 
 @pytest.fixture
@@ -116,6 +120,23 @@ MOCK_CHAPTERS = {
 
 READER_PATH = "app.api.routes.db.router.search_books_from_db"
 
+MOCK_STATS = {
+    "books": 150, "authors": 42, "narrators": 85, "series": 18, "booksWithChapters": 7,
+}
+
+
+def _stats_result(stats=None, seconds=300):
+    """A DbStatsResult with an expiry `seconds` in the future -- the shape
+    get_db_stats now always returns. `seconds=None` produces the no-store
+    case (cache_expires_at=None): the DB-failure fallback or a cache-write
+    failure after an otherwise successful query."""
+    if seconds is None:
+        return DbStatsResult(stats if stats is not None else MOCK_STATS, None)
+    return DbStatsResult(
+        stats if stats is not None else MOCK_STATS,
+        datetime.now(timezone.utc) + timedelta(seconds=seconds),
+    )
+
 
 def _many_db_books(n):
     """n distinct books, cheap enough to build at both below- and
@@ -132,9 +153,9 @@ def _many_db_books(n):
 async def test_get_db_stats_returns_200(async_client):
     """Returns 200 with stats."""
     with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock:
-        mock.return_value = {
+        mock.return_value = _stats_result({
             "books": 150, "authors": 42, "narrators": 85, "series": 18, "booksWithChapters": 7,
-        }
+        })
         response = await async_client.get("/db/stats")
         assert response.status_code == 200
 
@@ -143,9 +164,9 @@ async def test_get_db_stats_returns_200(async_client):
 async def test_get_db_stats_returns_all_fields(async_client):
     """Returns books, authors, narrators, series, and booksWithChapters counts."""
     with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock:
-        mock.return_value = {
+        mock.return_value = _stats_result({
             "books": 150, "authors": 42, "narrators": 85, "series": 18, "booksWithChapters": 7,
-        }
+        })
         response = await async_client.get("/db/stats")
         data = response.json()
         assert data["books"] == 150
@@ -159,9 +180,9 @@ async def test_get_db_stats_returns_all_fields(async_client):
 async def test_get_db_stats_returns_zeros_on_empty_db(async_client):
     """Returns zero counts when DB is empty."""
     with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock:
-        mock.return_value = {
+        mock.return_value = _stats_result({
             "books": 0, "authors": 0, "narrators": 0, "series": 0, "booksWithChapters": 0,
-        }
+        })
         response = await async_client.get("/db/stats")
         data = response.json()
         assert data["books"] == 0
@@ -180,7 +201,7 @@ async def test_get_db_stats_missing_books_with_chapters_from_service_defaults_to
     guarantee that a future non-default field would need to uphold.
     """
     with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock:
-        mock.return_value = {"books": 150, "authors": 42, "narrators": 85, "series": 18}
+        mock.return_value = _stats_result({"books": 150, "authors": 42, "narrators": 85, "series": 18})
         response = await async_client.get("/db/stats")
         assert response.status_code == 200
         assert response.json()["booksWithChapters"] == 0
@@ -196,9 +217,9 @@ async def test_get_db_stats_no_region_param_forwards_none_to_the_reader(async_cl
     """A plain call with no `region` query param must still forward
     region=None to the reader -- the same call an old client makes."""
     with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock:
-        mock.return_value = {
+        mock.return_value = _stats_result({
             "books": 150, "authors": 42, "narrators": 85, "series": 18, "booksWithChapters": 7,
-        }
+        })
         response = await async_client.get("/db/stats")
 
         assert response.status_code == 200
@@ -216,9 +237,9 @@ async def test_get_db_stats_no_region_response_carries_only_the_original_five_st
     set of the old response would not have seen before this change.
     """
     with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock:
-        mock.return_value = {
+        mock.return_value = _stats_result({
             "books": 150, "authors": 42, "narrators": 85, "series": 18, "booksWithChapters": 7,
-        }
+        })
         response = await async_client.get("/db/stats")
 
         data = response.json()
@@ -237,10 +258,10 @@ async def test_get_db_stats_region_param_is_forwarded_normalized(async_client):
     validate_region has run on it -- normalized to lowercase, not the raw
     query string."""
     with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock:
-        mock.return_value = {
+        mock.return_value = _stats_result({
             "books": 100, "authors": 200, "narrators": 999, "series": 300,
             "booksWithChapters": 400, "seriesRegionUnknown": 5,
-        }
+        })
         response = await async_client.get("/db/stats?region=UK")
 
         assert response.status_code == 200
@@ -278,14 +299,165 @@ async def test_get_db_stats_series_region_unknown_reaches_the_caller_through_the
     through the route.
     """
     with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock:
-        mock.return_value = {
+        mock.return_value = _stats_result({
             "books": 100, "authors": 200, "narrators": 999, "series": 300,
             "booksWithChapters": 400, "seriesRegionUnknown": 5,
-        }
+        })
         response = await async_client.get("/db/stats?region=us")
 
         assert response.status_code == 200
         assert response.json()["seriesRegionUnknown"] == 5
+
+
+# ============================================================
+# GET /db/stats — Cache-Control header
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_unscoped_sets_cache_control_header(async_client):
+    """The regression that mattered: this route previously sent no
+    Cache-Control at all, which is why Cloudflare reported BYPASS on every
+    call. The README's badges fire 37 fetches across 9 distinct origin
+    URLs on every render; whether shields.io actually honours this header
+    on its own fetch, and so throttles how many of those 37 reach the
+    origin, has not been measured. A plain, unscoped call must carry the
+    header."""
+    with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock_stats:
+        mock_stats.return_value = _stats_result()
+        response = await async_client.get("/db/stats")
+
+    assert response.status_code == 200
+    assert "Cache-Control" in response.headers
+    assert response.headers["Cache-Control"].startswith("public,")
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_scoped_sets_cache_control_header(async_client):
+    """Same regression, scoped call -- a region query param must not skip
+    the header logic."""
+    with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock_stats:
+        mock_stats.return_value = _stats_result(MOCK_STATS)
+        response = await async_client.get("/db/stats?region=us")
+
+    assert response.status_code == 200
+    assert "Cache-Control" in response.headers
+    assert response.headers["Cache-Control"].startswith("public,")
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_max_age_tracks_the_entrys_remaining_life_not_the_flat_ttl(async_client):
+    """The whole point of the change: max-age has to quote how much life is
+    actually left on the cache entry, not a flat re-quote of
+    STATS_CACHE_TTL_SECONDS every time regardless of how far into its life
+    the entry already is. A entry primed with ~42 seconds left must produce
+    a max-age in that neighborhood, not 300 -- a test that only checked
+    "some Cache-Control exists" would pass just as well against a hardcoded
+    300 and miss this entirely."""
+    with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock_stats:
+        mock_stats.return_value = _stats_result(seconds=42)
+        response = await async_client.get("/db/stats")
+
+    max_age = int(re.search(r"max-age=(\d+)", response.headers["Cache-Control"]).group(1))
+    s_maxage = int(re.search(r"s-maxage=(\d+)", response.headers["Cache-Control"]).group(1))
+    assert 40 <= max_age <= 42
+    assert max_age == s_maxage
+    # Not the flat TTL -- that would mean the real lookup never happened.
+    assert max_age != 300
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_longer_remaining_life_also_tracked_not_flat_ttl(async_client):
+    """Same proof at a different TTL, so the first test isn't just a
+    coincidence of one magic number: a 99-second entry must not also
+    collapse to 300."""
+    with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock_stats:
+        mock_stats.return_value = _stats_result(MOCK_STATS, seconds=99)
+        response = await async_client.get("/db/stats?region=us")
+
+    max_age = int(re.search(r"max-age=(\d+)", response.headers["Cache-Control"]).group(1))
+    assert 96 <= max_age <= 99
+    assert max_age != 300
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_db_failure_fallback_gets_no_store(async_client):
+    """The regression this change exists to close: the previous version made
+    a second, independent cache.get_entry call in the router, which could not
+    distinguish "healthy, just written" from "degraded, deliberately not
+    written" -- a cache miss there fell back to advertising the full TTL, so
+    the all-zeros DB-failure fallback got 'public, max-age=300, s-maxage=300'
+    and Cloudflare held those zeros at the edge for five minutes with no way
+    for origin to self-correct. get_db_stats now reports this case as
+    cache_expires_at=None, and the router must translate that into
+    Cache-Control: no-store, never a max-age."""
+    with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock_stats:
+        mock_stats.return_value = DbStatsResult(
+            {"books": 0, "authors": 0, "narrators": 0, "series": 0, "booksWithChapters": 0},
+            None,
+        )
+        response = await async_client.get("/db/stats")
+
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "no-store"
+    assert "max-age" not in response.headers["Cache-Control"]
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_cache_write_failure_gets_no_store(async_client):
+    """The other case where get_db_stats reports cache_expires_at=None: the
+    live query succeeded but the follow-up cache.set failed, so nothing was
+    actually persisted for any max-age to describe. Quoting a lifetime for an
+    entry that was never written is exactly the bug being fixed -- this must
+    also be no-store, never the full TTL this test used to assert."""
+    with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock_stats:
+        mock_stats.return_value = DbStatsResult(MOCK_STATS, None)
+        response = await async_client.get("/db/stats")
+
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "no-store"
+    assert "max-age" not in response.headers["Cache-Control"]
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_entry_on_the_edge_of_expiry_never_advertises_a_negative_max_age(async_client):
+    """An entry can lapse between whatever wrote it and this arithmetic
+    running. A negative max-age is malformed and a caching proxy may treat
+    it unpredictably -- this must clamp to zero, not go negative."""
+    with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock_stats:
+        mock_stats.return_value = _stats_result(seconds=-5)
+        response = await async_client.get("/db/stats")
+
+    assert "max-age=0" in response.headers["Cache-Control"]
+    assert "max-age=-" not in response.headers["Cache-Control"]
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_scoped_and_unscoped_read_different_cache_entries(async_client):
+    """Scoped and unscoped calls are backed by their own cache entries
+    (`db_stats` vs `db_stats:<region>`), so their headers can legitimately
+    diverge -- a test that expected one value for both would be wrong. Since
+    get_db_stats now carries the expiry out of the one cache read/write it
+    already performs, this proves the router's header tracks whichever
+    result it was actually handed, per call, rather than a single shared
+    value."""
+    results = {
+        None: _stats_result(seconds=42),
+        "us": _stats_result(seconds=200),
+    }
+
+    async def fake_get_db_stats(session, region=None):
+        return results[region]
+
+    with patch("app.api.routes.db.router.get_db_stats", side_effect=fake_get_db_stats):
+        unscoped_response = await async_client.get("/db/stats")
+        scoped_response = await async_client.get("/db/stats?region=us")
+
+    unscoped_max_age = int(re.search(r"max-age=(\d+)", unscoped_response.headers["Cache-Control"]).group(1))
+    scoped_max_age = int(re.search(r"max-age=(\d+)", scoped_response.headers["Cache-Control"]).group(1))
+    assert 40 <= unscoped_max_age <= 42
+    assert 198 <= scoped_max_age <= 200
+    assert unscoped_max_age != scoped_max_age
 
 
 # ============================================================

@@ -8,7 +8,7 @@ Returns the same dict format as the Audible services.
 
 # Standard library
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, NamedTuple
 
 # Third party
 from sqlalchemy import Float, case, cast, func, select
@@ -1432,10 +1432,47 @@ _STAT_KEYS = frozenset({"books", "authors", "narrators", "series", "booksWithCha
 _REGION_STAT_KEYS = _STAT_KEYS | {"seriesRegionUnknown"}
 
 
-async def get_db_stats(session: AsyncSession, region: str | None = None) -> dict[str, int]:
+class DbStatsResult(NamedTuple):
+    """Stats counts together with the cache expiry backing them.
+
+    Exists so /db/stats can derive Cache-Control from the one cache read/
+    write this function already does, instead of a second, independent
+    cache.get_entry call in the router. Two reads of the same key cannot
+    agree on "healthy, just written" versus "degraded, deliberately not
+    written" — both look identical to a second read that simply finds
+    nothing there. Carrying the expiry out of the read this function already
+    performed removes the second read entirely, so there is nothing left to
+    disagree.
+
+    cache_expires_at is None whenever the returned stats are not backed by a
+    live cache entry: the live query itself failed (the all-zeros fallback),
+    or it succeeded but the follow-up cache.set failed, so no entry exists
+    for any read to find. The router should treat None the way
+    _mark_completeness (app/api/routes/authors/router.py) treats an
+    incomplete result — Cache-Control: no-store — never substitute
+    STATS_CACHE_TTL_SECONDS as a guessed duration, which is exactly the bug
+    this replaces: the fallback was reachable only on failure and handed out
+    the longest freshness Libex offers.
+
+    On a fresh write, cache_expires_at is computed locally as
+    now + STATS_CACHE_TTL_SECONDS rather than re-read back from the row
+    cache.set just committed, to avoid a third round trip for a value this
+    function already knows deterministically. The row's real expiry is set
+    a few microseconds later inside cache.set, so this is a lower bound —
+    the edge is told to hold the value for very slightly less than it
+    actually remains valid, never more.
+    """
+    stats: dict[str, int]
+    cache_expires_at: datetime | None
+
+
+async def get_db_stats(
+    session: AsyncSession, region: str | None = None
+) -> DbStatsResult:
     """
     Returns counts of books, authors, narrators, series, and books with stored
-    chapter data in the local DB. booksWithChapters counts rows in the tracks
+    chapter data in the local DB, together with the cache expiry backing that
+    value (see DbStatsResult). booksWithChapters counts rows in the tracks
     table (one per book that actually has chapters stored), not books that have
     merely been checked — checked includes ISBN-keyed records and bundle ASINs
     that will never have chapters, which would overstate what Libex holds.
@@ -1467,14 +1504,18 @@ async def get_db_stats(session: AsyncSession, region: str | None = None) -> dict
     query, and so does a cache error — but a cache error at the database level
     leaves the session's transaction aborted, so it must be rolled back before
     the live query can run on the same session, and a cache write failure
-    never fails the request.
+    never fails the request (but does mean the returned DbStatsResult carries
+    no cache_expires_at, since nothing was actually written for it to quote).
+    A DB read failure is rolled back too, for the same reason: it left this
+    branch as the one place in the function that could hand the caller back
+    an aborted transaction on the same session.
     """
     key = cache.stats_key(region)
     expected_keys = _STAT_KEYS if region is None else _REGION_STAT_KEYS
     try:
-        cached = await cache.get(session, key)
-        if cached is not None and set(cached) == expected_keys:
-            return cached
+        entry = await cache.get_entry(session, key)
+        if entry is not None and set(entry.value) == expected_keys:
+            return DbStatsResult(entry.value, entry.expires_at)
     except Exception as e:
         logger.warning(f"Cache read failed for stats: {e}")
         await session.rollback()
@@ -1516,17 +1557,20 @@ async def get_db_stats(session: AsyncSession, region: str | None = None) -> dict
             stats["seriesRegionUnknown"] = series_region_unknown.scalar_one()
     except Exception as e:
         logger.warning(f"DB read failed for stats: {e}")
+        await session.rollback()
         fallback = {"books": 0, "authors": 0, "narrators": 0, "series": 0, "booksWithChapters": 0}
         if region is not None:
             fallback["seriesRegionUnknown"] = 0
-        return fallback
+        return DbStatsResult(fallback, None)
 
+    cache_expires_at = datetime.now(timezone.utc) + timedelta(seconds=STATS_CACHE_TTL_SECONDS)
     try:
         await cache.set(session, key, stats, ttl_seconds=STATS_CACHE_TTL_SECONDS)
     except Exception as e:
         logger.warning(f"Cache write failed for stats: {e}")
+        cache_expires_at = None
 
-    return stats
+    return DbStatsResult(stats, cache_expires_at)
 
 
 async def get_stored_genres(

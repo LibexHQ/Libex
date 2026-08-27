@@ -15,6 +15,7 @@ import asyncio
 import random
 import time
 from datetime import timedelta
+from enum import Enum
 
 # Third party
 from asyncpg.exceptions import TransactionRollbackError
@@ -129,9 +130,11 @@ _PERSIST_RETRY_BASE_SECONDS = 0.25
 # while the database is unavailable. It is also two full prolific catalogs, so
 # a second walk arriving while the first is still draining is admitted rather
 # than shed whole. Raising it trades that headroom against the one failure here
-# that takes a worker down completely: shedding costs some books a write they
-# get back on the next request, and running out of memory costs everything the
-# process was doing.
+# that takes a worker down completely: for an API request, shedding costs some
+# books a write they get back on the next request that asks for them; running
+# out of memory costs everything the process was doing. That trade does not
+# hold for a caller with no next request to recover on — see PersistOutcome,
+# which exists for exactly that case.
 _PERSIST_BACKLOG_MAX_BOOKS = 5000
 
 # Shedding and chunk retries are both reported on this window, never per
@@ -153,8 +156,25 @@ _SHED_LOG_INTERVAL_SECONDS = 60
 _bg_write_semaphore: asyncio.Semaphore | None = None
 _bg_write_semaphore_loop: asyncio.AbstractEventLoop | None = None
 
-# Limits concurrent background writes so the seeder doesn't starve the
-# API's DB connection pool. At most 2 background persist tasks write at once.
+# Limits concurrent background writes against the pool this process shares
+# with its own request-serving queries. Every background write here still
+# takes a connection from the same engine ordinary requests use, so too many
+# running at once competes with the responses being built right now for
+# connections, in service of work nothing is waiting on.
+#
+# The seeder is not what this protects against, and the comment that used to
+# say so is now wrong rather than merely imprecise: it has run in its own
+# container with its own connection pool since 1.18.x, so nothing it does can
+# starve this one. What the limit actually bounds is per-process, and the API
+# is the process with request-path queries to protect against its own
+# background work; a dedicated container has no such traffic sharing its pool
+# and no reason to inherit the API's ceiling.
+#
+# A module-level constant rather than a settings field on purpose, so it can
+# be raised or lowered for one process without touching every process that
+# imports this module — see set_bg_write_concurrency_limit below, and
+# scripts/refresh_corpus.py's _raise_process_limits for the existing use of
+# exactly this kind of per-process override on a sibling limit.
 _BG_WRITE_CONCURRENCY_LIMIT = 2
 
 # Strong references to every background task in flight. asyncio holds only a
@@ -180,6 +200,42 @@ _retry_last_logged: float | None = None
 
 
 # ============================================================
+# PERSIST OUTCOME
+# ============================================================
+
+class PersistOutcome(Enum):
+    """
+    What a call that goes through _spawn can establish about its own batch
+    before it returns — the backlog admission decision, and nothing past it.
+
+    ADMITTED means every persistable item in the call's batch was queued for
+    a background write, including the case where there was nothing to queue
+    at all (an empty or all-unwritable batch is never shed, since shedding
+    zero books protects nothing). It does not mean the write finished, or
+    that it will ultimately succeed: an admitted chunk still runs the
+    retry-then-replay path in _persist_book_chunk_background, and a per-book
+    failure surviving that is only logged, never reported back through this
+    value. Closing that gap needs a mechanism that can report something
+    learned after this function has already returned control to its caller —
+    an awaited result, or a callback — not a richer member of this enum,
+    because ADMITTED is decided synchronously at spawn time, before the write
+    it describes has even started.
+
+    SHED means the backlog was already at _PERSIST_BACKLOG_MAX_BOOKS and none
+    of the batch was queued. persist_books_background admits or sheds a
+    call's whole persistable set as a single unit — the backlog is reserved
+    for the full batch before any chunk inside it starts, so one call is
+    never half admitted; there is no PARTIAL member because no code path
+    here produces one. A caller that cannot treat "queued" and "durably
+    written" as interchangeable — the seeder deciding whether to mark an
+    entity as seeded is the case this was added for — has this value to gate
+    on instead of assuming persistence happened.
+    """
+    ADMITTED = "admitted"
+    SHED = "shed"
+
+
+# ============================================================
 # QUEUE STATE ACCESSORS
 # ============================================================
 #
@@ -199,6 +255,30 @@ def backlog_capacity() -> int:
 def queued_books() -> int:
     """Books currently queued or in flight across every entry point below."""
     return _queued_books
+
+
+def set_bg_write_concurrency_limit(limit: int) -> None:
+    """
+    Raises or lowers _BG_WRITE_CONCURRENCY_LIMIT for this process, before the
+    semaphore it governs has been built.
+
+    The default of 2 is sized for the API process protecting its own
+    request-path queries from its own background writes; a dedicated
+    container carrying no such traffic — the seeder, or a one-off script —
+    can ask for more. This is the entry point for that: it exists so such a
+    caller mutates a documented function instead of reaching past the
+    underscore into module-private state and duplicating the ordering check
+    below itself.
+
+    Raises AssertionError if the semaphore already exists. It is built
+    lazily on first use and reused for the rest of the process's life, so a
+    call after that point would silently leave the old limit in force —
+    exactly the failure scripts/refresh_corpus.py's own asserts exist to
+    catch on the sibling limits it rebinds the same way.
+    """
+    global _BG_WRITE_CONCURRENCY_LIMIT
+    assert _bg_write_semaphore is None, "Background write semaphore already built"
+    _BG_WRITE_CONCURRENCY_LIMIT = limit
 
 
 def _get_bg_write_semaphore() -> asyncio.Semaphore:
@@ -238,9 +318,12 @@ def _record_shed(books: int) -> None:
     waiting out a window before saying anything hides the moment shedding
     began, which is the part that dates the incident.
 
-    The count is what matters operationally — which books were dropped is not
-    recoverable information anyway, since they persist on the next request that
-    asks for them — so nothing about a book is logged, only how many.
+    The count is what matters operationally, not which books were dropped —
+    for the API read paths that call through _spawn, a shed book persists on
+    the next request that asks for it, so nothing about a book is logged,
+    only how many. That does not hold for a caller with no next request to
+    fall back on; PersistOutcome is how such a caller learns its batch was
+    shed instead of assuming this log line would have told it.
     """
     global _shed_books, _shed_events, _shed_last_logged
 
@@ -296,24 +379,36 @@ def _record_retry(attempts: int, replayed: bool, fields: dict) -> None:
     _retry_last_logged = now
 
 
-def _spawn(make_coro, books: int) -> None:
+def _spawn(make_coro, books: int) -> PersistOutcome:
     """
     Starts one background persist, or sheds it when the backlog is full.
 
     Takes a coroutine function rather than a coroutine so a shed batch leaves
     nothing un-awaited behind it. The task is held in _inflight for as long as
     it runs and discarded by its own done callback.
+
+    Returns which of the two happened. persist_author_background,
+    persist_series_background, persist_track_background,
+    persist_cache_background and persist_author_books_cache_background each
+    reserve one item's worth of backlog and discard this value — a single
+    shed profile or cache entry re-fetches the same way a shed book does, and
+    nothing downstream of those five entry points currently reacts to
+    shedding differently from success. persist_books_background is the one
+    caller that forwards it to its own caller, because it is the one call
+    whose admission or shedding an outside caller (the seeder) needs to tell
+    apart from a completed write.
     """
     global _queued_books
 
     if _queued_books + books > _PERSIST_BACKLOG_MAX_BOOKS:
         _record_shed(books)
-        return
+        return PersistOutcome.SHED
 
     _queued_books += books
     task = asyncio.create_task(_tracked(make_coro(), books))
     _inflight.add(task)
     task.add_done_callback(_inflight.discard)
+    return PersistOutcome.ADMITTED
 
 
 async def _tracked(coro, books: int) -> None:
@@ -435,7 +530,7 @@ async def _persist_book_chunk_background(chunk: list[dict], region: str) -> None
 # ENTRY POINTS
 # ============================================================
 
-def persist_books_background(books: list[dict], region: str) -> None:
+def persist_books_background(books: list[dict], region: str) -> PersistOutcome:
     """
     Fires a single background task to write multiple books to DB and cache.
 
@@ -448,6 +543,18 @@ def persist_books_background(books: list[dict], region: str) -> None:
 
     Books without an ASIN are dropped before the slicing, so the backlog is
     reserved for what will actually be written and no chunk is short.
+
+    Returns PersistOutcome.SHED when the backlog was already full and none of
+    this call's books were queued, or PersistOutcome.ADMITTED otherwise —
+    decided for the whole call as a single unit, before the loop above has
+    run a single chunk, so a batch is never partly admitted and partly shed.
+    See PersistOutcome for exactly what a caller can and cannot conclude from
+    either value, in particular that ADMITTED is not a promise the write will
+    finish or that it will succeed once it runs.
+
+    Existing callers that call this and ignore the return value are
+    unaffected: the background write fires identically either way, the same
+    as before this had a return value at all.
     """
     persistable = [b for b in books if b.get("asin")]
 
@@ -469,7 +576,7 @@ def persist_books_background(books: list[dict], region: str) -> None:
                 extra={"books": len(persistable), "region": region, **_failure_fields(exc)},
             )
 
-    _spawn(_persist, len(persistable))
+    return _spawn(_persist, len(persistable))
 
 
 def persist_author_background(data: dict, region: str) -> None:

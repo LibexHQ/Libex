@@ -254,14 +254,11 @@ _FAVICON = "/static/favicon.png"
 # time after, so the document is built once rather than per request, and the
 # key is added to the object that is cached.
 #
-# The logo `info.x-logo` names is Libex's own, and which of the two files it
-# names is decided by the sidebar behind it: the /redoc route sets that sidebar
-# to #0f1720, so logo-dark.png is the pairing -- the same file the README's
-# <picture> serves under prefers-color-scheme: dark. logo.png is the
-# dark-on-light artwork and would be close to invisible there.
-#
-# The two move together. Changing the sidebar colour in the theme object
-# without changing this line, or the reverse, is how the logo goes dark-on-dark.
+# The logo `info.x-logo` names is Libex's own -- logo-dark.png, the same file
+# the README's <picture> serves under prefers-color-scheme: dark, chosen
+# because the /redoc route's sidebar is dark. logo.png is the dark-on-light
+# artwork and would be close to invisible there. See the sidebar's background
+# colour in the theme object below for why the two can't change independently.
 #
 # The bundle has no prefers-color-scheme handling, so ReDoc cannot select
 # between the two files the way the README does; this one is pinned regardless
@@ -310,17 +307,21 @@ async def swagger_ui() -> HTMLResponse:
     )
 
 
-# ReDoc's appearance is set by a theme object handed to Redoc.init, and
-# get_redoc_html emits `<redoc spec-url=...>` -- the web component form, which
-# takes no options. Reaching the theme means owning the page, so this template
-# replaces upstream's rather than calling it.
+# get_redoc_html emits `<redoc spec-url=...>` -- the web component form. That
+# element does read a theme attribute (JSON-encoded), but get_redoc_html gives
+# no way to reach it: the function exposes no argument that adds an attribute
+# to the tag it emits, it takes no CSS URL at all unlike get_swagger_ui_html,
+# and the version line below the logo needs Redoc.init's post-render callback,
+# which the web component form has no equivalent for. Owning the page is the
+# only way to reach any of the three, so this template replaces upstream's
+# rather than calling it.
 #
 # What that costs: upstream's template is no longer tracked, so a FastAPI
 # release that changes it changes nothing here and the two drift silently. The
-# parts worth keeping were carried over deliberately -- the <noscript> notice,
-# so a visitor with JavaScript off is told why the page is blank instead of
-# being handed a blank page, and the body reset, inlined rather than moved into
-# the stylesheet so it applies before that sheet has been fetched.
+# parts worth keeping were carried over -- the <noscript> notice, so a visitor
+# with JavaScript off is told why the page is blank instead of being handed a
+# blank page, and the body reset, inlined rather than moved into the
+# stylesheet so it applies before that sheet has been fetched.
 #
 # Every URL below is same-origin and relative, which is the whole reason these
 # assets are served from here: opening /redoc must contact nothing but Libex.
@@ -328,14 +329,15 @@ async def swagger_ui() -> HTMLResponse:
 # only silenced one of them.
 #
 # Colours are the logo's own, sampled from the artwork rather than picked to
-# taste: #001414 near-black navy and the #f06400-#f08c00 orange it carries.
+# taste. Decoding app/static/logo.png, the dominant colour among its opaque
+# pixels is #111822. Its orange is a gradient rather than a single colour --
+# sampled pixels there range from roughly #fd4d01 to #fe8901 -- and #f79320
+# below falls inside that range.
 # The sidebar sits at the navy end and the accent at the orange one, so the
 # page reads as the same thing the logo does. Contrast against the sidebar was
 # measured, not eyeballed -- 11.1:1 for menu text, 7.9:1 for the accent, 6.1:1
 # for the version line, all clear of AA.
 #
-# The sidebar being dark is what pins `info.x-logo` to logo-dark.png above.
-# Those two values are a pair and are wrong separately.
 _REDOC_THEME: dict[str, Any] = {
     "theme": {
         "colors": {"primary": {"main": "#f79320"}},
@@ -343,6 +345,9 @@ _REDOC_THEME: dict[str, Any] = {
             # 260px is the default, and the operation names in this API are
             # long enough to wrap at it.
             "width": "300px",
+            # Paired with logo-dark.png in _openapi_with_logo above -- the two
+            # are wrong separately, and changing one without the other is how
+            # the logo ends up dark-on-dark.
             "backgroundColor": "#0f1720",
             "textColor": "#c3ccd6",
             "activeTextColor": "#f79320",
@@ -360,14 +365,32 @@ _REDOC_THEME: dict[str, Any] = {
 }
 
 
+# json.dumps alone only guarantees valid JSON, not a value safe to interpolate
+# into an inline <script> block -- it leaves `<`, `>` and `&` untouched, so a
+# string containing `</script>` closes the tag at the HTML-parser level no
+# matter how the JSON inside it is quoted. Escaping those three characters to
+# their unicode forms keeps the tag from ever closing while still parsing as
+# the same JS value. Not fastapi.openapi.docs._html_safe_json, which does the
+# same three replacements but is a private, unversioned symbol -- copying the
+# handful of lines here means a FastAPI upgrade can't rename or drop it out
+# from under this file.
+def _html_safe_json(value: Any) -> str:
+    return (
+        json.dumps(value)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
+
+
 @app.get("/redoc", include_in_schema=False)
 async def redoc() -> HTMLResponse:
-    # json.dumps rather than an f-string: these three values are interpolated
-    # into executing JavaScript, and dumps is what guarantees the result is a
-    # JS literal whatever the strings contain. app.version comes from settings
-    # and app.openapi_url from the FastAPI() call, so neither is caller-shaped
-    # today -- but the escaping is the reason that stays true rather than
-    # something to re-derive if either ever comes from somewhere else.
+    # _html_safe_json rather than plain json.dumps: all three values below are
+    # interpolated into an inline <script> block, and app.version in
+    # particular comes from the APP_VERSION environment variable via
+    # Settings, so it is operator-controlled rather than fixed by the repo.
+    # openapi_url and the theme dict get the same treatment rather than
+    # relying on today's callers happening to be safe.
     #
     # The version is placed by script rather than CSS because there is nothing
     # stable to select: ReDoc wraps the logo in a styled-components div whose
@@ -392,8 +415,8 @@ async def redoc() -> HTMLResponse:
     <script src="/static/docs/redoc.standalone.js"></script>
     <script>
       Redoc.init(
-        {json.dumps(app.openapi_url)},
-        {json.dumps(_REDOC_THEME)},
+        {_html_safe_json(app.openapi_url)},
+        {_html_safe_json(_REDOC_THEME)},
         document.getElementById("redoc"),
         function () {{
           var img = document.querySelector('.menu-content img[alt="Libex"]');
@@ -403,7 +426,7 @@ async def redoc() -> HTMLResponse:
           if (!wrapper || !wrapper.parentNode) {{ return; }}
           var line = document.createElement("div");
           line.className = "libex-version";
-          line.textContent = "v" + {json.dumps(app.version)};
+          line.textContent = "v" + {_html_safe_json(app.version)};
           wrapper.parentNode.insertBefore(line, wrapper.nextSibling);
         }}
       );

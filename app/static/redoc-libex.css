@@ -21,7 +21,7 @@
  * ReDoc has no option for hiding the API title, and the page does not need it:
  * the logo directly above says Libex, and the version now sits under the logo
  * where a reader looks for it rather than in the middle of the first heading.
- * Left alone it renders "Libex (1.17.0)" as an h1 over the introduction.
+ * Left alone it renders "Libex (<version>)" as an h1 over the introduction.
  *
  * .api-info is one of the hand-written class names, and the h1 is the first
  * thing inside it -- ReDoc builds that heading as `title + " " + <span>(ver)</span>`,

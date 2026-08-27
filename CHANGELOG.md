@@ -10,6 +10,36 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.18.3]
+
+No endpoint, parameter, response shape, field or status code moved — every
+change here is to the ReDoc documentation page, not the API it describes.
+
+### Changed
+- **The ReDoc page now uses the logo's own colours, and gives its samples
+  more room.** The sidebar was near-white at 260px and the right panel held
+  response samples at 40%, so a fully populated sample wrapped awkwardly
+  while the description column beside it ran half empty. The sidebar is now
+  300px wide on a near-black navy sampled from the logo artwork, with an
+  orange accent taken from the same source; the right panel is 46%. The
+  centred "Libex (version)" heading that used to sit over the introduction
+  is gone — the logo above it already says Libex — and the version now
+  appears as a small line beneath the logo instead.
+
+### Security
+- **Closed a script-injection hole in the ReDoc page.** The page builds its
+  own inline `<script>` block and writes the API's OpenAPI URL, ReDoc's
+  theme, and Libex's own version string into it. It used `json.dumps` to do
+  that, which produces valid JSON but does not escape `<`, `>` or `&` — a
+  value containing `</script>` closed the tag early and let arbitrary markup
+  run in its place. The version string is the one of the three that isn't
+  fixed by the code: it comes from a configuration setting an operator can
+  override, not from anything a caller of the API can influence, so this was
+  not reachable through a request against Libex. It is fixed regardless, by
+  escaping all three values before they reach the page rather than relying
+  on the version string staying trusted. Anyone self-hosting from `main`
+  since the ReDoc page's restyle shipped should update.
+
 ## [1.18.2]
 
 No endpoint, parameter, response shape, field or status code moved — every

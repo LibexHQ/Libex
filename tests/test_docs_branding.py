@@ -101,6 +101,26 @@ def test_logo_variant_matches_the_sidebar_it_sits_on(client):
     )
 
 
+def test_version_line_selector_matches_the_logo_alt_text(client):
+    """
+    The same silent-pairing failure as the sidebar/logo-variant check above,
+    sixty-odd lines apart in `app/main.py` instead of two artefacts: the
+    inline script on /redoc finds the logo with
+    `querySelector('.menu-content img[alt="Libex"]')` to anchor the version
+    line beneath it, and the alt text it looks for is set by
+    `info.x-logo.altText` in `_openapi_with_logo`. Change one without the
+    other and the selector stops matching -- the page still renders, still
+    validates, and the version line silently stops appearing with nothing to
+    show for it.
+    """
+    alt_text = client.get("/openapi.json").json()["info"]["x-logo"]["altText"]
+    html = client.get("/redoc").text
+
+    match = re.search(r'img\[alt="([^"]+)"\]', html)
+    assert match, "/redoc's inline script no longer selects the logo by alt text"
+    assert match.group(1) == alt_text
+
+
 def test_openapi_logo_url_is_served(client):
     """Joins the two halves: whatever URL the document names is fetched, so
     renaming the asset or repointing the key fails here rather than in a

@@ -187,6 +187,108 @@ async def test_get_db_stats_missing_books_with_chapters_from_service_defaults_to
 
 
 # ============================================================
+# GET /db/stats — region scoping
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_no_region_param_forwards_none_to_the_reader(async_client):
+    """A plain call with no `region` query param must still forward
+    region=None to the reader -- the same call an old client makes."""
+    with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "books": 150, "authors": 42, "narrators": 85, "series": 18, "booksWithChapters": 7,
+        }
+        response = await async_client.get("/db/stats")
+
+        assert response.status_code == 200
+        assert mock.call_args.args[1] is None
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_no_region_response_carries_only_the_original_five_stat_values(async_client):
+    """
+    Documents the actual current shape of a no-param call rather than the
+    stronger claim that it is byte-for-byte identical to the pre-region
+    response: StatsResponse now always includes a `region` key (null here),
+    which a caller ignoring unknown fields tolerates (additive, per the
+    drop-in compatibility rule) but which a caller pinning the exact key
+    set of the old response would not have seen before this change.
+    """
+    with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "books": 150, "authors": 42, "narrators": 85, "series": 18, "booksWithChapters": 7,
+        }
+        response = await async_client.get("/db/stats")
+
+        data = response.json()
+        assert {"books", "authors", "narrators", "series", "booksWithChapters"} <= set(data.keys())
+        assert data["books"] == 150
+        assert data["authors"] == 42
+        assert data["narrators"] == 85
+        assert data["series"] == 18
+        assert data["booksWithChapters"] == 7
+        assert data["region"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_region_param_is_forwarded_normalized(async_client):
+    """A region query param must reach the reader only after
+    validate_region has run on it -- normalized to lowercase, not the raw
+    query string."""
+    with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "books": 100, "authors": 200, "narrators": 999, "series": 300,
+            "booksWithChapters": 400, "seriesRegionUnknown": 5,
+        }
+        response = await async_client.get("/db/stats?region=UK")
+
+        assert response.status_code == 200
+        assert mock.call_args.args[1] == "uk"
+        assert response.json()["region"] == "uk"
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_invalid_region_returns_400_same_shape_as_categories(async_client):
+    """
+    An invalid region must fail the same way every other region-taking
+    endpoint does: the same RegionException, the same {"error", "status_code"}
+    body -- not a bespoke 422 from FastAPI's own query validation, and not a
+    different error shape just because this route calls validate_region()
+    directly instead of going through the valid_region dependency.
+    """
+    stats_response = await async_client.get("/db/stats?region=zz")
+    categories_response = await async_client.get("/categories?region=zz")
+
+    assert stats_response.status_code == 400
+    assert stats_response.status_code == categories_response.status_code
+    assert stats_response.json() == categories_response.json()
+    assert stats_response.json() == {"error": "Invalid region: zz", "status_code": 400}
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_series_region_unknown_reaches_the_caller_through_the_route(async_client):
+    """
+    seriesRegionUnknown must survive the round trip through StatsResponse,
+    not just the reader. The field is a normal declared field on the model
+    (`seriesRegionUnknown: int | None = None`), not a passthrough extra --
+    but response_model still only serializes declared fields, so a test
+    that only calls get_db_stats() directly would pass even if the field
+    were removed from StatsResponse and silently dropped on its way out
+    through the route.
+    """
+    with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock:
+        mock.return_value = {
+            "books": 100, "authors": 200, "narrators": 999, "series": 300,
+            "booksWithChapters": 400, "seriesRegionUnknown": 5,
+        }
+        response = await async_client.get("/db/stats?region=us")
+
+        assert response.status_code == 200
+        assert response.json()["seriesRegionUnknown"] == 5
+
+
+# ============================================================
 # VALIDATION TESTS
 # ============================================================
 

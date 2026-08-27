@@ -44,6 +44,7 @@ from app.db.models import Cache
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.core.middleware import is_safe_log_value
+from app.services.audible.client import VALID_REGIONS
 
 settings = get_settings()
 logger = get_logger()
@@ -104,8 +105,26 @@ def coming_soon_key(region: str, days: int, category: str | None = None) -> str:
     return f"coming_soon:{region}:{days}:{category or 'all'}"
 
 
-def stats_key() -> str:
-    return "db_stats"
+def stats_key(region: str | None = None) -> str:
+    """
+    `region=None` (the default) returns the bare global key, unchanged from
+    before per-region stats existed. A region composes its own key here
+    rather than in the caller, same as every other region-varying key in
+    this module -- and is checked against VALID_REGIONS up front, so a bad
+    region raises here instead of quietly composing a key nothing ever
+    writes to, which is what let a prior caller-side version of this raise
+    from inside a bare `except` and serve cached all-zeros forever.
+
+    Raises `ValueError`, not `RegionException` -- the route already validates
+    region before this is ever reached, so this check is a backstop against
+    a future caller, not the user-facing path, and a cache-key builder has
+    no business importing an HTTP-shaped exception from the Audible layer.
+    """
+    if region is None:
+        return "db_stats"
+    if region not in VALID_REGIONS:
+        raise ValueError(f"invalid region: {region!r}")
+    return f"db_stats:{region}"
 
 
 # ============================================================

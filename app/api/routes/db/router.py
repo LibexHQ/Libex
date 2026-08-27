@@ -21,6 +21,7 @@ from app.api.routes.series.schemas import SeriesResponse
 from app.core.exceptions import NotFoundException
 from app.core.middleware import is_valid_asin, valid_region
 from app.db.session import get_session
+from app.services.audible.client import validate_region
 from app.api.routes.db.filters import (
     book_filters,
     NarratorFilters,
@@ -55,19 +56,47 @@ router = APIRouter(prefix="/db", tags=["Database"])
 
 
 class StatsResponse(BaseModel):
+    """
+    Counts of books, authors, narrators, series, and books with chapters.
+
+    narrators has no region column and its PK is the name, so it is always a
+    global count, even when `region` scopes the rest. series.region is
+    nullable; a scoped series count excludes rows with no region, so
+    per-region series counts will not sum to the global series count.
+    seriesRegionUnknown is that excluded count -- present when `region` scopes
+    the response, null otherwise.
+    """
+
     books: int = 0
     authors: int = 0
     narrators: int = 0
     series: int = 0
     booksWithChapters: int = 0
+    region: str | None = None
+    seriesRegionUnknown: int | None = None
 
 
 @router.get("/stats", response_model=StatsResponse)
 async def get_stats(
+    region: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Audible region code. Omit for global counts. When given, "
+                "scopes books/authors/series/booksWithChapters to that "
+                "region; narrators stays global (no region column), and "
+                "series excludes rows with no region so it will not sum to "
+                "the global series count."
+            )
+        ),
+    ] = None,
     session: AsyncSession = Depends(get_session),
-) -> dict[str, int]:
+) -> dict[str, Any]:
     """Get counts of books, authors, narrators, series, and books with chapters in the local DB."""
-    return await get_db_stats(session)
+    if region is not None:
+        region = validate_region(region)
+    stats = await get_db_stats(session, region)
+    return {**stats, "region": region}
 
 
 @router.get("/book", response_model=list[BookResponse])

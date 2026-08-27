@@ -48,9 +48,12 @@ class Cache(Base):
         series:us:B08G9PRS1K
         search:us:dune+frank+herbert
 
-    A value with nothing that varies by region or identifier, like the local
-    DB stats snapshot, keys on its bare type name instead:
+    A value with nothing that varies by region or identifier keys on its
+    bare type name instead. The global DB stats snapshot is the example —
+    but stats also has a region-scoped form, keyed like a region-varying
+    value above it rather than like its own bare key:
         db_stats
+        db_stats:us
     """
 
     __tablename__ = "cache"
@@ -136,6 +139,15 @@ class Book(Base):
 
     __table_args__ = (
         Index("books_asin_index", "asin"),
+        # Covering index for region-scoped stats: booksWithChapters joins
+        # tracks to books on asin under a region filter, and a bare
+        # books(region) still forces a heap fetch for that join. Leading
+        # with region and including asin makes both the region count and
+        # the join index-only -- once the visibility map is current.
+        # Pre-VACUUM (freshly loaded/heavily written table) Postgres can't
+        # trust the visibility map and falls back to a Bitmap Heap Scan;
+        # still indexed, just not index-only, at roughly 2.6x the buffers.
+        Index("books_region_asin_index", "region", "asin"),
     )
 
     def __repr__(self) -> str:
@@ -227,6 +239,10 @@ class Series(Base):
     
     __table_args__ = (
         Index("series_asin_index", "asin"),
+        # Region-scoped series count. region is nullable, but a btree
+        # indexes NULLs, so this also covers the seriesRegionUnknown scan
+        # (WHERE region IS NULL) without a separate partial index.
+        Index("series_region_index", "region"),
     )
 
     def __repr__(self) -> str:

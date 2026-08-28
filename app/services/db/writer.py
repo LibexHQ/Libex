@@ -876,8 +876,18 @@ async def upsert_book(session: AsyncSession, data: dict) -> None:
 
     The single-book entry point, and the per-book replay path for a chunk whose
     shared transaction was lost: it wraps _write_book in a commit of its own and
-    swallows the failure, so one bad book costs only itself. The batched persist
-    calls write_books directly on its normal path.
+    keeps an ordinary bad book's failure to itself.
+
+    That is most of "one bad book costs only itself" and not all of it, which
+    is worth stating exactly, because the missing part used to read here as
+    settled. The rollback below is unguarded — nothing catches it — so a
+    connection that has died under the statement raises there instead, and the
+    failure leaves this function after all. The property holds because the
+    caller carries the rest of it: _replay_book_chunk guards this call and
+    clears the session before it reaches the next book. Neither half is
+    sufficient alone.
+
+    The batched persist calls write_books directly on its normal path.
 
     Existing non-null values are never overwritten with null.
     Pivot relationships (genres, narrators, authors) are additive — never shrink.

@@ -458,6 +458,38 @@ def _backoff_seconds(attempt: int) -> float:
     return nominal * (0.5 + random.random())
 
 
+async def _clear_session(session: AsyncSession, fields: dict) -> None:
+    """
+    Rolls back so whatever runs next on this session starts on a usable one,
+    and guards the rollback itself.
+
+    A failed statement leaves its transaction aborted, and every later
+    statement on the same session then dies of 25P02 with nothing wrong with
+    it — measured on the replay path, where an un-rolled-back cache failure
+    cost the next book in the chunk. The rollback is the only thing that
+    clears that state.
+
+    It is guarded because it is itself work against the connection. When the
+    connection has died rather than merely refused a statement, the rollback
+    raises too, and an unguarded one re-raises out of the very handler that
+    exists to contain the first failure — which is how a cleanup step ends up
+    deciding the fate of work that has nothing to do with it. Nothing here can
+    recover a dead connection; what the guard buys is that the caller decides
+    what happens next.
+
+    fields carries the caller's own context — asin and region on the per-book
+    path, region alone on the chunk attempt — so the line says which unit of
+    work was being cleaned up after.
+    """
+    try:
+        await session.rollback()
+    except Exception as e:
+        logger.warning(
+            "Background persist could not clear the session",
+            extra={**fields, **_failure_fields(e)},
+        )
+
+
 # ============================================================
 # BOOK CHUNKS
 # ============================================================
@@ -471,10 +503,101 @@ async def _write_book_chunk(session: AsyncSession, chunk: list[dict], region: st
 
 
 async def _replay_book_chunk(session: AsyncSession, chunk: list[dict], region: str) -> None:
-    """The chunk written a book at a time, each in a transaction of its own."""
+    """
+    The chunk written a book at a time, each in a transaction of its own.
+
+    The replay exists so a chunk that lost its shared transaction still stores
+    every book it can, which only holds while one book's failure cannot decide
+    the next book's outcome. Both writes are therefore guarded per book.
+    upsert_book keeps its own failure to itself, but the rollback it takes on
+    the way out can still raise on a connection that has already died, and
+    cache.set commits a statement of its own that can fail for every reason
+    the row write can. Unguarded, either one ends the loop — and since the
+    caller runs this outside its retry loop with no try of its own, the
+    exception escapes to persist_books_background and abandons the rest of
+    this chunk and every chunk after it, up to a prolific author's whole
+    catalog. It fires under exactly the Postgres degradation that put the
+    chunk here to begin with.
+
+    Catching the failure is not enough on its own, and this was measured
+    rather than reasoned: cache.set's INSERT runs inside this session's
+    transaction, so a failure at the statement leaves the transaction aborted,
+    and the next book's first statement then dies of 25P02 with nothing wrong
+    with the book. It cost exactly one book every time — upsert_book's own
+    handler logged that book, rolled the session back, and the loop recovered
+    from the one after it. Both handlers therefore clear the session before
+    the loop continues.
+
+    The write handler clears it too, and not merely for symmetry: an attempted
+    rollback is not always an effective one. upsert_book's handler re-raises a
+    failed rollback before SQLAlchemy unwinds to the root transaction, so when
+    it is a SAVEPOINT that fails to roll back — upsert_author opens one per
+    new or still-null-asin author — the session can be left reparented onto a
+    root that is still active and was never rolled back. That is one further
+    book at stake rather than the rest of the chunk, but this function's whole
+    thesis is that one book's failure decides nothing else's, and the handler
+    only runs on the escape path, so the second attempt costs nothing whenever
+    the first already worked.
+
+    A failed cache write leaves the row written. upsert_book has already
+    committed by then, the row is the durable copy and the cache entry is
+    derivable from it, so the loop reports the book and moves on rather than
+    unwinding a store that succeeded.
+
+    One residue the guards cannot remove: the rollback is itself work against
+    the connection, so it can fail when the connection is gone rather than
+    merely unhappy. Nothing escapes when it does: the remaining books are
+    still attempted, each costing three lines — upsert_book's own record of
+    the failed write, then the replay's, then _clear_session reporting that it
+    could not clear the session either — but they do fail. The independence
+    this function promises is a promise about a live connection; nothing can
+    be written down a dead one.
+
+    The closing line carries what the replay can honestly observe, and no
+    stored count: upsert_book swallows its own DB failure and returns nothing,
+    so from here a book that stored and a book that did not look identical.
+    Its per-book warning is the record of a book that failed to store.
+    write_escaped is named for the narrow thing it actually counts — the
+    failures that got past upsert_book's own handler, which a live connection
+    does not produce at all. Neither it nor cache_failed is a count of books
+    that failed to store, and nothing downstream should be built as though
+    either were: a degraded chunk that stores none of its fifty books reports
+    zero for both, because each failure was caught and rolled back one level
+    down and the cache write that followed it went on to succeed.
+    """
+    write_escaped = 0
+    cache_failed = 0
+
     for book in chunk:
-        await upsert_book(session, book)
-        await cache.set(session, book_key(book["asin"], region), book)
+        fields = {"asin": book.get("asin"), "region": region}
+
+        try:
+            await upsert_book(session, book)
+        except Exception as e:
+            write_escaped += 1
+            logger.warning(
+                "Background persist replay failed for book",
+                extra={**fields, **_failure_fields(e)},
+            )
+            await _clear_session(session, fields)
+            continue
+
+        try:
+            await cache.set(session, book_key(book["asin"], region), book)
+        except Exception as e:
+            cache_failed += 1
+            logger.warning(
+                "Background persist replay failed to cache book",
+                extra={**fields, **_failure_fields(e)},
+            )
+            await _clear_session(session, fields)
+
+    logger.info("Background persist replay complete", extra={
+        "books": len(chunk),
+        "region": region,
+        "write_escaped": write_escaped,
+        "cache_failed": cache_failed,
+    })
 
 
 async def _attempt_book_chunk(chunk: list[dict], region: str) -> Exception | None:
@@ -490,6 +613,15 @@ async def _attempt_book_chunk(chunk: list[dict], region: str) -> Exception | Non
     the pool is what starves first with six workers against a shared limit.
     Sleeping while still holding the chunk's row locks would also guarantee
     the retry collides with whoever it collided with the first time.
+
+    The rollback on the failure path goes through _clear_session so that
+    promise holds literally rather than nearly. Unguarded, it raises on a
+    connection that died under the statement, and the caller runs this with no
+    try of its own, so what was meant to be a returned failure escapes into
+    persist_books_background and abandons every chunk it had not started yet.
+    That is the wider exposure of the two on this path, not the narrower one:
+    this attempt runs for every chunk, where the per-book replay runs only for
+    a chunk whose attempt has already failed.
     """
     async with _get_bg_write_semaphore():
         async with _BackgroundSession() as session:
@@ -497,7 +629,7 @@ async def _attempt_book_chunk(chunk: list[dict], region: str) -> Exception | Non
                 await _write_book_chunk(session, chunk, region)
                 return None
             except Exception as exc:
-                await session.rollback()
+                await _clear_session(session, {"region": region})
                 return exc
 
 

@@ -10,6 +10,68 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.19.3]
+
+No endpoint, parameter, response shape, field or status code moved — every
+change here is to how background book writes behave when the database is
+struggling.
+
+### Fixed
+- **One book failing to store no longer costs the rest of the batch.** Books
+  fetched from Audible are written to storage in the background, fifty to a
+  transaction; a chunk whose transaction fails is retried and then replayed a
+  book at a time, so that as much of it as possible still lands. Neither of
+  the two writes in that replay — the book row and its cache entry — was
+  guarded, so the first one to fail escaped the replay, escaped the chunk, and
+  abandoned every chunk still to come in the same batch. For an author's full
+  catalogue that is a thousand books or more discarded because of one, and it
+  happened under exactly the database degradation that put the chunk on the
+  replay path to begin with. Both writes are now contained per book, so a book
+  that cannot be stored costs only itself and everything else in the batch is
+  still written. Containing the failure was not enough on its own: a failed
+  cache write leaves the transaction unusable, and the next book was then
+  rejected for that reason alone rather than for anything wrong with it, so
+  each handler now clears the session before the loop moves on. Self-hosters
+  seeing books that Libex had already returned in a response never turn up in
+  the database afterwards — and far more of them missing than any single
+  failure would explain — were most likely seeing this.
+
+- **A chunk that lost its connection no longer abandons the chunks behind
+  it.** When a chunk's transaction failed, the rollback taken on the way out
+  was itself unguarded, and a rollback is work against the connection like any
+  other — on a connection that had died rather than merely refused a
+  statement, it raised in turn, out of the very path that existed to report
+  the failure calmly. That path runs for every chunk, not only for one that
+  reached the replay above, so it was the wider of the two exposures. It is
+  now contained the same way.
+
+  Two limits on all of this, because neither is obvious from the outside.
+  Containment is a promise about a live connection: when the connection itself
+  is gone, the remaining books are still attempted and still fail, each one
+  recorded rather than the batch stopping at the first. And a book accepted
+  for background writing is still not a stored book — the queue reports only
+  that a batch was admitted, never how it ended, so the seeder check added in
+  1.19.2 still cannot tell that books were queued and then failed to write,
+  and can still mark an author, series or narrator as seeded when that
+  happened. This narrows what a failure costs. It does not close that gap.
+
+### Added
+- **A replayed chunk now says what it lost.** It logs a line for each book it
+  could not store and a line for each book it stored but could not cache, both
+  carrying the ASIN, the region, and the failure's type, SQLSTATE and schema
+  object — never the exception text, which Postgres fills with the offending
+  row. A failed attempt to clear the session after either logs its own line.
+  Each chunk then closes with a `Background persist replay complete` summary
+  carrying the chunk size, the region, and two counts, `write_escaped` and
+  `cache_failed`.
+
+  Read those two counts narrowly and do not build on them as failure totals:
+  neither is a count of books that failed to store. An ordinary failed write
+  is caught and reported one level down and never reaches `write_escaped`, so
+  a degraded chunk that stores none of its fifty books can report zero for
+  both. The per-book lines are the record of what was lost; the summary only
+  counts what got past the layer beneath it.
+
 ## [1.19.2]
 
 ### Fixed

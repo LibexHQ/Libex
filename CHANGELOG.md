@@ -10,6 +10,54 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.19.5]
+
+### Fixed
+- **A book asked about before its release date is no longer written off as
+  having no chapters forever.** Audible answers a chapter request for a title
+  that has not come out yet with a 404 — the audio genuinely does not exist —
+  and Libex recorded that answer as final, so a book checked while it was
+  still upcoming left the chapter queue and was never asked again, including
+  on release day when the chapters actually appeared. On the public instance
+  this had left 79.11% of unreleased books (13,585 of 17,173) permanently
+  chapterless, against 0.09% of the books that were already out when they were
+  checked. A book whose chapter check predates its own release date is now
+  admitted once more after that date has passed — one further request, and
+  then it settles for good either way. Two things are worth knowing about the
+  recovery. It happens on the chapters backfill, which is launched by hand
+  rather than running as part of the seeder, so the already-affected books
+  repair themselves as a walk reaches them but nothing repairs them until a
+  walk is run. And it is keyed to the release date as Audible publishes it,
+  which carries no time of day and is read as midnight UTC in every
+  marketplace, so a book that a walk reaches in the hours between that point
+  and the audio actually going live locally spends its one retry early. Books
+  with no recorded release date are untouched and stay settled by their first
+  check, as they always were.
+- **A chapter response carrying no chapters can no longer erase a stored
+  listing that has some.** Chapters were written over whatever was already
+  stored, with nothing compared. Audible sometimes answers with chapter
+  metadata that is present but holds no chapter list — an intro duration and
+  little else — and that answer is substantial enough to pass every check in
+  front of it, so it became a valid, empty listing and replaced what was
+  there; a book with 21 stored chapters could be left with none. Every path
+  that stores chapters now keeps whichever of the two payloads actually lists
+  chapters, and logs when it declines an empty one; where neither lists any,
+  the incoming payload is taken as before. This was reachable on
+  `GET /book/{asin}/chapters` and on the backfill independently of the
+  release-date fix above. It does not change what that request returns — the
+  response is still exactly what Audible sent, and the guard covers only what
+  gets stored — so what a caller notices is that a later request answered from
+  storage still has its chapters.
+
+### Changed
+- **Storing chapters now needs PostgreSQL 14 or newer.** Deciding whether an
+  incoming chapter payload holds anything means reading a key out of stored
+  JSON, and that is written with subscript syntax which older servers reject
+  outright. The published compose file runs PostgreSQL 16, so a normal
+  deployment is unaffected; a self-hoster pointing Libex at an older external
+  server would find chapter writes failing while the rest of the API carried
+  on.
+
 ## [1.19.4]
 
 Documentation only — no endpoint, parameter, response shape, field or status

@@ -43,6 +43,36 @@ If you rely on Libex for a project or tool, we recommend self-hosting your own i
 
 ---
 
+## Regions
+
+Libex serves all eleven Audible marketplaces. The counts are the public
+instance's stored library, read live from `GET /db/stats?region=xx` — each
+badge links to the call it comes from. Narrators isn't a column: that table has
+no region column, so a scoped call returns the same figure as the global
+Narrators badge above, for every region. Coverage grows with regional traffic —
+every `?region=xx` request that fetches from Audible persists what it gets.
+
+| Code | Region | Books | Authors | Series | Books w/ Chapters |
+|---|---|---|---|---|---|
+| `us` | United States | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dus&query=%24.books&label=&color=orange&cacheSeconds=3600)](https://libexdb.com/db/stats?region=us) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dus&query=%24.authors&label=&color=teal&cacheSeconds=3600)](https://libexdb.com/db/stats?region=us) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dus&query=%24.series&label=&color=purple&cacheSeconds=3600)](https://libexdb.com/db/stats?region=us) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dus&query=%24.booksWithChapters&label=&color=b5179e&cacheSeconds=3600)](https://libexdb.com/db/stats?region=us) |
+| `uk` | United Kingdom | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Duk&query=%24.books&label=&color=orange&cacheSeconds=3600)](https://libexdb.com/db/stats?region=uk) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Duk&query=%24.authors&label=&color=teal&cacheSeconds=3600)](https://libexdb.com/db/stats?region=uk) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Duk&query=%24.series&label=&color=purple&cacheSeconds=3600)](https://libexdb.com/db/stats?region=uk) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Duk&query=%24.booksWithChapters&label=&color=b5179e&cacheSeconds=3600)](https://libexdb.com/db/stats?region=uk) |
+| `ca` | Canada | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dca&query=%24.books&label=&color=orange&cacheSeconds=3600)](https://libexdb.com/db/stats?region=ca) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dca&query=%24.authors&label=&color=teal&cacheSeconds=3600)](https://libexdb.com/db/stats?region=ca) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dca&query=%24.series&label=&color=purple&cacheSeconds=3600)](https://libexdb.com/db/stats?region=ca) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dca&query=%24.booksWithChapters&label=&color=b5179e&cacheSeconds=3600)](https://libexdb.com/db/stats?region=ca) |
+| `au` | Australia | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dau&query=%24.books&label=&color=orange&cacheSeconds=3600)](https://libexdb.com/db/stats?region=au) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dau&query=%24.authors&label=&color=teal&cacheSeconds=3600)](https://libexdb.com/db/stats?region=au) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dau&query=%24.series&label=&color=purple&cacheSeconds=3600)](https://libexdb.com/db/stats?region=au) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dau&query=%24.booksWithChapters&label=&color=b5179e&cacheSeconds=3600)](https://libexdb.com/db/stats?region=au) |
+| `de` | Germany | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dde&query=%24.books&label=&color=orange&cacheSeconds=3600)](https://libexdb.com/db/stats?region=de) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dde&query=%24.authors&label=&color=teal&cacheSeconds=3600)](https://libexdb.com/db/stats?region=de) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dde&query=%24.series&label=&color=purple&cacheSeconds=3600)](https://libexdb.com/db/stats?region=de) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dde&query=%24.booksWithChapters&label=&color=b5179e&cacheSeconds=3600)](https://libexdb.com/db/stats?region=de) |
+| `fr` | France | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dfr&query=%24.books&label=&color=orange&cacheSeconds=3600)](https://libexdb.com/db/stats?region=fr) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dfr&query=%24.authors&label=&color=teal&cacheSeconds=3600)](https://libexdb.com/db/stats?region=fr) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dfr&query=%24.series&label=&color=purple&cacheSeconds=3600)](https://libexdb.com/db/stats?region=fr) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dfr&query=%24.booksWithChapters&label=&color=b5179e&cacheSeconds=3600)](https://libexdb.com/db/stats?region=fr) |
+| `it` | Italy | — | — | — | — |
+| `es` | Spain | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Des&query=%24.books&label=&color=orange&cacheSeconds=3600)](https://libexdb.com/db/stats?region=es) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Des&query=%24.authors&label=&color=teal&cacheSeconds=3600)](https://libexdb.com/db/stats?region=es) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Des&query=%24.series&label=&color=purple&cacheSeconds=3600)](https://libexdb.com/db/stats?region=es) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Des&query=%24.booksWithChapters&label=&color=b5179e&cacheSeconds=3600)](https://libexdb.com/db/stats?region=es) |
+| `jp` | Japan | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Djp&query=%24.books&label=&color=orange&cacheSeconds=3600)](https://libexdb.com/db/stats?region=jp) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Djp&query=%24.authors&label=&color=teal&cacheSeconds=3600)](https://libexdb.com/db/stats?region=jp) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Djp&query=%24.series&label=&color=purple&cacheSeconds=3600)](https://libexdb.com/db/stats?region=jp) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Djp&query=%24.booksWithChapters&label=&color=b5179e&cacheSeconds=3600)](https://libexdb.com/db/stats?region=jp) |
+| `in` | India | — | — | — | — |
+| `br` | Brazil | — | — | — | — |
+
+`it`, `in` and `br` are supported like every other market but have seen almost
+no traffic yet, so there's next to nothing stored for them. A dash means
+nothing worth counting is in the database, not that Libex can't serve that
+region.
+
+---
+
 ## Why Libex?
 
 The audiobook automation community has long depended on metadata services to power tools like Readarr, Audiobookshelf, and custom managers. When those services disappear or restrict usage, every project depending on them breaks.
@@ -377,53 +407,6 @@ For the **complete** list across all categories, use the **DB** endpoints (`/db/
 ### Narrator filters
 
 `GET /db/narrator` searches narrators by name and also filters on `gender`, `language` (matches a language the narrator works in), `audiobooks_produced` (one of the count buckets), `source`, and `cultural_heritage`.
-
----
-
-## Supported Regions
-
-| Code | Region |
-|------|--------|
-| `us` | United States |
-| `uk` | United Kingdom |
-| `ca` | Canada |
-| `au` | Australia |
-| `de` | Germany |
-| `fr` | France |
-| `it` | Italy |
-| `es` | Spain |
-| `jp` | Japan |
-| `in` | India |
-| `br` | Brazil |
-
----
-
-## Regional Coverage
-
-`GET /db/stats` counts books, authors, series, and books-with-chapters per
-region when called with `?region=xx` — the table below shows those four
-counts for every region that currently holds real data. Narrators isn't a
-column here: that table has no region column, so a scoped call always
-returns the same figure as the global Narrators badge above, for every
-region. Coverage grows with regional traffic — every `?region=xx` request
-that fetches from Audible persists what it gets — and a region gets a row
-once it has real data; a market no one has queried yet isn't shown rather
-than shown as a row of zeros.
-
-| Region | Books | Authors | Series | Books w/ Chapters |
-|---|---|---|---|---|
-| `us` | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dus&query=%24.books&label=&color=orange&cacheSeconds=3600)](https://libexdb.com/db/stats?region=us) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dus&query=%24.authors&label=&color=teal&cacheSeconds=3600)](https://libexdb.com/db/stats?region=us) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dus&query=%24.series&label=&color=purple&cacheSeconds=3600)](https://libexdb.com/db/stats?region=us) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dus&query=%24.booksWithChapters&label=&color=b5179e&cacheSeconds=3600)](https://libexdb.com/db/stats?region=us) |
-| `uk` | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Duk&query=%24.books&label=&color=orange&cacheSeconds=3600)](https://libexdb.com/db/stats?region=uk) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Duk&query=%24.authors&label=&color=teal&cacheSeconds=3600)](https://libexdb.com/db/stats?region=uk) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Duk&query=%24.series&label=&color=purple&cacheSeconds=3600)](https://libexdb.com/db/stats?region=uk) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Duk&query=%24.booksWithChapters&label=&color=b5179e&cacheSeconds=3600)](https://libexdb.com/db/stats?region=uk) |
-| `ca` | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dca&query=%24.books&label=&color=orange&cacheSeconds=3600)](https://libexdb.com/db/stats?region=ca) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dca&query=%24.authors&label=&color=teal&cacheSeconds=3600)](https://libexdb.com/db/stats?region=ca) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dca&query=%24.series&label=&color=purple&cacheSeconds=3600)](https://libexdb.com/db/stats?region=ca) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dca&query=%24.booksWithChapters&label=&color=b5179e&cacheSeconds=3600)](https://libexdb.com/db/stats?region=ca) |
-| `au` | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dau&query=%24.books&label=&color=orange&cacheSeconds=3600)](https://libexdb.com/db/stats?region=au) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dau&query=%24.authors&label=&color=teal&cacheSeconds=3600)](https://libexdb.com/db/stats?region=au) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dau&query=%24.series&label=&color=purple&cacheSeconds=3600)](https://libexdb.com/db/stats?region=au) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dau&query=%24.booksWithChapters&label=&color=b5179e&cacheSeconds=3600)](https://libexdb.com/db/stats?region=au) |
-| `de` | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dde&query=%24.books&label=&color=orange&cacheSeconds=3600)](https://libexdb.com/db/stats?region=de) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dde&query=%24.authors&label=&color=teal&cacheSeconds=3600)](https://libexdb.com/db/stats?region=de) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dde&query=%24.series&label=&color=purple&cacheSeconds=3600)](https://libexdb.com/db/stats?region=de) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dde&query=%24.booksWithChapters&label=&color=b5179e&cacheSeconds=3600)](https://libexdb.com/db/stats?region=de) |
-| `fr` | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dfr&query=%24.books&label=&color=orange&cacheSeconds=3600)](https://libexdb.com/db/stats?region=fr) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dfr&query=%24.authors&label=&color=teal&cacheSeconds=3600)](https://libexdb.com/db/stats?region=fr) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dfr&query=%24.series&label=&color=purple&cacheSeconds=3600)](https://libexdb.com/db/stats?region=fr) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Dfr&query=%24.booksWithChapters&label=&color=b5179e&cacheSeconds=3600)](https://libexdb.com/db/stats?region=fr) |
-| `es` | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Des&query=%24.books&label=&color=orange&cacheSeconds=3600)](https://libexdb.com/db/stats?region=es) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Des&query=%24.authors&label=&color=teal&cacheSeconds=3600)](https://libexdb.com/db/stats?region=es) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Des&query=%24.series&label=&color=purple&cacheSeconds=3600)](https://libexdb.com/db/stats?region=es) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Des&query=%24.booksWithChapters&label=&color=b5179e&cacheSeconds=3600)](https://libexdb.com/db/stats?region=es) |
-| `jp` | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Djp&query=%24.books&label=&color=orange&cacheSeconds=3600)](https://libexdb.com/db/stats?region=jp) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Djp&query=%24.authors&label=&color=teal&cacheSeconds=3600)](https://libexdb.com/db/stats?region=jp) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Djp&query=%24.series&label=&color=purple&cacheSeconds=3600)](https://libexdb.com/db/stats?region=jp) | [![](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Flibexdb.com%2Fdb%2Fstats%3Fregion%3Djp&query=%24.booksWithChapters&label=&color=b5179e&cacheSeconds=3600)](https://libexdb.com/db/stats?region=jp) |
-
-`it`, `in`, and `br` haven't been queried yet and aren't shown; they'll get
-a row once they have real counts. Every badge above links to the live
-`/db/stats?region=xx` call it reads from.
 
 ---
 

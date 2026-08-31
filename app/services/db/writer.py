@@ -102,6 +102,89 @@ def _longer_wins(new_value, existing_col):
     )
 
 
+def _chapter_count(payload):
+    """
+    Counts the chapters carried by a TrackContentDto payload, without ever
+    raising on one that carries none.
+
+    jsonb_array_length raises 22023 on anything that is not a JSON array — an
+    object, a string, a number, a json null — and neither side of the
+    comparison can promise it is looking at one: the incoming payload is
+    whatever Audible answered, and a stored one may have been written by any
+    earlier version of the normalizer. The inner CASE does not test the value
+    so much as replace it. Both of its arms are arrays, so what reaches the
+    length function is always an array and the error is structurally
+    unreachable rather than merely guarded against.
+
+    The equivalent AND — typeof(x) = 'array' AND jsonb_array_length(x) > 0 —
+    would in fact survive in both positions this helper is used from today.
+    Boolean expressions short-circuit at execution in a scalar CASE arm and in
+    a RETURNING list, so neither the ON CONFLICT SET nor the returned count
+    can reach the length function with a non-array. It is quals the planner
+    reorders: measured on postgresql 16.14, the same AND inside a WHERE failed
+    with 22023 against plain built-ins of equal cost, with EXPLAIN showing the
+    source order inverted. This is a reusable helper, already called from both
+    chapter writers, so the first "find tracks with no chapters" — a WHERE —
+    turns that into a live error against precisely the malformed rows it
+    exists to tolerate. A green suite is therefore not grounds to flatten this
+    into the AND: every test there is exercises a position where the AND is
+    safe, and none of them can fail on the position where it is not.
+
+    payload["chapters"] compiles to postgresql's jsonb subscript rather than
+    ->, which needs postgresql 14 or newer and is a syntax error before it.
+    docker-compose pins postgres:16-alpine, so the deployed path is clear —
+    but this is the first jsonb key extraction in the writer, the floor is new
+    for the file, and a self-hoster on an older server is who it would
+    surprise.
+    """
+    chapters = payload["chapters"]
+    return func.jsonb_array_length(
+        case(
+            (func.jsonb_typeof(chapters) == "array", chapters),
+            else_=func.jsonb_build_array(),
+        )
+    )
+
+
+def _chaptered_wins(new_value, existing_col):
+    """
+    Keeps whichever chapter payload actually lists chapters, so a response
+    that carries none cannot erase one that is already stored.
+
+    The floor is emptiness and nothing finer, deliberately. An empty list is
+    the JSONB analogue of the NULL _coalesce guards: it asserts nothing, so
+    preferring the stored payload loses no answer Audible gave. Two non-empty
+    lists are two real answers, and the shorter one is not necessarily the
+    poorer — a reissue can genuinely re-cut a title into fewer, longer
+    chapters, and a count or duration floor would pin the first list we ever
+    saw and refuse every correction after it. Merging the two is meaningless:
+    chapters are an ordered whole, not a set of independently sourced fields.
+
+    The whole payload moves together, not just the list. A chapterless
+    response reads as runtimeLengthMs 0 and brandIntroDurationMs 0 because
+    Audible omits those fields and _normalize_chapters supplies the zero, not
+    because Audible asserted one; writing them beside a retained list would
+    leave a row that disagrees with itself.
+
+    When neither payload lists chapters the incoming one is taken, which means
+    a stored runtimeLengthMs can be replaced by a defaulted 0. That is a
+    named consequence rather than an oversight: keeping it would mean merging
+    the payload field by field, and a chapter payload is an ordered whole. It
+    is also no worse than the unguarded write this replaces, which overwrote
+    in every case, chapters included.
+
+    Both counts are measured rather than tested for null because the column is
+    NOT NULL on both sides — the thing being guarded against here is a present,
+    well-formed payload with nothing in it, which is precisely what a truthy
+    but chapterless chapter_info normalizes into.
+    """
+    return case(
+        (_chapter_count(new_value) > 0, new_value),
+        (_chapter_count(existing_col) > 0, existing_col),
+        else_=new_value,
+    )
+
+
 def _to_bool(value, default: bool = False) -> bool:
     """Converts string or bool to bool safely."""
     if isinstance(value, bool):
@@ -915,20 +998,55 @@ async def upsert_book(session: AsyncSession, data: dict) -> None:
 # ============================================================
 
 async def upsert_track(session: AsyncSession, asin: str, chapters_data: dict) -> None:
-    """Upserts chapter data for a book."""
+    """
+    Upserts chapter data for a book, keeping the richer of the two payloads.
+
+    The merge is decided in the SET clause rather than by reading the row
+    first: several fetch paths can be refreshing the same ASIN at once, and a
+    read-compare-write would let two of them agree the stored row was empty
+    before either had written. _chaptered_wins settles it inside the one
+    statement, against the row as postgresql has it locked.
+
+    updated_at is bumped either way. It records that the row was reconsidered,
+    which is true whether or not the payload changed, and nothing reads it for
+    staleness.
+
+    Unlike the batched book upsert, this statement may carry returning():
+    that statement's hazard is the insertmanyvalues rewrite, which only
+    applies to an executemany, and this is a single row with literal values.
+    The count comes back so a suppressed overwrite can be logged — a write
+    that silently declines is no easier to diagnose than the silent overwrite
+    it replaces, and no one is watching this path.
+    """
     try:
         stmt = insert(Track).values(
             asin=asin,
             chapters=chapters_data,
             created_at=_now(),
             updated_at=_now(),
-        ).on_conflict_do_update(
-            index_elements=["asin"],
-            set_={"chapters": chapters_data, "updated_at": _now()},
         )
-        await session.execute(stmt)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["asin"],
+            set_={
+                "chapters": _chaptered_wins(stmt.excluded.chapters, Track.chapters),
+                "updated_at": _now(),
+            },
+        ).returning(_chapter_count(Track.chapters))
+
+        result = await session.execute(stmt)
+        stored_count = result.scalar() or 0
         await session.commit()
-        logger.info(f"DB write: track {asin}")
+
+        offered = chapters_data.get("chapters") if isinstance(chapters_data, dict) else None
+        offered_count = len(offered) if isinstance(offered, list) else 0
+
+        if offered_count == 0 and stored_count > 0:
+            logger.warning(
+                "Kept stored chapters over an empty response",
+                extra={"asin": asin, "stored_chapters": stored_count},
+            )
+        else:
+            logger.info(f"DB write: track {asin}")
 
     except Exception as e:
         logger.warning(

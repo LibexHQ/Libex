@@ -27,6 +27,7 @@ from app.services.db.writer import (
     _longer_wins,
     upsert_author,
     upsert_book,
+    upsert_track,
     reconcile_genres,
 )
 
@@ -862,6 +863,129 @@ def test_upsert_book_uses_the_guarded_comparison_for_its_text_columns(column):
     sql = _compiled(session.execute.call_args_list[0].args[0])
     guarded = f"COALESCE(LENGTH(BOOKS.{column}), -1)"
     assert guarded in sql
+
+
+# ============================================================
+# _chaptered_wins — THE EMPTY-PAYLOAD OVERWRITE
+# ============================================================
+# tracks.chapters holds a whole TrackContentDto payload, and a chapterless
+# Audible response does not arrive as nothing — it normalizes into a perfectly
+# well-formed payload whose chapters list is empty. So the guard is a length
+# test on the list inside the payload rather than a null check on the column,
+# which is NOT NULL on both sides and would never fire.
+#
+# These check the compiled SQL carries that test, and carries it as a
+# replacement rather than a precondition: both arms of the inner CASE are
+# arrays, so the length function is incapable of receiving anything else. The
+# behaviour this produces against a real database is proved end to end in
+# tests/integration/test_track_chapters_shrinkage.py.
+
+def _track_upsert_sql(payload=None):
+    """Compiles the statement upsert_track actually issues. Not _compiled():
+    that inlines literals, and a JSONB bind has no literal renderer, so this
+    keeps the binds and returns the compiled object for its params too."""
+    result = MagicMock()
+    result.scalar = MagicMock(return_value=0)
+    session = _session(result)
+    asyncio.run(upsert_track(session, "B0TRACKSQL", payload or {"chapters": []}))
+    return session.execute.call_args_list[0].args[0].compile()
+
+
+def test_chaptered_wins_measures_the_list_inside_the_payload_on_both_sides():
+    """Both the incoming payload and the stored one are measured by the length
+    of their chapters list. Measuring the payload itself, or testing it for
+    null, would call every chapterless response a valid answer -- which is
+    precisely how an empty list came to overwrite a stored 21-chapter one."""
+    sql = str(_track_upsert_sql())
+    assert "jsonb_array_length(CASE WHEN (jsonb_typeof(excluded.chapters[" in sql
+    assert "jsonb_array_length(CASE WHEN (jsonb_typeof(tracks.chapters[" in sql
+
+
+def test_chaptered_wins_keeps_the_type_test_inside_the_length_call():
+    """
+    The array test sits INSIDE the CASE that jsonb_array_length is handed, not
+    in an AND beside it. jsonb_array_length raises 22023 on anything that is
+    not a JSON array, and neither side can be assumed well formed -- the
+    incoming payload is whatever Audible answered, and a stored one may have
+    been written by any earlier version of the normalizer.
+
+    What the CASE buys is not a test but a replacement. Both of its arms are
+    arrays: the real value when jsonb_typeof says array, jsonb_build_array()
+    otherwise, including when a missing key makes the subscript yield SQL
+    NULL. So the length function cannot receive a non-array at all, which is a
+    stronger guarantee than any argument about evaluation order -- and it is
+    what this assertion actually pins.
+
+    The equivalent AND would in fact survive in both positions this helper is
+    used from today. Boolean expressions short-circuit at execution in a
+    scalar CASE arm and in a RETURNING list, so neither the ON CONFLICT SET
+    nor the returned count can reach the length function with a non-array. It
+    is quals the planner reorders: measured on postgresql 16.14, the same AND
+    inside a WHERE failed with 22023 against plain built-ins of equal cost,
+    with EXPLAIN showing the source order inverted.
+
+    The CASE is kept anyway because _chapter_count is a reusable helper,
+    already called from both chapter writers. The first caller to use it in a
+    qual -- the obvious "find tracks with no chapters" -- turns the AND into a
+    live error against precisely the malformed rows the helper exists to
+    tolerate.
+
+    That is also why this cannot be pinned behaviourally, and why a green
+    suite is no grounds to flatten it: every position the code uses today is
+    one where the AND is safe, so no behavioural test can tell the two forms
+    apart. Confirmed by mutation -- the AND form passes every test in
+    tests/integration/test_track_chapters_shrinkage.py, on both writers.
+    """
+    sql = str(_track_upsert_sql())
+    assert "jsonb_array_length(CASE WHEN (jsonb_typeof(" in sql
+    # The failure mode this excludes: the test hoisted out to sit beside the
+    # call rather than wrapping its argument.
+    assert "jsonb_array_length(excluded.chapters[" not in sql
+    assert "jsonb_array_length(tracks.chapters[" not in sql
+
+
+def test_chaptered_wins_treats_a_non_array_as_empty_rather_than_an_error():
+    """The ELSE arm hands the length function an empty array, so a payload
+    whose chapters is null, an object, or a string measures as zero and loses
+    to a stored listing -- rather than taking the statement down and leaving
+    the write to be retried forever."""
+    assert "ELSE jsonb_build_array() END" in str(_track_upsert_sql())
+
+
+def test_chaptered_wins_floors_on_emptiness_not_on_a_count():
+    """
+    The threshold is zero on both sides: any non-empty incoming list wins,
+    however short.
+
+    Deliberate, and the reason it is pinned. A count floor would look like a
+    stronger version of the same rule and is not -- a reissue can genuinely
+    re-cut a title into fewer, longer chapters, and a floor would pin the
+    first list ever stored and silently refuse every correction after it. The
+    only thing an empty list asserts is nothing at all, which is the JSONB
+    analogue of the NULL these writers already coalesce away.
+    """
+    params = _track_upsert_sql().params
+    assert {v for k, v in params.items() if k.startswith("jsonb_typeof")} == {"array"}
+    assert {v for k, v in params.items() if k.startswith("jsonb_array_length")} == {0}
+
+
+def test_chaptered_wins_takes_the_incoming_payload_when_neither_lists_chapters():
+    """Two empty payloads are not a shrinkage, so the incoming one lands and
+    the rest of its fields refresh. The ELSE arm is the incoming value, not
+    the stored one -- the guard exists to stop a loss, not to freeze a row
+    that has nothing to lose."""
+    assert "ELSE excluded.chapters END" in str(_track_upsert_sql())
+
+
+def test_the_track_upsert_moves_the_whole_payload_as_one_value():
+    """chapters is assigned as a single column, never merged field by field. A
+    chapterless response also carries runtimeLengthMs 0 and
+    brandIntroDurationMs 0, and writing those beside a retained list would
+    leave a row disagreeing with itself about a book it never re-measured."""
+    sql = str(_track_upsert_sql())
+    assert sql.count("SET chapters = CASE") == 1
+    assert "jsonb_set" not in sql
+    assert "||" not in sql
 
 
 # ============================================================

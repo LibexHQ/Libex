@@ -10,21 +10,31 @@ Covers:
   spike detection, and _dispatch_one giving each concurrent unit its own
   session.
 - Keyset paging: _advance_cursor's wrap-around policy.
+- Re-admission: _select_work's eligibility rule over a page -- never checked,
+  or checked before a release date that has since passed -- and that rule
+  reaching the dispatcher through the real run loop without the ramp, the
+  back-off window or the NONE-rate guard seeing anything that was never
+  requested.
 - Containment: _proxy_host_for_log never letting a full (possibly
   credentialed) AUDIBLE_PROXY_URL reach a log record, and
   _verify_dedicated_proxy refusing to start against anything but this
   script's own dedicated exit.
 
-Nothing here exercises the run loop's DB I/O (_read_page's actual SQL) or the
-DB queue beyond what proves the proxy check runs before either is touched --
-those remain operational concerns of a one-off script, not the content of
-either fix, matching this file's existing scope.
+Nothing here exercises the script's DB I/O -- _read_page's and _mark_checked's
+actual SQL against a real database -- beyond what proves the proxy check runs
+before either is touched. That remains an operational concern of a one-off
+script, matching this file's existing scope. The eligibility rule is tested
+twice over regardless, because it exists twice: as the Python filter below,
+and as the seeder's SQL WHERE clause. That the two agree case for case is
+pinned against real Postgres in
+tests/integration/test_chapters_release_gate.py.
 """
 
 # Standard library
 import inspect
 import logging
 import time
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Third party
@@ -32,6 +42,7 @@ import pytest
 
 # Local
 from app.core.exceptions import AudibleAPIException, NotFoundException
+from app.services.db import writer
 from scripts.backfill_chapters import (
     _BackoffWindow,
     _Gate,
@@ -50,6 +61,7 @@ from scripts.backfill_chapters import (
     _process_one,
     _proxy_host_for_log,
     _run,
+    _select_work,
     _verify_dedicated_proxy,
 )
 import scripts.backfill_chapters as backfill_chapters
@@ -703,11 +715,170 @@ def test_none_rate_guard_baseline_excludes_the_current_window_from_its_own_denom
 
 
 # ============================================================
+# _select_work -- which books on a page this walk should fetch
+# ============================================================
+# A page row is (asin, region, chapters_checked_at, release_date), in
+# _read_page's own select order. NOW is the clock _select_work is handed;
+# nothing here reads the real one.
+
+NOW = datetime(2026, 8, 30, 12, 0, 0, tzinfo=timezone.utc)
+OUT = NOW - timedelta(days=30)     # released a month ago
+AHEAD = NOW + timedelta(days=30)   # releases in a month
+
+
+def test_select_work_takes_a_book_never_checked_at_all():
+    """The walk's original job, unchanged: a null stamp is work."""
+    assert _select_work([("B00NEVERCHK", "de", None, OUT)], NOW) == [("B00NEVERCHK", "de")]
+
+
+def test_select_work_takes_a_never_checked_book_that_has_not_released_yet():
+    """An upcoming title is fetched like any other rather than skipped. A
+    real share of unreleased books already have chapter data before their
+    release date, so refusing to ask would withhold data Libex can store
+    today; the 404 the rest return costs one request and is recoverable,
+    because the stamp it leaves is what the re-admission below keys on."""
+    assert _select_work([("B00UPCOMING", "us", None, AHEAD)], NOW) == [("B00UPCOMING", "us")]
+
+
+def test_select_work_readmits_a_book_checked_before_a_release_that_has_now_passed():
+    """The fix, and the single assertion this slice exists for. Asked while
+    the audio did not exist yet, answered with a 404, marked -- and now the
+    date has passed, so the question is worth putting again. Without this the
+    stamp would be terminal and the title would never pick up chapters at
+    all."""
+    rows = [("B00READMIT1", "uk", NOW - timedelta(days=60), NOW - timedelta(days=5))]
+    assert _select_work(rows, NOW) == [("B00READMIT1", "uk")]
+
+
+def test_select_work_leaves_a_book_checked_after_its_release_settled():
+    """The other half of the rule, and what stops re-admission from becoming
+    a permanent re-fetch loop over the whole corpus: a stamp later than the
+    release date was an answer about the finished title, so it stands for
+    good however long ago it was written."""
+    rows = [("B00SETTLED1", "us", NOW - timedelta(days=365), NOW - timedelta(days=400))]
+    assert _select_work(rows, NOW) == []
+
+
+def test_select_work_does_not_readmit_a_book_stamped_exactly_at_its_release_date():
+    """checked < release_date is strict. A stamp bearing precisely the release
+    instant was not asked early -- it was asked at the moment the title
+    landed -- so it settles. Equality is the only input that separates < from
+    <=, which is why the clock is an argument rather than something read."""
+    instant = NOW - timedelta(days=5)
+    rows = [("B00ONSTAMP1", "us", instant, instant)]
+    assert _select_work(rows, NOW) == []
+
+
+def test_select_work_readmits_a_book_whose_release_date_is_exactly_now():
+    """release_date <= now is inclusive: a title releasing at precisely the
+    instant being compared against is eligible immediately, not one tick
+    later."""
+    rows = [("B00ONTHEDOT", "us", NOW - timedelta(days=10), NOW)]
+    assert _select_work(rows, NOW) == [("B00ONTHEDOT", "us")]
+
+
+def test_select_work_does_not_readmit_a_book_releasing_a_second_from_now():
+    """The far side of that same edge, so the test above cannot pass by the
+    release-date comparison having been dropped altogether."""
+    rows = [("B00ALMOSTOK", "us", NOW - timedelta(days=10), NOW + timedelta(seconds=1))]
+    assert _select_work(rows, NOW) == []
+
+
+def test_select_work_never_readmits_a_checked_book_with_no_release_date():
+    """A book with no release date is settled by its first check: there is no
+    date for it to become eligible on, and inventing one would read a missing
+    value as evidence about a release nobody has measured. Such books are left
+    exactly where they already were.
+
+    Here that answer comes from the explicit `release_date is not None` guard,
+    which is load-bearing rather than defensive -- this is Python, where
+    `checked < None` raises TypeError instead of answering false, so without
+    it every page carrying such a book takes the walk down. The seeder's SQL
+    reaches the same answer by three-valued logic, which is genuinely
+    null-propagating; that difference, and that the two still agree, is
+    tests/integration/test_chapters_release_gate.py's subject."""
+    rows = [("B00NULLDATE", "us", NOW - timedelta(days=400), None)]
+    assert _select_work(rows, NOW) == []
+
+
+def test_select_work_still_takes_an_unchecked_book_with_no_release_date():
+    """The null rule is about re-admission only -- a missing date never
+    triggers special treatment in either direction, so an unchecked book with
+    no date is ordinary work."""
+    assert _select_work([("B00NULLNEW1", "us", None, None)], NOW) == [("B00NULLNEW1", "us")]
+
+
+def test_select_work_keeps_each_book_with_its_own_region():
+    """The pair travels together: a book ASIN resolves only in its own
+    marketplace, so the region has to survive selection rather than be
+    re-derived downstream. Checked on the re-admission arm too, since that is
+    the newer of the two paths out of this function."""
+    rows = [
+        ("B00NEVERCHK", "jp", None, OUT),
+        ("B00READMIT1", "br", NOW - timedelta(days=60), NOW - timedelta(days=5)),
+    ]
+    assert _select_work(rows, NOW) == [("B00NEVERCHK", "jp"), ("B00READMIT1", "br")]
+
+
+def test_select_work_over_a_mixed_page():
+    """The realistic page: every case side by side, decided per row rather
+    than for the page as a whole, in the order the page arrived."""
+    rows = [
+        ("B00SETTLED1", "us", NOW - timedelta(days=1), NOW - timedelta(days=400)),
+        ("B00NEVERCHK", "uk", None, OUT),
+        ("B00NULLDATE", "us", NOW - timedelta(days=400), None),
+        ("B00READMIT1", "de", NOW - timedelta(days=60), NOW - timedelta(days=5)),
+        ("B00WAITING1", "fr", NOW - timedelta(days=2), AHEAD),
+    ]
+    assert _select_work(rows, NOW) == [("B00NEVERCHK", "uk"), ("B00READMIT1", "de")]
+
+
+# ============================================================
+# _store_chapters -- the second site that writes tracks.chapters
+# ============================================================
+# This walk is the traffic that makes the shrinkage guard matter: the books
+# _select_work re-admits were fetched before release, and some already hold a
+# full listing that a chapterless re-fetch would erase. The rule's behaviour
+# is proved on both writers in
+# tests/integration/test_track_chapters_shrinkage.py; what these pin is that
+# this site carries it at all, which is what it was missing.
+
+def test_store_chapters_borrows_the_writers_own_guard_rather_than_restating_it():
+    """Identity, not equivalence. One rule written out twice is a drift
+    surface, and this is the second of the two sites that write this column --
+    the first version of this slice left this one unguarded entirely. A local
+    re-implementation could pass every behavioural test on the day it was
+    written and diverge silently afterwards; sharing the object cannot."""
+    assert backfill_chapters._chaptered_wins is writer._chaptered_wins
+    assert backfill_chapters._chapter_count is writer._chapter_count
+
+
+@pytest.mark.asyncio
+async def test_store_chapters_puts_the_guard_in_the_conflict_clause():
+    """Wired into the statement, not merely imported. The merge is decided by
+    postgresql inside the one write, against the row it has locked, rather
+    than by reading the row first -- several paths refresh the same ASIN at
+    once, and a read-compare-write would let two of them agree the stored row
+    was empty before either had written."""
+    result = MagicMock()
+    result.scalar = MagicMock(return_value=0)
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=result)
+
+    await backfill_chapters._store_chapters(session, "B00STORESQL", {"chapters": []})
+
+    sql = str(session.execute.call_args_list[0].args[0].compile())
+    assert "ON CONFLICT (asin) DO UPDATE SET chapters = CASE WHEN" in sql
+    assert "jsonb_array_length(CASE WHEN (jsonb_typeof(excluded.chapters[" in sql
+    assert "jsonb_array_length(CASE WHEN (jsonb_typeof(tracks.chapters[" in sql
+
+
+# ============================================================
 # _advance_cursor -- keyset paging's wrap-around policy
 # ============================================================
 
 def test_advance_cursor_moves_forward_on_a_non_empty_page():
-    rows = [("B001", "us", None), ("B002", "us", None)]
+    rows = [("B001", "us", None, None), ("B002", "us", None, None)]
     next_cursor, wrapped, done = _advance_cursor(rows, cursor="B000", wrapped=False)
     assert next_cursor == "B002"
     assert wrapped is False
@@ -731,7 +902,7 @@ def test_advance_cursor_a_row_between_two_wraps_resets_the_wrap_state():
     """If the wrap-around pass finds real work again before reaching the
     end a second time, wrapped stays True but done must stay False --
     proves the wrap doesn't prematurely end the pass."""
-    rows = [("B001", "us", None)]
+    rows = [("B001", "us", None, None)]
     next_cursor, wrapped, done = _advance_cursor(rows, cursor=None, wrapped=True)
     assert next_cursor == "B001"
     assert wrapped is True
@@ -968,6 +1139,126 @@ def test_run_calls_handle_pending_pauses_both_inside_and_after_the_page_loop():
     item."""
     source = inspect.getsource(_run)
     assert source.count("await _handle_pending_pauses(") >= 2
+
+
+# ============================================================
+# _run -- re-admission reaching the dispatcher, and what the
+# concurrency machinery is allowed to see
+# ============================================================
+
+async def _drive_run(*pages, limit=None):
+    """
+    Drives the real _run over the canned pages given (then two empty ones, so
+    the wrap-around ends the walk) and hands back the run's own state objects
+    plus every (asin, region) that actually reached _process_one.
+
+    Only the edges are stubbed: the engine and sessionmaker, _read_page (the
+    page IS the input), _process_one, the exit-IP probe, every sleep, and
+    signal.signal -- that last one because this is pytest's own process, and
+    the script's SIGTERM/SIGINT handlers would outlive the test.
+
+    Everything between the page and the outcome is real: _select_work, the
+    dispatch loop, _dispatch_one, the gate, the ramp, the back-off window
+    and the NONE-rate guard. That is the point of harnessing the loop rather
+    than asserting on _select_work alone -- a rule that is right in isolation
+    and never reaches the dispatcher is worth nothing, and what the
+    concurrency machinery observes is itself part of the claim.
+    """
+    seen: list[tuple[str, str]] = []
+    captured: dict = {}
+    remaining = [*pages, [], []]
+    real_run_cls, real_ramp_cls = backfill_chapters._Run, backfill_chapters._Ramp
+
+    async def _next_page(_session, _cursor, _size):
+        return remaining.pop(0) if remaining else []
+
+    async def _record(_session, asin, region):
+        seen.append((asin, region))
+        return _Outcome.NOT_FOUND, False, False, 0.01
+
+    def _make_run():
+        captured["run"] = real_run_cls()
+        return captured["run"]
+
+    def _make_ramp(gate):
+        captured["gate"] = gate
+        captured["ramp"] = real_ramp_cls(gate)
+        return captured["ramp"]
+
+    sessions = MagicMock(side_effect=lambda: AsyncMock(
+        __aenter__=AsyncMock(return_value=AsyncMock()), __aexit__=AsyncMock(return_value=False)
+    ))
+
+    with patch.dict("os.environ", {
+        "AUDIBLE_PROXY_URL": "http://libex-backfill-vpn:8888",
+        "DATABASE_URL": "postgresql+asyncpg://unused/unused",
+    }), \
+         patch("scripts.backfill_chapters.create_async_engine", MagicMock(return_value=AsyncMock())), \
+         patch("scripts.backfill_chapters.async_sessionmaker", MagicMock(return_value=sessions)), \
+         patch("scripts.backfill_chapters.signal.signal", MagicMock()), \
+         patch("scripts.backfill_chapters._log_exit_ip", new=AsyncMock()), \
+         patch("scripts.backfill_chapters._interruptible_sleep", new=AsyncMock()), \
+         patch("scripts.backfill_chapters._read_page", new=_next_page), \
+         patch("scripts.backfill_chapters._process_one", new=_record), \
+         patch("scripts.backfill_chapters._Run", new=_make_run), \
+         patch("scripts.backfill_chapters._Ramp", new=_make_ramp):
+        exit_code = await _run(limit)
+
+    return captured["run"], captured["ramp"], captured["gate"], seen, exit_code
+
+
+@pytest.mark.asyncio
+async def test_run_dispatches_a_re_admitted_book_end_to_end():
+    """The rule reaching the thing that acts on it. _select_work being right
+    in isolation proves nothing if the loop still filters on `checked is
+    None` of its own accord, which is exactly what it did before this slice
+    -- so this drives the real loop and watches for the request itself.
+
+    The page carries a settled book alongside the re-admitted one so a loop
+    that simply dispatched everything would fail here too."""
+    page = [
+        ("B00READMIT1", "uk", NOW - timedelta(days=60), NOW - timedelta(days=5)),
+        ("B00SETTLED1", "us", NOW - timedelta(days=1), NOW - timedelta(days=400)),
+        ("B00NEVERCHK", "us", None, OUT),
+    ]
+    run, _ramp, _gate, seen, exit_code = await _drive_run(page)
+
+    assert seen == [("B00READMIT1", "uk"), ("B00NEVERCHK", "us")]
+    assert run.processed == 2
+    assert run.not_found == 2
+    assert run.errors == 0
+    assert exit_code == 0
+
+
+@pytest.mark.asyncio
+async def test_run_keeps_settled_books_out_of_the_concurrency_machinery():
+    """A book nobody asked Audible about is no evidence at all about the
+    exit, so a page mostly of settled records must leave the ramp, the
+    back-off window and the NONE-rate guard holding only what was really
+    requested. Otherwise a long stamped stretch of the corpus could either
+    fake a degradation or dilute a real one, and the run would throttle
+    itself over requests it never made.
+
+    Checked against the real objects' own state rather than a dispatch
+    count: the ramp keeps a signal PER REGION, so a settled de or fr book
+    leaking through would leave an empty region signal -- a fingerprint that
+    a later real de/fr result would then be judged against, and one a count
+    of dispatches would never show."""
+    page = [
+        ("B00SETTLED1", "de", NOW - timedelta(days=1), NOW - timedelta(days=400)),
+        ("B00READMIT1", "uk", NOW - timedelta(days=60), NOW - timedelta(days=5)),
+        ("B00NULLDATE", "fr", NOW - timedelta(days=400), None),
+        ("B00NEVERCHK", "us", None, OUT),
+    ]
+    run, ramp, gate, seen, _exit_code = await _drive_run(page)
+
+    assert len(seen) == 2
+    assert set(ramp._regions) == {"uk", "us"}
+    assert sum(signal.samples for signal in ramp._regions.values()) == 2
+    assert len(run.backoff_window._events) == 2
+    assert run.none_guard.total == 2
+    assert gate.limit == backfill_chapters.CONCURRENCY_START
+    assert run.ratchet.tripped is False
 
 
 # ============================================================

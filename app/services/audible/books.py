@@ -1117,8 +1117,15 @@ async def fetch_and_store_chapters(
     - "error":     transient failure (Audible 500/timeout/network) or a write
                    failure; NOT marked, so a later pass (or the backfill) retries.
 
-    Coordinates with the standalone backfill via chapters_checked_at: a book
-    marked here won't be re-fetched there, and vice versa.
+    A book asked about before its release date is marked like any other, but
+    the mark does not settle it: Audible answers a chapter request for audio
+    that does not exist yet with a 404, so both selection sites re-admit a book
+    whose stamp predates its release_date once that date has passed. Asking
+    early therefore costs one wasted request rather than retiring the title
+    before it ever had chapters to find.
+
+    Coordinates with the standalone backfill via chapters_checked_at: neither
+    path re-fetches what the other has already marked, on the same terms.
     """
     path = f"/1.0/content/{asin}/metadata"
     params = {
@@ -1151,7 +1158,20 @@ async def fetch_and_store_chapters(
 
 
 async def _mark_chapters_checked(session: AsyncSession, asin: str) -> None:
-    """Stamps chapters_checked_at on a book so it leaves the backfill queue."""
+    """
+    Stamps chapters_checked_at on a book, recording that its chapters have
+    been asked about.
+
+    Nothing ever clears the column, so for a book that was already out when it
+    was asked this is final and it leaves the queue for good. For one asked
+    ahead of its release date it is not: both selection sites re-admit a book
+    whose stamp predates its release_date once that date has passed. That is
+    what keeps an early 404 -- Audible has no chapters for audio that does not
+    exist yet -- from retiring a title before release day, and it needs no
+    condition here, because the stamp itself is the record of when the
+    question was asked. See _gather_chapters in the seeder and _select_work in
+    scripts/backfill_chapters.py.
+    """
     await session.execute(
         update(Book)
         .where(Book.asin == asin)

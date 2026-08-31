@@ -6,7 +6,10 @@ from Audible, and stores them slowly so the traffic doesn't look like a
 scraper. Concurrency ramps 3 -> 10 on clean latency evidence, drops to 1 on
 the first 429/401/403 and aborts on a second. A 404, or a confirmed-permanent
 non-404 status (currently just 400), marks the book checked without
-retrying; anything else is retried. Reuses the app's own fetch/normalize/
+retrying; anything else is retried -- except that a book checked before its
+release date comes back round once that date passes, since Audible has no
+chapters for audio that does not exist yet and its 404 said nothing about the
+finished title (see _select_work). Reuses the app's own fetch/normalize/
 write path, so stored data matches an on-demand fetch.
 
 RUN IT (its own container, its own dedicated VPN exit -- AUDIBLE_PROXY_URL
@@ -83,6 +86,7 @@ from app.core.logging import get_logger, setup_logging
 from app.services.audible import client as audible_client
 from app.services.audible.client import audible_get
 from app.services.audible.books import _normalize_chapters
+from app.services.db.writer import _chapter_count, _chaptered_wins
 
 
 logger = get_logger()
@@ -570,27 +574,103 @@ class _NoneRateGuard:
 
 # --- keyset paging with a one-shot wrap-around ------------------------------
 
+# One row of the corpus walk, in the order _read_page selects them.
+_PageRow = tuple[str, str, datetime | None, datetime | None]
+
+
 async def _read_page(
     session: AsyncSession, cursor: str | None, size: int
-) -> list[tuple[str, str, datetime | None]]:
+) -> list[_PageRow]:
     """
-    One keyset page of (asin, region, chapters_checked_at), ordered by the
-    primary key.
+    One keyset page of (asin, region, chapters_checked_at, release_date),
+    ordered by the primary key.
 
-    Filtering to chapters_checked_at IS NULL happens after this call, in
-    Python, not in the WHERE clause -- that column has no index, so a
-    filtered query would heap-fetch every row of the stamped prefix on
-    every page.
+    The eligibility test happens after this call, in Python, not in the WHERE
+    clause -- see _select_work for the rule, and this docstring for why it
+    lives out here rather than in SQL. Neither of the two columns the test
+    reads is indexed.
+
+    Over a whole walk the two forms cost about the same: 119,761 buffers
+    filtered against 119,000 as written, 0.6% apart. So the argument is about
+    distribution, not total. Filtered, the cost collects into single
+    statements that scan the whole stamped prefix at once -- 73,746 buffers
+    and 283ms for the first page past a contiguous stamped run, throwing away
+    495,900 rows to return one page of 500 -- against 77 buffers and 0.40ms as
+    written. Unfiltered, no page can cost more than a page, which is what
+    keeps this run's 30s statement_timeout, and the database that also serves
+    the public API, out of the question.
+
+    Those figures were measured on a synthetic container built to match
+    production's proportions rather than against production itself, walking
+    at CHUNK_SIZE=500 with 495,900 already-stamped rows sitting ahead of the
+    first unstamped one. The two scales reconcile as arithmetic: 119,000 is
+    that 77-buffer page multiplied across the roughly 1,500 pages the fixture
+    takes to walk end to end.
+
+    The provenance is stated on purpose: this comment exists to stop the
+    filter being pushed into SQL by someone who has not measured, so it has to
+    survive being checked. An earlier set of numbers here did not -- they
+    described the superseded hold-back predicate, and re-measuring under the
+    rule the code actually carries produced the ones above. Re-measure rather
+    than re-argue.
+
+    Selecting release_date alongside the columns already being read is free --
+    measured indistinguishable from the three-column page at CHUNK_SIZE=500.
     """
-    stmt = select(Book.asin, Book.region, Book.chapters_checked_at).order_by(Book.asin).limit(size)
+    stmt = (
+        select(Book.asin, Book.region, Book.chapters_checked_at, Book.release_date)
+        .order_by(Book.asin)
+        .limit(size)
+    )
     if cursor is not None:
         stmt = stmt.where(Book.asin > cursor)
     result = await session.execute(stmt)
-    return [(row[0], row[1], row[2]) for row in result.all()]
+    return [(row[0], row[1], row[2], row[3]) for row in result.all()]
+
+
+def _select_work(rows: list[_PageRow], now: datetime) -> list[tuple[str, str]]:
+    """
+    Picks the books on one page this walk should fetch chapters for.
+
+    Two ways in. Never checked at all, which is the walk's original job. Or
+    checked before the book's own release date, and that date has since
+    passed: Audible answers a chapter request for audio that does not exist
+    yet with a 404, and _process_one marks a 404 like any other answer, so
+    without this an upcoming title would be retired on the strength of a
+    question asked too early. Comparing the stamp against the release date
+    re-admits exactly those, once, on their own -- there is no flag to set and
+    nothing to un-mark, and a book checked after it was out never comes back.
+
+    A book with no release date is settled by its first check. Here that is
+    the explicit `release_date is not None` test below doing the work, not the
+    seeder's null propagation: this is Python, where `checked < None` raises
+    TypeError rather than answering false. Drop the guard and the walk runs
+    fine until it reaches a row that is both stamped and dateless, then raises
+    on that row and takes the run down -- rare enough to survive a test pass
+    and fatal when it lands. The seeder's SQL reaches the same answer by
+    three-valued logic instead. One rule, two languages, which is
+    exactly the pair that quietly stops agreeing -- so the two are asserted
+    case for case against each other in
+    tests/integration/test_chapters_release_gate.py.
+
+    Leaving those books settled is itself deliberate, and it leaves them
+    exactly where they already were -- the alternative reads a missing date as
+    evidence about a release nobody has measured.
+
+    Each book keeps its own region -- a book ASIN resolves only in its own
+    marketplace, so the pair travels together to _dispatch_one.
+    """
+    work: list[tuple[str, str]] = []
+    for asin, region, checked, release_date in rows:
+        if checked is None:
+            work.append((asin, region))
+        elif release_date is not None and checked < release_date <= now:
+            work.append((asin, region))
+    return work
 
 
 def _advance_cursor(
-    rows: list[tuple[str, str, datetime | None]], cursor: str | None, wrapped: bool
+    rows: list[_PageRow], cursor: str | None, wrapped: bool
 ) -> tuple[str | None, bool, bool]:
     """
     Pure wrap-around policy: reached the end of the corpus once -> wrap the
@@ -607,7 +687,17 @@ def _advance_cursor(
 
 
 async def _mark_checked(session: AsyncSession, asin: str) -> None:
-    """Stamps chapters_checked_at so this book leaves the queue for good."""
+    """
+    Stamps chapters_checked_at, recording that this book's chapters have been
+    asked about.
+
+    That is the end of it for a book already out when it was asked -- nothing
+    ever clears the column and _select_work will not look at it again. For one
+    asked ahead of its release date it is not: the stamp records when the
+    question was put, and _select_work re-admits the book once its release
+    date has passed. So this write needs no condition of its own; writing it
+    unconditionally is what makes the comparison there possible.
+    """
     await session.execute(
         update(Book).where(Book.asin == asin).values(chapters_checked_at=_now())
     )
@@ -615,7 +705,32 @@ async def _mark_checked(session: AsyncSession, asin: str) -> None:
 
 
 async def _store_chapters(session: AsyncSession, asin: str, chapters: dict) -> None:
-    """Writes the track row. Upserts by asin so a re-run just refreshes it."""
+    """
+    Writes the track row. Upserts by asin so a re-run just refreshes it --
+    except that a response carrying no chapters cannot erase a stored listing
+    that has some.
+
+    The guard is _chaptered_wins, imported from the service writer rather than
+    restated here. One rule expressed twice is a drift surface, and this is
+    the second of the two sites that write this column; borrowing the
+    expression is what keeps them from disagreeing later. The statement around
+    it mirrors upsert_track deliberately, down to bumping updated_at either
+    way and reporting a suppressed overwrite -- but it is a separate statement
+    rather than a call to upsert_track, because that one swallows its own
+    write failures. Best-effort is right on the request path and wrong here,
+    where a failed write has to reach _process_one as an ERROR so the book is
+    left unstamped and tried again.
+
+    Why this walk is the traffic that makes it matter: the fall-through in
+    _process_one tests chapter_info for truthiness, not for containing
+    chapters, so a chapter_info of {"brandIntroDurationMs": 2000} is not a
+    NONE outcome. It reaches _normalize_chapters, which faithfully turns it
+    into a payload whose chapters list is empty. That is not a response to
+    reject wholesale -- Audible sent those durations and they are real -- so
+    the refusal belongs here, on the one value that would shrink. And the
+    books it protects are not hypothetical: the ones _select_work re-admits
+    were fetched before release, and some already hold a full listing.
+    """
     from sqlalchemy.dialects.postgresql import insert
 
     stmt = insert(Track).values(
@@ -623,12 +738,32 @@ async def _store_chapters(session: AsyncSession, asin: str, chapters: dict) -> N
         chapters=chapters,
         created_at=_now(),
         updated_at=_now(),
-    ).on_conflict_do_update(
-        index_elements=["asin"],
-        set_={"chapters": chapters, "updated_at": _now()},
     )
-    await session.execute(stmt)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["asin"],
+        set_={
+            "chapters": _chaptered_wins(stmt.excluded.chapters, Track.chapters),
+            "updated_at": _now(),
+        },
+    ).returning(_chapter_count(Track.chapters))
+
+    result = await session.execute(stmt)
+    stored_count = result.scalar() or 0
     await session.commit()
+
+    offered = chapters.get("chapters") if isinstance(chapters, dict) else None
+    offered_count = len(offered) if isinstance(offered, list) else 0
+    if offered_count == 0 and stored_count > 0:
+        # Deliberately unprefixed, where nearly every line in this script
+        # carries "Backfill:" and only the two RESUME CURSOR lines do not:
+        # upsert_track emits this exact message for the same event on
+        # the service path, and one string across both is what lets a search
+        # find every suppressed overwrite rather than half of them. The asin
+        # says which path it came from.
+        logger.warning(
+            "Kept stored chapters over an empty response",
+            extra={"asin": asin, "stored_chapters": stored_count},
+        )
 
 
 class _Outcome:
@@ -663,9 +798,10 @@ async def _process_one(
     """
     Fetches and stores one book's chapters.
 
-    Outcomes: STORED/NONE/NOT_FOUND/PERMANENT mark the book checked and
-    leave the queue; none of these count as an error. ERROR is left
-    unmarked so a later pass retries it.
+    Outcomes: STORED/NONE/NOT_FOUND/PERMANENT mark the book checked; none of
+    these count as an error. That takes the book out of the queue, except
+    where the mark predates its release date, which _select_work re-admits
+    once that date passes. ERROR is left unmarked so a later pass retries it.
 
     Returns (outcome, is_backoff_signal, is_ratchet_signal, elapsed).
     is_ratchet_signal is only ever True for a raised 401/403 -- a 429 never
@@ -677,9 +813,10 @@ async def _process_one(
         data = await audible_get(region, CHAPTERS_PATH.format(asin=asin), CHAPTERS_PARAMS)
     except NotFoundException:
         elapsed = time.monotonic() - started
-        # 404 -- terminal. This record has no chapter metadata (confirmed across
-        # all regions for the ISBN-keyed class). Mark it and move on; do not retry
-        # and do not treat as an error.
+        # 404 -- nothing to fetch. Mark it and move on; do not retry and do not
+        # treat as an error. Settled for a book already out; for one asked ahead
+        # of its release date the mark is exactly what lets _select_work bring it
+        # back afterwards.
         await _mark_checked(session, asin)
         return _Outcome.NOT_FOUND, False, False, elapsed
     except AudibleAPIException as e:
@@ -994,7 +1131,7 @@ async def _run(limit: int | None) -> int:
             cursor = next_cursor
             logger.info(f"RESUME CURSOR: {cursor}")
 
-            work = [(asin, region) for asin, region, checked in rows if checked is None]
+            work = _select_work(rows, _now())
             if not work:
                 continue
 

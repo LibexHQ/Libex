@@ -127,23 +127,53 @@ async def _stamp_narrator(narrator_name: str) -> None:
 
 async def _gather_chapters(asins: list[str], region: str, delay: float) -> None:
     """
-    Fetches and stores chapters for books that haven't been checked yet.
+    Fetches and stores chapters for the books in this batch whose chapters are
+    not already settled.
 
     Best-effort and paced by the seeder delay: each book is a separate Audible
-    call on the live IP, so we only touch books with chapters_checked_at still
-    null (newly discovered ones — already-checked books, including those the
-    backfill handled, are skipped) and space the calls out. fetch_and_store_chapters
-    never raises, and the whole thing is wrapped, so a chapter failure can never
-    disrupt the metadata persistence that is the seeder's actual job.
+    call on the live IP, so we only touch the ones the query below admits —
+    newly discovered books, whose chapters_checked_at is still null — and space
+    the calls out. Anything already checked, including whatever the backfill
+    covered, is left alone. fetch_and_store_chapters never raises, and the whole
+    thing is wrapped, so a chapter failure can never disrupt the metadata
+    persistence that is the seeder's actual job.
+
+    A book is also eligible again once it has released, if it was checked
+    before its release date. Audible answers a chapter request for audio that
+    does not exist yet with a 404, and fetch_and_store_chapters marks that
+    answer like any other, so a title asked about while it was still upcoming
+    would otherwise be retired before it ever had chapters to find. Comparing
+    the stamp against the release date re-admits any such book that appears in
+    a batch handed to this function — no flag to set and nothing to un-mark.
+    A book checked after it was already out stays settled forever.
+
+    A book with no release date is settled by its first check and never
+    re-admitted: the comparison is null-propagating, so it cannot re-enter on
+    a date that does not exist. That is deliberate and it matches the
+    behaviour every such book already had — the alternative reads a missing
+    date as evidence about a release that nobody has measured. The backfill's
+    _select_work spells the same rule with an explicit None check, because
+    Python raises on that comparison rather than answering null.
+
+    The `&` below is one argument to or_() on purpose. The two comparisons are
+    a single conjunction — checked before the date, and the date has passed —
+    so flattening them into three arguments would make "has released" an
+    alternative to "never checked" rather than a qualifier on the stamp, and
+    re-admit every released book on every pass.
     """
     if not asins:
         return
 
+    now = _now()
     async with SessionFactory() as session:
         result = await session.execute(
             select(Book.asin).where(
                 Book.asin.in_(asins),
-                Book.chapters_checked_at.is_(None),
+                or_(
+                    Book.chapters_checked_at.is_(None),
+                    (Book.chapters_checked_at < Book.release_date)
+                    & (Book.release_date <= now),
+                ),
             )
         )
         need = [row[0] for row in result.fetchall()]

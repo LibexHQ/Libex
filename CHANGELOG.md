@@ -10,6 +10,45 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.19.4]
+
+Documentation only — no endpoint, parameter, response shape, field or status
+code changed. Both entries below describe the project's README.
+
+### Changed
+- **The two region sections are now one table, near the top of the page.**
+  "Supported Regions" listed the eleven marketplaces and "Regional Coverage"
+  reported the per-region stored counts, as two separate tables sitting below
+  the endpoint reference. They are now a single "Regions" section placed ahead
+  of the introduction, with one table carrying each marketplace's code, name
+  and its four stored counts on the same row. Every one of the eleven regions
+  now appears: the coverage table previously omitted any market with next to
+  nothing stored, so a reader could not tell whether such a market was
+  unsupported or merely unused. Those markets now get a row with a dash in
+  place of each badge, and the surrounding text states that a dash reflects an
+  almost-empty shelf rather than a region Libex is unable to serve. No count,
+  badge target or region-scoped call changed — the same figures are read from
+  the same live endpoint as before.
+
+### Fixed
+- **The stored-count badges display numbers again instead of reading
+  "inaccessible".** Nothing in Libex was failing while they were broken: the
+  stats endpoint answers in a fraction of a second, sends the caching headers
+  it has sent since 1.19.1, and the badge service renders a real count when
+  asked for one directly. The fault was in GitHub's image proxy, which fetches
+  every badge on the page's behalf and caches whatever comes back — including
+  the failed fetches it collected while the database was being moved onto a
+  private network in 1.18.2 — and it kept serving those cached failures long
+  after the endpoint itself recovered. Every badge address is now different
+  from the one the proxy holds an entry against, so it fetches them as images
+  it has never seen before. No badge's value or meaning changes. The badges
+  also now ask to be refreshed every half hour rather than every hour, so a
+  figure that falls behind corrects sooner. This does not prevent a
+  recurrence: a future spell of failed fetches can be cached the same way, and
+  the only remedy remains changing the addresses again. Anyone who forked the
+  README carries the same stale entries in their own copy until the addresses
+  in that copy change too.
+
 ## [1.19.3]
 
 No endpoint, parameter, response shape, field or status code moved — every

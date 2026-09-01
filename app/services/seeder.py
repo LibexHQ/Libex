@@ -56,14 +56,33 @@ SessionFactory = async_sessionmaker(engine, expire_on_commit=False)
 
 SEED_STALE_DAYS = 7
 
-# Refresh cadence for upcoming (not-yet-released) books. As a book's release
-# date approaches, its details (date, cover, narrator, runtime) firm up, so we
-# re-fetch more often the closer it gets. Each tier is
-# (max_days_until_release, refresh_if_not_updated_in_days): a book is refreshed
-# when it falls within the day range and hasn't been updated within the tier's
-# staleness threshold. Books already released are never refreshed — they're
-# settled. Ordered nearest-release first; the first matching tier wins.
+# How far past its release date a book stays in the refresh rotation. Read by
+# REFRESH_TIERS' leading tier and by _select_refresh_asins' outer bound; see
+# both for why it is the only place the backward reach is written down.
+POST_RELEASE_WINDOW_DAYS = 7
+
+# Refresh cadence for books near their release date. A title's details — date,
+# cover, narrator credits, runtime, availability — firm up as the date
+# approaches and finish settling shortly after it rather than at it: a pre-order
+# carries an estimated runtime and often placeholder cover art, and the full
+# narrator credit list is frequently complete only once the title is actually
+# out. So the rotation does not end at release, it ends POST_RELEASE_WINDOW_DAYS
+# past it — a full week rather than a few days so a Friday release still gets
+# the following Monday's corrections, and no longer than a week because past
+# that the details have stopped moving and every extra day is a permanent
+# per-cycle cost for nothing.
+#
+# Each tier is (max_days_until_release, refresh_if_not_updated_in_days): a book
+# is refreshed when it falls within the day range and hasn't been updated within
+# the tier's staleness threshold. Ordered nearest-release first; the first
+# matching tier wins. The leading tier's max_days is 0, so its window ends at
+# the release instant and opens behind it, from the prev_max seed in
+# _select_refresh_asins. Its staleness threshold matches the tier after it
+# deliberately: a title is watched at the same cadence the day after release as
+# the day before, so there is no step change at the moment its details move
+# fastest.
 REFRESH_TIERS = [
+    (0, 1),      # out for under a week -> refresh if older than 1 day
     (14, 1),     # within 2 weeks  -> refresh if older than 1 day
     (30, 3),     # within a month  -> 3 days
     (60, 7),     # within 2 months -> 7 days
@@ -559,7 +578,8 @@ async def _scan_new_releases(region: str, delay: float) -> dict[str, int]:
     ALL reachable ASINs — future pre-orders and recent releases alike, no date
     gate — and persisting the ones we don't already have. This is how both
     new-releases and coming-soon data lands in the DB; the tiered refresh
-    (_refresh_upcoming) then keeps near-release pre-orders current.
+    (_refresh_upcoming) then keeps titles current on both sides of their
+    release date.
 
     Audible caps every catalog/products query at ~535 results and a parent query
     is not a superset of its children, so we walk parents plus leaves and union
@@ -639,12 +659,25 @@ async def _select_refresh_asins(
     session: AsyncSession, region: str, now: datetime
 ) -> list[str]:
     """
-    Returns ASINs of upcoming books due for a refresh, tiered by REFRESH_TIERS
-    and ordered oldest-first (by updated_at). Pure selection — no fetching — so
-    the tier and staleness logic can be tested against a real database.
+    Returns ASINs of books near their release date that are due for a refresh,
+    tiered by REFRESH_TIERS and ordered oldest-first (by updated_at). Pure
+    selection — no fetching — so the tier and staleness logic can be tested
+    against a real database.
+
+    Every tier's lower bound is the previous tier's upper bound, so seeding
+    prev_max at -POST_RELEASE_WINDOW_DAYS rather than 0 is the whole of what
+    opens the leading tier's window behind the release instant; the chain above
+    it is untouched and still meets at now. The outer release_date bound reads
+    the same constant for the same reason — left at now it would exclude every
+    row the leading tier selects and quietly reduce this back to the
+    forward-only selection it replaced, with the tier still sitting there
+    looking correct.
+
+    max_days is compared against None, not truth-tested: the leading tier's 0 is
+    a real upper bound, the release instant, not an absent one.
     """
     tier_conditions = []
-    prev_max = 0
+    prev_max = -POST_RELEASE_WINDOW_DAYS
     for max_days, stale_days in REFRESH_TIERS:
         stale_cutoff = now - timedelta(days=stale_days)
         lower = now + timedelta(days=prev_max)
@@ -661,7 +694,7 @@ async def _select_refresh_asins(
         .where(
             Book.region == region,
             Book.release_date.isnot(None),
-            Book.release_date > now,
+            Book.release_date > now - timedelta(days=POST_RELEASE_WINDOW_DAYS),
             or_(*tier_conditions),
         )
         .order_by(Book.updated_at.asc())
@@ -671,14 +704,27 @@ async def _select_refresh_asins(
 
 async def _refresh_upcoming(region: str, delay: float) -> dict[str, int]:
     """
-    Re-fetches upcoming (not-yet-released) books whose details may have changed
-    as their release date approaches. Selection is tiered by REFRESH_TIERS:
-    the closer a book is to release, the shorter the staleness threshold before
-    it's refreshed. Already-released books are left alone.
+    Re-fetches books whose details may still be moving — everything from beyond
+    a year out to POST_RELEASE_WINDOW_DAYS past release. Selection is tiered by
+    REFRESH_TIERS: the closer a book is to release, the shorter the staleness
+    threshold before it's refreshed, and the rotation carries on for a week
+    afterwards because runtime, cover art and narrator credits finish settling
+    just after the date rather than on it.
 
     Books are processed oldest-first (by updated_at) so the most stale get
     priority, and refreshing a book updates its updated_at — which drops it out
     of the next cycle's selection until it ages back past its tier threshold.
+
+    Carrying past release also revives a book's chapters, which is a consequence
+    of the metadata window rather than the reason for it. A title asked for
+    chapters while it was still a pre-order gets a legitimate 404 — the audio
+    does not exist yet — and fetch_and_store_chapters stamps that answer like
+    any other. _gather_chapters re-admits a book whose stamp predates its
+    release_date once that date has passed, and this is the only path that ever
+    hands it a stored, released book, so such titles recover on the cycle after
+    they come out instead of waiting for scripts/backfill_chapters.py to be run
+    by hand. Only for the regions in SEEDER_REGIONS, which defaults to us alone;
+    the standalone backfill is what reaches the other ten.
 
     _fetch_and_persist's admission signal is not checked here, unlike the
     expansion phases: there is no entity to withhold a stamp from, and
@@ -700,7 +746,7 @@ async def _refresh_upcoming(region: str, delay: float) -> dict[str, int]:
         stats["books_refreshed"] = len(asins)
 
         logger.info(
-            f"Seeder: refreshed {len(asins)} upcoming books for {region}",
+            f"Seeder: refreshed {len(asins)} books near release for {region}",
             extra={"books_refreshed": len(asins)},
         )
 

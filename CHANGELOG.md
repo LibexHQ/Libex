@@ -10,6 +10,41 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.19.6]
+
+Documentation only — no endpoint, parameter, response shape, field or status
+code changed. Both entries below describe the project's README.
+
+### Changed
+- **The README now states the PostgreSQL version Libex needs.** Storing
+  chapters has required PostgreSQL 14 or newer since 1.19.5, which the
+  changelog entry and that version's release notes both said at the time —
+  but the README, which is where a self-hoster actually sets a database up,
+  said nothing about it anywhere. Self-Hosting Notes now opens with the
+  requirement, and the note beside `DATABASE_URL` repeats it for anyone
+  pointing Libex at a server of their own. What makes it worth stating twice
+  is the way an older server fails: the chapter write is rejected as a syntax
+  error, that error is caught and logged as a warning, and the request carries
+  on, so chapters never store while every other part of the API behaves
+  normally and nothing anywhere says the server is too old. Anyone who has
+  been running 1.19.5 against an external PostgreSQL 13 or earlier has been in
+  that state since they upgraded. The published compose file pins
+  `postgres:16-alpine`, so a deployment that uses it is unaffected — which is
+  why the requirement is not repeated in Quick Start, whose steps download
+  that file — and it is absent from the environment table because it is not
+  an environment variable.
+
+### Fixed
+- **The regions table no longer says a dash means nothing is stored.** The
+  text below the table read that a dash meant nothing worth counting was in
+  the database, while the sentence immediately before it described those
+  markets as holding next to nothing — and next to nothing is not nothing.
+  The markets shown with a dash do hold a small number of records. A dash now
+  reads as too little stored there to be worth a badge, which stays true
+  whether the figure is a handful or zero, and makes no promise about what a
+  future row will show. No row, badge or badge target changed, and the counts
+  on the page are read from the same live endpoint as before.
+
 ## [1.19.5]
 
 ### Fixed

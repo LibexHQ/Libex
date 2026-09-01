@@ -68,8 +68,8 @@ every `?region=xx` request that fetches from Audible persists what it gets.
 
 `it`, `in` and `br` are supported like every other market but have seen almost
 no traffic yet, so there's next to nothing stored for them. A dash means
-nothing worth counting is in the database, not that Libex can't serve that
-region.
+there's too little stored there to be worth a badge, not that Libex can't
+serve that region.
 
 ---
 
@@ -431,7 +431,7 @@ Copy `.env.example` to `.env` and configure:
 | `AUDIBLE_PROXY_URL` | — | Proxy URL for outbound Audible requests only. Supports `http://`, `https://`, `socks5://`. API serving is unaffected |
 | `SEED_SECRET` | — | PBKDF2 hash for the internal seed endpoint. Empty = endpoint disabled. Generate with `python -m app.api.routes.internal.router` |
 
-`DATABASE_URL` is constructed automatically by docker-compose from `DB_NAME`, `DB_USER`, and `DB_PASSWORD`. Only set it manually if running outside of Docker.
+`DATABASE_URL` is constructed automatically by docker-compose from `DB_NAME`, `DB_USER`, and `DB_PASSWORD`. Only set it manually if running outside of Docker — and whatever it points at must be PostgreSQL 14 or newer, see Self-Hosting Notes below.
 
 ### Seeder stack (`docker-compose.seeder.yml`)
 
@@ -471,6 +471,7 @@ Libex is API-compatible with AudiMeta. To migrate:
 
 ## Self-Hosting Notes
 
+- **PostgreSQL 14 or newer is required.** The compose file above pins `postgres:16-alpine`, so this only concerns you if you're pointing Libex at a database you already run. On an older server chapter writes fail as a syntax error that's logged as a warning and nothing more — chapters never store, everything else keeps working, and nothing tells you the server is too old
 - Libex uses PostgreSQL as both a persistent library and a cache — no Redis required
 - Every book, author, series, narrator, and genre ever requested is stored in a full relational schema and survives cache expiry indefinitely
 - The local library powers the `/db/book` and `/book/sku/{sku}` endpoints and serves as an automatic fallback when Audible is unavailable

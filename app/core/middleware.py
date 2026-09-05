@@ -65,12 +65,12 @@ def valid_region(
 # ============================================================
 
 # Query params whose values may be logged verbatim: region selectors,
-# pagination, sort order, and catalogue facets. Every one of them describes HOW
-# a caller asked, never WHAT they typed. Membership is necessary but not
-# sufficient -- the value must also pass is_safe_log_value, and one that does not
-# is replaced by the sentinel with its key kept, exactly like a param that is
-# known but not listed here. A key in neither set is dropped whole, pair and
-# all; see _KNOWN_QUERY_PARAMS.
+# pagination, sort order, catalogue facets, and the toggles that pick a
+# response's shape. Every one of them describes HOW a caller asked, never WHAT
+# they typed. Membership is necessary but not sufficient -- the value must also
+# pass is_safe_log_value, and one that does not is replaced by the sentinel with
+# its key kept, exactly like a param that is known but not listed here. A key in
+# neither set is dropped whole, pair and all; see _KNOWN_QUERY_PARAMS.
 #
 # An allowlist rather than a denylist, deliberately. A denylist leaks every
 # param added after it was written, silently and by default, and the failure
@@ -79,7 +79,7 @@ def valid_region(
 # value and below for its key.
 _SAFE_QUERY_PARAMS = frozenset({
     "region", "book_region", "cache", "limit", "page", "sort", "order",
-    "flat", "depth", "days", "source", "products_sort_by",
+    "flat", "label", "depth", "days", "source", "products_sort_by",
     "category", "genre", "book_format", "language", "plan_name",
     "explicit", "has_pdf", "is_vvab", "whisper_sync",
     "audiobooks_produced", "cultural_heritage", "gender",

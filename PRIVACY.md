@@ -172,6 +172,15 @@ load, are ordinary requests and produce ordinary log lines. What they don't do
 is reach anyone else — see
 [Who else sees your requests](#who-else-sees-your-requests).
 
+**So are the README's counter badges.** The numbers in Libex's README are
+images served from `/db/stats/badge/`, so rendering that page fetches them
+from the public instance and each fetch writes the same line as any other
+request — the fields in the table above, no address. It is worth naming on its
+own because the person whose browser makes those requests opened a page rather
+than called an API, and may not have counted that as touching Libex at all.
+Until this release it didn't: what changed, and what it changed *from*, is
+under [Who else sees your requests](#who-else-sees-your-requests).
+
 ### What happens to a search you type
 
 This is the part people most reasonably assume the worst about, so it gets its
@@ -277,7 +286,8 @@ What survives is decided by an allowlist, and it decides the names as well as
 the values:
 
 - **Kept with its value** — structural parameters: `region`, `limit`, `page`,
-  `sort`, `order`, and the catalogue filters. These describe *how* a request
+  `sort`, `order`, the catalogue filters, and the switches that pick the shape
+  of a response, like `flat` and `label`. These describe *how* a request
   was made. The value still has to look like the short token those parameters
   take — if it runs past 64 characters, or contains a `;` or an `=`, which is
   how a second query would be smuggled inside one value, it's redacted like
@@ -407,6 +417,26 @@ contacts no third party: no CDN, no font service, no external favicon, and no
 logo fetched from the documentation tool's own vendor as it renders. The pages
 do contain ordinary links out — an attribution link, specification URLs — and
 those reach nobody unless you choose to click one.
+
+**shields.io, for the README's counters — until this release.** The count
+badges in Libex's README used to be images drawn by
+[shields.io](https://shields.io): the picture came from their servers, and
+their servers then called `libexdb.com` for the number. Rendering the page
+fetched from shields.io, and Libex saw their servers rather than you. Those
+badges are now drawn by Libex itself, from `/db/stats/badge/`, so the fetch
+comes here instead.
+
+That takes one company out of one path, and the honest version of it says what
+it puts in. The fetch is now an ordinary request to the public instance and is
+logged like one — the fields in the table above, no address — and it crosses
+Cloudflare, which sees the address it came from, exactly as it does for every
+other request. Where a renderer fetches images through an image proxy of its
+own rather than from your browser, Libex and Cloudflare see that proxy and not
+you; GitHub says it does this, but that is GitHub's behaviour, not something I
+can check from this repository, so I'm not going to state it as a fact about
+your render. GitHub is serving you the page either way, and none of this
+changes that. The fixed badges — the licence and the two container-registry
+links — are still shields.io images.
 
 **Nobody else.** I don't sell log data, share it, trade it, or hand it to
 advertisers, data brokers or anyone else. The parties above have it because
@@ -544,6 +574,12 @@ What carries over to your instance:
 - Your instance still calls Audible's API to answer requests, from your
   server's IP address. Search terms go to Audible; nothing about your users
   does.
+- **The README's counter badges point at my instance, not yours.** They are
+  images from `libexdb.com/db/stats/badge/`, so if you keep them in a fork,
+  someone reading your README fetches them from my server, across Cloudflare,
+  and that fetch is logged here under the terms above rather than on your
+  instance. Your copy serves the same routes — repoint them at your own host,
+  or take them out.
 - The `/docs` and `/redoc` pages are served from your own copy of the assets
   as well, so nobody who opens them on your instance contacts a third party
   either. That depends on `scripts/fetch_docs_assets.sh` having run, which the

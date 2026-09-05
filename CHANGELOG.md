@@ -10,6 +10,231 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.20.0]
+
+### Added
+- **Libex now draws its own stats badges, at
+  `GET /db/stats/badge/{metric}.svg`.** `metric` is one of the counts
+  `/db/stats` already returns — `books`, `booksWithChapters`, `authors`,
+  `narrators` and `series` — and the response is an SVG in the same flat style
+  the README's counters were previously drawn in, so one stands in for the
+  other without the page looking any different. `?region=xx` scopes the figure
+  exactly as it scopes `/db/stats`, including the caveat that already applies
+  there: narrators are not stored per region, so a narrators badge shows the
+  global figure whatever region is asked for. `?label=false` draws the number
+  on its own, for a table whose row and column already say what it counts. A
+  badge is a second representation of `/db/stats` rather than a second source
+  of it — the same counts, the same cache entry, the same freshness header —
+  so the image and the JSON cannot disagree about a figure, and a badge
+  request costs exactly what the equivalent JSON request costs.
+  `seriesRegionUnknown` deliberately has no badge: it is the size of a gap in
+  the data rather than a library count, and a number alone in a coloured box
+  would read as a sixth one.
+
+  Mistakes are answered with a badge instead of an error status. An unknown
+  metric or an invalid region returns a grey badge reading "unknown metric" or
+  "invalid region", with a 200 and `no-store`, and anything else under
+  `/db/stats/badge/` — a missing `.svg`, a `.png`, an extra path segment —
+  returns a grey "no such badge" the same way, where it would previously have
+  been a JSON 404. This one surface makes that exception because what is being
+  fetched is an image: a 404 body is never drawn, so the honest status code
+  shows a reader nothing but the browser's broken-image icon, while a grey box
+  naming the mistake is legible to them, to a screen reader and to `curl`. A
+  malformed `label` is still the API's ordinary 422 JSON, since that means a
+  caller building the URL programmatically rather than a person typing one.
+  Nothing a caller sends is ever drawn into the image — every string in it is
+  one of Libex's own fixed labels or a count in digits.
+
+  The README's own counters read this endpoint from this release onwards;
+  what that changes for someone looking at that page is described below.
+
+- **The stats counts are now kept warm in the background, so a reader is far
+  less likely to be the one who pays to recompute them.** `/db/stats` holds
+  each set of counts for five minutes, and the first request after that lapses
+  recomputes from scratch: 0.12 seconds when the entry is warm, against 1.6
+  seconds for a small region, 4.7 for `us`, and about 15.3 for the unscoped
+  global counts that the five badges at the top of the README read. Treat that
+  last figure as an upper bound on database time rather than as database time
+  — it is end-to-end wall clock against the live instance — but what it
+  settles is that the global counts are nowhere near bounded by the
+  region-scoped ones, since every region-scoped count is a filtered subset of
+  one the global entry does in full. shields.io allows an upstream fetch about
+  three and a half seconds before it renders "inaccessible" instead of a
+  number, which is why some badges failed while others beside them did not,
+  and why the global ones failed most. Load is not the cause and was measured
+  not to be: the endpoint answers in 0.12s to 0.37s at 1, 5, 15 and 37
+  simultaneous requests. A README render does fire 37 fetches at once, but
+  they do not slow each other down — each independently pays whatever its own
+  entry costs.
+
+  A background pass now recomputes each stored set of counts once it has less
+  than 150 seconds of its five minutes left, so in ordinary operation nothing
+  arrives to find one expired. It looks every 20 seconds, and a look that
+  finds nothing due costs one indexed lookup and stops there; where Libex
+  runs several workers, one is elected through a Postgres advisory lock on
+  the passes that do have work, so the counting is not multiplied by the
+  worker count. It is not a guarantee, and three limits are worth knowing.
+
+  A pass stops admitting further entries after 60 seconds, with a hard cut at
+  90; whatever it did not reach is still due and is taken by the next pass,
+  which while everything is healthy costs nothing, because the entry left
+  behind is then the one with the most life left. A pass that fails outright
+  at the wrong moment can still let one set lapse until a later pass lands.
+
+  The third is the case where a scope does not merely cost a lot to count but
+  keeps failing. A failed refresh writes nothing, deliberately, so that scope
+  keeps the last real figure it had rather than being overwritten with zeroes
+  — but it keeps its old expiry along with it, so an order that always took
+  the nearest to lapsing first would hand the failing scope the front of
+  every pass in perpetuity and starve every healthy one behind it. A scope
+  that has been failing for longer than a full cache lifetime is therefore
+  put behind every scope that has not, and those stragglers take turns at the
+  front rather than settling into a fixed order, so none of them can be held
+  behind another for the life of the process. What that does not remove is
+  the onset: a failing scope takes several minutes to fall that far back, and
+  until it does it holds the earliest expiry and can spend a whole pass on
+  its own. Simulating the loop at the per-scope costs above with two scopes
+  failing, every other scope — the global counts the five top-of-README
+  badges read among them — spent one continuous stretch fully expired at the
+  start, between about three and a half and sixteen minutes depending on
+  which scopes were failing and what each cost to count. That is long enough
+  for a badge to render "inaccessible", so the breakage this exists to remove
+  happens once at the onset of such a fault rather than continuously; in the
+  same simulations nothing lapsed again after the first twenty-five minutes,
+  with the fault present throughout.
+
+  **Self-hosters should know what this commits an instance to.** Only counts
+  already stored are refreshed — the loop computes nothing that has never been
+  asked for — but a set of counts it renews never expires again, so the hourly
+  cache purge can never collect it either. One scanner, or one fork of the
+  README sweeping every region, therefore commits an instance to recounting
+  that scope every 150 seconds for as long as the process runs, up to a
+  ceiling of twelve scopes: the global one plus the eleven regions. Deleting
+  the cache rows stops it, and nothing recreates one until a request for that
+  scope does — note that it takes two predicates rather than one, because the
+  global entry's key is plain `db_stats` while the region ones are
+  `db_stats:xx`, and a `db_stats:%` pattern does not match the global one.
+  Automatic eviction was considered and refused: any rule for deciding whether
+  a scope is still wanted has to let it go cold to find out, and a scope going
+  cold is the single fault this exists to remove.
+
+### Changed
+- **`GET /db/stats` now tells caches they may serve the last real count while
+  they fetch a new one.** A response carrying a trustworthy result adds
+  `stale-while-revalidate=3600` and `stale-if-error=86400` to the
+  `Cache-Control` header it has sent since 1.19.1. `max-age` and `s-maxage`
+  are untouched — still the real remaining life of the underlying five-minute
+  entry — so the moment at which the response says it has stopped being
+  current has not moved. What is new is what a cache in front of Libex may do
+  afterwards: hand the previous count straight back and run the recompute
+  behind the request instead of in front of it, and keep serving a real count
+  for up to a day when Libex itself is unwell rather than showing an error.
+  The cost to a caller is that a count can be up to about an hour behind,
+  where it was previously at most five minutes; these are running totals of
+  tables that only grow, and the request that receives the stale copy is the
+  one that triggers the refresh. A response carrying the all-zeros
+  database-failure fallback still sends `no-store` and gains neither directive
+  — serving a stale real count is worth doing, serving stale zeros is not. The
+  response body is unchanged. An instance with no cache in front of it, or one
+  whose cache happens to hold no previous copy of the response, gets nothing
+  from this at all, which is why the background refresh above exists rather
+  than this alone.
+
+  This also revises what [1.19.4] said about the same symptom. That entry put
+  the broken badges down to GitHub's image proxy holding on to fetches that
+  had failed during an earlier outage, and changed every badge address so the
+  proxy would fetch them as images it had not seen; the badges carried on
+  breaking afterwards. The tell that the explanation did not fit is that the
+  fault comes and goes, where cached failures would have stayed stuck until
+  the addresses changed. That entry's claim that the endpoint answers in a
+  fraction of a second was measured on a warm result and is true of one — it
+  is not true of the first request after an expiry, which is the case that
+  matters and the one that had not been measured. Nothing from that release is
+  being undone for having done harm, but neither of its remedies outlives
+  this release: the badge addresses change once more, to Libex's own, and
+  the half-hourly refresh interval goes with them, since a badge served from
+  here carries its own caching headers instead of asking a badge service to
+  hold one. They simply never fixed this.
+
+- **The warnings `/db/stats` logs when it cannot read, count or cache no
+  longer carry the database's own error text.** Each of the three now records
+  the region it was serving, the error's type, its SQLSTATE and the schema
+  object involved — the same treatment background book writes have had since
+  1.19.3. On the request path the old lines were adequate because a caller saw
+  the failure too, but the background refresh above calls the same code
+  unattended up to twelve times a pass, and some of the exceptions a degraded
+  database raises here have an empty message: a dropped connection produced a
+  line that named no cause whatsoever. Nothing a caller sends appeared in
+  those lines before this change or after it. Separately, `label` joins the
+  query parameters whose value is recorded as sent, alongside `region`,
+  `limit` and the rest, because it selects the shape of a response rather than
+  carrying anything a caller typed; `PRIVACY.md` now names that category of
+  parameter explicitly.
+
+- **The README's counters are drawn by Libex now instead of by shields.io.**
+  All 37 of the stored-count badges on that page — the five at the top and
+  the four on each of the eight region rows that have any — are images from
+  `/db/stats/badge/`, where they were previously shields.io images that asked
+  `/db/stats` for a number and drew it. The region-table badges pass
+  `label=false`, since the row and column already say what is being counted;
+  the five at the top keep their labels. Every colour, size, link target and
+  piece of alt text is what it was, and the figures come from where they
+  always came from, so the page reads as it did before. The reproduction is
+  pixel-identical rather than byte-identical: the authors and series badges
+  write their colour as a hex value where shields wrote the colour's name,
+  which is the same colour either way — nothing on the page moves or changes
+  shade. The half-hourly refresh each of these badges asked for, added in
+  [1.19.4], goes with them, because a badge from here sends its own
+  `Cache-Control` rather than being told how long to be kept. Three
+  shields.io badges remain — the licence and the two container-registry
+  links — so rendering the page still contacts shields three times; none of
+  those three reads anything out of Libex. The endpoint table further down
+  the page gains a row for the badge route.
+
+  Rendering the README is now 37 requests to Libex, where it was 37 requests
+  to shields.io and up to nine from there to Libex. There are still only nine sets
+  of counts behind them — one global, one per region with anything stored —
+  so it costs the database no more than it did; what changed is that the
+  requests arrive here rather than at a badge service that was fetching on
+  every reader's behalf and holding the answer for half an hour between them.
+
+  **What a reader sees when a count is slow changes with it, and not entirely
+  for the better.** shields gave up on a slow fetch after about three and a
+  half seconds and drew a grey "inaccessible" plate, which at least said that
+  something was wrong. Nothing imposes that ceiling now — but nothing draws
+  that plate either: GitHub's image proxy waits for however long the origin
+  takes, so a count being recomputed in front of a reader shows up as a badge
+  that is slow to appear, or a gap where one should be. The background
+  refresh above is what keeps a reader from meeting a recompute at all; the
+  several minutes at the onset of a persistently failing scope, described
+  there, is the case where one still can, and a missing image is what that
+  fault looks like now.
+
+  **It also changes who sees a request that reads the page.** A render used to
+  fetch the numbers from shields.io and shields' servers then called Libex, so
+  Libex saw shields rather than the reader. Those fetches come to the public
+  instance directly now, and are logged exactly as any other request is — the
+  same fields, no address — and they cross Cloudflare as every other request
+  does. `PRIVACY.md` sets that out in full, including one point worth
+  repeating here: the badge addresses are absolute to `libexdb.com`, so a fork
+  that keeps this README sends its own readers' browsers to the public
+  instance rather than to the fork. Every instance serves the same route —
+  repoint them at your own host, or take them out.
+
+### Fixed
+- **One set of counts failing to cache no longer takes the sets after it down
+  with it.** When the counts were computed but writing them to the cache
+  failed, the failure was logged and the request answered normally, which is
+  correct as far as it goes — but the database session was left in an aborted
+  transaction, so anything else attempted on that session afterwards failed
+  for that reason alone rather than for anything wrong with it. No caller
+  could reach this: a request makes one such call and its session is closed
+  immediately afterwards. The background refresh added in this release is the
+  first thing to walk up to twelve scopes on a single session, where one
+  failed cache write would have failed every scope behind it and counted each
+  of them as broken. The rollback the other two failure paths already took is
+  now taken here as well, so a set that cannot be cached costs only itself.
+
 ## [1.19.6]
 
 Documentation only — no endpoint, parameter, response shape, field or status

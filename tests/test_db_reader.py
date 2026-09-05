@@ -1751,6 +1751,308 @@ async def test_get_db_stats_region_scoped_fallback_on_exception_includes_series_
 
 
 # ============================================================
+# get_db_stats — refresh=True
+# ============================================================
+# The flag the background refresher (app/services/db/stats_refresh.py) uses.
+# Its whole job is to replace an entry that is still live, before it lapses,
+# so the cache-aside read has to be skipped -- and the DB-failure path has to
+# leave whatever is stored exactly where it is, because that stored value goes
+# on serving for whatever is left of its expiry. Only that much: cache.get_entry
+# filters on expires_at > now, so once the row lapses the request path treats it
+# as a miss, and what spares a reader from there is the edge's stale-if-error
+# window, not the row.
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_refresh_false_is_the_unchanged_cache_aside_read():
+    """The default path is byte-identical to what it was before the flag
+    existed: a fresh, key-complete hit is served without running a single
+    count. Passing the flag explicitly is asserted alongside the default so
+    a later change that made refresh=False mean something subtly different
+    from "not passed" fails here."""
+    cached = {
+        "books": 150,
+        "authors": 42,
+        "narrators": 85,
+        "series": 18,
+        "booksWithChapters": 7,
+    }
+    cached_expires_at = datetime.now(timezone.utc) + timedelta(seconds=123)
+
+    for kwargs in ({}, {"refresh": False}):
+        session = AsyncMock()
+        hit = MagicMock()
+        hit.scalar_one_or_none.return_value = MagicMock(value=cached, expires_at=cached_expires_at)
+        session.execute = AsyncMock(return_value=hit)
+
+        result = await get_db_stats(session, **kwargs)
+
+        assert result.stats == cached
+        assert result.cache_expires_at == cached_expires_at
+        assert session.execute.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_refresh_skips_the_cache_read_entirely():
+    """
+    Not "misses the cache" -- never asks. The refresher runs against
+    entries that are all still live, so a cache-aside read would hand back
+    the very value it is there to supersede and the loop would renew
+    nothing while looking like it worked. The first statement issued must
+    be a count, and the execute queue below carries no cache-read result
+    at all, so a version that still read the cache would run out of queued
+    results rather than quietly passing.
+    """
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=[
+        _stats_count_result(150),
+        _stats_count_result(42),
+        _stats_count_result(85),
+        _stats_count_result(18),
+        _stats_count_result(7),
+        MagicMock(),
+    ])
+
+    result = await get_db_stats(session, refresh=True)
+
+    first_statement = str(session.execute.call_args_list[0][0][0])
+    assert "FROM books" in first_statement
+    assert "cache" not in first_statement
+    assert result.stats == {
+        "books": 150,
+        "authors": 42,
+        "narrators": 85,
+        "series": 18,
+        "booksWithChapters": 7,
+    }
+    assert result.cache_expires_at is not None
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_refresh_writes_the_fresh_counts_over_the_stored_entry():
+    """The point of the pass: the same key is overwritten in place with the
+    new figures. A refresh that computed counts and did not store them
+    would leave every reader on the old entry until it lapsed -- which is
+    the cold request this whole change exists to remove."""
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=[
+        _stats_count_result(150),
+        _stats_count_result(42),
+        _stats_count_result(85),
+        _stats_count_result(18),
+        _stats_count_result(7),
+        MagicMock(),
+    ])
+
+    await get_db_stats(session, refresh=True)
+
+    write_params = session.execute.call_args_list[5][0][0].compile().params
+    assert write_params["key"] == "db_stats"
+    assert write_params["value"] == {
+        "books": 150,
+        "authors": 42,
+        "narrators": 85,
+        "series": 18,
+        "booksWithChapters": 7,
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_refresh_never_clears_the_key_first():
+    """
+    Invalidate-then-recompute is the intuitive way to force a refresh and
+    it trades away the guarantee below for nothing: the write here is an
+    upsert, so a successful refresh overwrites the entry either way, while
+    a clear-first version turns every failed pass into the cold state the
+    refresher exists to prevent -- at the moment the database is already
+    unwell. No DELETE may be issued on this path.
+    """
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=[
+        _stats_count_result(150),
+        _stats_count_result(42),
+        _stats_count_result(85),
+        _stats_count_result(18),
+        _stats_count_result(7),
+        MagicMock(),
+    ])
+
+    await get_db_stats(session, refresh=True)
+
+    statements = [str(call[0][0]) for call in session.execute.call_args_list]
+    assert not any("DELETE" in statement.upper() for statement in statements)
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_refresh_failure_writes_nothing_at_all():
+    """
+    A failed refresh must leave the stored entry intact, so it goes on
+    serving for whatever is left of its expiry -- that remainder, and not
+    "until a later pass succeeds", is what is being preserved here.
+    The DB-failure handler returns the all-zeros fallback BEFORE cache.set
+    is reached, so nothing is written -- one execute, the count that fell
+    over, and no more. Move that return below the write, or write the
+    fallback "for consistency", and the badges show zeros for five minutes
+    every time a count times out under a corpus refresh's write load.
+    """
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=Exception("statement timeout"))
+
+    result = await get_db_stats(session, refresh=True)
+
+    assert result.cache_expires_at is None
+    assert result.stats == {
+        "books": 0,
+        "authors": 0,
+        "narrators": 0,
+        "series": 0,
+        "booksWithChapters": 0,
+    }
+    assert session.execute.call_count == 1
+    session.rollback.assert_awaited()
+
+
+class _CacheWriteAbortingSession:
+    """
+    Models Postgres's transaction-abort semantics around a FAILED CACHE
+    WRITE, which is the one get_db_stats handler that used to leave the
+    session unusable.
+
+    Once a statement raises inside a transaction Postgres aborts it and
+    every later statement fails with 25P02 until rollback() actually runs.
+    A plain AsyncMock side-effect queue does not model that -- queued
+    results come back regardless of transaction state -- so a test built on
+    one passes whether or not the handler rolls back. Here the second
+    get_db_stats call can only succeed if the first one's write handler
+    really rolled back, which is the interaction the background refresher
+    exposes and the request path never did: on the request path the session
+    is closed immediately afterwards, so the aborted transaction cost
+    nothing and went unnoticed.
+    """
+
+    FAIL = object()
+
+    def __init__(self, results):
+        self._results = list(results)
+        self._aborted = False
+        self.rollback_count = 0
+
+    async def execute(self, *args, **kwargs):
+        if self._aborted:
+            raise Exception(
+                "current transaction is aborted, commands ignored until end of transaction block"
+            )
+        result = self._results.pop(0)
+        if result is self.FAIL:
+            self._aborted = True
+            raise Exception("cache write unavailable")
+        return result
+
+    async def rollback(self):
+        self.rollback_count += 1
+        self._aborted = False
+
+    async def commit(self):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_cache_write_failure_rolls_the_session_back():
+    """
+    The handler that was missing it. A failed cache.set leaves the session's
+    transaction aborted, and until this rollback the only reason that never
+    showed was that the request path closes the session straight afterwards.
+    """
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=[
+        _stats_count_result(150),
+        _stats_count_result(42),
+        _stats_count_result(85),
+        _stats_count_result(18),
+        _stats_count_result(7),
+        Exception("cache write unavailable"),
+    ])
+
+    result = await get_db_stats(session, refresh=True)
+
+    assert result.cache_expires_at is None
+    session.rollback.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_cache_write_failure_leaves_the_session_usable_for_the_next_entry():
+    """
+    Why that rollback matters, in the shape that actually bites. The
+    refresher walks up to twelve entries on ONE session, so an aborted
+    transaction left behind by entry three fails entry four on 25P02 -- and
+    entry four is healthy, so the pass records a real entry as a failure and
+    leaves its stored value to go stale for a reason that has nothing to do
+    with it. This drives two calls on a session that models the abort: the
+    second returns real counts only if the first rolled back, and returns
+    the all-zeros fallback if it did not.
+    """
+    session = _CacheWriteAbortingSession([
+        # First entry: counts fine, cache write fails.
+        _stats_count_result(150),
+        _stats_count_result(42),
+        _stats_count_result(85),
+        _stats_count_result(18),
+        _stats_count_result(7),
+        _CacheWriteAbortingSession.FAIL,
+        # Second entry, on the same session, healthy throughout.
+        _stats_count_result(151),
+        _stats_count_result(43),
+        _stats_count_result(86),
+        _stats_count_result(19),
+        _stats_count_result(8),
+        MagicMock(),
+    ])
+
+    first = await get_db_stats(session, refresh=True)
+    second = await get_db_stats(session, refresh=True)
+
+    assert first.cache_expires_at is None
+    assert session.rollback_count >= 1
+    assert second.stats == {
+        "books": 151,
+        "authors": 43,
+        "narrators": 86,
+        "series": 19,
+        "booksWithChapters": 8,
+    }
+    assert second.cache_expires_at is not None
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_refresh_scoped_keeps_its_own_key_and_key_set():
+    """A region-scoped refresh writes the region's own entry and carries
+    the scoped key set with it. Writing scoped counts to the global key --
+    or dropping seriesRegionUnknown on the refresh path -- would make the
+    stored entry fail the shape check on the next read, so every later
+    request would recompute from cold and the refresher would be worse than
+    doing nothing."""
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=[
+        _stats_count_result(100),
+        _stats_count_result(200),
+        _stats_count_result(999),
+        _stats_count_result(300),
+        _stats_count_result(400),
+        _stats_count_result(5),
+        MagicMock(),
+    ])
+
+    result = await get_db_stats(session, region="us", refresh=True)
+
+    write_params = session.execute.call_args_list[6][0][0].compile().params
+    assert write_params["key"] == "db_stats:us"
+    assert set(result.stats) == {
+        "books", "authors", "narrators", "series", "booksWithChapters", "seriesRegionUnknown",
+    }
+    assert result.stats["seriesRegionUnknown"] == 5
+
+
+# ============================================================
 # _get_series_positions_batch — chunked IN query
 # ============================================================
 # The batch reads series positions for every book its caller holds, and

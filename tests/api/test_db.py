@@ -138,6 +138,20 @@ def _stats_result(stats=None, seconds=300):
     )
 
 
+def _cache_directives(response):
+    """The response's Cache-Control parsed into a {directive: value} map, a
+    bare directive mapping to None. Deliberately order-independent: the
+    header tests above read the string positionally, which is fine while the
+    remaining-life pair comes first, but the stale windows are only
+    meaningful as values and a reordered directive list must not be able to
+    change what an assertion about them measures."""
+    directives = {}
+    for part in response.headers["Cache-Control"].split(","):
+        name, _, value = part.strip().partition("=")
+        directives[name] = value or None
+    return directives
+
+
 def _many_db_books(n):
     """n distinct books, cheap enough to build at both below- and
     well-above-threshold sizes for the large-catalogue offload tests."""
@@ -458,6 +472,160 @@ async def test_get_db_stats_scoped_and_unscoped_read_different_cache_entries(asy
     assert 40 <= unscoped_max_age <= 42
     assert 198 <= scoped_max_age <= 200
     assert unscoped_max_age != scoped_max_age
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_fresh_answer_carries_both_stale_directives(async_client):
+    """What keeps the badges rendering across the moment the edge copy runs
+    out. Measured against the live instance: a warm request comes back in
+    0.12s, while the first request after an entry lapses recomputes counts
+    over ~1.5M rows.
+
+    What that costs is not settled by the region, which is how this read
+    until the unscoped entry was measured. The scoped entries came back in
+    1.6s for de and 4.7s for us; the unscoped one, which is scoped to no
+    region at all, came back in ~15.3s -- end-to-end wall clock, so TLS,
+    Cloudflare, network and origin are inside it and it bounds the database
+    time from above rather than being it. shields.io gives an upstream fetch
+    about 3.5 seconds, so a cheap region answers inside that and the global
+    counters miss it several times over, on an endpoint that was up and
+    answering throughout. Arrival rate is not the mechanism either, and this
+    used to say it was: measured at concurrency 1, 5, 15 and 37, the endpoint
+    returned 1.598s, 0.127s, 0.155s and 0.367s -- the serial request paid the
+    cold recompute and the batches behind it read the warm entry.
+
+    stale-while-revalidate lets the edge hand back the lapsed copy at warm
+    speed and refresh behind it; stale-if-error keeps a real count on the
+    badge while origin is unwell. The windows are what make each of them
+    work -- an hour has to span the gap between renders rather than one
+    recompute, and a day has to outlive an outage -- so the values are
+    pinned here, not just the directive names."""
+    with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock_stats:
+        mock_stats.return_value = _stats_result()
+        response = await async_client.get("/db/stats")
+
+    assert response.status_code == 200
+    directives = _cache_directives(response)
+    assert directives["stale-while-revalidate"] == "3600"
+    assert directives["stale-if-error"] == "86400"
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_scoped_fresh_answer_carries_both_stale_directives(async_client):
+    """Eight of the nine origin URLs a README render hits are scoped ones,
+    so a region query param skipping the stale windows would leave most of
+    the badge wall in exactly the state this change exists to fix."""
+    with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock_stats:
+        mock_stats.return_value = _stats_result(MOCK_STATS)
+        response = await async_client.get("/db/stats?region=us")
+
+    assert response.status_code == 200
+    directives = _cache_directives(response)
+    assert directives["stale-while-revalidate"] == "3600"
+    assert directives["stale-if-error"] == "86400"
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_fresh_answer_sends_exactly_these_five_directives(async_client):
+    """A set, so it catches the regression in both directions: quietly
+    falling back to the bare public/max-age/s-maxage form the route sent
+    before the badge burst was measured, and picking up some sixth
+    directive nobody reasoned about. Order is not asserted -- the string may
+    be rearranged freely -- but membership is exact."""
+    with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock_stats:
+        mock_stats.return_value = _stats_result()
+        response = await async_client.get("/db/stats")
+
+    assert set(_cache_directives(response)) == {
+        "public",
+        "max-age",
+        "s-maxage",
+        "stale-while-revalidate",
+        "stale-if-error",
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_db_failure_fallback_gets_no_stale_window_at_all(async_client):
+    """The line the stale windows must not cross. Serving a real count past
+    its expiry is a good trade; serving all-zeros past its expiry is not,
+    and the DB-failure fallback is precisely the case where Libex knows the
+    numbers mean nothing. A stale-if-error on this branch would pin those
+    zeros to the badge for a day with no way for origin to correct it --
+    the same edge-holds-the-zeros failure no-store was introduced to close,
+    only 288 times longer. The header stays exactly one directive."""
+    with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock_stats:
+        mock_stats.return_value = DbStatsResult(
+            {"books": 0, "authors": 0, "narrators": 0, "series": 0, "booksWithChapters": 0},
+            None,
+        )
+        response = await async_client.get("/db/stats")
+
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "no-store"
+    assert set(_cache_directives(response)) == {"no-store"}
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_cache_write_failure_gets_no_stale_window_at_all(async_client):
+    """The second route to cache_expires_at=None, and it has to be pinned
+    separately: here the counts are real, which makes "let a cache keep
+    them a while longer" sound reasonable. It is not -- nothing was
+    persisted, so there is no entry whose life a stale window could be
+    measured against, and the copy an edge held would expire on a schedule
+    origin has no record of. Same one-directive header as the fallback
+    above, for a different reason."""
+    with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock_stats:
+        mock_stats.return_value = DbStatsResult(MOCK_STATS, None)
+        response = await async_client.get("/db/stats")
+
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "no-store"
+    assert set(_cache_directives(response)) == {"no-store"}
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_stale_directives_do_not_disturb_the_remaining_life(async_client):
+    """The appended windows are additive: max-age and s-maxage still quote
+    the real life left on the entry, which is what stops the edge holding a
+    copy well after origin moved to a newer one. Read out of a parsed map
+    rather than the first regex match in the string, so this still measures
+    the right number if the directives are ever reordered, and asserts the
+    figure is not one of the two stale windows -- a max-age of 3600 or
+    86400 here would mean an assertion had latched onto the wrong one."""
+    with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock_stats:
+        mock_stats.return_value = _stats_result(seconds=42)
+        response = await async_client.get("/db/stats")
+
+    directives = _cache_directives(response)
+    max_age = int(directives["max-age"])
+    assert 40 <= max_age <= 42
+    assert max_age == int(directives["s-maxage"])
+    assert max_age != 300
+    assert max_age not in (3600, 86400)
+    assert directives["stale-while-revalidate"] == "3600"
+    assert directives["stale-if-error"] == "86400"
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_clamped_entry_still_carries_the_full_stale_windows(async_client):
+    """An entry with nothing left is the exact moment the badge burst
+    arrives, so it is the one case where the stale windows matter most and
+    the one where a clamp could plausibly be mistaken for "nothing to
+    advertise". Zero freshness and a full hour of revalidation are not in
+    tension: the first says the stored figure is no longer current, the
+    second says a cache may hand it over anyway while it fetches a new one.
+    Both windows keep their own values -- neither is clamped along with
+    max-age."""
+    with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock_stats:
+        mock_stats.return_value = _stats_result(seconds=-5)
+        response = await async_client.get("/db/stats")
+
+    directives = _cache_directives(response)
+    assert directives["max-age"] == "0"
+    assert directives["s-maxage"] == "0"
+    assert directives["stale-while-revalidate"] == "3600"
+    assert directives["stale-if-error"] == "86400"
 
 
 # ============================================================

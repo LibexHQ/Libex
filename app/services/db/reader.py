@@ -23,6 +23,7 @@ from app.services.audible.client import REGION_MAP
 from app.services.cache import manager as cache
 from app.services.sorting import apply_sort, BOOK_SORT_FIELDS, NARRATOR_SORT_FIELDS
 from app.services.db.filtering import apply_book_filters, apply_narrator_filters
+from app.services.db.writer import _failure_fields
 
 # Core
 from app.core.logging import get_logger
@@ -1415,10 +1416,12 @@ async def get_track_from_db(session: AsyncSession, asin: str) -> dict[str, Any] 
 # ============================================================
 
 
-# Public, unauthenticated, and hit continuously by shields.io on every README
-# render. Stats change continuously as the seeder writes, so a short TTL trades
-# a few minutes of badge staleness for skipping five full-table scans on most
-# requests.
+# Public, unauthenticated, and hit continuously on every README render -- the
+# counters there are /db/stats/badge SVGs (app/api/routes/db/badge.py) drawn
+# from this same accessor and the same cache entries, so a badge fetch costs
+# what a JSON fetch costs. Stats change continuously as the seeder writes, so a
+# short TTL trades a few minutes of badge staleness for skipping five
+# full-table scans on most requests.
 STATS_CACHE_TTL_SECONDS = 300
 
 # The exact key set a cached stats entry must have. Guards against a cached
@@ -1467,7 +1470,7 @@ class DbStatsResult(NamedTuple):
 
 
 async def get_db_stats(
-    session: AsyncSession, region: str | None = None
+    session: AsyncSession, region: str | None = None, refresh: bool = False
 ) -> DbStatsResult:
     """
     Returns counts of books, authors, narrators, series, and books with stored
@@ -1506,18 +1509,51 @@ async def get_db_stats(
     the live query can run on the same session, and a cache write failure
     never fails the request (but does mean the returned DbStatsResult carries
     no cache_expires_at, since nothing was actually written for it to quote).
-    A DB read failure is rolled back too, for the same reason: it left this
-    branch as the one place in the function that could hand the caller back
-    an aborted transaction on the same session.
+    A DB read failure is rolled back too, and so is a cache WRITE failure —
+    all three handlers now leave the session usable, which is the property
+    that matters once a caller reuses one session across several calls. The
+    write handler was the last one missing it, and on the request path it
+    read as harmless because the session is closed immediately afterwards;
+    the background refresher (app/services/db/stats_refresh.py) walks up to
+    twelve entries on one session, where an aborted transaction left behind
+    by entry three fails entry four on InFailedSqlTransaction and counts a
+    healthy entry as a failure.
+
+    All three handlers report through _failure_fields for the same reason
+    the refresher does. They used to interpolate the exception, which reads
+    as adequate on the request path because a caller saw the failure too --
+    but that refresher calls them unattended, up to twelve times a pass, and
+    the exceptions a degraded database produces here include ones whose
+    str() is empty. A bare TimeoutError from a partitioned host logged a
+    line that named no cause at all. error_type and the SQLSTATE name it
+    without putting the exception text, and whatever Postgres embedded in
+    it, into the log.
+
+    `refresh=True` skips the cache read and always runs the live query,
+    writing the result over whatever is stored. It exists for the background
+    refresher (app/services/db/stats_refresh.py), whose whole job is to
+    replace an entry that is still live, before it lapses — a cache-aside
+    read would hand it back the very value it is there to supersede. It
+    deliberately does not invalidate the key first: on a DB failure the
+    handler below returns the all-zeros fallback *before* cache.set is
+    reached, so nothing is written and the stored entry keeps its real
+    value for whatever life it had left. Only that remainder, though —
+    cache.get_entry filters on expires_at > now, so from the moment the
+    entry lapses the request path treats it as a miss and recomputes
+    instead of handing the stored value back, and what covers a reader
+    past that point is the edge's stale-if-error window
+    (app/api/routes/db/stats_headers.py), not this row. Clearing the key
+    would trade even that away, and for nothing — the write here is an
+    upsert, so a successful refresh overwrites the entry either way.
     """
     key = cache.stats_key(region)
     expected_keys = _STAT_KEYS if region is None else _REGION_STAT_KEYS
     try:
-        entry = await cache.get_entry(session, key)
+        entry = None if refresh else await cache.get_entry(session, key)
         if entry is not None and set(entry.value) == expected_keys:
             return DbStatsResult(entry.value, entry.expires_at)
     except Exception as e:
-        logger.warning(f"Cache read failed for stats: {e}")
+        logger.warning("Cache read failed for stats", extra={"region": region, **_failure_fields(e)})
         await session.rollback()
 
     try:
@@ -1556,7 +1592,7 @@ async def get_db_stats(
             )
             stats["seriesRegionUnknown"] = series_region_unknown.scalar_one()
     except Exception as e:
-        logger.warning(f"DB read failed for stats: {e}")
+        logger.warning("DB read failed for stats", extra={"region": region, **_failure_fields(e)})
         await session.rollback()
         fallback = {"books": 0, "authors": 0, "narrators": 0, "series": 0, "booksWithChapters": 0}
         if region is not None:
@@ -1567,7 +1603,8 @@ async def get_db_stats(
     try:
         await cache.set(session, key, stats, ttl_seconds=STATS_CACHE_TTL_SECONDS)
     except Exception as e:
-        logger.warning(f"Cache write failed for stats: {e}")
+        logger.warning("Cache write failed for stats", extra={"region": region, **_failure_fields(e)})
+        await session.rollback()
         cache_expires_at = None
 
     return DbStatsResult(stats, cache_expires_at)

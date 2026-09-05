@@ -26,6 +26,7 @@ from app.db.session import engine, AsyncSessionFactory
 
 # Services
 from app.services.cache.manager import purge_expired
+from app.services.db.stats_refresh import stats_refresh_loop
 
 # Routes
 from app.api.routes.books import router as books_router
@@ -101,10 +102,24 @@ async def lifespan(app: FastAPI):
     # rather than a flag this process reads.
     purge_task = asyncio.create_task(_cache_purge_loop())
 
+    # Keeps the /db/stats cache entries warm so that in ordinary operation a
+    # request does not find one expired. Deliberately not a guarantee, and
+    # not stated as one here: app/services/db/stats_refresh.py sets out where
+    # it stops holding, along with why that matters and how the six workers
+    # elect one of themselves to do the work.
+    # Started, never awaited: create_task returns immediately, so a database
+    # that is unreachable at boot delays nothing here, the same way nothing
+    # else in this lifespan assumes the schema is current.
+    stats_refresh_task = asyncio.create_task(stats_refresh_loop())
+
     yield
 
     # Shutdown
     purge_task.cancel()
+    # cancel() only requests cancellation and returns; the task is never
+    # awaited, so a pass in the middle of a several-second count cannot hold
+    # the shutdown open.
+    stats_refresh_task.cancel()
     await engine.dispose()
     logger.info("Libex shutting down")
     # Last, so the line above is still drained: stop() flushes the queue before

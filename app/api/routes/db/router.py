@@ -5,7 +5,6 @@ Only returns books that have been fetched and stored previously.
 """
 
 # Standard library
-from datetime import datetime, timezone
 from typing import Annotated, Any
 
 # Third party
@@ -23,10 +22,12 @@ from app.core.exceptions import NotFoundException
 from app.core.middleware import is_valid_asin, valid_region
 from app.db.session import get_session
 from app.services.audible.client import validate_region
+from app.api.routes.db.badge import badge_router
 from app.api.routes.db.filters import (
     book_filters,
     NarratorFilters,
 )
+from app.api.routes.db.stats_headers import stats_cache_control
 from app.api.routes.sort_params import (
     BookSortField,
     NarratorSortField,
@@ -54,6 +55,12 @@ from app.services.db.reader import (
 )
 
 router = APIRouter(prefix="/db", tags=["Database"])
+
+# The badge images that render /db/stats counts as SVG. Mounted here rather
+# than registered separately in main.py so the db package keeps exporting a
+# single router, and so the images cannot end up on a different prefix from
+# the numbers they draw.
+router.include_router(badge_router)
 
 
 class StatsResponse(BaseModel):
@@ -98,44 +105,47 @@ async def get_stats(
     Get counts of books, authors, narrators, series, and books with chapters
     in the local DB.
 
-    Public, unauthenticated, and hit hard by shields.io on every README
-    render -- 37 fetches across 9 distinct origin URLs (5 global badges plus
-    8 regions, each region's 4 counts sharing one `?region=xx` response via
-    different JSONPaths) fired at once by one page load. Cache-Control has
-    to be set explicitly here: left unset, Cloudflare never caches this
-    route -- `cf-cache-status: BYPASS` was measured on every call -- and
-    those badges render "inaccessible" instead of a number.
+    Public and unauthenticated, and no longer what a README render fetches:
+    the counters are badge images now, 37 of them across 37 distinct origin
+    URLs under /db/stats/badge/. This route is what each of those badges
+    links to, so it is read when a reader clicks one, not when they open the
+    page.
 
-    s-maxage and max-age carry the same value. There is a blast-radius gap
-    between an edge copy and a browser copy -- the same one author-books
-    cites, where an edge copy is purgeable and a browser copy is not --
-    but it is safe to ignore here because the value handed to both is
-    bounded above by STATS_CACHE_TTL_SECONDS: neither copy can ever be told
-    to hold stale data longer than that ceiling permits.
+    The load moved but the cost did not, because the badges read the same
+    get_db_stats cache entries as this route rather than ones of their own.
+    A page render touches nine of those entries: the unscoped one behind all
+    five global badges, and one `?region=xx` entry behind each of the eight
+    regions' four counts. So what arrives together is nine entries' worth of
+    first-request, not 37 -- and no contention across the nine, since each
+    pays only what its own entry costs. What costs here is being the first
+    request against a lapsed entry: a cold recompute over ~1.5M rows takes
+    seconds where a warm read takes 0.12 at any concurrency. What it costs
+    varies by entry, and region is not the largest term -- 1.6s for de, 4.7s
+    for us, and 15.3s for the unscoped global count the five top-of-README
+    badges read, that last one end-to-end wall clock and so an upper bound on
+    database time rather than database time (stats_headers.py carries the
+    full reading).
 
-    The value itself is the real remaining life of the cache entry
-    get_db_stats already read or wrote, carried back on the result rather
-    than re-read independently here (see DbStatsResult): quoting the full
-    TTL regardless of how far into its life the underlying entry already is
-    would tell the edge to hold a copy for a fresh window measured from
-    whenever it happened to ask, which can leave the edge serving a copy
-    well after origin has already moved on to a newer one. When nothing
-    trustworthy was stored -- the DB-failure fallback, or a cache-write
-    failure after an otherwise successful query -- get_db_stats reports
-    that as no expiry at all, and the response is marked no-store rather
-    than handed the longest freshness Libex offers.
+    Cache-Control has to be set explicitly: left unset, Cloudflare never
+    caches this route -- `cf-cache-status: BYPASS` was measured on every call
+    -- and every reader pays a recompute an edge copy would have covered. The
+    header itself comes from stats_cache_control (stats_headers.py), shared
+    with the badge route so the JSON and the image cannot advertise different
+    freshness, and documented there.
+
+    The one thing this route supplies is the expiry that policy is built
+    from: the real remaining life of the cache entry get_db_stats already
+    read or wrote, carried back on the result rather than re-read here (see
+    DbStatsResult). None means nothing trustworthy was stored -- the
+    DB-failure fallback, or a cache-write failure after an otherwise
+    successful query -- and the response is marked no-store rather than
+    handed the longest freshness Libex offers.
     """
     if region is not None:
         region = validate_region(region)
     result = await get_db_stats(session, region)
 
-    if result.cache_expires_at is None:
-        response.headers["Cache-Control"] = "no-store"
-    else:
-        remaining = (result.cache_expires_at - datetime.now(timezone.utc)).total_seconds()
-        edge_seconds = max(0, int(remaining))
-        response.headers["Cache-Control"] = f"public, max-age={edge_seconds}, s-maxage={edge_seconds}"
-
+    response.headers["Cache-Control"] = stats_cache_control(result.cache_expires_at)
     return {**result.stats, "region": region}
 
 

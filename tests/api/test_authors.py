@@ -720,6 +720,43 @@ async def test_get_author_books_rejects_invalid_asin(async_client):
     assert "Invalid ASIN" in response.json()["error"]
 
 
+@pytest.mark.asyncio
+async def test_get_author_resolves_lowercase_asin(async_client):
+    """A lowercase author ASIN must reach the service normalised, the same
+    fix the book routes needed."""
+    with patch("app.api.routes.authors.router.get_author", new_callable=AsyncMock) as mock:
+        mock.return_value = {**MOCK_AUTHOR, "asin": "B000APF21M"}
+        response = await async_client.get("/author/b000apf21m")
+        assert response.status_code == 200
+        args, _ = mock.call_args
+        assert args[0] == "B000APF21M"
+
+
+@pytest.mark.asyncio
+async def test_get_author_books_resolves_lowercase_asin(async_client):
+    """The author-books route adopted the same dependency."""
+    with patch("app.api.routes.authors.router.get_author_books", new_callable=AsyncMock) as mock_books, \
+         patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
+        mock_books.return_value = AuthorBooksResult(["B08G9PRS1K"], True)
+        mock_asins.return_value = [MOCK_BOOK]
+        response = await async_client.get("/author/books/b000apf21m")
+        assert response.status_code == 200
+        args, _ = mock_books.call_args
+        assert args[0] == "B000APF21M"
+
+
+def test_author_path_asin_parameter_keeps_its_author_asin_description_in_openapi():
+    """Author ASINs are not region-specific like book ASINs -- the wording
+    matters, and the factory exists so it doesn't collapse into "Audible
+    ASIN" the way a single shared dependency would."""
+    schema = app.openapi()
+    params = schema["paths"]["/author/{asin}"]["get"]["parameters"]
+    asin_param = next(p for p in params if p["name"] == "asin")
+    assert asin_param["in"] == "path"
+    assert asin_param["required"] is True
+    assert asin_param["description"] == "Author ASIN"
+
+
 # ============================================================
 # /author/{asin} -- CACHE-CONTROL AND X-LIBEX-SOURCE
 # ============================================================

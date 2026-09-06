@@ -30,7 +30,7 @@ from app.services.filtering import filter_dicts
 
 # Core
 from app.core.exceptions import NotFoundException
-from app.core.middleware import is_valid_asin, valid_region
+from app.core.middleware import is_valid_asin, normalise_asin, valid_asin, valid_region
 from app.core.response_headers import ResponseFacts
 
 router = APIRouter(prefix="/book", tags=["Books"])
@@ -56,7 +56,7 @@ async def get_books_by_sku(
 
 @router.get("/{asin}", response_model=BookResponse, responses={200: {"headers": FACTS_RESPONSE_HEADERS}})
 async def get_book(
-    asin: Annotated[str, Path(description="Audible ASIN")],
+    asin: Annotated[str, Depends(valid_asin("Audible ASIN"))],
     response: Response,
     region: str = Depends(valid_region),
     cache: CacheStandardParam = True,
@@ -66,8 +66,6 @@ async def get_book(
     Get a single book by ASIN.
     Returns a single book object directly.
     """
-    if not is_valid_asin(asin):
-        raise NotFoundException(f"Invalid ASIN format: {asin}")
     facts = ResponseFacts()
     data = await get_book_by_asin(asin, region, session, cache, facts=facts)
     apply_cache_control(response, cache)
@@ -77,14 +75,12 @@ async def get_book(
 
 @router.get("/{asin}/chapters", response_model=ChapterResponse, responses={200: {"headers": FACTS_RESPONSE_HEADERS}})
 async def get_book_chapters(
-    asin: Annotated[str, Path(description="Audible ASIN")],
+    asin: Annotated[str, Depends(valid_asin("Audible ASIN"))],
     response: Response,
     region: str = Depends(valid_region),
     session: AsyncSession = Depends(get_session),
 ) -> ChapterResponse:
     """Get chapter information for a book by ASIN."""
-    if not is_valid_asin(asin):
-        raise NotFoundException(f"Invalid ASIN format: {asin}")
     facts = ResponseFacts()
     data = await get_chapters(asin, region, session, facts=facts)
     stamp_facts_headers(response, facts, has_entities=True)
@@ -98,14 +94,12 @@ async def get_book_chapters(
     responses={200: {"headers": FACTS_RESPONSE_HEADERS}},
 )
 async def get_book_chapters_legacy(
-    asin: Annotated[str, Path(description="Audible ASIN")],
+    asin: Annotated[str, Depends(valid_asin("Audible ASIN"))],
     response: Response,
     region: str = Depends(valid_region),
     session: AsyncSession = Depends(get_session),
 ) -> ChapterResponse:
     """Legacy endpoint. Use /book/{asin}/chapters instead."""
-    if not is_valid_asin(asin):
-        raise NotFoundException(f"Invalid ASIN format: {asin}")
     facts = ResponseFacts()
     data = await get_chapters(asin, region, session, facts=facts)
     stamp_facts_headers(response, facts, has_entities=True)
@@ -138,6 +132,7 @@ async def get_books_bulk(
     invalid = [a for a in asin_list if not is_valid_asin(a)]
     if invalid:
         raise NotFoundException(f"Invalid ASIN format: {', '.join(invalid)}")
+    asin_list = [normalise_asin(a) for a in asin_list]
 
     if not asin_list:
         raise NotFoundException("No valid ASINs provided")

@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Annotated
 
 # Third party
-from fastapi import APIRouter, Query, Path, Depends, Response
+from fastapi import APIRouter, Query, Depends, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Database
@@ -41,7 +41,7 @@ from app.services.sorting import sort_dicts, BOOK_SORT_FIELDS
 from app.services.filtering import filter_dicts
 
 # Core
-from app.core.middleware import is_valid_asin, valid_region
+from app.core.middleware import valid_asin, valid_region
 from app.core.exceptions import NotFoundException
 from app.core.response_headers import HEADER_COMPLETE, ResponseFacts
 
@@ -190,7 +190,7 @@ def _mark_completeness(
     responses={200: {"headers": COMPLETE_ONLY_RESPONSE_HEADERS}},
 )
 async def get_books_by_author(
-    asin: Annotated[str, Path(description="Author ASIN")],
+    asin: Annotated[str, Depends(valid_asin("Author ASIN"))],
     response: Response,
     region: str = Depends(valid_region),
     # See cache_param.CacheAuthorBooksParam for why this defaults to True
@@ -206,8 +206,6 @@ async def get_books_by_author(
     Get all books by author ASIN.
     Returns full book objects matching AudiMeta's BookDto format.
     """
-    if not is_valid_asin(asin):
-        raise NotFoundException(f"Invalid ASIN format: {asin}")
     # One deadline for the whole request, computed here and shared by both
     # phases. Previously each phase was bounded separately -- discovery by its
     # own budget, hydration by nothing at all -- so the worst case was the
@@ -267,7 +265,7 @@ async def get_books_by_author(
     responses={200: {"headers": COMPLETE_ONLY_RESPONSE_HEADERS}},
 )
 async def get_books_by_author_primary(
-    asin: Annotated[str, Path(description="Author ASIN")],
+    asin: Annotated[str, Depends(valid_asin("Author ASIN"))],
     response: Response,
     region: str = Depends(valid_region),
     # See cache_param.CacheAuthorBooksParam for the full reasoning. This is
@@ -280,8 +278,6 @@ async def get_books_by_author_primary(
     session: AsyncSession = Depends(get_session),
 ) -> list[BookResponse] | Response:
     """Legacy endpoint. Use /author/books/{asin} instead."""
-    if not is_valid_asin(asin):
-        raise NotFoundException(f"Invalid ASIN format: {asin}")
     # One deadline shared by both phases, same as get_books_by_author above
     # -- this is its legacy-route twin; see that call site's comment.
     deadline = time.monotonic() + AUTHOR_BOOKS_TIME_BUDGET_SECONDS
@@ -324,7 +320,7 @@ async def get_books_by_author_primary(
 
 @router.get("/{asin}", response_model=AuthorResponse, responses={200: {"headers": FACTS_RESPONSE_HEADERS}})
 async def get_author_by_asin(
-    asin: Annotated[str, Path(description="Author ASIN")],
+    asin: Annotated[str, Depends(valid_asin("Author ASIN"))],
     response: Response,
     region: str = Depends(valid_region),
     # Flipped from the profile-only False this route used to carry. A
@@ -341,8 +337,6 @@ async def get_author_by_asin(
     session: AsyncSession = Depends(get_session),
 ) -> AuthorResponse:
     """Get author profile by ASIN."""
-    if not is_valid_asin(asin):
-        raise NotFoundException(f"Invalid ASIN format: {asin}")
     facts = ResponseFacts()
     data = await get_author(asin, region, session, cache, facts=facts)
     apply_cache_control(response, cache)

@@ -4,14 +4,16 @@ CORS and request validation.
 """
 
 # Standard library
+from collections.abc import Callable
 import re
 import time
 import unicodedata
 import urllib.parse
 import uuid
+from typing import Annotated
 
 # Third party
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Path, Query
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -21,7 +23,7 @@ from app.services.audible.client import validate_region
 
 # Core
 from app.core.logging import get_logger
-from app.core.exceptions import RegionException
+from app.core.exceptions import NotFoundException, RegionException
 from app.core.migration_notice import MigrationNotice, MIGRATION_HEADER_NAMES, is_new_host_request
 from app.core.response_headers import (
     HEADER_COMPLETE,
@@ -41,9 +43,50 @@ logger = get_logger()
 ASIN_PATTERN = re.compile(r'^[A-Z0-9]{10}$')
 
 
+def normalise_asin(asin: str) -> str:
+    """
+    Returns the form of an ASIN that Audible and the database both answer to.
+
+    Audible's catalogue is case-sensitive on the ASIN. A lowercase key returns
+    the bare-ASIN shape Libex reads as a miss rather than the product, and
+    stored keys are uppercase, so the database fallback misses the same way --
+    a book that exists is reported absent. Callers may send either case, since
+    is_valid_asin has always accepted both, which makes uppercasing the step
+    that has to happen before the value is used for anything. It lives here
+    beside the validator so no route has to remember it.
+    """
+    return asin.upper()
+
+
 def is_valid_asin(asin: str) -> bool:
     """Validates that a string matches Audible ASIN format."""
-    return bool(ASIN_PATTERN.fullmatch(asin.upper()))
+    return bool(ASIN_PATTERN.fullmatch(normalise_asin(asin)))
+
+
+def valid_asin(description: str) -> Callable[[str], str]:
+    """
+    Builds a FastAPI dependency that validates an ASIN path param and hands
+    back the normalised value, the way valid_region does for a region.
+
+    Returning the value is the point. A bool can only report that the input was
+    acceptable, which left every route free to carry on with whatever casing
+    arrived and answer "not found" for a title Audible holds.
+
+    `description` is required and has no default so a route keeps the wording
+    its path param already carried: "Author ASIN" and "Series ASIN" say
+    something "Audible ASIN" does not, on an API where book ASINs are
+    region-specific and author ASINs are not. It also makes Depends(valid_asin)
+    written without the call fail immediately instead of quietly turning the
+    description into a query parameter.
+    """
+    def dependency(asin: Annotated[str, Path(description=description)]) -> str:
+        if not is_valid_asin(asin):
+            # The rejected value is echoed exactly as it arrived, uppercased
+            # or not, because it is the caller's own input being reported back.
+            raise NotFoundException(f"Invalid ASIN format: {asin}")
+        return normalise_asin(asin)
+
+    return dependency
 
 
 # ============================================================

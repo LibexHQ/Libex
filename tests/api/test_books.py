@@ -236,6 +236,83 @@ async def test_bulk_books_rejects_invalid_asin_in_list(async_client):
     assert response.status_code == 404
     assert "Invalid ASIN" in response.json()["error"]
 
+
+@pytest.mark.asyncio
+async def test_get_book_rejects_invalid_asin_response_body_is_pinned_exactly(async_client):
+    """Drop-in AudiMeta contract surface: the exception handler's rendered
+    body, byte for byte, not just a substring of one field."""
+    response = await async_client.get("/book/not-an-asin")
+    assert response.json() == {
+        "error": "Invalid ASIN format: not-an-asin",
+        "status_code": 404,
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_book_resolves_lowercase_asin(async_client):
+    """A lowercase ASIN that Audible only answers to uppercase must reach the
+    service normalised -- this is the caller-visible defect the slice fixed:
+    a book that exists returned 404 for no reason but casing."""
+    with patch("app.api.routes.books.router.get_book_by_asin", new_callable=AsyncMock) as mock:
+        mock.return_value = {**MOCK_BOOK, "asin": "B009CFOEGK"}
+        response = await async_client.get("/book/b009cfoegk")
+        assert response.status_code == 200
+        args, _ = mock.call_args
+        assert args[0] == "B009CFOEGK"
+
+
+@pytest.mark.asyncio
+async def test_get_book_resolves_isbn_style_lowercase_x_check_digit(async_client):
+    """ISBN-10 check digits can be X, so a lowercase x is a live input, not a
+    hypothetical -- 080213825x must normalise the same as any other ASIN."""
+    with patch("app.api.routes.books.router.get_book_by_asin", new_callable=AsyncMock) as mock:
+        mock.return_value = {**MOCK_BOOK, "asin": "080213825X"}
+        response = await async_client.get("/book/080213825x")
+        assert response.status_code == 200
+        args, _ = mock.call_args
+        assert args[0] == "080213825X"
+
+
+@pytest.mark.asyncio
+async def test_get_book_chapters_resolves_lowercase_asin(async_client):
+    """The chapters endpoint adopted the same dependency and must normalise
+    too, not just the single-book route."""
+    with patch("app.api.routes.books.router.get_chapters", new_callable=AsyncMock) as mock:
+        mock.return_value = {"asin": "B009CFOEGK", "chapters": []}
+        response = await async_client.get("/book/b009cfoegk/chapters")
+        assert response.status_code == 200
+        args, _ = mock.call_args
+        assert args[0] == "B009CFOEGK"
+
+
+@pytest.mark.asyncio
+async def test_bulk_books_lowercase_asin_is_not_reported_not_found_when_the_book_exists(async_client):
+    """Deterministically wrong before the fix: notFound was computed against
+    uppercase found_asins, so a lowercase input landed in notFound even when
+    the book existed. This is the cleanest regression to pin."""
+    with patch("app.api.routes.books.router.get_books_by_asins", new_callable=AsyncMock) as mock:
+        mock.return_value = [{**MOCK_BOOK, "asin": "B009CFOEGK"}]
+        response = await async_client.get("/book?asins=b009cfoegk")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["notFound"] == []
+        assert [b["asin"] for b in data["books"]] == ["B009CFOEGK"]
+        args, _ = mock.call_args
+        assert args[0] == ["B009CFOEGK"]
+
+
+def test_book_path_asin_parameter_keeps_its_audible_asin_description_in_openapi():
+    """The factory exists so each router's wording survives rather than
+    collapsing into one shared string -- pin this route's exact parameter
+    metadata, not just that a description is present."""
+    schema = app.openapi()
+    params = schema["paths"]["/book/{asin}"]["get"]["parameters"]
+    asin_param = next(p for p in params if p["name"] == "asin")
+    assert asin_param["in"] == "path"
+    assert asin_param["required"] is True
+    assert asin_param["description"] == "Audible ASIN"
+
+
 @pytest.mark.asyncio
 async def test_get_books_by_sku_returns_200(async_client):
     """SKU endpoint returns 200 with valid SKU."""

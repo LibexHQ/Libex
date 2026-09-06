@@ -321,6 +321,42 @@ async def test_get_series_books_rejects_invalid_asin(async_client):
     assert response.status_code == 404
     assert "Invalid ASIN" in response.json()["error"]
 
+
+@pytest.mark.asyncio
+async def test_get_series_resolves_lowercase_asin(async_client):
+    """A lowercase series ASIN must reach the service normalised, the same
+    fix the book routes needed."""
+    with patch("app.api.routes.series.router.get_series", new_callable=AsyncMock) as mock:
+        mock.return_value = {**MOCK_SERIES, "asin": "B00SERIES1"}
+        response = await async_client.get("/series/b00series1")
+        assert response.status_code == 200
+        args, _ = mock.call_args
+        assert args[0] == "B00SERIES1"
+
+
+@pytest.mark.asyncio
+async def test_get_books_by_series_resolves_lowercase_asin(async_client):
+    """The series-books route adopted the same dependency."""
+    with patch("app.api.routes.series.router.get_series_books", new_callable=AsyncMock) as mock:
+        mock.return_value = ["B08G9PRS1K"]
+        with patch("app.api.routes.series.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
+            mock_asins.return_value = [MOCK_BOOK]
+            response = await async_client.get("/series/books/b00series1")
+        assert response.status_code == 200
+        args, _ = mock.call_args
+        assert args[0] == "B00SERIES1"
+
+
+def test_series_path_asin_parameter_keeps_its_series_asin_description_in_openapi():
+    """The factory exists so this route keeps "Series ASIN" rather than
+    collapsing into the same wording every other router carries."""
+    schema = app.openapi()
+    params = schema["paths"]["/series/{asin}"]["get"]["parameters"]
+    asin_param = next(p for p in params if p["name"] == "asin")
+    assert asin_param["in"] == "path"
+    assert asin_param["required"] is True
+    assert asin_param["description"] == "Series ASIN"
+
 # ============================================================
 # CACHE DEFAULT FLIP -- omitting cache now reads the cache
 # ============================================================

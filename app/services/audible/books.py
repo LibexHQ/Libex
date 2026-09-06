@@ -118,6 +118,22 @@ NORMALIZE_THREAD_THRESHOLD = 100
 # HELPERS
 # ============================================================
 
+def _has_uncovered(asins: list[str], covered: set[str]) -> bool:
+    """
+    True when at least one of `asins` is absent from `covered`.
+
+    The one predicate every hydration-incomplete site in
+    _get_books_by_asins_unsettled shares: a loss class earns its incomplete
+    reason only when it actually owns an ASIN missing from what the function
+    is about to hand back, never merely because that class experienced a
+    loss internally. `covered` is always the ASIN set already present in the
+    result about to be returned (a DB backstop, a DB fallback, a cache
+    fallback) -- never a count, since two same-sized sets can still miss
+    each other entirely.
+    """
+    return any(asin not in covered for asin in asins)
+
+
 def _best_image(product_images: dict | None) -> str | None:
     """Returns the highest resolution image URL with size suffix stripped."""
     if not product_images:
@@ -601,22 +617,6 @@ async def _fetch_chunk(asins: list[str], region: str) -> list[dict[str, Any]]:
     return _filter_products(products)
 
 
-def _has_uncovered(asins: list[str], covered: set[str]) -> bool:
-    """
-    True when at least one of `asins` is absent from `covered`.
-
-    The one predicate every hydration-incomplete site in
-    _get_books_by_asins_unsettled shares: a loss class earns its incomplete
-    reason only when it actually owns an ASIN missing from what the function
-    is about to hand back, never merely because that class experienced a
-    loss internally. `covered` is always the ASIN set already present in the
-    result about to be returned (a DB backstop, a DB fallback, a cache
-    fallback) -- never a count, since two same-sized sets can still miss
-    each other entirely.
-    """
-    return any(asin not in covered for asin in asins)
-
-
 # ============================================================
 # PUBLIC API
 # ============================================================
@@ -875,8 +875,15 @@ async def _get_books_by_asins_unsettled(
                 if isinstance(result, HydrationDeadlineExceeded):
                     deadline_asins.extend(chunk)
                 logger.warning(
-                    f"Hydration chunk {idx + 1}/{len(chunks)} failed for "
-                    f"{len(chunk)} ASINs ({region}): {type(result).__name__}: {result}"
+                    "Hydration chunk failed",
+                    extra={
+                        "chunk_index": idx + 1,
+                        "chunk_count": len(chunks),
+                        "chunk_size": len(chunk),
+                        "region": region,
+                        "error_type": type(result).__name__,
+                        "error": str(result),
+                    },
                 )
                 continue
             # A batch chunk's own response is always a 200 even when some of
@@ -976,7 +983,10 @@ async def _get_books_by_asins_unsettled(
 
     except Exception:
         await session.rollback()
-        logger.warning(f"Audible unavailable, attempting DB fallback for {fetch_asins}")
+        logger.warning(
+            "Audible unavailable, attempting DB fallback",
+            extra={"asins": fetch_asins},
+        )
 
         # Try relational DB first for the misses
         db_results = await get_books_from_db(session, fetch_asins)
@@ -1139,7 +1149,15 @@ async def fetch_and_store_chapters(
         await _mark_chapters_checked(session, asin)
         return "not_found"
     except Exception as e:
-        logger.warning(f"Seeder chapters: fetch error for {asin} ({region}): {type(e).__name__}: {e}")
+        logger.warning(
+            "Seeder chapters: fetch error",
+            extra={
+                "asin": asin,
+                "region": region,
+                "error_type": type(e).__name__,
+                "error": str(e),
+            },
+        )
         return "error"
 
     if not data.get("content_metadata", {}).get("chapter_info"):
@@ -1152,7 +1170,10 @@ async def fetch_and_store_chapters(
         await _mark_chapters_checked(session, asin)
         return "stored"
     except Exception as e:
-        logger.warning(f"Seeder chapters: store failed for {asin}: {type(e).__name__}: {e}")
+        logger.warning(
+            "Seeder chapters: store failed",
+            extra={"asin": asin, "error_type": type(e).__name__, "error": str(e)},
+        )
         await session.rollback()
         return "error"
 

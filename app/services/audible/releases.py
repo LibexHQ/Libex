@@ -148,7 +148,10 @@ async def _ensure_genres(session: AsyncSession, region: str) -> list[dict[str, s
             await session.commit()
             stored, _ = await get_stored_genres(session, region)
     except Exception as e:
-        logger.warning(f"Genre taxonomy fetch failed for {region}: {e}")
+        logger.warning(
+            "Genre taxonomy fetch failed",
+            extra={"region": region, "error": str(e)},
+        )
 
     return stored
 
@@ -282,7 +285,10 @@ async def get_new_releases(
         return books
 
     except Exception as e:
-        logger.error(f"New releases scan failed: {e}")
+        logger.error(
+            "New releases scan failed",
+            extra={"region": region, "category": category, "error": str(e)},
+        )
         return []
 
 
@@ -346,5 +352,8 @@ async def get_coming_soon(
         return books
 
     except Exception as e:
-        logger.error(f"Coming soon scan failed: {e}")
+        logger.error(
+            "Coming soon scan failed",
+            extra={"region": region, "category": category, "error": str(e)},
+        )
         return []

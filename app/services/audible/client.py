@@ -99,8 +99,8 @@ def get_region_headers(region: str) -> dict[str, str]:
 # ============================================================
 
 # Every fan-out in this app sets its own per-walk concurrency constant
-# (NAME_SEARCH_CONCURRENCY, SCREENS_FANOUT_CONCURRENCY in authors.py), but
-# those only bound one walk at a time -- two simultaneous requests for a
+# (SCREENS_FANOUT_CONCURRENCY in authors/screens.py), but those only bound
+# one walk at a time -- two simultaneous requests for a
 # large author already double the in-flight count, and nothing upstream of
 # this module caps the total across every walk running at once. audible_get
 # is the one place every outbound Audible call passes through, so the bound
@@ -445,7 +445,7 @@ def _is_retryable_status(status_code: int) -> bool:
     return status_code in _RETRYABLE_STATUS_CODES or 500 <= status_code < 600
 
 
-# Kept small on purpose. AUTHOR_BOOKS_TIME_BUDGET_SECONDS in authors.py caps
+# Kept small on purpose. AUTHOR_BOOKS_TIME_BUDGET_SECONDS in authors/__init__.py caps
 # a whole discovery walk's wall-clock time, but that deadline is checked by
 # the callers between requests -- it never reaches audible_get, since this
 # function's signature (region, path, params, extra_headers) doesn't carry

@@ -24,7 +24,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # Core
 from app.core.exceptions import NotFoundException
 from app.core.logging import get_logger
-from app.core.response_headers import ResponseFacts, SOURCE_AUDIBLE, SOURCE_CACHE, SOURCE_DB, record_source
+from app.core.response_headers import (
+    ResponseFacts,
+    SOURCE_AUDIBLE,
+    SOURCE_CACHE,
+    SOURCE_DB,
+    record_source,
+)
 from app.core.utils import strip_html
 
 # Services
@@ -956,7 +962,7 @@ async def search_authors(
             "key_strokes": name,
             "site_variant": "android-mshop",
             "session_id": _generate_session_id(),
-            "local_time": datetime.utcnow().isoformat(),
+            "local_time": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
             "surface": "Android",
         }
 

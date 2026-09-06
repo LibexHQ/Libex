@@ -4,7 +4,7 @@ Audible search service.
 
 # Standard library
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 # Third party
@@ -121,7 +121,7 @@ async def search(
     except NotFoundException:
         return []
     except Exception as e:
-        logger.error(f"Search failed: {e}")
+        logger.error("Search failed", extra={"region": region, "error": str(e)})
         return []
 
 
@@ -150,7 +150,7 @@ async def quick_search(
             "key_strokes": keywords,
             "site_variant": "desktop",
             "session_id": _generate_session_id(),
-            "local_time": datetime.utcnow().isoformat(),
+            "local_time": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
             "surface": "Android",
         }
 
@@ -223,5 +223,5 @@ async def quick_search(
         return []
 
     except Exception as e:
-        logger.error(f"Quick search failed: {e}")
+        logger.error("Quick search failed", extra={"region": region, "error": str(e)})
         return []

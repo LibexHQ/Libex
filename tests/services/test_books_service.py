@@ -701,12 +701,13 @@ async def test_get_books_by_asins_not_found_and_transient_together_backstop_scop
     """Both buckets populated in the same request -- a 404'd single-ASIN
     chunk and a separately-failing 50-ASIN transient chunk -- alongside a
     third, successful 50-ASIN batch (forcing all_products non-empty so the
-    run actually reaches the DB-backstop branch at all, unlike a
-    not-found-only call, which returns early before ever reaching it --
-    see the sibling test above, and note that early return is exactly the
-    gap that let the mutated backstop condition
-    `transient_failed_asins or not_found_asins` pass every pre-existing
-    test in this file, including that sibling, untouched). The DB
+    run actually reaches the DB-backstop branch at all). The sibling test
+    above reaches that same branch too, but its transient_failed_asins list
+    is empty, so the backstop guard `if transient_failed_asins:` skips the
+    DB call outright -- it proves confirmed-404 ASINs are excluded from a
+    backstop that never ran, not that the backstop itself is scoped
+    correctly once a real DB call happens. Only this test forces that call
+    to actually fire alongside a confirmed 404 in the same request. The DB
     genuinely has rows for every ASIN in both failed buckets; only the
     transient ones may be resurrected -- the 404'd one, a confirmed
     absence, must never appear even though the same DB call would have

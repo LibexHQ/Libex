@@ -222,6 +222,18 @@ Libex's own work on Audible's catalogue. The names in them came back from
 Audible; they are catalogue data, not anything a caller typed. None of those
 lines carry your IP, your user agent or any identifier tied to your request.
 
+Some of those lines name an author or a narrator outright, and it is worth
+being exact about where that name came from, because further down this page a
+line naming an author or narrator is described as a defect. The two are not the
+same thing. The background jobs work through Libex's own catalogue tables,
+picking up whichever authors and narrators are due to be refreshed and asking
+Audible what else they have. The name on such a line is a row read out of that
+table — chosen by how long it has been since Libex last looked at it, with no
+request in flight and nothing to correlate it to. What the sentence further
+down calls a defect is the opposite case: a name that arrived because *someone
+searched for it*. That is caller input, it has been removed where it was found,
+and it is not what these lines carry.
+
 Two of them do record what a request asked for, and they're worth naming
 rather than leaving to be discovered. Both belong to the bulk lookup
 `/books?asins=`, which is the one place the request line deliberately withholds
@@ -241,9 +253,26 @@ An ASIN is a catalogue identifier — ten characters, letters and digits only,
 checked against exactly that format before it ever reaches this code, so it
 can't carry text you typed. Neither line carries anything about who asked.
 
-Where an ASIN is part of the path instead — `/book/B01234567` and the like —
-database warnings name it too, but that discloses nothing further: the request
-line already records the path in its `url` field, as the table above says.
+Of the two, the fallback warning is the one place a value taken from your
+request is written as a field with a name of its own — `asins` — rather than
+sitting inside the sentence of a message. In the log service that is the
+difference between something you would have to read and something that can be
+searched and counted on directly. It is worth saying plainly rather than
+leaving to be found: it is still only the list of titles that request asked
+for, it still answers "which books did that outage affect" and nothing else,
+and there is nothing on that line or anywhere else to attach it to a person.
+The database read behind it writes its ASINs into its message text as before.
+
+Where the thing being looked up is part of the path instead, database warnings
+name it too, but that discloses nothing further: the request line already
+records the path in its `url` field, as the table above says — verbatim, and
+even when the path matches no route at all. That covers more than ASINs.
+`/book/B01234567` is one shape of it; `/db/plans/{plan_name}` and
+`/book/sku/{sku}` are another, and their segments are ordinary text with no
+format check applied to them, unlike an ASIN. The reason they disclose nothing
+further is not that they are constrained — it is that the whole path was
+already recorded, so a warning naming one segment of it tells you nothing the
+request line had not already written down.
 
 One further exception worth naming: if a request causes an unexpected error, the
 error line and its stack trace can include whatever triggered it — and if
@@ -388,8 +417,28 @@ is the authority, not this page.
 fields in that table, plus the things every log line has anyway: a timestamp,
 the level, which part of Libex wrote it, the message text — which on an error
 line includes the stack trace that came with it — and the worker `pid`.
+
+A line that isn't a request line carries named fields of its own instead of
+that table's, and each one arrives in Axiom as a field that can be searched and
+grouped on rather than as words inside a message. What they hold is the
+background work itself: which region a job was running in and which catalogue
+entity it was working on — by ASIN, or by an author's or narrator's name read
+out of Libex's own database — how far through it had got and how much it had
+found, the key and lifetime of a cache entry, and, where something failed, what
+kind of failure it was. A database failure adds the SQLSTATE and the schema,
+table, column and constraint names, deliberately and only those, because
+Postgres writes the offending row into its own error text; elsewhere the
+error's own text is carried. None of it is new in this release — the cache and
+database lines have been shaped this way for as long as they have existed — and
+it is spelled out here for the same reason `pid` is: a field you can query by
+name deserves to be described by name, whether or not it says anything about a
+person. These don't.
+
 Nothing outside that list is sent. What it holds describes requests,
-not requesters: no address, and nothing you typed.
+not requesters: no address, and nothing you typed — subject to the two limits
+this page has already named and does not quietly widen here: the ASINs a bulk
+lookup asked for, and an error line that incidentally quotes back something you
+sent.
 Axiom is a hosted log service; it stores and indexes those records so I can
 query them. I'm the only person I've given access to that dataset — but Axiom
 is the company storing it, on its own infrastructure, under its own policies.

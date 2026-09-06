@@ -246,10 +246,13 @@ async def _expand_authors(region: str, delay: float) -> dict[str, int]:
 
     total = len(authors)
     if total == 0:
-        logger.info(f"Seeder: no stale authors in {region}, skipping")
+        logger.info("Seeder: no stale authors, skipping", extra={"region": region})
         return stats
 
-    logger.info(f"Seeder: expanding {total} stale authors in {region}")
+    logger.info(
+        "Seeder: expanding stale authors",
+        extra={"total": total, "region": region},
+    )
 
     for author_id, author_asin, author_name in authors:
         try:
@@ -263,7 +266,10 @@ async def _expand_authors(region: str, delay: float) -> dict[str, int]:
                 if missing:
                     persisted = await _fetch_and_persist(missing, region, delay)
                     stats["books_discovered"] += len(missing)
-                    logger.info(f"Seeder: {author_name} — {len(missing)} new books")
+                    logger.info(
+                        "Seeder: author yielded new books",
+                        extra={"author_name": author_name, "new_books": len(missing)},
+                    )
 
             if persisted:
                 await _stamp_author(author_id)
@@ -275,16 +281,31 @@ async def _expand_authors(region: str, delay: float) -> dict[str, int]:
                 # cycle finds it again and retries rather than the missing
                 # books going unnoticed for SEED_STALE_DAYS.
                 logger.warning(
-                    f"Seeder: not stamping author {author_name} — persist queue "
-                    "shed a chunk of its new books, will retry next cycle"
+                    "Seeder: not stamping author — persist queue shed a chunk "
+                    "of its new books, will retry next cycle",
+                    extra={"author_name": author_name},
                 )
 
             if stats["authors_processed"] % 100 == 0:
-                logger.info(f"Seeder: author progress {stats['authors_processed']}/{total}, {stats['books_discovered']} new books so far")
+                logger.info(
+                    "Seeder: author progress",
+                    extra={
+                        "authors_processed": stats["authors_processed"],
+                        "total": total,
+                        "books_discovered": stats["books_discovered"],
+                    },
+                )
 
         except Exception as e:
             stats["errors"] += 1
-            logger.warning(f"Seeder: failed to expand author {author_asin} ({author_name}): {e}")
+            logger.warning(
+                "Seeder: failed to expand author",
+                extra={
+                    "author_asin": author_asin,
+                    "author_name": author_name,
+                    "error": str(e),
+                },
+            )
 
         await asyncio.sleep(delay)
 
@@ -314,10 +335,13 @@ async def _expand_series(region: str, delay: float) -> dict[str, int]:
 
     total = len(series_asins)
     if total == 0:
-        logger.info(f"Seeder: no stale series in {region}, skipping")
+        logger.info("Seeder: no stale series, skipping", extra={"region": region})
         return stats
 
-    logger.info(f"Seeder: expanding {total} stale series in {region}")
+    logger.info(
+        "Seeder: expanding stale series",
+        extra={"total": total, "region": region},
+    )
 
     for series_asin in series_asins:
         try:
@@ -344,7 +368,10 @@ async def _expand_series(region: str, delay: float) -> dict[str, int]:
                 if missing:
                     persisted = await _fetch_and_persist(missing, region, delay)
                     stats["books_discovered"] += len(missing)
-                    logger.info(f"Seeder: series {series_asin} — {len(missing)} new books")
+                    logger.info(
+                        "Seeder: series yielded new books",
+                        extra={"series_asin": series_asin, "new_books": len(missing)},
+                    )
 
             if persisted:
                 await _stamp_series(series_asin)
@@ -354,16 +381,27 @@ async def _expand_series(region: str, delay: float) -> dict[str, int]:
                 # books never reached storage, so the series is left stale for
                 # the next cycle to retry rather than stamped over the gap.
                 logger.warning(
-                    f"Seeder: not stamping series {series_asin} — persist queue "
-                    "shed a chunk of its new books, will retry next cycle"
+                    "Seeder: not stamping series — persist queue shed a chunk "
+                    "of its new books, will retry next cycle",
+                    extra={"series_asin": series_asin},
                 )
 
             if stats["series_processed"] % 100 == 0:
-                logger.info(f"Seeder: series progress {stats['series_processed']}/{total}, {stats['books_discovered']} new books so far")
+                logger.info(
+                    "Seeder: series progress",
+                    extra={
+                        "series_processed": stats["series_processed"],
+                        "total": total,
+                        "books_discovered": stats["books_discovered"],
+                    },
+                )
 
         except Exception as e:
             stats["errors"] += 1
-            logger.warning(f"Seeder: failed to expand series {series_asin}: {e}")
+            logger.warning(
+                "Seeder: failed to expand series",
+                extra={"series_asin": series_asin, "error": str(e)},
+            )
 
         await asyncio.sleep(delay)
 
@@ -393,10 +431,13 @@ async def _expand_narrators(region: str, delay: float) -> dict[str, int]:
 
     total = len(narrator_names)
     if total == 0:
-        logger.info(f"Seeder: no stale narrators in {region}, skipping")
+        logger.info("Seeder: no stale narrators, skipping", extra={"region": region})
         return stats
 
-    logger.info(f"Seeder: expanding {total} stale narrators in {region}")
+    logger.info(
+        "Seeder: expanding stale narrators",
+        extra={"total": total, "region": region},
+    )
 
     for narrator_name in narrator_names:
         try:
@@ -428,7 +469,10 @@ async def _expand_narrators(region: str, delay: float) -> dict[str, int]:
                 if missing:
                     persisted = await _fetch_and_persist(missing, region, delay)
                     stats["books_discovered"] += len(missing)
-                    logger.info(f"Seeder: {narrator_name} — {len(missing)} new books")
+                    logger.info(
+                        "Seeder: narrator yielded new books",
+                        extra={"narrator_name": narrator_name, "new_books": len(missing)},
+                    )
 
             if persisted:
                 await _stamp_narrator(narrator_name)
@@ -438,16 +482,27 @@ async def _expand_narrators(region: str, delay: float) -> dict[str, int]:
                 # books never reached storage, so the narrator is left stale
                 # for the next cycle to retry rather than stamped over the gap.
                 logger.warning(
-                    f"Seeder: not stamping narrator {narrator_name} — persist "
-                    "queue shed a chunk of its new books, will retry next cycle"
+                    "Seeder: not stamping narrator — persist queue shed a "
+                    "chunk of its new books, will retry next cycle",
+                    extra={"narrator_name": narrator_name},
                 )
 
             if stats["narrators_processed"] % 100 == 0:
-                logger.info(f"Seeder: narrator progress {stats['narrators_processed']}/{total}, {stats['books_discovered']} new books so far")
+                logger.info(
+                    "Seeder: narrator progress",
+                    extra={
+                        "narrators_processed": stats["narrators_processed"],
+                        "total": total,
+                        "books_discovered": stats["books_discovered"],
+                    },
+                )
 
         except Exception as e:
             stats["errors"] += 1
-            logger.warning(f"Seeder: failed to expand narrator {narrator_name}: {e}")
+            logger.warning(
+                "Seeder: failed to expand narrator",
+                extra={"narrator_name": narrator_name, "error": str(e)},
+            )
 
         await asyncio.sleep(delay)
 
@@ -582,7 +637,10 @@ async def _scan_new_releases(region: str, delay: float) -> dict[str, int]:
         genres = await _fetch_catalog_genres(region)
     except Exception as e:
         stats["errors"] += 1
-        logger.warning(f"Seeder: new releases scan failed for {region}: {e}")
+        logger.warning(
+            "Seeder: new releases scan failed",
+            extra={"region": region, "error": str(e)},
+        )
         return stats
 
     all_asins: list[str] = []
@@ -594,8 +652,13 @@ async def _scan_new_releases(region: str, delay: float) -> dict[str, int]:
         except Exception as e:
             stats["errors"] += 1
             logger.warning(
-                f"Seeder: new releases genre walk failed for {region}: {e}",
-                extra={"genre_id": genre.get("genre_id"), "genre_name": genre.get("name")},
+                "Seeder: new releases genre walk failed",
+                extra={
+                    "region": region,
+                    "genre_id": genre.get("genre_id"),
+                    "genre_name": genre.get("name"),
+                    "error": str(e),
+                },
             )
             continue
         stats["pages_scanned"] += pages
@@ -613,13 +676,15 @@ async def _scan_new_releases(region: str, delay: float) -> dict[str, int]:
             stats["books_discovered"] = len(missing)
     except Exception as e:
         stats["errors"] += 1
-        logger.warning(f"Seeder: new releases persist failed for {region}: {e}")
+        logger.warning(
+            "Seeder: new releases persist failed",
+            extra={"region": region, "error": str(e)},
+        )
 
     logger.info(
-        f"Seeder: new releases scan complete for {region} — "
-        f"{len(all_asins)} found, {stats['books_discovered']} new, "
-        f"{stats['pages_scanned']} pages scanned",
+        "Seeder: new releases scan complete",
         extra={
+            "region": region,
             "total_found": len(all_asins),
             "new_books": stats["books_discovered"],
             "pages_scanned": stats["pages_scanned"],
@@ -700,13 +765,16 @@ async def _refresh_upcoming(region: str, delay: float) -> dict[str, int]:
         stats["books_refreshed"] = len(asins)
 
         logger.info(
-            f"Seeder: refreshed {len(asins)} upcoming books for {region}",
-            extra={"books_refreshed": len(asins)},
+            "Seeder: refreshed upcoming books",
+            extra={"region": region, "books_refreshed": len(asins)},
         )
 
     except Exception as e:
         stats["errors"] += 1
-        logger.warning(f"Seeder: refresh upcoming failed for {region}: {e}")
+        logger.warning(
+            "Seeder: refresh upcoming failed",
+            extra={"region": region, "error": str(e)},
+        )
 
     return stats
 
@@ -770,7 +838,7 @@ async def run_seeder(once: bool = False) -> None:
             logger.info("Seeder: cycle complete", extra=cycle_stats)
 
         except Exception as e:
-            logger.error(f"Seeder: cycle failed: {e}")
+            logger.error("Seeder: cycle failed", extra={"error": str(e)})
 
         if once:
             return
@@ -825,7 +893,7 @@ async def run_new_releases_seeder(once: bool = False) -> None:
             logger.info("Seeder: new releases cycle complete", extra=cycle_stats)
 
         except Exception as e:
-            logger.error(f"Seeder: new releases cycle failed: {e}")
+            logger.error("Seeder: new releases cycle failed", extra={"error": str(e)})
 
         if once:
             return

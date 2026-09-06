@@ -58,6 +58,23 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+    # json-file's max-size defaults to -1, unlimited, so a container that runs
+    # for months writes stdout to the host disk with nothing capping it. 10m x 5
+    # holds this service to 50MB of rotated json. The driver is named rather
+    # than inherited because these options are validated against whichever
+    # driver the host daemon defaults to, and a host that has changed that
+    # default would reject them.
+    #
+    # Not a second copy of LOG_RETENTION_DAYS above. That one bounds the app's
+    # own /app/logs/libex.log, rotated daily by app/core/logging.py and kept for
+    # that many days, where 0 means keep forever. This bounds the separate copy
+    # Docker keeps of the same lines on their way to stdout. Two paths, two
+    # mechanisms, and neither one truncates the other's file.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 
   postgres:
     image: postgres:16-alpine
@@ -68,6 +85,16 @@ services:
     # this image -- the seeder stack, refresh_corpus, backfill_chapters -- is
     # another 20 on top while it runs, and nothing enforces that budget.
     command: ["postgres", "-c", "max_connections=200"]
+    # /dev/shm, where postgres puts every parallel query's dynamic shared memory
+    # segment -- dynamic_shared_memory_type defaults to posix on Linux, which is
+    # shm_open, which is /dev/shm. Docker's default for it is 64MB (`df -h
+    # /dev/shm` in any container), and a parallel scan that outgrows that fails
+    # the query with "could not resize shared memory segment: No space left on
+    # device" rather than degrading to a serial plan. tmpfs allocates on use, so
+    # this is a ceiling and not 1GB taken at start; the pages it does take are
+    # still RAM, competing with the page cache that keeps the stats counts fast,
+    # so raise it in response to a failure rather than pre-emptively.
+    shm_size: ${DB_SHM_SIZE:-1gb}
     # loopback: the seeder stack reaches this container over libex-db, so the
     # host port is only for your own psql/DBeaver, directly or via an ssh tunnel.
     # DB_BIND=0.0.0.0 widens it, with only the postgres password in front.
@@ -89,6 +116,22 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    # this image sets STOPSIGNAL SIGINT, so a stop is postgres's fast shutdown:
+    # backends are killed off, then a shutdown checkpoint runs before exit.
+    # Docker's default allows 10s for that, and a SIGKILL landing mid-checkpoint
+    # buys crash recovery on the next start. A grace period is a maximum wait
+    # and not a delay -- Docker stops waiting the moment the container exits --
+    # so this is set generously on purpose rather than fitted to a checkpoint
+    # time nobody has measured on this database.
+    stop_grace_period: 120s
+    # the same unlimited json-file default as libex above, and the service most
+    # able to exploit it: the errors worth catching here are the repetitive ones,
+    # a shared-memory or connection-limit failure logging a line per attempt.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 
 networks:
   # created here, joined by the seeder stack as external. the pinned name is the

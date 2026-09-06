@@ -10,6 +10,206 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.21.0]
+
+### Added
+- **Libex can now back its own database up on a schedule, to a machine that is
+  not the one it runs on.** This is the one change in the release that asks
+  something of an operator. The published compose file gains a second service,
+  `libex-backup`, running the same image as the API, so it arrives with every
+  deployment that pulls the new file. There is no enable switch, because
+  configuration is the switch: with no destination set the container starts,
+  says it has nothing to do, and repeats that on the schedule. An instance that
+  never configures one is unaffected apart from a slightly larger image — the
+  image now carries the PostgreSQL 16 `pg_dump` and `pg_restore` binaries,
+  which is 725 KB of it, under half a percent.
+
+  When it runs is a period — daily, weekly or monthly — a time as `HH:MM`, and
+  an IANA timezone name rather than an offset, so the hour holds across a
+  daylight saving change instead of drifting by one twice a year. A configured
+  time that does not exist on a given day runs at the next real instant on that
+  same date; a time that happens twice runs once; a monthly backup set for the
+  31st falls back to the last day of a month that has no 31st rather than
+  skipping the seven months a year that are short. A period missed because the
+  container was down is taken when it comes back, not abandoned.
+
+  **What it keeps is eight artefacts at the defaults, and the reason it is
+  eight is worth reading before changing it.** Six is the recent tier — the
+  last six taken. Behind that sit two more: the newest artefact at least thirty
+  days old, and the oldest one not yet thirty days old. The first of those two
+  is the copy that matters when damage is noticed late, because six nightly
+  backups of a database that went wrong a week ago are six copies of the same
+  wrong database. The second exists only so the first can ever hold anything:
+  keeping six dailies deletes every candidate at about six days, so with those
+  two tiers alone nothing survives long enough to become thirty days old, the
+  aged tier finds nobody to promote, and the nightly prune logs a clean result
+  for the rest of the archive's life while the copy the whole arrangement
+  exists for is never created. Reserving the next artefact in line before it
+  qualifies is what gives the aged tier a successor to promote. Setting the
+  aged-days figure to `0` switches both of those tiers off; the recent tier has
+  no off switch.
+
+  The destination is FTPS and nothing else for now, and it is explicit FTPS on
+  port 21 — the control connection opens in the clear and is upgraded by
+  `AUTH TLS` — not implicit FTPS on 990, which is a different protocol with a
+  similar name and which the two get confused for constantly. Point it at 990
+  and the handshake never happens. Certificate verification cannot be turned
+  off; there is no setting for it. A box with its own certificate, which is the
+  normal case for a NAS, needs that certificate supplied, and a destination
+  whose certificate cannot be verified stays inactive rather than falling back
+  to an unverified upload. So does a half-filled-in destination — host and user
+  set with no password is inactive, with a log line naming the piece that is
+  missing, never a half-configured attempt.
+
+  A cycle is deliberately cautious at every point it could do damage. It checks
+  there is room in the spool before it starts rather than nine minutes in. It
+  reads the finished archive's table of contents back out of it before anything
+  uploads, and an artefact that fails that read is kept rather than deleted,
+  because it is the evidence. It prunes a destination only after that same
+  destination's own successful upload, never on the strength of another's, and
+  wherever the keep set cannot be worked out with confidence — a listing that
+  will not parse, a timestamp from the future, a misconfigured tier — it
+  deletes nothing anywhere on that cycle. A failed cycle retries, waiting
+  longer each time. A stop request reaches `pg_dump` itself rather than waiting
+  the dump out, which is what keeps a redeploy from queueing behind a lock on
+  every table.
+
+  **Two things this does not do, and both would be reasonable to assume it
+  did.** The archive is not encrypted. The transfer to the destination is
+  protected; the file sitting at the far end is not, so the destination is as
+  trusted as the database. And nothing here restores anything — putting a
+  backup back is still a manual job, and the note describing it says to analyze
+  the database afterwards, because a restore carries no planner statistics
+  across and every table will otherwise be queried from defaults.
+
+  `.env.example` gains nineteen `BACKUP_*` names covering the schedule,
+  retention, the FTPS destination, the two timeouts and where the spool lives,
+  every one of them with a working default. Six of the nineteen are numeric,
+  and a value that is not a number in any of the six is logged by name and
+  replaced with that setting's default rather than raising: it would otherwise
+  raise while settings are being read, before any logger exists, which under
+  `restart: unless-stopped` is a silent restart loop with nothing useful in
+  `docker logs`. None of the `BACKUP_*` names is passed to the API service, so
+  a mistyped backup setting can stop backups but cannot touch the API.
+
+  One version coupling to know about, because a routine upgrade walks into it
+  from either side. The client tools in the image are PostgreSQL 16 and the
+  compose file pins a 16 server. Move the server to 17 and the dump refuses to
+  run at all, saying so on stderr on the first attempt; take a dump with 17
+  tools instead and the archive it writes cannot be read back by the 16
+  `pg_restore` that would be doing the restoring. The server version and the
+  client tools move together, in one change.
+
+### Changed
+- **Warnings on the database read path no longer put the database's own error
+  text into the message.** Eighteen of them built a sentence around whatever
+  the driver reported. That text is where PostgreSQL can print the contents of
+  the row it was working on, so a failure could copy stored data into the log
+  file and onward to wherever those logs ship — and a line that has to be read
+  as prose cannot be searched or counted on. Each of those lines now carries
+  the operation, whatever identifies the thing being read, and the failure's
+  type, SQLSTATE and schema object as fields of their own, which is the
+  treatment the stats counts got in 1.20.0 and background book writes in
+  1.19.3. Nothing a caller typed appeared in these lines before and none does
+  now; the ones that read caller-supplied text kept it out by leaving it off
+  the message, and are clear of it twice over now that the fields replacing
+  that message render no error text at all. Alongside them, the background
+  write queue's session-clearing warnings now say which of the three writes
+  they followed instead of leaving it to be inferred, and both cache-key lines
+  go through the same guard the query allowlist already used.
+
+- **The seeder's and the live Audible lookups' log lines carry their context as
+  fields too.** Twenty-eight lines across the seeding cycles and the outbound
+  Audible calls put the region, the entity being worked on, how far a run had
+  got and what it had found into the message text; they carry those as named
+  fields now, so a run can be followed by querying rather than by reading. These
+  keep the error's own text, unlike the database warnings above, and the
+  difference is deliberate rather than an inconsistency: PostgreSQL can quote
+  the row it was working on, an HTTP client cannot, and the URLs these lines
+  build carry no query parameters, so nothing a caller typed can reach the
+  field. No line gained or lost a piece of information about a caller, and the
+  operations behind them are unchanged.
+
+- **The published compose files cap Docker's own log files and give PostgreSQL
+  room for a parallel query.** This one landed after [1.20.0] was released,
+  carried no version of its own, and so has reached no release until this one —
+  it is recorded here because an operator pulling the compose file for the
+  backup container above picks it up in the same action, and would otherwise
+  have no note anywhere describing what else changed underneath them. Docker's
+  `json-file` driver keeps log output forever by default, so all three services
+  across the two published compose files — the API, the database and the seeder
+  — are now held to five rotated files of 10 MB each. That is a separate copy
+  of the same lines from the application's own log file, which
+  `LOG_RETENTION_DAYS` bounds; neither mechanism truncates the other's. The
+  database container also gets a `/dev/shm` of 1 GB in place of Docker's 64 MB
+  default, which is where PostgreSQL puts the shared memory a parallel query's
+  workers hand results back through — too small a value fails such a query
+  outright with "No space left on device" rather than falling back to a serial
+  plan. It is a ceiling rather than memory claimed at startup, but the pages it
+  does take are real, so `DB_SHM_SIZE` in `.env.example` lowers it on a small
+  host. The database is also given up to two minutes to finish its shutdown
+  checkpoint instead of Docker's ten seconds, so a stop is less likely to be
+  cut short into crash recovery on the next start; a grace period is a maximum
+  wait rather than a delay, and a container that exits sooner is not held.
+
+- **`PRIVACY.md` now separates a name Libex read out of its own tables from a
+  name someone searched for.** The page describes the fields those background
+  lines carry, and in doing so settles something it had left open: some of them
+  name an author or a narrator outright, while further down the same page a
+  logged author or narrator name is called a defect. They are not the same
+  thing. The names on the background lines are rows read out of Libex's own
+  catalogue because they were due to be refreshed, with no request in flight
+  and nothing to correlate them to; the defect is a name that arrived because
+  somebody searched for it. The page also now states plainly that the one value
+  taken from a request which becomes a field of its own is the ASIN list a bulk
+  lookup asked for, and widens a claim it had understated — a path segment
+  appearing in a warning discloses nothing further because the whole path is
+  already recorded, not because ASINs are format-checked, which is what makes
+  the claim cover the segments that are unchecked text.
+
+### Fixed
+- **A blank answer from Audible can no longer erase something Libex had already
+  stored.** An empty string is not a null, so the merge that was supposed to
+  preserve stored values took one as a real answer: a response group that
+  carried a field with nothing in it overwrote the publisher, copyright, ISBN,
+  language, cover, subtitle or title already on the row, and an author's
+  portrait along with it. Nothing announced it, and nothing in the response
+  told a caller that a field had been emptied rather than never known — an
+  ordinary refresh of a book that already had a publisher could return it
+  without one afterwards. Fourteen text columns on a book now keep what is
+  stored whenever what arrives is blank, and the author's image does the same.
+
+  Blank means blank: emptiness is measured after trimming every character
+  Unicode calls whitespace, so a lone tab, the non-breaking space a copied web
+  page leaves behind, and the ideographic space that is ordinary in the
+  Japanese catalogue all read as no answer, where each of them previously
+  passed as one. **It stops there, and the limit is deliberate.** Zero-width
+  characters are not whitespace in Unicode and are not trimmed, so a value made
+  only of those still counts as an answer and will still replace what is
+  stored. Only the measurement is trimmed — what gets written is what Audible
+  sent, character for character.
+
+  The book's plans list is left on the old merge on purpose. It is the one
+  field here where an empty answer is a real one, because that is how a book
+  which has left the Plus catalogue reports itself, and guarding it would hold
+  a book in a catalogue it no longer belongs to.
+
+- **The README's description of how an older PostgreSQL fails a chapter write
+  was wrong, and this release withdraws it.** [1.19.5] introduced the
+  requirement and said older servers reject the subscript syntax outright;
+  [1.19.6] put it in the README and called the failure a syntax error. It is
+  not one. The statement parses, and fails at type resolution, reporting that
+  it cannot subscript a value that is not an array. Anyone running Libex
+  against an external PostgreSQL 13 or earlier and searching their logs for a
+  syntax error therefore found nothing, and had every reason to conclude this
+  was not their problem. The README says what the server actually reports as of
+  this release. Nothing else in either of those entries changes: the version
+  requirement, the symptom — chapters never store, everything else keeps
+  working, nothing says the server is too old — and the fact that the published
+  compose file pins `postgres:16-alpine` and so is unaffected all stand as
+  written. Those two sections are left as they were published; this entry is
+  the correction.
+
 ## [1.20.0]
 
 ### Added

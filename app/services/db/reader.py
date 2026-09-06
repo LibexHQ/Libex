@@ -204,7 +204,10 @@ async def get_book_from_db(session: AsyncSession, asin: str) -> dict[str, Any] |
         positions = await _get_series_positions(session, asin)
         return _book_to_dict(book, positions)
     except Exception as e:
-        logger.warning(f"DB read failed for book {asin}: {e}")
+        logger.warning(
+            "DB read failed for book",
+            extra={"asin": asin, **_failure_fields(e)},
+        )
         return None
 
 
@@ -228,7 +231,10 @@ async def get_books_from_db(session: AsyncSession, asins: list[str]) -> list[dic
             results.append(_book_to_dict(book, positions))
         return results
     except Exception as e:
-        logger.warning(f"DB read failed for books {asins}: {e}")
+        logger.warning(
+            "DB read failed for books",
+            extra={"asins": asins, **_failure_fields(e)},
+        )
         return []
 
 async def search_books_from_db(
@@ -321,7 +327,7 @@ async def search_books_from_db(
             results.append(_book_to_dict(book, positions))
         return results
     except Exception as e:
-        logger.warning(f"DB search failed for books: {e}")
+        logger.warning("DB search failed for books", extra={**_failure_fields(e)})
         return []
 
 async def get_books_by_sku_from_db(session: AsyncSession, sku_group: str) -> list[dict[str, Any]]:
@@ -344,7 +350,10 @@ async def get_books_by_sku_from_db(session: AsyncSession, sku_group: str) -> lis
             results.append(_book_to_dict(book, positions))
         return results
     except Exception as e:
-        logger.warning(f"DB read failed for sku_group {sku_group}: {e}")
+        logger.warning(
+            "DB read failed for sku_group",
+            extra={"sku_group": sku_group, **_failure_fields(e)},
+        )
         return []
 
 
@@ -361,7 +370,7 @@ async def get_distinct_plans_from_db(session: AsyncSession) -> list[str]:
         plans = sorted([row[0] for row in result.fetchall()])
         return plans
     except Exception as e:
-        logger.warning(f"DB read failed for distinct plans: {e}")
+        logger.warning("DB read failed for distinct plans", extra={**_failure_fields(e)})
         return []
 
 
@@ -382,7 +391,11 @@ async def get_distinct_genres_from_db(
         names = sorted({row[0] for row in result.fetchall()})
         return names
     except Exception as e:
-        logger.warning(f"DB read failed for distinct genres: {e}")
+        # search is caller-supplied filter text and stays out of the log for
+        # the same reason the narrator and series name searches below do: it
+        # is not in this message, and _failure_fields(e) never renders the
+        # exception's own text either.
+        logger.warning("DB read failed for distinct genres", extra={**_failure_fields(e)})
         return []
 
 
@@ -471,7 +484,10 @@ async def get_books_by_plan_from_db(
             results.append(_book_to_dict(book, positions))
         return results
     except Exception as e:
-        logger.warning(f"DB read failed for plan '{plan_name}': {e}")
+        logger.warning(
+            "DB read failed for plan",
+            extra={"plan_name": plan_name, **_failure_fields(e)},
+        )
         return []
 
 
@@ -559,7 +575,7 @@ async def get_vvab_books_from_db(
             results.append(_book_to_dict(book, positions))
         return results
     except Exception as e:
-        logger.warning(f"DB read failed for VVAB books: {e}")
+        logger.warning("DB read failed for VVAB books", extra={**_failure_fields(e)})
         return []
 
 
@@ -665,7 +681,7 @@ async def get_new_releases_from_db(
             results.append(_book_to_dict(book, positions))
         return results
     except Exception as e:
-        logger.warning(f"DB read failed for new releases: {e}")
+        logger.warning("DB read failed for new releases", extra={**_failure_fields(e)})
         return []
 
 
@@ -773,7 +789,7 @@ async def get_coming_soon_from_db(
             results.append(_book_to_dict(book, positions))
         return results
     except Exception as e:
-        logger.warning(f"DB read failed for coming soon: {e}")
+        logger.warning("DB read failed for coming soon", extra={**_failure_fields(e)})
         return []
 
 # ============================================================
@@ -1054,7 +1070,10 @@ async def get_author_books_from_db(
             results.append(_book_to_dict(book, positions))
         return results
     except Exception as e:
-        logger.warning(f"DB read failed for author books {author_asin}: {e}")
+        logger.warning(
+            "DB read failed for author books",
+            extra={"author_asin": author_asin, **_failure_fields(e)},
+        )
         return []
 
 
@@ -1121,13 +1140,15 @@ async def search_narrators_from_db(
         return [_narrator_to_dict(n) for n in narrators]
     except Exception as e:
         # The searched-for name is the caller's own text and is never written
-        # to a log -- neither by this message, which omits it, nor through the
-        # exception, which would otherwise carry it: the name is a bound
-        # parameter of the statement above, and a StatementError renders its
-        # bound parameters into str(). The engine sets hide_parameters=True to
-        # suppress that; see app/db/session.py. The operation is still named
-        # here, so the failure remains attributable to this endpoint.
-        logger.warning(f"DB read failed for narrator search: {e}")
+        # to a log -- neither in this message, which omits it, nor in the
+        # extra fields below, which carry only _failure_fields(e) (error type
+        # and SQLSTATE, never the exception's own rendered text). The name is
+        # also a bound parameter of the statement above, and hide_parameters
+        # on the engine (see app/db/session.py) keeps a StatementError from
+        # rendering it either, so the name stays out twice over. The operation
+        # is still named here, so the failure remains attributable to this
+        # endpoint.
+        logger.warning("DB read failed for narrator search", extra={**_failure_fields(e)})
         return []
 
 
@@ -1220,10 +1241,11 @@ async def get_narrator_books_from_db(
         return results
     except Exception as e:
         # Narrator name and every book filter applied above arrive from the
-        # query string, and all of them stay out of the log for the same reason
-        # as the narrator search above: absent from this message, and kept out
-        # of the exception text by hide_parameters on the engine.
-        logger.warning(f"DB read failed for narrator books: {e}")
+        # query string, and all of them stay out of the log for the same
+        # reason as the narrator search above: absent from this message, and
+        # kept out of the extra fields too, since _failure_fields(e) never
+        # renders the exception's own text.
+        logger.warning("DB read failed for narrator books", extra={**_failure_fields(e)})
         return []
 
 
@@ -1250,7 +1272,10 @@ async def get_series_from_db(session: AsyncSession, asin: str) -> dict[str, Any]
             "updatedAt": series.updated_at.isoformat() if series.updated_at else None,
         }
     except Exception as e:
-        logger.warning(f"DB read failed for series {asin}: {e}")
+        logger.warning(
+            "DB read failed for series",
+            extra={"asin": asin, **_failure_fields(e)},
+        )
         return None
 
 
@@ -1276,11 +1301,11 @@ async def search_series_from_db(session: AsyncSession, name: str) -> list[dict[s
         ]
     except Exception as e:
         # Series name is caller-supplied search text and is not logged: it is
-        # not in this message, and hide_parameters on the engine keeps it out
-        # of the exception text, where it would otherwise appear as a bound
-        # parameter. Which name was searched for matters less than knowing that
+        # not in this message, and _failure_fields(e) never renders the
+        # exception's own text, so it can't smuggle the bound parameter in
+        # either. Which name was searched for matters less than knowing that
         # this lookup is the one that failed.
-        logger.warning(f"DB search failed for series: {e}")
+        logger.warning("DB search failed for series", extra={**_failure_fields(e)})
         return []
 
 
@@ -1388,7 +1413,10 @@ async def get_series_books_from_db(
             results.append(_book_to_dict(book, positions))
         return results
     except Exception as e:
-        logger.warning(f"DB read failed for series books {series_asin}: {e}")
+        logger.warning(
+            "DB read failed for series books",
+            extra={"series_asin": series_asin, **_failure_fields(e)},
+        )
         return []
 
 
@@ -1407,7 +1435,10 @@ async def get_track_from_db(session: AsyncSession, asin: str) -> dict[str, Any] 
             return None
         return track.chapters
     except Exception as e:
-        logger.warning(f"DB read failed for track {asin}: {e}")
+        logger.warning(
+            "DB read failed for track",
+            extra={"asin": asin, **_failure_fields(e)},
+        )
         return None
 
 
@@ -1638,5 +1669,8 @@ async def get_stored_genres(
         oldest_checked = min(r[3] for r in rows)
         return genres, oldest_checked
     except Exception as e:
-        logger.warning(f"DB read failed for catalog_genres '{region}': {e}")
+        logger.warning(
+            "DB read failed for catalog_genres",
+            extra={"region": region, **_failure_fields(e)},
+        )
         return [], None

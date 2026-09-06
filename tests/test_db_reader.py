@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 # Third party
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 # Local
 from app.services.db.reader import (
@@ -26,6 +27,15 @@ from app.services.db.reader import (
     search_series_from_db,
     get_track_from_db,
     get_db_stats,
+    search_books_from_db,
+    get_books_by_sku_from_db,
+    get_distinct_plans_from_db,
+    get_distinct_genres_from_db,
+    get_books_by_plan_from_db,
+    get_vvab_books_from_db,
+    get_new_releases_from_db,
+    get_coming_soon_from_db,
+    get_stored_genres,
 )
 
 
@@ -128,6 +138,33 @@ def _make_session_with_books(books=None):
     positions_result.fetchall.return_value = []
     # For each book we need a positions query, so side_effect rotates
     session.execute = AsyncMock(side_effect=[scalars_result] + [positions_result] * len(books or []))
+    return session
+
+
+class _FakeDriverOrig:
+    """A DBAPI-shaped `.orig`, populated the way asyncpg actually populates one
+    on a constraint violation -- schema_name/table_name/column_name/
+    constraint_name are real attributes on the driver exception, not
+    fabricated for the test."""
+
+    def __init__(self):
+        self.sqlstate = "23502"
+        self.schema_name = "public"
+        self.table_name = "books"
+        self.column_name = "region"
+        self.constraint_name = None
+
+
+def _dbapi_shaped_error():
+    """An IntegrityError carrying a populated `.orig`, so _failure_fields
+    exercises the branch where schema/table/column/constraint are real
+    values rather than the all-None shape a bare Exception produces."""
+    return IntegrityError("INSERT", {}, _FakeDriverOrig())
+
+
+def _session_raising(error):
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=error)
     return session
 
 
@@ -2126,3 +2163,218 @@ async def test_series_positions_batch_splits_the_list_one_past_the_ceiling():
     chunks = _executed_asin_chunks(session)
     assert [len(chunk) for chunk in chunks] == [5000, 1]
     assert [asin for chunk in chunks for asin in chunk] == asins
+
+# ============================================================
+# THE NINE READERS WHOSE except-BRANCH WAS PREVIOUSLY UNPROVEN
+#
+# Every other reader's failure path is exercised above by driving a session
+# to raise and letting the real function body construct its own extra={}.
+# These nine were, until now, only ever reached through a route-layer mock
+# that patched the reader out entirely -- so extra={} never actually ran.
+# Both exception shapes are driven for each: a bare Exception with no .orig
+# (the shape _failure_fields degrades to all-None optional fields for) and
+# an IntegrityError with a populated .orig (the shape that actually carries
+# schema_name/table_name/column_name/constraint_name).
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_search_books_from_db_returns_empty_list_on_exception():
+    session = _session_raising(Exception("DB error"))
+    result = await search_books_from_db(session)
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_search_books_from_db_logs_structured_fields_on_dbapi_error(caplog):
+    session = _session_raising(_dbapi_shaped_error())
+
+    with caplog.at_level(logging.WARNING):
+        result = await search_books_from_db(session)
+
+    assert result == []
+    matches = [r for r in caplog.records if "DB search failed for books" in r.getMessage()]
+    assert len(matches) == 1
+    record = matches[0]
+    assert record.error_type == "IntegrityError"
+    assert record.schema_name == "public"
+    assert record.table_name == "books"
+    assert record.column_name == "region"
+
+
+@pytest.mark.asyncio
+async def test_get_books_by_sku_from_db_returns_empty_list_on_exception():
+    session = _session_raising(Exception("DB error"))
+    result = await get_books_by_sku_from_db(session, "SKU-GROUP-1")
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_get_books_by_sku_from_db_logs_structured_fields_on_dbapi_error(caplog):
+    session = _session_raising(_dbapi_shaped_error())
+
+    with caplog.at_level(logging.WARNING):
+        result = await get_books_by_sku_from_db(session, "SKU-GROUP-1")
+
+    assert result == []
+    matches = [r for r in caplog.records if "DB read failed for sku_group" in r.getMessage()]
+    assert len(matches) == 1
+    record = matches[0]
+    assert record.sku_group == "SKU-GROUP-1"
+    assert record.error_type == "IntegrityError"
+    assert record.table_name == "books"
+
+
+@pytest.mark.asyncio
+async def test_get_distinct_plans_from_db_returns_empty_list_on_exception():
+    session = _session_raising(Exception("DB error"))
+    result = await get_distinct_plans_from_db(session)
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_get_distinct_plans_from_db_logs_structured_fields_on_dbapi_error(caplog):
+    session = _session_raising(_dbapi_shaped_error())
+
+    with caplog.at_level(logging.WARNING):
+        result = await get_distinct_plans_from_db(session)
+
+    assert result == []
+    matches = [r for r in caplog.records if "DB read failed for distinct plans" in r.getMessage()]
+    assert len(matches) == 1
+    record = matches[0]
+    assert record.error_type == "IntegrityError"
+    assert record.column_name == "region"
+
+
+@pytest.mark.asyncio
+async def test_get_distinct_genres_from_db_returns_empty_list_on_exception():
+    session = _session_raising(Exception("DB error"))
+    result = await get_distinct_genres_from_db(session)
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_get_distinct_genres_from_db_logs_structured_fields_on_dbapi_error(caplog):
+    session = _session_raising(_dbapi_shaped_error())
+
+    with caplog.at_level(logging.WARNING):
+        result = await get_distinct_genres_from_db(session)
+
+    assert result == []
+    matches = [r for r in caplog.records if "DB read failed for distinct genres" in r.getMessage()]
+    assert len(matches) == 1
+    record = matches[0]
+    assert record.error_type == "IntegrityError"
+    assert record.schema_name == "public"
+
+
+@pytest.mark.asyncio
+async def test_get_books_by_plan_from_db_returns_empty_list_on_exception():
+    session = _session_raising(Exception("DB error"))
+    result = await get_books_by_plan_from_db(session, "Plus Catalog")
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_get_books_by_plan_from_db_logs_structured_fields_on_dbapi_error(caplog):
+    session = _session_raising(_dbapi_shaped_error())
+
+    with caplog.at_level(logging.WARNING):
+        result = await get_books_by_plan_from_db(session, "Plus Catalog")
+
+    assert result == []
+    matches = [r for r in caplog.records if "DB read failed for plan" in r.getMessage()]
+    assert len(matches) == 1
+    record = matches[0]
+    assert record.plan_name == "Plus Catalog"
+    assert record.error_type == "IntegrityError"
+    assert record.table_name == "books"
+
+
+@pytest.mark.asyncio
+async def test_get_vvab_books_from_db_returns_empty_list_on_exception():
+    session = _session_raising(Exception("DB error"))
+    result = await get_vvab_books_from_db(session)
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_get_vvab_books_from_db_logs_structured_fields_on_dbapi_error(caplog):
+    session = _session_raising(_dbapi_shaped_error())
+
+    with caplog.at_level(logging.WARNING):
+        result = await get_vvab_books_from_db(session)
+
+    assert result == []
+    matches = [r for r in caplog.records if "DB read failed for VVAB books" in r.getMessage()]
+    assert len(matches) == 1
+    record = matches[0]
+    assert record.error_type == "IntegrityError"
+    assert record.column_name == "region"
+
+
+@pytest.mark.asyncio
+async def test_get_new_releases_from_db_returns_empty_list_on_exception():
+    session = _session_raising(Exception("DB error"))
+    result = await get_new_releases_from_db(session)
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_get_new_releases_from_db_logs_structured_fields_on_dbapi_error(caplog):
+    session = _session_raising(_dbapi_shaped_error())
+
+    with caplog.at_level(logging.WARNING):
+        result = await get_new_releases_from_db(session)
+
+    assert result == []
+    matches = [r for r in caplog.records if "DB read failed for new releases" in r.getMessage()]
+    assert len(matches) == 1
+    record = matches[0]
+    assert record.error_type == "IntegrityError"
+    assert record.schema_name == "public"
+
+
+@pytest.mark.asyncio
+async def test_get_coming_soon_from_db_returns_empty_list_on_exception():
+    session = _session_raising(Exception("DB error"))
+    result = await get_coming_soon_from_db(session)
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_get_coming_soon_from_db_logs_structured_fields_on_dbapi_error(caplog):
+    session = _session_raising(_dbapi_shaped_error())
+
+    with caplog.at_level(logging.WARNING):
+        result = await get_coming_soon_from_db(session)
+
+    assert result == []
+    matches = [r for r in caplog.records if "DB read failed for coming soon" in r.getMessage()]
+    assert len(matches) == 1
+    record = matches[0]
+    assert record.error_type == "IntegrityError"
+    assert record.table_name == "books"
+
+
+@pytest.mark.asyncio
+async def test_get_stored_genres_returns_empty_tuple_on_exception():
+    session = _session_raising(Exception("DB error"))
+    result = await get_stored_genres(session, "us")
+    assert result == ([], None)
+
+
+@pytest.mark.asyncio
+async def test_get_stored_genres_logs_structured_fields_on_dbapi_error(caplog):
+    session = _session_raising(_dbapi_shaped_error())
+
+    with caplog.at_level(logging.WARNING):
+        result = await get_stored_genres(session, "us")
+
+    assert result == ([], None)
+    matches = [r for r in caplog.records if "DB read failed for catalog_genres" in r.getMessage()]
+    assert len(matches) == 1
+    record = matches[0]
+    assert record.region == "us"
+    assert record.error_type == "IntegrityError"
+    assert record.column_name == "region"

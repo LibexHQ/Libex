@@ -30,7 +30,7 @@ from app.db.session import engine
 
 # Services
 from app.services.cache import manager as cache
-from app.services.cache.manager import author_key, book_key, chapters_key, series_key
+from app.services.cache.manager import _safe_key_for_log, author_key, book_key, chapters_key, series_key
 from app.services.db.writer import (
     _cache_set_many,
     _failure_fields,
@@ -477,9 +477,16 @@ async def _clear_session(session: AsyncSession, fields: dict) -> None:
     recover a dead connection; what the guard buys is that the caller decides
     what happens next.
 
-    fields carries the caller's own context — asin and region on the per-book
-    path, region alone on the chunk attempt — so the line says which unit of
-    work was being cleaned up after.
+    fields carries the caller's own context — asin, region and a stage label
+    on the per-book path, region and a stage label on the chunk attempt — so
+    the line identifies which of the three call sites failed to clear its
+    session, not merely which book or chunk it was cleaning up after. The
+    stage label is what makes that possible: the per-book path calls this
+    twice in the same loop iteration, once after upsert_book fails and once
+    after cache.set fails, and both calls started from the same `fields`
+    dict — without a label distinguishing "book_write" from "cache_write",
+    a rollback failure on either leg logs identically and there is no way to
+    tell, after the fact, which statement actually broke the session.
     """
     try:
         await session.rollback()
@@ -499,7 +506,7 @@ async def _write_book_chunk(session: AsyncSession, chunk: list[dict], region: st
     await write_books(session, chunk)
     await _cache_set_many(session, [(book_key(b["asin"], region), b) for b in chunk])
     await session.commit()
-    logger.info(f"DB write: {len(chunk)} books")
+    logger.info("DB write", extra={"books": len(chunk), "region": region})
 
 
 async def _replay_book_chunk(session: AsyncSession, chunk: list[dict], region: str) -> None:
@@ -579,7 +586,7 @@ async def _replay_book_chunk(session: AsyncSession, chunk: list[dict], region: s
                 "Background persist replay failed for book",
                 extra={**fields, **_failure_fields(e)},
             )
-            await _clear_session(session, fields)
+            await _clear_session(session, {**fields, "stage": "book_write"})
             continue
 
         try:
@@ -590,7 +597,7 @@ async def _replay_book_chunk(session: AsyncSession, chunk: list[dict], region: s
                 "Background persist replay failed to cache book",
                 extra={**fields, **_failure_fields(e)},
             )
-            await _clear_session(session, fields)
+            await _clear_session(session, {**fields, "stage": "cache_write"})
 
     logger.info("Background persist replay complete", extra={
         "books": len(chunk),
@@ -629,7 +636,7 @@ async def _attempt_book_chunk(chunk: list[dict], region: str) -> Exception | Non
                 await _write_book_chunk(session, chunk, region)
                 return None
             except Exception as exc:
-                await _clear_session(session, {"region": region})
+                await _clear_session(session, {"region": region, "stage": "chunk_write"})
                 return exc
 
 
@@ -774,7 +781,7 @@ def persist_cache_background(key: str, value) -> None:
             except Exception as e:
                 logger.warning(
                     "Background cache persist failed",
-                    extra={"cacheKey": key, **_failure_fields(e)},
+                    extra={"cacheKey": _safe_key_for_log(key), **_failure_fields(e)},
                 )
 
     _spawn(_persist, 1)
@@ -870,7 +877,7 @@ def persist_author_books_cache_background(
             except Exception as e:
                 logger.warning(
                     "Background cache persist failed",
-                    extra={"cacheKey": key, **_failure_fields(e)},
+                    extra={"cacheKey": _safe_key_for_log(key), **_failure_fields(e)},
                 )
 
     _spawn(_persist, 1)

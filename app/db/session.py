@@ -45,7 +45,7 @@ settings = get_settings()
 # length of an Audible call — not the chunk fan-out an author-ASIN route
 # drives with high_concurrency=True under the 25-permit author-books pool
 # (services/audible/client.py), and not the walk that runs to
-# AUTHOR_BOOKS_TIME_BUDGET_SECONDS (45s). A worker's 20 slots therefore serve
+# AUTHOR_BOOKS_TIME_BUDGET_SECONDS (25s). A worker's 20 slots therefore serve
 # far more than 20 concurrent requests.
 #
 # server_settings apply per-connection at the driver level: statement_timeout

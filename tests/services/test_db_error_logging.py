@@ -2,25 +2,31 @@
 Guards the privacy contract on the DB reader's failure log lines.
 
 Three reader handlers -- narrator search, narrator books and series search --
-log a warning naming the operation when their query fails, and deliberately
-leave the caller's search text out of the message. Taking it out of the message
-is only half the guard: that text travels as a bound parameter of the statement,
-and SQLAlchemy renders a statement's bound parameters into str() on any
-StatementError. Every DBAPIError, OperationalError and DataError is one, so an
-"{e}" on those lines puts back exactly what the message removed.
-
-app/db/session.py closes that engine-wide with hide_parameters=True. These tests
-hold both ends of it:
+log a warning naming the operation when their query fails, and never put the
+caller's search text anywhere in that log line. The message is a fixed string
+naming the operation, and the structured fields alongside it come from
+_failure_fields(e) (app/services/db/writer.py), which reports classification
+and schema metadata only -- error_type, sqlstate, schema_name, table_name,
+column_name, constraint_name -- and never touches str(e), the compiled
+statement, or the statement's bound parameters. That is a stronger guarantee
+than the previous shape of these three lines, which interpolated the
+exception directly into the message (an f"...: {e}") and relied on the
+engine's hide_parameters=True (app/db/session.py) to keep the rendered
+exception text from including the bound parameters. Both guards are exercised
+here:
 
   * the failure path is driven with an error that really CARRIES bound
-    parameters. A bare Exception passes here whether the flag is set or not,
-    which is why nothing caught this the first time round; and
-  * the engine setting those errors are rendered under is asserted directly, so
-    deleting the flag fails a test rather than silently reopening the leak.
+    parameters, so a fixture that could never leak in the first place proves
+    nothing; and
+  * the engine setting is still asserted directly (it still matters for any
+    query not routed through _failure_fields), so deleting it fails a test
+    rather than silently reopening a leak on some other path.
 
-The middle test is the control: with the flag off, the identical path prints the
-caller's text. It is what stops the other assertions passing vacuously if a
-future SQLAlchemy stops rendering parameters into the exception at all.
+The test that used to be the control -- proving the same path leaks without
+hide_parameters -- now proves the opposite, and is kept for that reason: since
+the message no longer touches str(e) at all, disabling the engine setting no
+longer reopens a leak on this specific path. That is a real, verified change
+of behaviour, not an oversight in the test.
 """
 
 # Standard library
@@ -46,6 +52,15 @@ from app.services.db.reader import (
 # word short enough to appear inside an unrelated one ("q" would match "query").
 SECRET = "Zorbleflux Quennathrix"
 
+# The exact key set _failure_fields(e) reports -- pinned here as well as in
+# tests/services/test_persist_queue.py, since both reader.py and
+# persist_queue.py import the same function from writer.py and a change to it
+# affects both call sites' log shape identically.
+_FAILURE_FIELD_KEYS = {
+    "error_type", "sqlstate", "schema_name", "table_name",
+    "column_name", "constraint_name",
+}
+
 
 def _records(caplog):
     return [r for r in caplog.records if r.levelno >= logging.WARNING]
@@ -53,6 +68,22 @@ def _records(caplog):
 
 def _serialised(caplog):
     return " ".join(str(r.__dict__) for r in _records(caplog))
+
+
+# Duplicates app/core/logging.py's own standard-field exclusion list rather
+# than importing it, so this test does not reach into a module it has no
+# reason to depend on just to compute which attributes on a LogRecord came in
+# through extra=.
+_STANDARD_RECORD_FIELDS = {
+    "name", "msg", "args", "levelname", "levelno", "pathname", "filename",
+    "module", "exc_info", "exc_text", "stack_info", "lineno", "funcName",
+    "created", "msecs", "relativeCreated", "thread", "threadName",
+    "processName", "process", "message", "taskName", "asctime",
+}
+
+
+def _extras(record):
+    return {k: v for k, v in record.__dict__.items() if k not in _STANDARD_RECORD_FIELDS}
 
 
 def _statement_error(column, *, hide_parameters):
@@ -83,12 +114,12 @@ def _session_raising(error):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reader,column,prefix", [
-    (search_narrators_from_db, Narrator.name, "DB read failed for narrator search: "),
-    (get_narrator_books_from_db, Narrator.name, "DB read failed for narrator books: "),
-    (search_series_from_db, Series.title, "DB search failed for series: "),
+@pytest.mark.parametrize("reader,column,message", [
+    (search_narrators_from_db, Narrator.name, "DB read failed for narrator search"),
+    (get_narrator_books_from_db, Narrator.name, "DB read failed for narrator books"),
+    (search_series_from_db, Series.title, "DB search failed for series"),
 ])
-async def test_reader_failure_never_logs_the_bound_search_text(caplog, reader, column, prefix):
+async def test_reader_failure_never_logs_the_bound_search_text(caplog, reader, column, message):
     session = _session_raising(_statement_error(
         column, hide_parameters=engine.sync_engine.hide_parameters
     ))
@@ -100,16 +131,17 @@ async def test_reader_failure_never_logs_the_bound_search_text(caplog, reader, c
 
     records = _records(caplog)
     assert len(records) == 1
-    message = records[0].getMessage()
+    record = records[0]
 
-    # The operation is still named and the statement still printed: suppressing
-    # the values must not cost the operator the ability to tell which query
-    # failed, which is the whole reason the exception is logged at all.
-    assert message.startswith(prefix)
-    assert "[SQL:" in message
-    # Suppressed, not merely absent -- the marker is SQLAlchemy reporting that
-    # it had parameters and withheld them.
-    assert "[SQL parameters hidden" in message
+    # The operation is still named, so the failure remains attributable to
+    # this endpoint -- but the message itself is now static: nothing derived
+    # from the exception is interpolated into it at all.
+    assert record.getMessage() == message
+
+    # The extra fields carry exactly _failure_fields(e)'s fixed key set --
+    # never str(e), never the compiled statement, never a bound parameter --
+    # so there is nothing here for hide_parameters to have to catch.
+    assert set(_extras(record)) == _FAILURE_FIELD_KEYS
 
     serialised = _serialised(caplog)
     assert SECRET not in serialised
@@ -118,19 +150,24 @@ async def test_reader_failure_never_logs_the_bound_search_text(caplog, reader, c
 
 
 @pytest.mark.asyncio
-async def test_the_same_failure_leaks_the_search_text_without_the_engine_setting(caplog):
+async def test_the_reader_no_longer_depends_on_the_engine_setting_to_stay_safe(caplog):
     """
-    The control. Everything above passes for free against an exception with
-    nothing in it, so this proves the exception used up there is one that
-    genuinely carries the caller's text, and that the engine setting is what
-    withholds it.
+    Historically this was the control: with hide_parameters off, the same path
+    used to interpolate str(e) into the log message and leak the caller's
+    text, proving the engine setting was load-bearing for it. That path no
+    longer exists -- the message is static and the extras carry only
+    _failure_fields(e), which never touches str(e) or the statement's bound
+    parameters -- so the secret stays out even with the engine setting
+    disabled. hide_parameters is still asserted directly below, as a second,
+    independent guard for any query not routed through _failure_fields, but
+    this reader path no longer needs it to be correct.
     """
     session = _session_raising(_statement_error(Narrator.name, hide_parameters=False))
 
     with caplog.at_level(logging.WARNING):
         await search_narrators_from_db(session, SECRET)
 
-    assert SECRET in _serialised(caplog)
+    assert SECRET not in _serialised(caplog)
 
 
 def test_the_engine_hides_bound_parameters():

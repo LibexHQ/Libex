@@ -472,7 +472,7 @@ Libex is API-compatible with AudiMeta. To migrate:
 
 ## Self-Hosting Notes
 
-- **PostgreSQL 14 or newer is required.** The compose file above pins `postgres:16-alpine`, so this only concerns you if you're pointing Libex at a database you already run. On an older server chapter writes fail as a syntax error that's logged as a warning and nothing more — chapters never store, everything else keeps working, and nothing tells you the server is too old
+- **PostgreSQL 14 or newer is required.** The compose file above pins `postgres:16-alpine`, so this only concerns you if you're pointing Libex at a database you already run. On an older server chapter writes fail — postgres rejects the jsonb subscript with a type error, not a syntax error — logged as a warning and nothing more: chapters never store, everything else keeps working, and nothing tells you the server is too old
 - Libex uses PostgreSQL as both a persistent library and a cache — no Redis required
 - Every book, author, series, narrator, and genre ever requested is stored in a full relational schema and survives cache expiry indefinitely
 - The local library powers the `/db/book` and `/book/sku/{sku}` endpoints and serves as an automatic fallback when Audible is unavailable

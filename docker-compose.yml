@@ -43,7 +43,8 @@ services:
       - MIGRATION_SUNSET=${MIGRATION_SUNSET:-}
       - MIGRATION_INFO_URL=${MIGRATION_INFO_URL:-}
       # no SEEDER_* here: the seeder runs in its own stack, docker-compose.seeder.yml.
-    # /app/logs is the only path the image expects to be writable.
+    # /app/logs is the only path this service needs writable. The image also
+    # creates /backup-spool, which only libex-backup below ever mounts.
     volumes:
       - ${LOGS_PATH:-./logs}:/app/logs
     depends_on:
@@ -132,6 +133,251 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
+
+  libex-backup:
+    image: ghcr.io/libexhq/libex:latest
+    container_name: libex-backup
+    # entrypoint and command together, never one without the other.
+    # docker-entrypoint.sh runs `alembic upgrade head` before whatever it is
+    # handed, unconditionally -- right for the API and for the operator
+    # scripts, wrong here. This container runs pg_dump against a database it
+    # never opens with the ORM: it needs no schema of its own and has no
+    # business migrating anyone else's, and two containers in one file racing
+    # the same migration is a hazard neither of them is written to survive.
+    # The seeder stack avoids that race with a deploy-order instruction in a
+    # comment, which cannot work here -- both services come up together from
+    # this one file.
+    #
+    # `entrypoint: []` alone does not do it. Measured on Compose 2.40.3: with
+    # the entrypoint emptied and no command, the image CMD becomes the whole
+    # argv and this container quietly starts a second uvicorn.
+    entrypoint: []
+    command: ["python", "-m", "scripts.backup"]
+    # this container is always up and always idle between runs, so a restart
+    # policy that acts on exit only works if the runner never exits: no
+    # destination configured means sit there saying so, not exit 0, which
+    # this line would turn into a restart cycle. There is no healthcheck
+    # because there is nothing listening to check, and an unhealthy status
+    # triggers no action from Docker anyway -- what a missed backup needs is
+    # a log line at the destination, not a probe here.
+    restart: unless-stopped
+    environment:
+      # the same URL the API uses, built from the same three variables: one
+      # source of truth for where the database is. It is SQLAlchemy's form,
+      # so the runner drops the +asyncpg suffix before handing it to pg_dump,
+      # which speaks libpq URIs and nothing else. PGHOST/PGUSER/PGPASSWORD
+      # instead would be a second, separately editable copy of the same
+      # connection details, which is exactly how two copies come to disagree.
+      - DATABASE_URL=postgresql+asyncpg://${DB_USER:-libex}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-libex}
+      # when. TIME is local to TIMEZONE, an IANA name read by zoneinfo (stdlib
+      # on 3.12, so no dependency); DAY_OF_WEEK applies to weekly and
+      # DAY_OF_MONTH to monthly, and each is ignored by the other periods
+      # rather than being an error.
+      - BACKUP_TIMEZONE=${BACKUP_TIMEZONE:-UTC}
+      - BACKUP_PERIOD=${BACKUP_PERIOD:-daily}
+      - BACKUP_TIME=${BACKUP_TIME:-03:00}
+      - BACKUP_DAY_OF_WEEK=${BACKUP_DAY_OF_WEEK:-sunday}
+      - BACKUP_DAY_OF_MONTH=${BACKUP_DAY_OF_MONTH:-1}
+      # what to keep: the last N artefacts, plus the newest one at least
+      # AGED_DAYS old, plus the oldest one not yet AGED_DAYS old. The second
+      # tier is what survives damage noticed late, when every one of the
+      # recent copies already contains it; the third is what lets the second
+      # ever hold anything, by reserving the next artefact in line before the
+      # recent tier can delete it. Eight artefacts at these defaults. 0
+      # disables both aged tiers.
+      - BACKUP_RETENTION_RECENT=${BACKUP_RETENTION_RECENT:-6}
+      - BACKUP_RETENTION_AGED_DAYS=${BACKUP_RETENTION_AGED_DAYS:-30}
+      # a literal, and the same literal as the volume target below: one value
+      # written twice that has to move in both places at once. The path
+      # inside the container is fixed the way the listening port is, and
+      # BACKUP_SPOOL_PATH relocates the host side only.
+      #
+      # Four places, not two, and the two named here are the harmless pair.
+      # The others are app/core/config.py's backup_spool_dir default, which
+      # this line overrides and which decides the path when it does not (the
+      # operator scripts, a bare `docker run`), and -- the one nothing else
+      # points at -- the Dockerfile's `mkdir -p /app/logs /backup-spool` and
+      # the `chown -R libex:libex /app /backup-spool` beside it. Those two
+      # exist so a fresh named volume is seeded from a directory the runtime
+      # user owns. Move the path here and leave them, and the mount point no
+      # longer exists in the image, so Docker creates it root-owned and the
+      # first dump gets EACCES -- exactly the failure the Dockerfile comment
+      # says that mkdir is there to prevent, arriving because the path moved
+      # out from under it. Nothing has diverged; this is the list to check.
+      - BACKUP_SPOOL_DIR=/backup-spool
+      # sized for a degraded host, not fitted to a measurement: a clean dump
+      # of the live database took 8m39s for a 2.38 GB archive, and this is
+      # about seven times that. Finite rather than enormous because pg_dump
+      # holds one snapshot open for its whole run and autovacuum reclaims
+      # nothing newer while it does. stop_grace_period below is tied to this
+      # number -- raising it means raising that too.
+      - BACKUP_DUMP_TIMEOUT_SECONDS=${BACKUP_DUMP_TIMEOUT_SECONDS:-3600}
+      # the upload half, separately. Neither end of that transfer has been
+      # measured -- not the link to the destination, not the server at the
+      # other end of it -- so this is a shape rather than a fitted value: an
+      # hour is generous for a 2.4 GB file to a box on the same network and
+      # about right for one crossing a domestic uplink. Raise it from the
+      # stack if uploads time out; nothing derives from it.
+      - BACKUP_DESTINATION_TIMEOUT_SECONDS=${BACKUP_DESTINATION_TIMEOUT_SECONDS:-3600}
+      # empty by default, which is a working deployment with the backup
+      # capability present and idle: configuration is what turns the
+      # destination on, not deployment. A partial set is inactive too, with a
+      # warning naming what is missing -- never a half-configured upload.
+      #
+      # PORT 21 is explicit FTPS: the control connection opens in the clear
+      # and is upgraded by AUTH TLS. It is not implicit FTPS on 990, which
+      # negotiates TLS before the first command and is a different protocol
+      # with a similar name. Pointing this at 990 means the handshake never
+      # happens.
+      #
+      # CA_BUNDLE is the server's own certificate and is not optional in
+      # practice -- a self-signed certificate is the normal case on a NAS,
+      # and a context built from a bundle trusts that bundle and nothing
+      # else (measured: one CA in the store, against 121 system roots
+      # without it). That is certificate pinning, and it is a stronger
+      # position than trusting every public CA to vouch for a box on a LAN.
+      # SERVER_HOSTNAME is the escape hatch for a certificate whose CN is
+      # not the address you reach the box on. There is no setting that turns
+      # verification off, deliberately: a destination that cannot verify is
+      # inactive.
+      #
+      # A misspelled name here sets nothing and raises nothing -- config.py
+      # ignores unknown environment names -- so what an operator has to read
+      # is the runner's own startup line saying what it resolved.
+      - BACKUP_FTPS_HOST=${BACKUP_FTPS_HOST:-}
+      - BACKUP_FTPS_PORT=${BACKUP_FTPS_PORT:-21}
+      - BACKUP_FTPS_USER=${BACKUP_FTPS_USER:-}
+      - BACKUP_FTPS_PASSWORD=${BACKUP_FTPS_PASSWORD:-}
+      - BACKUP_FTPS_PATH=${BACKUP_FTPS_PATH:-}
+      - BACKUP_FTPS_CA_BUNDLE=${BACKUP_FTPS_CA_BUNDLE:-}
+      - BACKUP_FTPS_SERVER_HOSTNAME=${BACKUP_FTPS_SERVER_HOSTNAME:-}
+      # the same four logging names, with the same defaults, as the other two
+      # containers running this image. A backup that stops is silent by
+      # nature -- nobody notices an artefact that never appeared -- so this
+      # container reaching the same Axiom dataset as everything else is the
+      # difference between a failure being visible and being discovered
+      # during a restore. No CACHE_TTL: this one never touches the cache.
+      - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - AXIOM_TOKEN=${AXIOM_TOKEN:-}
+      - AXIOM_DATASET=${AXIOM_DATASET:-libex}
+    # a named volume by default rather than a bind mount, and the difference
+    # is a guaranteed first-run failure. Docker creates a missing bind-mount
+    # source itself, owned root:root, and this image runs as uid 1000 --
+    # measured both ways: the bind mount gives the dump EACCES on its first
+    # write, while a fresh named volume is seeded from the mount point in the
+    # image, which the Dockerfile creates owned by that user. The default
+    # path needs no operator action at all.
+    #
+    # BACKUP_SPOOL_PATH is still the way out, because the spool has to hold a
+    # whole dump and a named volume lands under /var/lib/docker on whichever
+    # filesystem that is. Give it an absolute or ./relative path and Compose
+    # reads the very same line as a bind mount instead (measured on 2.40.3:
+    # type volume with the default, type bind with a path) -- at which point
+    # the ownership is the operator's to arrange, which .env.example spells
+    # out beside the knob. A value that is neither a path nor the declared
+    # volume name fails `docker compose config` outright, which is the right
+    # place for that mistake to land.
+    #
+    # The second mount is how the trust anchor gets into the container at
+    # all: BACKUP_FTPS_CA_BUNDLE names a file, and without somewhere for that
+    # file to come from it would be a setting pointing at nothing. Read-only,
+    # a directory rather than a file so the source always exists, and
+    # defaulting to an empty named volume for the same reason the spool does
+    # -- the default deployment has no FTPS destination configured, so it
+    # mounts nothing meaningful and nothing has to be created by hand. Point
+    # BACKUP_FTPS_CA_PATH at a host directory holding the server's
+    # certificate and set BACKUP_FTPS_CA_BUNDLE to that file's path under
+    # /etc/libex/ftps-ca. Read-only because nothing here has any business
+    # writing to a trust store.
+    #
+    # The third is /app/logs, and it is the same LOGS_PATH the API service
+    # mounts, on purpose. app/core/logging.py writes /app/logs/libex.log in
+    # every container running this image whether anything is mounted there or
+    # not; unmounted, that file lands in the container's writable layer and is
+    # discarded on the next recreate, which leaves `docker logs` as the only
+    # durable view of a service whose whole job happens while nobody is
+    # watching. One file rather than a second path because the same argument
+    # already settled the Axiom dataset above -- a backup failure is worth
+    # finding in the place someone already looks.
+    #
+    # Sharing one file across containers is safe by the mechanism that already
+    # carries the API's six uvicorn workers on it: records are appended to a
+    # file opened O_APPEND, where the kernel makes each write atomic, and
+    # MultiProcessTimedRotatingFileHandler serialises the midnight rename
+    # behind an flock on .libex.log.rotate.lock in that directory. Both are
+    # kernel-level and neither cares which container a writer sits in, as long
+    # as it is the same host directory -- which it is, both services reading
+    # the one LOGS_PATH. Retention is one variable for both as well, so
+    # neither can delete a day the other still expects.
+    volumes:
+      - ${BACKUP_SPOOL_PATH:-libex-backup-spool}:/backup-spool
+      - ${BACKUP_FTPS_CA_PATH:-libex-backup-ca}:/etc/libex/ftps-ca:ro
+      - ${LOGS_PATH:-./logs}:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # unmeasured guard, interpolated so an OOM loop is fixable from the stack
+    # instead of by a rebuild -- the seeder's convention, at half its ceiling
+    # because the work here is a pg_dump child streaming into a file and that
+    # file streaming out to a destination. It is also what makes "never hold
+    # the whole artefact in memory" a hard limit on the runner rather than a
+    # preference: a 2.4 GB read into a buffer dies here.
+    mem_limit: ${BACKUP_MEM_LIMIT:-512m}
+    # 300s above BACKUP_DUMP_TIMEOUT_SECONDS' 3600s default, the longest
+    # single piece of work this container legitimately does. Compose cannot
+    # compute one from the other -- there is no ${X}+300 -- and deriving it
+    # from a second variable would be two knobs for one relationship, so it
+    # is a literal and the relationship is written down instead: raise the
+    # dump timeout past 3600 and this moves with it. Left below it, a stop
+    # drops SIGKILL into a dump still inside its own limit and leaves a
+    # partial artefact in the spool that no code path ran to clean up.
+    #
+    # Written down in four places, enforced in none, which is the standing
+    # hazard: here, the BACKUP_DUMP_TIMEOUT_SECONDS comment above, .env.example
+    # beside that same knob, and scripts/backup.py's module header and its
+    # environment table. Any of them can be raised alone. The fifth place is
+    # the one that says nothing -- app/core/config.py holds the 3600 default
+    # and explains only why it is finite, so raising the default there is the
+    # edit most likely to happen without this line ever being read. If you
+    # change one number, grep for the other before you stop.
+    #
+    # A maximum wait and not a delay -- Docker stops waiting the moment the
+    # container exits, and the runner does exit promptly: SIGTERM sets an
+    # asyncio Event that the wait for pg_dump watches alongside the child, so
+    # a dump in progress is terminated within a tick rather than run to
+    # completion. That was not always true. The handler set its flags while
+    # the wait consulted neither, and a stop mid-dump spent this entire grace
+    # period holding ACCESS SHARE on every table and its snapshot with it,
+    # with a queued migration and every reader behind it blocked. The number
+    # is headroom for winding up, not time anything spends.
+    #
+    # The real defence against a stranded partial is still the runner
+    # clearing the spool when it starts, not this number: a container killed
+    # outright runs no handler at all.
+    stop_grace_period: 3900s
+    # the same 10m x 5 json-file policy as every other service in both
+    # stacks. This one is quiet by design -- a handful of lines a day -- but
+    # a failing backup is exactly the thing that logs on every retry.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  # the backup spool: a scratch area holding one dump between pg_dump and the
+  # upload, never the archive of record. Declared rather than bind-mounted so
+  # a first deploy needs no chown -- see the libex-backup volumes comment --
+  # and deliberately not given a fixed `name:`, unlike the libex-db network
+  # below: nothing outside this stack ever has to find it, and pinning the
+  # name would collide with any other stack that pinned the same one.
+  libex-backup-spool:
+  # the FTPS trust anchor, mounted read-only. Declared so the default case
+  # has a valid source that needs no host directory created first; it stays
+  # empty unless BACKUP_FTPS_CA_PATH points somewhere real, and an empty
+  # trust store is the correct state for a deployment with no destination.
+  libex-backup-ca:
 
 networks:
   # created here, joined by the seeder stack as external. the pinned name is the

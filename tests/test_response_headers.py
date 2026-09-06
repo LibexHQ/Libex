@@ -10,21 +10,24 @@ holds the line:
   (a) registry consistency -- every emitted-header constant is registered,
       and CORSMiddleware's expose_headers is exactly the registry unioned
       with the migration headers.
-  (b) source scan -- walks app/ for the one assignment form
-      `response.headers["Literal"] = ...` and asserts every custom
-      (X-prefixed) header name assigned that way resolves into the
-      registry. (a) and (c) both only ever see headers that were already
-      registered; this one reads the header name out of the source text
-      itself rather than out of a constant a forgetful change never
-      touched -- but only for that single form. `Response(headers={...})`,
-      `.headers.update(...)` and `.setdefault(...)` are different
-      assignment shapes the regex does not match at all, so a header added
-      through one of those is invisible to this scan. The extraction regex
-      is proven separately against a fixture, not against app/'s own
-      content: app/ now assigns zero custom headers this way (every one
-      goes through a HEADER_* constant instead), so the scan's own result
-      is always empty and can no longer double as proof the regex still
-      matches anything.
+  (b) source scan -- walks app/ for four literal assignment forms --
+      `response.headers["Literal"] = ...`, `Response(headers={"Literal": ...})`,
+      `response.headers.update({"Literal": ...})`, and
+      `response.headers.setdefault("Literal", ...)` -- and asserts every
+      custom (X-prefixed) header name assigned that way resolves into the
+      registry, or is one of the two already-identified, not-yet-ruled-on
+      exceptions named where the scan is defined below. (a) and (c) both
+      only ever see headers that were already registered; this one reads
+      the header name out of the source text itself rather than out of a
+      constant a forgetful change never touched. All four forms share that
+      same limit: none of them sees a name that arrives through a variable
+      rather than a literal -- `Response(headers=some_dict)` or
+      `.headers.update(a_notice.headers)` hand the regex nothing to read at
+      all, which is a real limit of a source-text scan and not a gap this
+      widening closes. The extraction regex is proven separately against a
+      fixture, not against app/'s own content, because app/ is not empty
+      under the widened scan the way it was under the single-form one --
+      see the scan's own definition for what it currently finds and why.
   (c) response walk -- for a representative request per route family, with
       services mocked, every x-libex-* header actually present on the
       response also appears in access-control-expose-headers, so a real
@@ -346,25 +349,49 @@ async def test_a_multi_reason_incomplete_value_renders_through_a_real_response(a
 # app/ two directories up from this file (tests/test_response_headers.py).
 _APP_DIR = Path(__file__).resolve().parent.parent / "app"
 
-# Matches only a literal string key assigned into a `.headers[...]`
-# subscript anywhere in app/ -- `response.headers["Name"] = ...`,
-# `response.headers['Name'] = ...`. Deliberately does NOT match a
-# constant-based assignment (`response.headers[HEADER_SOURCE] = ...`) --
-# those can't drift from the registry because they *are* the registry;
-# what this exists to catch is exactly the case a constant can't produce: a
-# hand-typed literal that was never added to EXPOSED_HEADER_NAMES at all.
-# It also does not match `Response(headers={...})`, `.headers.update(...)`,
-# or `.setdefault(...)` -- a header assigned through one of those forms is
-# not seen by this scan at all, whether or not it is registered.
+# Four literal assignment shapes, matched against raw source text rather
+# than executed:
+#
+#   (1) response.headers["Name"] = ...            -- the original form
+#   (2) Response(..., headers={"Name": ...})       -- a literal dict handed
+#       to a Response (or any other call) as a `headers=` keyword argument
+#   (3) response.headers.update({"Name": ...})     -- a literal dict merged in
+#   (4) response.headers.setdefault("Name", ...)   -- a single literal name
+#
+# None of the four matches a constant-based assignment
+# (`response.headers[HEADER_SOURCE] = ...`) -- those can't drift from the
+# registry because they *are* the registry; what this exists to catch is
+# exactly what a constant can't produce: a hand-typed literal never added to
+# EXPOSED_HEADER_NAMES at all. And none of the four sees a name that arrives
+# through a variable rather than a literal -- `Response(headers=some_dict)`
+# or `.headers.update(a_notice.headers)` hand the regex nothing to read.
+#
+# (2) is deliberately unanchored to `Response(` specifically: it matches any
+# `..._headers = {` assignment, keyword or plain, because that is the only
+# way to also catch a name assigned to a differently-named kwarg that still
+# ends in "headers" -- see _custom_headers_assigned_in_app's own result for
+# what that widening currently surfaces in app/, including one hit that is a
+# request header rather than a response one for exactly this reason.
 _HEADER_ASSIGNMENT_RE = re.compile(r"""\.headers\[\s*["']([^"']+)["']\s*\]\s*=""")
+_HEADERS_KWARG_RE = re.compile(r"""headers\s*=\s*\{(?P<body>[^{}]*)\}""")
+_HEADERS_UPDATE_RE = re.compile(r"""\.headers\.update\(\s*\{(?P<body>[^{}]*)\}\s*\)""")
+_HEADERS_SETDEFAULT_RE = re.compile(r"""\.headers\.setdefault\(\s*["'](?P<name>[^"']+)["']""")
+# A dict-literal key: a quoted string immediately followed by a colon. Used
+# to pull names back out of whatever _HEADERS_KWARG_RE / _HEADERS_UPDATE_RE
+# captured as a dict body -- deliberately not a nested-brace-aware parser,
+# so a value itself containing braces (an f-string interpolation such as
+# `f"@{...}"`) can make a match start at that inner brace pair instead of the
+# dict's own -- harmless here because an interpolation's own contents are
+# never themselves a quoted-key-colon pair, so nothing spurious is extracted
+# from it, but this is a plain-text pattern match, not a Python parser.
+_DICT_LITERAL_KEY_RE = re.compile(r"""["']([^"']+)["']\s*:""")
 
 
 def _extract_custom_headers(text: str) -> set[str]:
-    """Every literal header name `text` assigns via the `.headers["Name"] =`
-    subscript form specifically -- not every way a header can be set --
-    restricted to Libex's own custom vocabulary (the `X-` prefix), the part
-    of the wire format response_headers.py actually claims ownership of.
-    Standard headers Libex also sets by hand (Cache-Control,
+    """Every literal header name `text` assigns via one of the four forms
+    above -- restricted to Libex's own custom vocabulary (the `X-` prefix),
+    the part of the wire format response_headers.py actually claims
+    ownership of. Standard headers Libex also sets by hand (Cache-Control,
     Access-Control-Allow-Origin, Access-Control-Expose-Headers) are a
     different, already-standard vocabulary with no registry of their own
     and are deliberately not in scope here.
@@ -373,16 +400,26 @@ def _extract_custom_headers(text: str) -> set[str]:
     can be proven correct against a fixture (see
     test_header_assignment_regex_extracts_a_known_positive below) as well as
     run for real over app/'s own source (see
-    _custom_headers_assigned_in_app). The two are deliberately split: app/
-    assigning zero hand-typed X- header literals is the intended end state
-    (every one of them now goes through a HEADER_* constant instead), not a
-    result this function's own correctness can be inferred from -- a
+    _custom_headers_assigned_in_app). The two are deliberately split: unlike
+    the original single-form scan, app/ does not assign zero custom headers
+    this way -- see _KNOWN_NON_RESPONSE_HEADER_NAMES below for the two names
+    the widened scan currently finds and why neither is registered -- so a
     fixture that does not depend on what app/ currently contains is what
-    tells a broken regex apart from a clean codebase.
+    tells a broken regex apart from a codebase whose only findings are the
+    ones already named.
     """
     found = set()
     for match in _HEADER_ASSIGNMENT_RE.finditer(text):
         name = match.group(1)
+        if name.lower().startswith("x-"):
+            found.add(name)
+    for pattern in (_HEADERS_KWARG_RE, _HEADERS_UPDATE_RE):
+        for match in pattern.finditer(text):
+            for name in _DICT_LITERAL_KEY_RE.findall(match.group("body")):
+                if name.lower().startswith("x-"):
+                    found.add(name)
+    for match in _HEADERS_SETDEFAULT_RE.finditer(text):
+        name = match.group("name")
         if name.lower().startswith("x-"):
             found.add(name)
     return found
@@ -398,33 +435,86 @@ def _custom_headers_assigned_in_app() -> set[str]:
 
 def test_header_assignment_regex_extracts_a_known_positive():
     """Proves the scanner's extraction logic against a fixture, independent
-    of what app/ currently contains. app/ assigning zero hand-typed X-
-    header literals today -- every one of them now goes through a HEADER_*
-    constant -- is not, on its own, distinguishable from the regex having
-    stopped matching anything at all; this fixture is what keeps that
-    distinction available once the real scan's own result is always
-    empty. Covers both quote styles, and confirms a same-shape assignment
-    to a non-X- header is correctly left out, matching what
-    _extract_custom_headers itself filters on."""
+    of what app/ currently contains -- covering all four forms, both quote
+    styles where relevant, and confirming a same-shape assignment to a
+    non-X- header is correctly left out on every form, matching what
+    _extract_custom_headers itself filters on. Also confirms the one
+    deliberately-loose piece of (2): a kwarg named `extra_headers` (not
+    `headers`) still matches, because that is exactly the shape
+    app/services/audible/authors/screens.py has today and the scan is
+    widened to see it on purpose -- see _KNOWN_NON_RESPONSE_HEADER_NAMES
+    below for why that particular hit is not itself a registry gap."""
     fixture = (
         'response.headers["X-Test-Header"] = "value"\n'
         "response.headers['X-Other-Header'] = compute()\n"
         'response.headers["Not-Custom"] = "value"\n'
+        'return Response(headers={"X-Kwarg-Header": "value", "Not-Custom": "v"})\n'
+        'extra_headers={"X-Extra-Header": "value"}\n'
+        'response.headers.update({"X-Update-Header": "value", "Not-Custom": "v"})\n'
+        'response.headers.update(some_variable_notice.headers)\n'
+        'response.headers.setdefault("X-Setdefault-Header", "value")\n'
+        'response.headers.setdefault("Not-Custom", "value")\n'
     )
-    assert _extract_custom_headers(fixture) == {"X-Test-Header", "X-Other-Header"}
+    assert _extract_custom_headers(fixture) == {
+        "X-Test-Header",
+        "X-Other-Header",
+        "X-Kwarg-Header",
+        "X-Extra-Header",
+        "X-Update-Header",
+        "X-Setdefault-Header",
+    }
+
+
+# The widened scan below finds exactly two X-prefixed literals that are not
+# in EXPOSED_HEADER_NAMES, and neither is a defect this test can resolve on
+# its own -- each is an open scope question for the lane that owns its call
+# site, not something a test-only slice rules on:
+#
+#   X-Content-Type-Options (app/api/routes/db/badge.py, via a literal
+#   `Response(headers={...})`) -- a standard browser security header the
+#   badge route sets on its own SVG responses, not a Libex-invented token a
+#   JS caller would ever read via fetch()/XHR the way the four names in
+#   EXPOSED_HEADER_NAMES are. It may belong in the same already-standard,
+#   no-registry-needed category this module's docstring already carves
+#   Cache-Control and the two Access-Control-* headers out of -- it simply
+#   keeps the legacy "X-" spelling that category's other members don't.
+#
+#   X-Device-Type-Id (app/services/audible/authors/screens.py, via
+#   `extra_headers={...}` passed to audible_get()) -- not a response header
+#   at all: it is a request header Libex sends *to* Audible. This registry
+#   and scan exist to govern what Libex emits on its own responses; a
+#   request-bound header dict happens to share the literal "headers={"
+#   shape the widened (2) form looks for, which a source-text scan cannot
+#   tell apart from the response-bound case just by reading it.
+#
+# Both are named exactly, rather than swept up in a broader "anything
+# already found is fine" allowance, so a third name appearing here later
+# still fails this test loudly instead of being silently absorbed.
+_KNOWN_NON_RESPONSE_HEADER_NAMES = frozenset({
+    "X-Content-Type-Options",
+    "X-Device-Type-Id",
+})
 
 
 def test_every_custom_header_assigned_in_app_resolves_into_the_registry():
     """The one part of this module that inspection alone can't verify: a
     header assigned somewhere in app/ under a hand-typed literal name, with
     that literal never added to EXPOSED_HEADER_NAMES, is exactly the defect
-    this test exists to catch. Passes vacuously while app/ assigns no
-    custom header this way at all, which is the current, intended state --
-    the fixture-based test above is what proves that emptiness is app/
-    being clean and not this scan having quietly stopped working."""
+    this test exists to catch -- now across all four assignment forms, not
+    only the subscript one. The two names in
+    _KNOWN_NON_RESPONSE_HEADER_NAMES are asserted for exactly, not merely
+    excluded: this test fails if app/ ever assigns a third unregistered
+    custom header this way, and also fails if either of the two named ones
+    stops being found, so a stale exception cannot outlive the code it was
+    written against."""
     found = _custom_headers_assigned_in_app()
     unregistered = found - set(EXPOSED_HEADER_NAMES)
-    assert not unregistered, f"assigned in app/ but never registered in EXPOSED_HEADER_NAMES: {unregistered}"
+    assert unregistered == _KNOWN_NON_RESPONSE_HEADER_NAMES, (
+        "assigned in app/ but never registered in EXPOSED_HEADER_NAMES, and "
+        "not matching the already-identified exceptions above -- "
+        f"unexpected: {unregistered - _KNOWN_NON_RESPONSE_HEADER_NAMES}, "
+        f"missing: {_KNOWN_NON_RESPONSE_HEADER_NAMES - unregistered}"
+    )
 
 
 # ============================================================

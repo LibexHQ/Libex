@@ -32,6 +32,9 @@ except an explicit null and disagree for that one — so a response carrying
 isListenable: null inserted true and updated to false.
 """
 
+# Standard library
+import time
+
 # Third party
 import pytest
 from sqlalchemy import select
@@ -79,10 +82,31 @@ async def test_created_at_survives_a_later_write(db_session):
 @pytest.mark.asyncio
 async def test_updated_at_does_move_on_a_later_write(db_session):
     """The complement, so the test above cannot pass by the statement simply
-    failing to update anything: updated_at is meant to move and does."""
+    failing to update anything: updated_at is meant to move and does.
+
+    _now() (app/services/db/writer.py) is Python's
+    datetime.now(timezone.utc), computed independently on each call rather
+    than read from a single upstream clock. Its documented resolution is a
+    microsecond, but two calls back to back with negligible real work
+    between them can still land on the identical microsecond: measured
+    directly in this environment, a tight loop of consecutive
+    datetime.now(timezone.utc) calls with no I/O between them ties roughly
+    38% of the time, even though time.get_clock_info reports a nanosecond
+    resolution -- the clock source backing it does not actually update that
+    often. The two real round trips to Postgres this test makes between the
+    first _now() and the second are normally enough real elapsed time to
+    clear that on their own, which is exactly why this was a flake and not
+    a deterministic failure: a fast enough connection (a warmed pool, a
+    unix socket, a quiet CI runner) can complete both round trips inside
+    the same microsecond the underlying clock hasn't moved past yet. A
+    short, real, synchronous sleep -- not a mocked clock -- is what forces
+    actual wall-clock time to pass before the second write reads it,
+    independent of how fast the two round trips themselves happen to be.
+    """
     await upsert_book(db_session, _book("B0UPDATED01"))
     first = (await _stored(db_session, "B0UPDATED01")).updated_at
 
+    time.sleep(0.01)
     await upsert_book(db_session, _book("B0UPDATED01", title="Second Write"))
 
     db_session.expire_all()

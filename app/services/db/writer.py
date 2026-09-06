@@ -70,9 +70,82 @@ def _parse_release_date_for_db(iso_str: str | None) -> datetime | None:
         return None
 
 
+# Every character Unicode gives the White_Space property, for btrim's second
+# argument. btrim(x) with no second argument trims U+0020 and nothing else --
+# not a tab, not a newline, not the U+00A0 a copied web page leaves behind, not
+# the U+3000 ideographic space that is ordinary in the Japanese catalogue -- so
+# a value made of any of those reaches SQL as a non-empty string and passes for
+# a real answer. Naming the set is what makes "blank" mean blank.
+#
+# Written as escapes rather than as the characters themselves: most of them are
+# invisible on screen and several are indistinguishable from a plain space, so
+# a literal set could be corrupted by an ordinary edit with nothing to show it.
+#
+# The set is exactly White_Space and stops there. Zero-width format characters
+# -- U+200B, U+FEFF and their neighbours -- are not whitespace in Unicode and
+# are not trimmed, so a value made only of those still reads as an answer.
+# Deliberate: they are not what stray catalogue text carries, and a set that
+# drifts past the standard has no definition left to check it against.
+_BLANK_CHARS = (
+    "\t\n\v\f\r "  # U+0009..U+000D, U+0020
+    "\u0085"  # next line
+    "\u00a0"  # no-break space
+    "\u1680"  # ogham space mark
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029"  # line separator, paragraph separator
+    "\u202f"  # narrow no-break space
+    "\u205f"  # medium mathematical space
+    "\u3000"  # ideographic space
+)
+
+
 def _coalesce(new_value, existing_col):
     """Returns new_value if not null, otherwise keeps the existing column value."""
     return func.coalesce(new_value, existing_col)
+
+
+def _answered(new_value, existing_col):
+    """
+    Keeps the incoming value only where Audible actually answered, so a blank
+    response cannot blank a stored one.
+
+    _coalesce is the right merge wherever "no answer" reaches SQL as NULL, and
+    for most of the book row it does. It is the wrong merge for the text
+    columns it guards below, because a blank from Audible is not always a
+    null: a response group that carries a field with nothing to put in it
+    sends an empty string, and coalesce('', books.publisher) is '' — SQL sees
+    a value and takes it, so a stored publisher is replaced by nothing. That
+    is the shrinkage rule failing inside the merge written to enforce it,
+    silently, on an ordinary refresh of a book that already had a publisher.
+
+    Emptiness is measured after trimming every character Unicode calls
+    whitespace — _BLANK_CHARS spells the set out and records what it leaves
+    alone — so an all-whitespace value counts as no answer too; it carries
+    exactly what '' carries.
+
+    Only the measurement is trimmed. What gets written is the value received,
+    verbatim, and that division is about layering rather than tidiness:
+    trimming here would put a normalization rule in the module that merges
+    rows, where nobody would think to look for one, and would leave the stored
+    text differing from what app/services/audible/ produced with nothing to
+    say which of the two is the record. Cleaning what Audible sends belongs to
+    the fetch layer. This module chooses between two values and alters
+    neither.
+
+    NULL keeps behaving as it always did. btrim(NULL, ...) is NULL, NULL != ''
+    is NULL rather than true, and the CASE falls to its ELSE, which is the
+    stored value. This is _coalesce plus one more case, never less.
+
+    Not a rule for every column, and deliberately not applied as one. It fits
+    only where a blank cannot be an assertion; where Audible could mean "none"
+    by sending nothing, swallowing the blank would pin a stale value in place
+    forever. Which columns qualify, and which one pointedly does not, is set
+    out at the merge itself.
+    """
+    return case(
+        (func.btrim(new_value, _BLANK_CHARS) != "", new_value),
+        else_=existing_col,
+    )
 
 
 def _longer_wins(new_value, existing_col):
@@ -90,11 +163,16 @@ def _longer_wins(new_value, existing_col):
     An incoming value that is empty or entirely whitespace measures as absent,
     so it cannot displace a stored NULL. It carries no more information than
     NULL does, and writing it would make a column Audible has never answered
-    indistinguishable from one it answered blank. Only the measurement is
-    trimmed — the value written is the value received, verbatim.
+    indistinguishable from one it answered blank. Whitespace means the full
+    Unicode set _answered measures against, not btrim's bare default, which
+    trims the space character alone and would have read a lone tab as text.
+    Only the measurement is trimmed — the value written is the value received,
+    verbatim.
     """
     absent = -1
-    new_length = func.coalesce(func.length(func.nullif(func.btrim(new_value), "")), absent)
+    new_length = func.coalesce(
+        func.length(func.nullif(func.btrim(new_value, _BLANK_CHARS), "")), absent
+    )
     existing_length = func.coalesce(func.length(existing_col), absent)
     return case(
         (new_length > existing_length, new_value),
@@ -443,7 +521,17 @@ async def upsert_author(session: AsyncSession, author: dict) -> int | None:
                     .where(Author.id == null_id)
                     .values(
                         asin=a_asin,
-                        image=_coalesce(author.get("image"), Author.image),
+                        # Same answered-versus-blank merge the book row's
+                        # image gets, and for the same reason: a portrait is
+                        # replaced by another URL, never withdrawn to
+                        # nothing, so a blank is a thin response rather than
+                        # an assertion. No blank can reach these two author
+                        # writers today — _parse_authors builds every author
+                        # this path sees with image None — but that is a
+                        # constant in another module, invisible from here
+                        # and free to change, and upsert_author_profile
+                        # below is already reachable by one.
+                        image=_answered(author.get("image"), Author.image),
                         description=_longer_wins(author.get("description"), Author.description),
                         updated_at=_now(),
                     )
@@ -482,7 +570,7 @@ async def upsert_author(session: AsyncSession, author: dict) -> int | None:
         ).on_conflict_do_update(
             constraint="authors_asin_region_name_unique",
             set_={
-                "image": _coalesce(author.get("image"), Author.image),
+                "image": _answered(author.get("image"), Author.image),
                 "description": _longer_wins(author.get("description"), Author.description),
                 "updated_at": _now(),
             },
@@ -595,8 +683,10 @@ def _build_book_upsert():
       excluded.region would let a response fetched for another region move it.
     - title falls back to '' on insert (the column is NOT NULL) but to the
       stored title on update, so a response that omits it cannot blank one
-      that is already stored. The bind carries None, never '', because
-      coalesce('', books.title) is '' and would do exactly that.
+      that is already stored. The update reads that bind through _answered,
+      which counts '' and whitespace as no answer alongside NULL. It used to
+      read it through a plain coalesce and rely on the bind never carrying
+      '', which nothing in this module was in a position to guarantee.
     """
     stmt = insert(Book).values(
         asin=bindparam("asin"),
@@ -639,31 +729,80 @@ def _build_book_upsert():
     return stmt.on_conflict_do_update(
         index_elements=["asin"],
         set_={
-            "title": _coalesce(bindparam("title"), Book.title),
-            "subtitle": _coalesce(stmt.excluded.subtitle, Book.subtitle),
+            # Fourteen text columns merge on answered-versus-blank rather
+            # than on NULL alone. Audible has no vocabulary for retracting
+            # any of them — no response means "this book no longer has a
+            # publisher" — so an empty string is Audible declining to answer,
+            # never Audible asserting none, and _answered keeps what is
+            # already stored. Each was decided on its own grounds, not by
+            # applying one rule across the row:
+            #
+            #   title                   The edition's own name. A reissue
+            #                           renames a book; nothing un-names one.
+            #                           title is NOT NULL besides, so a blank
+            #                           there is the worst loss on the row.
+            #   subtitle                Goes with title but stands on weaker
+            #                           ground, and the difference is worth
+            #                           stating rather than borrowing: a
+            #                           second edition genuinely dropping its
+            #                           subtitle is a real thing, so a blank
+            #                           here could be an answer in a way a
+            #                           blank title could not. It is guarded
+            #                           anyway because the tie-break for this
+            #                           row is already settled — stale but
+            #                           rich beats fresh but empty — not
+            #                           because title's argument covers it.
+            #   publisher, copyright,   Catalogue identity, fixed at
+            #   isbn, language, sku,    publication. A blank is a response
+            #   sku_group               group that came back thin, not a fact
+            #                           that changed underneath us.
+            #   image                   A cover is superseded by another URL,
+            #                           never withdrawn to nothing.
+            #   book_format,            Classification labels, guarded on the
+            #   content_type,           same ground as the rest of the row.
+            #   content_delivery_type,  The stronger argument — that each
+            #   episode_type            draws from a fixed vocabulary that
+            #                           does not contain '', putting a blank
+            #                           outside the answer set rather than in
+            #                           it — is unverified and should not be
+            #                           relied on: nothing in this repo
+            #                           enumerates any of the four, and no
+            #                           live probe has established them.
+            #   episode_number          Reaches this statement only through
+            #                           _normalize_product, which already
+            #                           turns a falsy episode number into
+            #                           None, so what a guard adds today is
+            #                           the whitespace-only case alone.
+            #                           Guarded regardless: this merge cannot
+            #                           see that upstream truthiness test,
+            #                           and a column whose safety lives in
+            #                           another module is one edit away from
+            #                           the defect the other thirteen had.
+            "title": _answered(bindparam("title"), Book.title),
+            "subtitle": _answered(stmt.excluded.subtitle, Book.subtitle),
             "region": Book.region,
             "description": _longer_wins(bindparam("description"), Book.description),
             "summary": _longer_wins(bindparam("summary"), Book.summary),
-            "publisher": _coalesce(stmt.excluded.publisher, Book.publisher),
-            "copyright": _coalesce(stmt.excluded.copyright, Book.copyright),
-            "isbn": _coalesce(stmt.excluded.isbn, Book.isbn),
-            "language": _coalesce(stmt.excluded.language, Book.language),
+            "publisher": _answered(stmt.excluded.publisher, Book.publisher),
+            "copyright": _answered(stmt.excluded.copyright, Book.copyright),
+            "isbn": _answered(stmt.excluded.isbn, Book.isbn),
+            "language": _answered(stmt.excluded.language, Book.language),
             "rating": _coalesce(stmt.excluded.rating, Book.rating),
             "release_date": _coalesce(stmt.excluded.release_date, Book.release_date),
             "length_minutes": _coalesce(stmt.excluded.length_minutes, Book.length_minutes),
             "explicit": stmt.excluded.explicit,
             "whisper_sync": stmt.excluded.whisper_sync,
             "has_pdf": stmt.excluded.has_pdf,
-            "image": _coalesce(stmt.excluded.image, Book.image),
-            "book_format": _coalesce(stmt.excluded.book_format, Book.book_format),
-            "content_type": _coalesce(stmt.excluded.content_type, Book.content_type),
-            "content_delivery_type": _coalesce(
+            "image": _answered(stmt.excluded.image, Book.image),
+            "book_format": _answered(stmt.excluded.book_format, Book.book_format),
+            "content_type": _answered(stmt.excluded.content_type, Book.content_type),
+            "content_delivery_type": _answered(
                 stmt.excluded.content_delivery_type, Book.content_delivery_type
             ),
-            "episode_number": _coalesce(stmt.excluded.episode_number, Book.episode_number),
-            "episode_type": _coalesce(stmt.excluded.episode_type, Book.episode_type),
-            "sku": _coalesce(stmt.excluded.sku, Book.sku),
-            "sku_group": _coalesce(stmt.excluded.sku_group, Book.sku_group),
+            "episode_number": _answered(stmt.excluded.episode_number, Book.episode_number),
+            "episode_type": _answered(stmt.excluded.episode_type, Book.episode_type),
+            "sku": _answered(stmt.excluded.sku, Book.sku),
+            "sku_group": _answered(stmt.excluded.sku_group, Book.sku_group),
             # The three NOT NULL booleans merge on asserted-versus-silent, not
             # on true-versus-false: excluded here would carry the insert
             # default and overwrite a stored answer with one Audible never
@@ -671,6 +810,28 @@ def _build_book_upsert():
             "is_listenable": _coalesce(bindparam("is_listenable"), Book.is_listenable),
             "is_buyable": _coalesce(bindparam("is_buyable"), Book.is_buyable),
             "is_vvab": _coalesce(bindparam("is_vvab"), Book.is_vvab),
+            # plans stays on the NULL-only merge, and that is a decision
+            # rather than an omission. It is the one column here where a
+            # blank is a real answer: an empty plans array is how a book that
+            # has left the Plus catalogue reports itself, and Audible is
+            # entitled to assert exactly that. Guarding it would hold a book
+            # in a catalogue it no longer belongs to — trading a silent
+            # shrink for a silent staleness, which is not self-evidently the
+            # better bargain. Which way that trade should go is a product
+            # question about the plans field, not a question about this
+            # merge, and it is open.
+            #
+            # Open, but not unattended, and a reader deciding from this
+            # statement alone would not know that. _parse_plans has already
+            # ruled on the same column from the other end: None for a
+            # response carrying no plans key, [] only for an explicitly
+            # empty one, and — the case that matters here — None again when
+            # entries are present but none of them yields a readable
+            # plan_name. That third fold is what keeps an upstream rename
+            # from emptying this column across the corpus, which is the
+            # damage a guard here would otherwise be needed for. What is
+            # left open is narrower than it looks: only whether Libex should
+            # keep believing Audible when Audible says, clearly, none.
             "plans": _coalesce(stmt.excluded.plans, Book.plans),
             "updated_at": stmt.excluded.updated_at,
         },
@@ -735,8 +896,10 @@ def _book_params(data: dict, now: datetime) -> dict:
     """
     return {
         "asin": data["asin"],
-        # Never '': the update merges this bind with coalesce, and
-        # coalesce('', books.title) would blank a stored title.
+        # Bound as received, '' included. The update merges it through
+        # _answered, which reads a blank title as no answer at all; the
+        # normalizer drops titleless products upstream, but that filter
+        # lives in another module and the merge does not lean on it.
         "title": data.get("title"),
         "subtitle": data.get("subtitle"),
         "region": data.get("region"),
@@ -1089,7 +1252,14 @@ async def upsert_author_profile(session: AsyncSession, data: dict) -> None:
                 constraint="authors_asin_region_name_unique",
                 set_={
                     "description": _longer_wins(data.get("description"), Author.description),
-                    "image": _coalesce(data.get("image"), Author.image),
+                    # The one author path a blank can actually arrive on.
+                    # _normalize_author passes the contributors response's
+                    # profile_image_url straight through, unfiltered and
+                    # unstripped, so a contributor whose image field comes
+                    # back empty reaches this merge as '' — and coalesce
+                    # would take it and blank a stored portrait on an
+                    # ordinary profile refresh.
+                    "image": _answered(data.get("image"), Author.image),
                     "fetched_description": True,
                     "updated_at": _now(),
                 },

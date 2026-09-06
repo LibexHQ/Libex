@@ -328,6 +328,19 @@ def _cache_failing_on(asin):
     return _set
 
 
+def _a_dead_connection() -> InterfaceError:
+    """
+    The InterfaceError a connection that died under the last statement raises,
+    carrying an orig with no SQLSTATE -- exactly what a dead connection reports,
+    as distinct from a statement the schema merely refused.
+
+    Built fresh on every call rather than shared: more than one call site below
+    raises this as a live exception, and a raised exception carries traceback
+    state that the next raise should not inherit.
+    """
+    return InterfaceError("ROLLBACK", None, Exception("connection was closed"))
+
+
 def _upsert_escaping_on(*asins):
     """
     upsert_book raising for the named books instead of keeping its failure to
@@ -335,12 +348,11 @@ def _upsert_escaping_on(*asins):
 
     Its own handler swallows the write failure, so the only way past it is the
     rollback in that handler failing too -- which is what a connection that
-    died under the statement does. InterfaceError is what that surfaces as,
-    carrying an orig with no SQLSTATE, exactly as a dead connection does.
+    died under the statement does.
     """
     async def _upsert(session, data):
         if data.get("asin") in asins:
-            raise InterfaceError("ROLLBACK", None, Exception("connection was closed"))
+            raise _a_dead_connection()
         return await upsert_book(session, data)
 
     return _upsert
@@ -363,9 +375,7 @@ def _upsert_escaping_on_an_aborted_session(asin):
             try:
                 await session.execute(text("SELECT 1 / 0"))
             except Exception as aborted:
-                raise InterfaceError(
-                    "ROLLBACK", None, Exception("connection was closed")
-                ) from aborted
+                raise _a_dead_connection() from aborted
         return await upsert_book(session, data)
 
     return _upsert
@@ -381,9 +391,7 @@ def _rollback_always_failing():
     call: the db_session fixture rolls back in its own teardown, outside the
     patch.
     """
-    return AsyncMock(side_effect=InterfaceError(
-        "ROLLBACK", None, Exception("connection was closed")
-    ))
+    return AsyncMock(side_effect=_a_dead_connection())
 
 
 def _cache_failure_chunk(prefix):
@@ -669,8 +677,11 @@ async def test_a_rollback_that_fails_is_reported_and_contained(db_session, caplo
     fails; the per-book handler is reached only once a chunk has fallen to the
     replay, which a non-retryable failure does after a single attempt -- the
     usual route, and this chunk's -- and a retryable one after three. Neither
-    may escape, and each says which unit of work it was cleaning up after --
-    the attempt knows only its region, the per-book handler names the book.
+    may escape, and each carries a `stage` field naming which of the three
+    _clear_session call sites it is -- the attempt's is "chunk_write", and the
+    per-book handler's poisoned book fails on the write leg, so its stage is
+    "book_write" and it also carries the asin the attempt-level record has no
+    reason to.
 
     The sound books still store: nothing rolls back a write that succeeded,
     so a broken rollback costs only the books that were failing anyway.
@@ -681,10 +692,10 @@ async def test_a_rollback_that_fails_is_reported_and_contained(db_session, caplo
 
     records = _warnings_saying(caplog, "Background persist could not clear the session")
 
-    from_the_attempt = [r for r in records if not hasattr(r, "asin")]
+    from_the_attempt = [r for r in records if r.stage == "chunk_write"]
     assert [r.region for r in from_the_attempt] == [REGION]
 
-    per_book = {getattr(r, "asin", None) for r in records if hasattr(r, "asin")}
+    per_book = {r.asin for r in records if r.stage == "book_write"}
     assert per_book == {f"B0CHK{POISON_SUFFIX}"}
 
     assert await _stored_books(db_session, "B0CHK") == {
@@ -705,7 +716,9 @@ async def test_a_failed_rollback_after_a_cache_failure_is_reported_and_contained
     so the books behind this one fail too -- that is the residue the replay
     documents rather than a property it promises, and pinning it would be
     asserting an independence that does not exist on a dead connection. What
-    must hold is that none of it escapes and that the book is still named.
+    must hold is that none of it escapes, that the book is still named, and
+    that its stage reads "cache_write" -- the one call site the test above
+    (which fails on the write leg) never reaches.
     """
     with caplog.at_level(logging.WARNING):
         with patch.object(cache_manager, "set", _cache_failing_on("B0CHK0000")), \
@@ -713,7 +726,7 @@ async def test_a_failed_rollback_after_a_cache_failure_is_reported_and_contained
             await _persist_book_chunk_background(_cache_failure_chunk("B0CHK"), REGION)
 
     records = _warnings_saying(caplog, "Background persist could not clear the session")
-    assert "B0CHK0000" in {getattr(r, "asin", None) for r in records}
+    assert "B0CHK0000" in {r.asin for r in records if r.stage == "cache_write"}
 
 
 # ============================================================

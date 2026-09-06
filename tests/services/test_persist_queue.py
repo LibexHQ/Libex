@@ -12,6 +12,7 @@ against real Postgres in tests/integration/test_persist_book_chunk.py.
 
 # Standard library
 import asyncio
+import logging
 from unittest.mock import AsyncMock, patch
 
 # Third party
@@ -213,6 +214,29 @@ def test_failure_fields_survive_an_exception_with_no_driver_original():
         "schema_name": None, "table_name": None,
         "column_name": None, "constraint_name": None,
     }
+
+
+# ============================================================
+# THE CHUNK WRITE SUMMARY LINE
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_write_book_chunk_logs_the_count_and_region_as_structured_fields(caplog):
+    """The per-chunk success line carries its count and region in extra=
+    rather than interpolated into the message, so the two are filterable and
+    aggregable instead of merely readable in a single rendered line."""
+    session = AsyncMock()
+    chunk = _books(3)
+
+    with patch.object(pq, "write_books", new=AsyncMock()), \
+         patch.object(pq, "_cache_set_many", new=AsyncMock()), \
+         caplog.at_level(logging.INFO):
+        await pq._write_book_chunk(session, chunk, REGION)
+
+    records = [r for r in caplog.records if r.getMessage() == "DB write"]
+    assert len(records) == 1
+    assert records[0].books == 3
+    assert records[0].region == REGION
 
 
 # ============================================================

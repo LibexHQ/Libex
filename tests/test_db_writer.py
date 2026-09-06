@@ -12,7 +12,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 # Third party
 import pytest
-from sqlalchemy import select
+from sqlalchemy import String, select
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import IntegrityError
 
 # Local
@@ -23,6 +24,7 @@ from app.services.db.persist_queue import (
     persist_author_books_cache_background,
 )
 from app.services.db.writer import (
+    _BLANK_CHARS,
     _BOOK_UPSERT,
     _longer_wins,
     upsert_author,
@@ -58,6 +60,77 @@ def _session(*side_effects):
     s.execute = AsyncMock(side_effect=list(side_effects))
     s.rollback = AsyncMock()
     return s
+
+
+def _set_clauses(sql: str) -> dict[str, str]:
+    """Splits an upsert's DO UPDATE SET into column -> merge expression.
+
+    Searching the statement text cannot do this job, and the way it fails is
+    worth spelling out, because the blank-guard checks further down are what
+    it defeats. Asking whether f"{column} = CASE WHEN (btrim(" is in the SQL is
+    true for a bare, unguarded `group` column: the fragment it finds is
+    sitting inside the correctly guarded `sku_group` clause. Any column whose
+    name ends another column's name is certified on the strength of an
+    expression that is not its own -- a check that passes without ever
+    looking at the thing it is checking. That is not hypothetical: `title`
+    ends `subtitle` on this table today, and both `content_type` and
+    `episode_type` are ended by `type`.
+
+    Splitting the assignments apart on the commas between them means each
+    column is only ever judged on the expression Postgres will apply to it,
+    and a name that is a prefix, suffix or substring of another buys nothing.
+    Commas inside parentheses and inside quoted text are stepped over, and
+    identifier quoting is stripped from the name, because a column named for
+    a reserved word arrives as "group".
+
+    Depth is tracked for parentheses only, not brackets, so a bare
+    ARRAY[...] literal on the right-hand side would defeat the depth-0 comma
+    split. Unreachable against the statement this is actually called on --
+    no Book column merges through an ARRAY-typed literal today -- and it
+    fails loudly with an assertion rather than mis-splitting silently, so it
+    is left rather than widened. Revisit if a guarded column's merge ever
+    becomes an array literal."""
+    _, separator, assignments = sql.partition(" DO UPDATE SET ")
+    assert separator, "statement has no DO UPDATE SET clause to read"
+
+    parts: list[str] = []
+    buffer: list[str] = []
+    depth = 0
+    quote = None
+    index = 0
+    while index < len(assignments):
+        char = assignments[index]
+        if quote is not None:
+            buffer.append(char)
+            if char == quote:
+                if assignments[index + 1:index + 2] == quote:
+                    buffer.append(quote)
+                    index += 2
+                    continue
+                quote = None
+            index += 1
+            continue
+        if char in "'\"":
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif char == "," and depth == 0:
+            parts.append("".join(buffer))
+            buffer = []
+            index += 1
+            continue
+        buffer.append(char)
+        index += 1
+    parts.append("".join(buffer))
+
+    clauses = {}
+    for part in parts:
+        column, separator, expression = part.strip().partition(" = ")
+        assert separator, f"unreadable assignment in the SET clause: {part!r}"
+        clauses[column.strip('"')] = expression.strip()
+    return clauses
 
 
 # ============================================================
@@ -830,9 +903,31 @@ def test_longer_wins_floors_the_incoming_length_too():
 def test_longer_wins_measures_the_incoming_value_content_free_trimmed():
     """An incoming empty or whitespace-only value is measured as absent, so it
     cannot displace a stored NULL. It carries no more information than NULL
-    and would make a never-answered column look like a blank-answered one."""
+    and would make a never-answered column look like a blank-answered one.
+
+    The trim set is asserted through the constant rather than as a literal.
+    Most of _BLANK_CHARS is invisible on screen and several of its members
+    are indistinguishable from a plain space, so a spelled-out copy here
+    could be corrupted by an ordinary edit with nothing to show it -- and a
+    copy that drifted would go on passing while pinning the wrong set. What
+    the constant itself contains is pinned separately, by the character-by-
+    character table in tests/integration/test_db_blank_answers.py."""
     sql = _longer_wins_sql("   ")
-    assert "NULLIF(BTRIM('   '), '')" in sql
+
+    assert f"NULLIF(BTRIM('   ', '{_BLANK_CHARS}'), '')".upper() in sql
+
+
+def test_longer_wins_trims_more_than_the_space_character():
+    """The set is wider than btrim's bare default, which trims U+0020 alone.
+    Asserting through the constant would pass on that default too, since the
+    constant would simply be a run of spaces -- so the width is checked here,
+    on the two characters that made the difference: a tab, which survives a
+    copy-paste into any field, and U+3000, the ordinary space of Japanese
+    text and therefore of the jp catalogue."""
+    sql = _longer_wins_sql("   ")
+
+    assert "\t" in _BLANK_CHARS and "\u3000" in _BLANK_CHARS
+    assert f"'{_BLANK_CHARS}'".upper() in sql
 
 
 def test_longer_wins_writes_the_incoming_value_untrimmed():
@@ -851,7 +946,11 @@ def test_longer_wins_keeps_the_existing_column_in_the_else_branch():
 @pytest.mark.parametrize("column", ["DESCRIPTION", "SUMMARY"])
 def test_upsert_book_uses_the_guarded_comparison_for_its_text_columns(column):
     """Both of the book columns merged by length carry the guards, so neither
-    can be pinned NULL by its first write."""
+    can be pinned NULL by its first write.
+
+    Read out of the column's own assignment rather than out of the statement
+    at large, so a floor sitting in some other column's merge cannot answer
+    for this one."""
     session = _session(*[MagicMock() for _ in range(4)])
     asyncio.run(upsert_book(session, {
         "asin": "B0BEXAMPLE",
@@ -860,9 +959,9 @@ def test_upsert_book_uses_the_guarded_comparison_for_its_text_columns(column):
         "description": "a description",
         "summary": "a summary",
     }))
-    sql = _compiled(session.execute.call_args_list[0].args[0])
-    guarded = f"COALESCE(LENGTH(BOOKS.{column}), -1)"
-    assert guarded in sql
+    clause = _set_clauses(_compiled(session.execute.call_args_list[0].args[0]))[column]
+
+    assert f"COALESCE(LENGTH(BOOKS.{column}), -1)" in clause
 
 
 # ============================================================
@@ -1010,6 +1109,177 @@ def test_the_book_upsert_carries_no_returning_clause():
     the only place it is visible is the statement itself.
     """
     assert "RETURNING" not in _compiled(_BOOK_UPSERT)
+
+
+# ============================================================
+# THE BOOK MERGE — WHICH COLUMNS TREAT A BLANK AS NO ANSWER
+# ============================================================
+# What each guard DOES against real Postgres is proved end to end in
+# tests/integration/test_db_blank_answers.py. What is pinned here is the set
+# it is applied to, which that file cannot defend: an integration test only
+# knows about the columns someone remembered to list in it, so a column added
+# to the statement later with a bare coalesce would ship with nothing failing.
+# This reads the statement itself, so the set has to be revisited rather than
+# drifted past.
+
+BLANK_GUARDED_COLUMNS = [
+    "title", "subtitle", "publisher", "copyright", "isbn", "language",
+    "image", "book_format", "content_type", "content_delivery_type",
+    "episode_number", "episode_type", "sku", "sku_group",
+]
+
+
+def _book_upsert_set_clauses() -> dict[str, str]:
+    """The book upsert's merge expressions, as Postgres receives them.
+
+    literal_binds is deliberately not used: every unbound parameter would
+    render as a literal NULL inside a != comparison, which is both noisy and
+    unreadable at exactly the columns being checked."""
+    return _set_clauses(str(_BOOK_UPSERT.compile(dialect=postgresql.dialect())))
+
+
+@pytest.mark.parametrize("column", BLANK_GUARDED_COLUMNS)
+def test_the_blank_guarded_columns_measure_the_incoming_value(column):
+    """Each of these merges on answered-versus-blank, not on NULL alone.
+    Audible sends an empty string for a field it has no content for, and
+    coalesce('', stored) is '' -- so a plain coalesce here hands back a
+    blanked column on an ordinary refresh."""
+    clause = _book_upsert_set_clauses().get(column, "")
+
+    assert clause.startswith("CASE WHEN (btrim("), (
+        f"{column} is listed as blank-guarded but merges as "
+        f"{clause or '<nothing: the column is not in the SET clause>'!r}"
+    )
+    assert "!=" in clause.partition(" THEN ")[0], (
+        f"{column}'s guard does not test the trimmed value against the "
+        f"blank sentinel with !=, so a flipped operator would keep only "
+        f"blanks and discard every real answer: {clause!r}"
+    )
+
+
+def test_the_blank_guard_writes_the_incoming_value_untrimmed():
+    """Only the measurement is trimmed. Writing btrim(value) instead would
+    silently rewrite Audible's answer, which is a different defect from the
+    one being fixed and no more acceptable."""
+    clause = _book_upsert_set_clauses()["publisher"]
+
+    assert clause.count("btrim(") == 1
+    assert "THEN excluded.publisher ELSE books.publisher" in clause
+
+
+def test_plans_is_left_on_the_null_only_merge():
+    """plans is the deliberate exception and the assertion is the record of
+    it. An empty plans array is a real answer -- it is how a book that has
+    left the Plus catalogue reports itself -- so guarding it would hold the
+    book in a catalogue it has gone from, trading a silent shrink for a
+    silent staleness. Extending the guard across the row without deciding
+    that trade is what this fails on."""
+    clause = _book_upsert_set_clauses()["plans"]
+
+    assert clause == "coalesce(excluded.plans, books.plans)"
+
+
+# ============================================================
+# THE BOOK MERGE — AND WHICH COLUMNS DO NOT
+# ============================================================
+# The list above is hand-kept, and a hand-kept list has no complement. It can
+# only ever say that the columns someone remembered are guarded; it cannot
+# say that no other column needs to be. A fifteenth text column added to the
+# statement later with a bare coalesce would ship with every test above still
+# green, which is exactly how the twelve excluded.* columns came to be
+# unguarded in the first place.
+#
+# So the population is derived from the model rather than typed out, and every
+# member of it has to land in one of the three named sets below. A new text
+# column fails here until someone decides which.
+#
+# The alternative — a policy dict in the writer mapping column to merge rule —
+# was rejected. A column forgotten there becomes a silent non-write: the
+# column simply stops being merged, nothing changes in the row, and there is
+# no failure to observe. That is strictly worse than the silent overwrite
+# being fixed, which at least leaves evidence in the data.
+
+_LENGTH_MERGED_COLUMNS = ["description", "summary"]
+
+_UNGUARDED_TEXT_COLUMNS = {
+    "asin": (
+        "The conflict target. It identifies the row being merged and appears "
+        "nowhere in the SET clause, so there is no merge here to guard."
+    ),
+    "region": (
+        "Assigned books.region unconditionally — the stored value, never the "
+        "incoming one. A book's region is settled by the row it is written "
+        "into, so nothing Audible sends can reach the column at all."
+    ),
+}
+
+
+def _text_columns() -> list[str]:
+    """Every string-typed column on the books table, read from the model.
+
+    String rather than Text, because these columns arrive in three shapes —
+    Text, String(n), and the region Enum — and all three subclass String.
+    Selecting on the base class is what makes a column added in any of them
+    land inside this population instead of quietly outside it."""
+    return [c.name for c in Book.__table__.columns if isinstance(c.type, String)]
+
+
+@pytest.mark.parametrize("column", _text_columns())
+def test_every_text_column_measures_a_blank_or_is_named_as_unguarded(column):
+    """Read off the statement itself, not off a list of column names, so the
+    only way to pass is to actually carry a guard.
+
+    Either shape counts. _answered tests the trimmed incoming value against
+    '' directly; _longer_wins measures it through the same trim before
+    comparing lengths. They differ in what they do with two real answers, not
+    in whether a blank one can win."""
+    clause = _book_upsert_set_clauses().get(column, "")
+
+    answered_shaped = clause.startswith("CASE WHEN (btrim(")
+    length_shaped = clause.startswith("CASE WHEN (coalesce(length(nullif(btrim(")
+    guarded = answered_shaped or length_shaped
+
+    assert guarded or column in _UNGUARDED_TEXT_COLUMNS, (
+        f"{column} merges on NULL alone, so an empty string from Audible "
+        "overwrites whatever is stored. Guard it, or name it in "
+        "_UNGUARDED_TEXT_COLUMNS with the reason a blank is a real answer "
+        "for that column."
+    )
+
+    # The shape check above passes for a guard whose comparison is flipped,
+    # since a flipped guard is still a CASE WHEN wrapped around a btrim call.
+    # An _answered guard that tests == instead of != keeps only blanks and
+    # discards every real answer; a _longer_wins guard that tests < instead
+    # of > keeps only the shorter value. Both are the exact inverse of the
+    # rule this column exists to enforce, so the operator is checked too.
+    guard = clause.partition(" THEN ")[0]
+    if answered_shaped:
+        assert "!=" in guard, (
+            f"{column}'s guard does not test inequality against the blank "
+            f"sentinel: {clause!r}"
+        )
+    elif length_shaped:
+        assert ") >" in guard, (
+            f"{column}'s length guard does not test for a longer incoming "
+            f"value: {clause!r}"
+        )
+
+
+def test_every_text_column_on_the_table_is_accounted_for():
+    """The set equality, which the per-column check cannot make on its own.
+    It fails in both directions on purpose: a column added to the table and
+    left out of all three sets, and a name left behind in one of them after
+    the column it described was renamed or dropped. The second matters as
+    much as the first — a stale entry in the unguarded map is a standing
+    exemption waiting for some future column to be given that name."""
+    accounted = (
+        set(BLANK_GUARDED_COLUMNS)
+        | set(_LENGTH_MERGED_COLUMNS)
+        | set(_UNGUARDED_TEXT_COLUMNS)
+    )
+
+    assert accounted == set(_text_columns())
+
 
 
 # ============================================================

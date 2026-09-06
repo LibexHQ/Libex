@@ -144,10 +144,29 @@ class Book(Base):
         # tracks to books on asin under a region filter, and a bare
         # books(region) still forces a heap fetch for that join. Leading
         # with region and including asin makes both the region count and
-        # the join index-only -- once the visibility map is current.
-        # Pre-VACUUM (freshly loaded/heavily written table) Postgres can't
-        # trust the visibility map and falls back to a Bitmap Heap Scan;
-        # still indexed, just not index-only, at roughly 2.6x the buffers.
+        # the join index-only -- but only while the visibility map marks
+        # the scanned pages all-visible. Postgres will not run an
+        # index-only scan it cannot trust, so with the map stale it stops
+        # choosing this index and reads the whole heap instead.
+        #
+        # That was this table's steady state, not its cold start, which is
+        # the part worth knowing here. Only VACUUM sets visibility-map
+        # bits -- ANALYZE never does, at any frequency -- and books takes
+        # both insert and update traffic: the writer upserts with
+        # on_conflict_do_update, so every re-seen ASIN leaves a dead
+        # tuple, and the chapters backfill stamps chapters_checked_at one
+        # book at a time. Neither autovacuum rule came near its default
+        # threshold between passes.
+        #
+        # That those defaults are why the map went stale is an inference,
+        # not a measurement: the statistics that would have evidenced it
+        # were discarded on a postmaster restart. What was measured is the
+        # cost, on a 1.8M-row rebuild of this table with the production
+        # 30s statement_timeout -- one count(*) took 31.9s and was killed
+        # by the timeout with the map stale, and 0.8s with it current.
+        # c7a4e9f13b02 lowers autovacuum's vacuum scale factors here, and
+        # on tracks, to keep the map current; it is what makes this index
+        # worth having.
         Index("books_region_asin_index", "region", "asin"),
     )
 
@@ -348,6 +367,11 @@ class Genre(Base):
 class Track(Base):
     __tablename__ = "tracks"
 
+    # tracks_pkey on asin is what lets the booksWithChapters join run
+    # index-only, and as on books that holds only while the visibility map
+    # marks the scanned pages all-visible. c7a4e9f13b02 lowers this table's
+    # autovacuum vacuum scale factors for that reason; the reasoning lives
+    # on Book.__table_args__.
     asin: Mapped[str] = mapped_column(
         String(12), ForeignKey("books.asin", ondelete="CASCADE"), primary_key=True
     )

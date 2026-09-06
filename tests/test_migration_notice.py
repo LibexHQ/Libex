@@ -61,12 +61,22 @@ ENABLED_SETTINGS_KWARGS = {
     "migration_info_url": "https://github.com/LibexHQ/Libex/issues/999",
 }
 
+
+def _as_env_value(value: bool | str) -> str:
+    """Settings and env vars spell the same value differently -- pydantic
+    Settings takes a real bool, the process environment only ever holds
+    strings. Only bools need translating (`True` -> "true"); every other
+    value here is already a string and passes through unchanged."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return value
+
+
+# Derived from ENABLED_SETTINGS_KWARGS rather than hand-duplicated, so the
+# two can never quietly drift apart -- a kwarg added or renamed above shows
+# up here automatically instead of the env fixture silently going stale.
 ENABLED_ENV = {
-    "MIGRATION_NOTICE_ENABLED": "true",
-    "MIGRATION_NEW_HOST": "https://libexdb.com",
-    "MIGRATION_ANNOUNCED": "2026-08-06",
-    "MIGRATION_SUNSET": "2026-11-04",
-    "MIGRATION_INFO_URL": "https://github.com/LibexHQ/Libex/issues/999",
+    key.upper(): _as_env_value(value) for key, value in ENABLED_SETTINGS_KWARGS.items()
 }
 
 OLD_HOST_HEADER = "libex.lostcartographer.xyz"
@@ -376,6 +386,16 @@ def test_enabled_openapi_servers_entry_targets_new_host(enabled_app):
     generated SDKs target it."""
     spec = TestClient(enabled_app).get("/openapi.json").json()
     assert spec["servers"] == [{"url": "https://libexdb.com"}]
+
+
+def test_enabled_openapi_description_never_names_this_host(enabled_app):
+    """The description is built once at import time and served from both
+    hostnames, so it can never say "this host" -- read from libexdb.com,
+    "this" would name the host the reader is already on rather than the one
+    actually being retired. Regression guard for exactly that phrasing
+    creeping into the notice text app.main builds."""
+    spec = TestClient(enabled_app).get("/openapi.json").json()
+    assert "this host" not in spec["info"]["description"]
 
 
 # ============================================================

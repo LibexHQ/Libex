@@ -10,14 +10,15 @@ happy path alone.
 
 # Standard library
 import asyncio
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 # Third party
 import pytest
 
 # Local
 import app.services.audible.authors.completion as completion
-from app.services.audible.authors import AuthorBooksResult
+from app.services.audible.authors import AuthorBooksResult, _walk_author_books
+from app.services.audible.authors.screens import _ScreenBooksResult, SCREENS_REASON_COMPLETED
 
 
 @pytest.fixture(autouse=True)
@@ -251,3 +252,42 @@ async def test_a_raising_walk_does_not_wedge_the_registry():
         await _drain()
 
     assert completion.inflight_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_a_clean_walk_never_requests_completion():
+    """
+    The other side of the invariant every test above assumes: a walk that
+    already finished clean must never be handed to
+    request_author_books_completion at all -- if it were, the concurrency
+    limit, the per-author dedupe, and the attempt cap this module maintains
+    would all be spending budget re-walking authors that never needed it.
+
+    Minimal mocking gets to a clean result without needing every wave: no
+    author name to resolve means the catalog wave is never even scheduled
+    (`_walk_author_books` only appends that task `if author_name`), so
+    nothing needs mocking there at all. A screens walk that terminates
+    COMPLETED and a DB backstop read that returns rather than fails are
+    then enough to make screens_clean, catalog_clean (trivially, via the
+    no-name case), and db_clean all true at once.
+    """
+    session = AsyncMock()
+    screen_result = _ScreenBooksResult(
+        asins=["B0CLEAN0001"],
+        pages_fetched=1,
+        product_count=1,
+        invalid_skipped=0,
+        attribution_rejected=0,
+        termination_reason=SCREENS_REASON_COMPLETED,
+    )
+
+    with patch("app.services.audible.authors._resolve_author_name", new=AsyncMock(return_value=None)), \
+         patch("app.services.audible.authors._fetch_author_books_by_screen", new=AsyncMock(return_value=screen_result)), \
+         patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
+         patch("app.services.audible.authors.persist_author_books_cache_background"), \
+         patch("app.services.audible.authors.request_author_books_completion") as mock_completion:
+        result = await _walk_author_books("B000AUTHOR", "us", session)
+
+    assert result.asins == ["B0CLEAN0001"]
+    assert result.is_complete is True
+    mock_completion.assert_not_called()

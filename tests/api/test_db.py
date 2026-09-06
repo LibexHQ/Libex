@@ -939,6 +939,18 @@ async def test_get_db_book_rejects_invalid_asin(async_client):
 
 
 @pytest.mark.asyncio
+async def test_get_db_book_resolves_lowercase_asin(async_client):
+    """A lowercase ASIN must reach get_book_from_db normalised, since
+    Book.asin is stored uppercase and the lookup misses otherwise."""
+    with patch("app.api.routes.db.router.get_book_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = MOCK_BOOK
+        response = await async_client.get("/db/book/b08g9prs1k")
+        assert response.status_code == 200
+        args, _ = mock.call_args
+        assert args[1] == "B08G9PRS1K"
+
+
+@pytest.mark.asyncio
 async def test_get_db_book_forwards_asin_to_reader(async_client):
     """ASIN is forwarded to get_book_from_db."""
     with patch("app.api.routes.db.router.get_book_from_db", new_callable=AsyncMock) as mock:
@@ -987,6 +999,30 @@ async def test_get_db_book_chapters_rejects_invalid_asin(async_client):
     response = await async_client.get("/db/book/not-an-asin/chapters")
     assert response.status_code == 404
     assert "Invalid ASIN" in response.json()["error"]
+
+
+@pytest.mark.asyncio
+async def test_get_db_book_chapters_resolves_lowercase_asin(async_client):
+    """The chapters route adopted the same dependency and must normalise
+    too."""
+    with patch("app.api.routes.db.router.get_track_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = MOCK_CHAPTERS
+        response = await async_client.get("/db/book/b08g9prs1k/chapters")
+        assert response.status_code == 200
+        args, _ = mock.call_args
+        assert args[1] == "B08G9PRS1K"
+
+
+def test_db_book_path_asin_parameter_keeps_its_book_asin_description_in_openapi():
+    """The db router's own wording -- "Book ASIN" -- has to survive the
+    factory, not collapse into "Audible ASIN" the way the live-lookup
+    routers phrase the same parameter."""
+    schema = app.openapi()
+    params = schema["paths"]["/db/book/{asin}"]["get"]["parameters"]
+    asin_param = next(p for p in params if p["name"] == "asin")
+    assert asin_param["in"] == "path"
+    assert asin_param["required"] is True
+    assert asin_param["description"] == "Book ASIN"
 
 
 # ============================================================
@@ -1330,6 +1366,17 @@ async def test_get_db_author_rejects_invalid_asin(async_client):
 
 
 @pytest.mark.asyncio
+async def test_get_db_author_resolves_lowercase_asin(async_client):
+    """A lowercase author ASIN must reach get_author_from_db normalised."""
+    with patch("app.api.routes.db.router.get_author_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = MOCK_AUTHOR
+        response = await async_client.get("/db/author/b000apf21m")
+        assert response.status_code == 200
+        args, _ = mock.call_args
+        assert args[1] == "B000APF21M"
+
+
+@pytest.mark.asyncio
 async def test_get_db_author_default_region_is_us(async_client):
     """Defaults to US region when not specified."""
     with patch("app.api.routes.db.router.get_author_from_db", new_callable=AsyncMock) as mock:
@@ -1398,6 +1445,18 @@ async def test_get_db_author_books_rejects_invalid_asin(async_client):
     response = await async_client.get("/db/author/not-an-asin/books")
     assert response.status_code == 404
     assert "Invalid ASIN" in response.json()["error"]
+
+
+@pytest.mark.asyncio
+async def test_get_db_author_books_resolves_lowercase_asin(async_client):
+    """A lowercase author ASIN must reach get_author_books_from_db
+    normalised."""
+    with patch("app.api.routes.db.router.get_author_books_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        response = await async_client.get("/db/author/b000apf21m/books")
+        assert response.status_code == 200
+        args, _ = mock.call_args
+        assert args[1] == "B000APF21M"
 
 
 @pytest.mark.asyncio
@@ -1568,6 +1627,17 @@ async def test_get_db_series_rejects_invalid_asin(async_client):
 
 
 @pytest.mark.asyncio
+async def test_get_db_series_resolves_lowercase_asin(async_client):
+    """A lowercase series ASIN must reach get_series_from_db normalised."""
+    with patch("app.api.routes.db.router.get_series_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = MOCK_SERIES
+        response = await async_client.get("/db/series/b00series1")
+        assert response.status_code == 200
+        args, _ = mock.call_args
+        assert args[1] == "B00SERIES1"
+
+
+@pytest.mark.asyncio
 async def test_get_db_series_forwards_asin_to_reader(async_client):
     """ASIN is forwarded to get_series_from_db."""
     with patch("app.api.routes.db.router.get_series_from_db", new_callable=AsyncMock) as mock:
@@ -1616,6 +1686,18 @@ async def test_get_db_series_books_rejects_invalid_asin(async_client):
     response = await async_client.get("/db/series/not-an-asin/books")
     assert response.status_code == 404
     assert "Invalid ASIN" in response.json()["error"]
+
+
+@pytest.mark.asyncio
+async def test_get_db_series_books_resolves_lowercase_asin(async_client):
+    """A lowercase series ASIN must reach get_series_books_from_db
+    normalised."""
+    with patch("app.api.routes.db.router.get_series_books_from_db", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        response = await async_client.get("/db/series/b00series1/books")
+        assert response.status_code == 200
+        args, _ = mock.call_args
+        assert args[1] == "B00SERIES1"
 
 
 @pytest.mark.asyncio

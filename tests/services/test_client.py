@@ -15,8 +15,8 @@ from app.services.audible.client import (
     VALID_REGIONS,
 )
 
-from app.core.exceptions import RegionException
-from app.core.middleware import is_valid_asin
+from app.core.exceptions import NotFoundException, RegionException
+from app.core.middleware import is_valid_asin, normalise_asin, valid_asin
 
 
 # ============================================================
@@ -162,8 +162,16 @@ def test_is_valid_asin_rejects_special_chars():
     assert is_valid_asin("not-an-asin") is False
 
 
-def test_is_valid_asin_accepts_uppercase():
-    """ASIN validation is case insensitive."""
+def test_is_valid_asin_accepts_lowercase():
+    """ASIN validation is case insensitive.
+
+    Previously named test_is_valid_asin_accepts_uppercase while asserting the
+    opposite of its own name -- lowercase input, not uppercase. is_valid_asin
+    still deliberately accepts either case; normalise_asin (below) is what
+    turns the accepted lowercase value into the form Audible and the stored
+    Book.asin column both answer to, so this permissiveness stays correct
+    under the new dependency rather than being the leftover bug it looks like.
+    """
     assert is_valid_asin("b08g9prs1k") is True
 
 
@@ -189,6 +197,61 @@ def test_is_valid_asin_rejects_trailing_newline_after_valid_isbn_style_key():
 def test_is_valid_asin_still_accepts_asin_without_trailing_newline():
     """The fullmatch tightening doesn't regress the plain valid case."""
     assert is_valid_asin("B08G9PRS1K") is True
+
+
+# ============================================================
+# NORMALISE_ASIN -- THE LOWERCASE-404 FIX
+# ============================================================
+# A lowercase ASIN validated but was never uppercased before being used
+# against Audible or the DB, so a book Audible holds came back "not found."
+# is_valid_asin's permissiveness (above) was never the bug; the missing step
+# after validation was.
+
+def test_normalise_asin_uppercases_a_lowercase_asin():
+    """b009cfoegk is a live Audible product (The Lord of the Rings) that
+    Audible's catalogue only answers to in uppercase."""
+    assert normalise_asin("b009cfoegk") == "B009CFOEGK"
+
+
+def test_normalise_asin_uppercases_isbn_style_key_with_lowercase_x_check_digit():
+    """ISBN-10 check digits can be X, so this is a live key, not a
+    hypothetical: 080213825x must normalise the same way any other lowercase
+    ASIN does."""
+    assert normalise_asin("080213825x") == "080213825X"
+
+
+def test_normalise_asin_is_a_no_op_on_an_already_uppercase_asin():
+    """Normalising an already-correct value doesn't change it."""
+    assert normalise_asin("B08G9PRS1K") == "B08G9PRS1K"
+
+
+# ============================================================
+# VALID_ASIN -- THE DEPENDENCY FACTORY
+# ============================================================
+
+def test_valid_asin_dependency_returns_the_normalised_value():
+    """The dependency built by the factory hands back the uppercased ASIN,
+    not just a pass/fail -- that's the whole point of the factory over the
+    bool valid_region-style check it replaces."""
+    dependency = valid_asin("Audible ASIN")
+    assert dependency("b009cfoegk") == "B009CFOEGK"
+
+
+def test_valid_asin_dependency_rejects_invalid_asin_and_echoes_the_raw_value():
+    """The rejected value is echoed exactly as the caller sent it -- not
+    uppercased -- because it's the caller's own input being reported back."""
+    dependency = valid_asin("Audible ASIN")
+    with pytest.raises(NotFoundException) as exc_info:
+        dependency("not-an-asin")
+    assert str(exc_info.value) == "Invalid ASIN format: not-an-asin"
+
+
+def test_valid_asin_requires_a_description_argument():
+    """valid_asin is a factory, not a dependency itself -- calling
+    Depends(valid_asin) without invoking it first should fail loudly rather
+    than silently turning the description into something else."""
+    with pytest.raises(TypeError):
+        valid_asin()
 
 
 # ============================================================

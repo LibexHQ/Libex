@@ -7,7 +7,7 @@ Compatible with AudiMeta endpoint structure for drop-in replacement.
 from typing import Annotated
 
 # Third party
-from fastapi import APIRouter, Query, Path, Depends, Response
+from fastapi import APIRouter, Query, Depends, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Database
@@ -28,7 +28,7 @@ from app.services.sorting import sort_dicts, BOOK_SORT_FIELDS
 from app.services.filtering import filter_dicts
 
 # Core
-from app.core.middleware import is_valid_asin, valid_region
+from app.core.middleware import valid_asin, valid_region
 from app.core.exceptions import NotFoundException
 from app.core.response_headers import ResponseFacts
 
@@ -66,7 +66,7 @@ async def search_legacy(
 
 @router.get("/books/{asin}", response_model=list[BookResponse], responses={200: {"headers": FACTS_RESPONSE_HEADERS}})
 async def get_books_by_series(
-    asin: Annotated[str, Path(description="Series ASIN")],
+    asin: Annotated[str, Depends(valid_asin("Series ASIN"))],
     response: Response,
     region: str = Depends(valid_region),
     cache: CacheStandardParam = True,
@@ -81,8 +81,6 @@ async def get_books_by_series(
     Defaults to series position order; passing a sort field overrides it.
     Returns full book objects matching AudiMeta's BookDto format.
     """
-    if not is_valid_asin(asin):
-        raise NotFoundException(f"Invalid ASIN format: {asin}")
     asins = await get_series_books(asin, region, session, cache)
     if not asins:
         raise NotFoundException("No books found for series")
@@ -102,7 +100,7 @@ async def get_books_by_series(
     responses={200: {"headers": FACTS_RESPONSE_HEADERS}},
 )
 async def get_books_by_series_primary(
-    asin: Annotated[str, Path(description="Series ASIN")],
+    asin: Annotated[str, Depends(valid_asin("Series ASIN"))],
     response: Response,
     region: str = Depends(valid_region),
     cache: CacheStandardParam = True,
@@ -112,8 +110,6 @@ async def get_books_by_series_primary(
     session: AsyncSession = Depends(get_session),
 ) -> list[BookResponse]:
     """Legacy endpoint. Use /series/books/{asin} instead."""
-    if not is_valid_asin(asin):
-        raise NotFoundException(f"Invalid ASIN format: {asin}")
     asins = await get_series_books(asin, region, session, cache)
     if not asins:
         raise NotFoundException("No books found for series")
@@ -128,15 +124,13 @@ async def get_books_by_series_primary(
 
 @router.get("/{asin}", response_model=SeriesResponse, responses={200: {"headers": FACTS_RESPONSE_HEADERS}})
 async def get_series_by_asin(
-    asin: Annotated[str, Path(description="Series ASIN")],
+    asin: Annotated[str, Depends(valid_asin("Series ASIN"))],
     response: Response,
     region: str = Depends(valid_region),
     cache: CacheStandardParam = True,
     session: AsyncSession = Depends(get_session),
 ) -> SeriesResponse:
     """Get series metadata by ASIN."""
-    if not is_valid_asin(asin):
-        raise NotFoundException(f"Invalid ASIN format: {asin}")
     facts = ResponseFacts()
     data = await get_series(asin, region, session, cache, facts=facts)
     apply_cache_control(response, cache)

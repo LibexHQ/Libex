@@ -253,26 +253,37 @@ An ASIN is a catalogue identifier — ten characters, letters and digits only,
 checked against exactly that format before it ever reaches this code, so it
 can't carry text you typed. Neither line carries anything about who asked.
 
-Of the two, the fallback warning is the one place a value taken from your
-request is written as a field with a name of its own — `asins` — rather than
-sitting inside the sentence of a message. In the log service that is the
-difference between something you would have to read and something that can be
-searched and counted on directly. It is worth saying plainly rather than
-leaving to be found: it is still only the list of titles that request asked
-for, it still answers "which books did that outage affect" and nothing else,
-and there is nothing on that line or anywhere else to attach it to a person.
-The database read behind it writes its ASINs into its message text as before.
+Both lines write those ASINs as a field with a name of its own — `asins` —
+rather than leaving them inside the sentence of a message. In the log service
+that is the difference between something you would have to read and something
+that can be searched and counted on directly, so it is worth saying plainly
+rather than leaving it to be found: each line is still only the list of titles
+that one request asked for, each still answers "which books did that outage
+affect" and nothing else, and there is nothing on either line or anywhere else
+to attach it to a person.
+
+Both of them became fields in this release, in two separate changes; until it,
+both wrote their ASINs into their message text. That moved a list Libex was
+already writing down out of prose and into something that can be searched and
+counted by name. It did not add a value, and it did not widen who receives
+one. The same release also took the database driver's own error text off the
+read line, which is the larger half of the change and is covered under
+[Who else sees your requests](#who-else-sees-your-requests).
 
 Where the thing being looked up is part of the path instead, database warnings
-name it too, but that discloses nothing further: the request line already
-records the path in its `url` field, as the table above says — verbatim, and
-even when the path matches no route at all. That covers more than ASINs.
-`/book/B01234567` is one shape of it; `/db/plans/{plan_name}` and
-`/book/sku/{sku}` are another, and their segments are ordinary text with no
-format check applied to them, unlike an ASIN. The reason they disclose nothing
-further is not that they are constrained — it is that the whole path was
-already recorded, so a warning naming one segment of it tells you nothing the
-request line had not already written down.
+name it too, and since this release they name it the same way — as a field of
+its own, called `asin`, `author_asin`, `series_asin`, `plan_name` or
+`sku_group` depending on what was being read. That discloses nothing further:
+the request line already records the path in its `url` field, as the table
+above says — verbatim, and even when the path matches no route at all. That
+covers more than ASINs. `/book/B01234567` is one shape of it;
+`/db/plans/{plan_name}` and `/book/sku/{sku}` are another, and their segments
+are ordinary text with no format check applied to them, unlike an ASIN. The
+reason they disclose nothing further is not that they are constrained — it is
+that the whole path was already recorded, so a warning naming one segment of
+it tells you nothing the request line had not already written down. Giving
+those segments field names changed how they can be queried, not which of them
+reach a log.
 
 One further exception worth naming: if a request causes an unexpected error, the
 error line and its stack trace can include whatever triggered it — and if
@@ -428,11 +439,17 @@ found, the key and lifetime of a cache entry, and, where something failed, what
 kind of failure it was. A database failure adds the SQLSTATE and the schema,
 table, column and constraint names, deliberately and only those, because
 Postgres writes the offending row into its own error text; elsewhere the
-error's own text is carried. None of it is new in this release — the cache and
-database lines have been shaped this way for as long as they have existed — and
-it is spelled out here for the same reason `pid` is: a field you can query by
-name deserves to be described by name, whether or not it says anything about a
-person. These don't.
+error's own text is carried. None of that is a new piece of information about
+you, but the shape of it is newer than it looks and the honest version says
+so: the cache lines and the background write lines have been built this way
+since earlier releases, while the database read lines, and the warning that
+records a fallback to them, were sentences until this one. What changed there
+is that the read lines stopped carrying the driver's own error text — the one
+part of them that could have quoted a stored row back — and that what those
+lines had been saying in prose was given names instead. It is spelled out here
+for the same reason `pid` is: a field you can query by name deserves to be
+described by name, whether or not it says anything about a person. These
+don't.
 
 Nothing outside that list is sent. What it holds describes requests,
 not requesters: no address, and nothing you typed — subject to the two limits

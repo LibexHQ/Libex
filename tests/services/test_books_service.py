@@ -142,6 +142,149 @@ def test_parse_authors_rejects_long_asin():
     assert result[0]["asin"] is None
 
 
+# Every payload below is a shape Audible was measured returning live on
+# 2026-09-06 -- see _parse_authors' docstring for the products each came
+# from, and for why the shape check reports without changing the write.
+# All of them are still stored in authors.asin verbatim.
+
+MALFORMED_ASINS = [
+    "Trinka Enell",   # the contributor's own name in the identifier slot
+    "Übersetzer",     # a role, not an identifier
+    "v",              # a single stray character
+    "25A7anha",       # tail of a twice percent-encoded surname
+    "B0D3XLNM68v",    # a real ASIN with a stray character appended
+]
+
+
+@pytest.mark.parametrize("junk_asin", MALFORMED_ASINS)
+def test_parse_authors_flags_an_asin_that_is_not_asin_shaped(junk_asin):
+    """A value that is not ASIN-shaped is recognised and warned about."""
+    product = {"asin": "B0DKQBH3CR", "authors": [{"name": "Author", "asin": junk_asin}]}
+    with patch("app.services.audible.books.logger") as mock_logger:
+        _parse_authors(product, "us")
+
+    messages = [c.args[0] for c in mock_logger.warning.call_args_list]
+    assert messages == ["Audible sent a malformed author ASIN"]
+
+
+@pytest.mark.parametrize("junk_asin", MALFORMED_ASINS)
+def test_parse_authors_stores_a_flagged_asin_unchanged(junk_asin):
+    """
+    Flagging changes nothing about what is written.
+
+    Nulling a value already stored on an author row would resolve the next
+    ingest to a second row for the same person, and author_book never drops
+    the first link, so the book would carry both for good. The check earns
+    its place by counting the population, not by acting on it.
+    """
+    product = {"asin": "B0DKQBH3CR", "authors": [{"name": "Author", "asin": junk_asin}]}
+    result = _parse_authors(product, "us")
+    assert result[0]["asin"] == junk_asin
+
+
+def test_parse_authors_logs_the_malformed_asin():
+    """The offending value is recorded with what it arrived attached to."""
+    product = {"asin": "B0DKQBH3CR", "authors": [
+        {"name": "Trinka Enell", "asin": "Trinka Enell"},
+    ]}
+    with patch("app.services.audible.books.logger") as mock_logger:
+        _parse_authors(product, "us")
+
+    calls = [
+        c for c in mock_logger.warning.call_args_list
+        if c.args[0] == "Audible sent a malformed author ASIN"
+    ]
+    assert len(calls) == 1
+    extra = calls[0].kwargs["extra"]
+    assert extra["malformed_author_asin"] == "Trinka Enell"
+    assert extra["author_name"] == "Trinka Enell"
+    assert extra["asin"] == "B0DKQBH3CR"
+    assert extra["region"] == "us"
+
+
+def test_parse_authors_logs_nothing_for_an_author_with_no_asin():
+    """An absent asin is ordinary catalogue data, not a malformed value."""
+    product = {"asin": "B0DKQBH3CR", "authors": [{"name": "Heinrich Heine"}]}
+    with patch("app.services.audible.books.logger") as mock_logger:
+        result = _parse_authors(product, "us")
+
+    assert result[0]["asin"] is None
+    assert mock_logger.warning.call_args_list == []
+
+
+def test_parse_authors_leaves_a_lowercased_asin_alone():
+    """
+    A lowercased real ASIN passes the shape check and is written as it came.
+
+    Uppercasing it would land it on a different author row than the one it
+    is already stored on, which is the duplicate this pass exists to avoid.
+    """
+    product = {"asin": "B00PLR8OQO", "authors": [
+        {"name": "Johann Wolfgang von Goethe", "asin": "B001kioieu"},
+    ]}
+    with patch("app.services.audible.books.logger") as mock_logger:
+        result = _parse_authors(product, "de")
+
+    assert result[0]["asin"] == "B001kioieu"
+    assert mock_logger.warning.call_args_list == []
+
+
+def test_parse_authors_keeps_a_well_formed_asin_untouched():
+    """The common case is unchanged by the shape check."""
+    product = {"asin": "B0TEST0001", "authors": [{"name": "Frank Herbert", "asin": "B000APF21M"}]}
+    with patch("app.services.audible.books.logger") as mock_logger:
+        result = _parse_authors(product, "us")
+
+    assert result[0]["asin"] == "B000APF21M"
+    assert mock_logger.warning.call_args_list == []
+
+
+def test_parse_authors_keeps_an_isbn_keyed_asin():
+    """An all-digit identifier is ASIN-shaped and is not a malformed value."""
+    product = {"asin": "0008433844", "authors": [{"name": "J. R. R. Tolkien", "asin": "0008433844"}]}
+    with patch("app.services.audible.books.logger") as mock_logger:
+        result = _parse_authors(product, "uk")
+
+    assert result[0]["asin"] == "0008433844"
+    assert mock_logger.warning.call_args_list == []
+
+
+def test_parse_authors_logs_the_over_long_asin_it_still_nulls():
+    """The >12-character ceiling predates the check and keeps nulling."""
+    product = {"asin": "B0TEST0001", "authors": [{"name": "Author", "asin": "TOOLONGASIN123"}]}
+    with patch("app.services.audible.books.logger") as mock_logger:
+        result = _parse_authors(product, "us")
+
+    assert result[0]["asin"] is None
+    extra = mock_logger.warning.call_args_list[0].kwargs["extra"]
+    assert extra["malformed_author_asin"] == "TOOLONGASIN123"
+
+
+@pytest.mark.parametrize("region", [
+    "us", "uk", "ca", "au", "de", "fr", "it", "es", "jp", "in", "br",
+])
+def test_parse_authors_flags_malformed_asins_in_every_region(region):
+    """The shape check is region-independent, and region still threads through."""
+    product = {"asin": "B0TEST0001", "authors": [
+        {"name": "Vitor Peçanha", "asin": "25A7anha"},
+        {"name": "Frank Herbert", "asin": "b000apf21m"},
+    ]}
+    with patch("app.services.audible.books.logger") as mock_logger:
+        result = _parse_authors(product, region)
+
+    assert result[0]["asin"] == "25A7anha"
+    assert result[1]["asin"] == "b000apf21m"
+    assert [a["region"] for a in result] == [region, region]
+    assert [a["regions"] for a in result] == [[region], [region]]
+
+    calls = [
+        c for c in mock_logger.warning.call_args_list
+        if c.args[0] == "Audible sent a malformed author ASIN"
+    ]
+    assert len(calls) == 1
+    assert calls[0].kwargs["extra"]["region"] == region
+
+
 def test_parse_authors_returns_empty_for_no_authors():
     """Returns empty list when no authors."""
     assert _parse_authors({}, "us") == []

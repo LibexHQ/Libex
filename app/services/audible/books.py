@@ -52,6 +52,7 @@ from app.db.models import Book
 # Core
 from app.core.exceptions import NotFoundException
 from app.core.logging import get_logger
+from app.core.middleware import is_valid_asin
 from app.core.response_headers import (
     REASON_HYDRATION_DEADLINE,
     REASON_HYDRATION_FAILED,
@@ -165,11 +166,63 @@ def _parse_release_date(raw: str | None) -> str | None:
 
 
 def _parse_authors(product: dict, region: str) -> list[dict]:
-    """Extracts author objects matching AudiMeta's MinimalAuthorDto."""
+    """
+    Extracts author objects matching AudiMeta's MinimalAuthorDto.
+
+    An author entry's asin is checked for ASIN shape -- ten characters of
+    A-Z0-9, the same test every author route applies before it queries --
+    and then written through unchanged whether it passes or not. The check
+    only reports. That is deliberate, and the reason is the pivot rather
+    than the predicate.
+
+    Audible's contributor entries are not always identifiers. Measured live
+    2026-09-06 against /1.0/catalog/products, the authors array can carry
+    the contributor's own name ({"asin": "Trinka Enell", "name": "Trinka
+    Enell"}, us B0DKQBH3CR), a single stray character ({"asin": "v"}, jp
+    B0H6ZCMBW5), or a fragment of a twice percent-encoded surname
+    ({"asin": "25A7anha", "name": "Vitor Peçanha"} -- the tail of
+    "Pe%25C3%25A7anha" -- us B09W33RNX7 and br B0CC8M5KXV). Nothing further
+    down validates either, not upsert_author and not
+    upsert_author_profile, so a value like one of those lands in
+    authors.asin verbatim and becomes somebody's identifier.
+
+    Nulling one now would cost more than it recovers. A book whose author
+    row already holds a junk asin is matched on that asin, so writing null
+    instead -- or uppercasing a lowercased real ASIN, which is the same
+    move -- resolves to a second row for the same person rather than the
+    one already there. author_book links are inserted on conflict do
+    nothing and are never removed, so the book keeps its old link and gains
+    a new one, and the search route joins author names without dedup: the
+    same contributor renders twice, permanently, in a state AudiMeta itself
+    cannot reach, because it replaces a book's link set on every write
+    where Libex only ever adds to it.
+
+    The warning is therefore the whole product of this pass. The affected
+    population cannot be counted from the table -- junk that is already ten
+    uppercase characters is indistinguishable from a real ASIN in a query,
+    and only Audible sending it again reveals it -- so logging every
+    rejected value with the product, the contributor name and the region is
+    the only way to size it. Enforcement waits on that number and on a plan
+    for the rows already written; adding it here without them trades a rare
+    bad asin for a permanent duplicate author on an unknown number of
+    books.
+
+    The >12-character value that still gets nulled below predates all of
+    this: authors.asin is a String(12) and the ceiling keeps an over-long
+    value from failing the insert. It is malformed by the same measure, so
+    it is logged too.
+    """
     authors = []
     for author in product.get("authors", []):
         name = author.get("name", "").replace("\t", "").strip()
         asin = author.get("asin", "").replace("\t", "").strip() if author.get("asin") else None
+        if asin and not is_valid_asin(asin):
+            logger.warning("Audible sent a malformed author ASIN", extra={
+                "asin": product.get("asin", ""),
+                "malformed_author_asin": asin,
+                "author_name": name,
+                "region": region,
+            })
         if asin and len(asin) > 12:
             asin = None
         if name:

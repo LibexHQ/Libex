@@ -11,10 +11,12 @@ without real HTTP or DB.
 
 The genre taxonomy helper (_fetch_catalog_genres) flattens every node at every
 level with its parent_id, feeding the /categories discovery endpoint; it's
-covered here at the unit level.
+covered here at the unit level, along with the freshness gate in _ensure_genres
+that decides whether that fetch happens at all.
 """
 
 # Standard library
+import logging
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
@@ -430,3 +432,200 @@ async def test_ensure_genres_empty_fetch_does_not_write():
         assert result == stored
         recon.assert_not_awaited()
         upsert.assert_not_awaited()
+
+
+# ============================================================
+# _ensure_genres — the freshness gate
+# ============================================================
+
+def _aged(seconds):
+    """A last_checked timestamp that many seconds in the past."""
+    return datetime.now(timezone.utc) - timedelta(seconds=seconds)
+
+
+def _fresh_enough():
+    """A last_checked comfortably inside the freshness window."""
+    return _aged(releases._GENRE_FRESHNESS_SECONDS // 2)
+
+
+def _too_old():
+    """A last_checked comfortably outside the freshness window."""
+    return _aged(releases._GENRE_FRESHNESS_SECONDS * 2)
+
+
+@pytest.mark.asyncio
+async def test_ensure_genres_serves_a_fresh_store_without_calling_audible():
+    """
+    The whole point of the gate: a stored taxonomy younger than the freshness
+    window is returned as-is and Audible is never called.
+    """
+    stored = _nodes(100)
+    with patch.object(releases, "_fetch_catalog_genres", new=AsyncMock()) as fetch, \
+         patch.object(releases, "get_stored_genres", new=AsyncMock(return_value=(stored, _fresh_enough()))), \
+         patch.object(releases, "reconcile_genres", new=AsyncMock()) as recon, \
+         patch.object(releases, "upsert_genres", new=AsyncMock()) as upsert:
+        session = AsyncMock()
+        result = await releases._ensure_genres(session, "us")
+        assert result == stored
+        fetch.assert_not_awaited()
+        recon.assert_not_awaited()
+        upsert.assert_not_awaited()
+        session.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ensure_genres_fetches_when_the_store_is_stale():
+    """A stored taxonomy older than the window is refreshed, not served blind."""
+    stored = _nodes(100)
+    fresh = _nodes(100)
+    with patch.object(releases, "_fetch_catalog_genres", new=AsyncMock(return_value=fresh)) as fetch, \
+         patch.object(releases, "get_stored_genres", new=AsyncMock(return_value=(stored, _too_old()))), \
+         patch.object(releases, "reconcile_genres", new=AsyncMock()) as recon, \
+         patch.object(releases, "upsert_genres", new=AsyncMock()):
+        session = AsyncMock()
+        await releases._ensure_genres(session, "us")
+        fetch.assert_awaited_once_with("us")
+        recon.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_ensure_genres_fetches_when_nothing_is_stored():
+    """
+    An empty store reads back as ([], None). None must mean "fetch" — read the
+    other way, a fresh deployment would serve an empty /categories forever.
+    """
+    fresh = _nodes(50)
+    with patch.object(releases, "_fetch_catalog_genres", new=AsyncMock(return_value=fresh)) as fetch, \
+         patch.object(releases, "get_stored_genres", new=AsyncMock(return_value=([], None))), \
+         patch.object(releases, "reconcile_genres", new=AsyncMock()) as recon, \
+         patch.object(releases, "upsert_genres", new=AsyncMock()):
+        session = AsyncMock()
+        await releases._ensure_genres(session, "us")
+        fetch.assert_awaited_once_with("us")
+        recon.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_ensure_genres_fetches_when_the_age_is_unknown():
+    """
+    get_stored_genres also returns a None timestamp when the read itself failed.
+    An unknown age is treated as stale, so a degraded read never masquerades as
+    a fresh store.
+    """
+    stored = _nodes(100)
+    with patch.object(releases, "_fetch_catalog_genres", new=AsyncMock(return_value=_nodes(100))) as fetch, \
+         patch.object(releases, "get_stored_genres", new=AsyncMock(return_value=(stored, None))), \
+         patch.object(releases, "reconcile_genres", new=AsyncMock()), \
+         patch.object(releases, "upsert_genres", new=AsyncMock()):
+        session = AsyncMock()
+        await releases._ensure_genres(session, "us")
+        fetch.assert_awaited_once_with("us")
+
+
+@pytest.mark.asyncio
+async def test_ensure_genres_fetches_at_exactly_the_freshness_boundary():
+    """The window is exclusive at its edge: an age equal to it counts as stale."""
+    stored = _nodes(100)
+    with patch.object(releases, "_fetch_catalog_genres", new=AsyncMock(return_value=_nodes(100))) as fetch, \
+         patch.object(releases, "get_stored_genres",
+                      new=AsyncMock(return_value=(stored, _aged(releases._GENRE_FRESHNESS_SECONDS)))), \
+         patch.object(releases, "reconcile_genres", new=AsyncMock()), \
+         patch.object(releases, "upsert_genres", new=AsyncMock()):
+        session = AsyncMock()
+        await releases._ensure_genres(session, "us")
+        fetch.assert_awaited_once_with("us")
+
+
+@pytest.mark.asyncio
+async def test_ensure_genres_freshness_is_scoped_per_region():
+    """
+    The taxonomy is per-region and so is its age. A region whose stored tree is
+    fresh must not suppress the fetch for a region whose tree is stale — the
+    exact shape of a freshness check that reads the wrong region's timestamp.
+    """
+    stored_by_region = {
+        "de": (_nodes(100), _fresh_enough()),
+        "us": (_nodes(100), _too_old()),
+        "jp": ([], None),
+    }
+
+    async def stored_for(session, region):
+        return stored_by_region[region]
+
+    with patch.object(releases, "_fetch_catalog_genres", new=AsyncMock(return_value=_nodes(100))) as fetch, \
+         patch.object(releases, "get_stored_genres", new=AsyncMock(side_effect=stored_for)) as reader, \
+         patch.object(releases, "reconcile_genres", new=AsyncMock()) as recon, \
+         patch.object(releases, "upsert_genres", new=AsyncMock()):
+        session = AsyncMock()
+        await releases._ensure_genres(session, "de")
+        await releases._ensure_genres(session, "us")
+        await releases._ensure_genres(session, "jp")
+
+        # de was fresh and was never fetched; us and jp were not and were.
+        assert [c.args[0] for c in fetch.await_args_list] == ["us", "jp"]
+        # Every store read named the region it was answering for.
+        assert [c.args[1] for c in reader.await_args_list] == ["de", "us", "us", "jp", "jp"]
+        assert [c.args[1] for c in recon.await_args_list] == ["us", "jp"]
+
+
+@pytest.mark.asyncio
+async def test_ensure_genres_logs_the_skipped_fetch(caplog):
+    """
+    A skipped fetch is visible: an operator asking why /categories got fast gets
+    a line naming the region, the node count and the store's age. Also proves
+    the extra= payload carries no reserved LogRecord attribute, which would
+    raise on this path and nowhere else.
+    """
+    stored = _nodes(7)
+    with patch.object(releases, "_fetch_catalog_genres", new=AsyncMock()), \
+         patch.object(releases, "get_stored_genres", new=AsyncMock(return_value=(stored, _fresh_enough()))), \
+         patch.object(releases, "reconcile_genres", new=AsyncMock()), \
+         patch.object(releases, "upsert_genres", new=AsyncMock()), \
+         caplog.at_level(logging.INFO):
+        session = AsyncMock()
+        await releases._ensure_genres(session, "de")
+
+    matches = [r for r in caplog.records if r.getMessage() == "Served genre taxonomy from fresh store"]
+    assert len(matches) == 1
+    record = matches[0]
+    assert record.region == "de"
+    assert record.nodes == 7
+    assert record.age_seconds > 0
+    assert record.freshness_seconds == releases._GENRE_FRESHNESS_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_ensure_genres_does_not_log_a_skip_when_it_fetches(caplog):
+    """The skip line is a claim about behaviour, so it must not appear on the fetch path."""
+    with patch.object(releases, "_fetch_catalog_genres", new=AsyncMock(return_value=_nodes(10))), \
+         patch.object(releases, "get_stored_genres", new=AsyncMock(return_value=(_nodes(10), _too_old()))), \
+         patch.object(releases, "reconcile_genres", new=AsyncMock()), \
+         patch.object(releases, "upsert_genres", new=AsyncMock()), \
+         caplog.at_level(logging.INFO):
+        session = AsyncMock()
+        await releases._ensure_genres(session, "us")
+
+    assert not [r for r in caplog.records if r.getMessage() == "Served genre taxonomy from fresh store"]
+
+
+# ============================================================
+# _genre_age_seconds
+# ============================================================
+
+def test_genre_age_seconds_is_none_when_there_is_no_timestamp():
+    assert releases._genre_age_seconds(None) is None
+
+
+def test_genre_age_seconds_measures_an_aware_timestamp():
+    age = releases._genre_age_seconds(_aged(600))
+    assert 590 < age < 700
+
+
+def test_genre_age_seconds_reads_a_naive_timestamp_as_utc():
+    """
+    The column is timezone-aware, but a naive value must not raise here — a
+    freshness check is not worth failing a /categories request over.
+    """
+    naive = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=600)
+    age = releases._genre_age_seconds(naive)
+    assert 590 < age < 700

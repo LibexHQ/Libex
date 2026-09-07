@@ -20,7 +20,7 @@ read side filters on.
 """
 
 # Standard library
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 # Third party
 import pytest
@@ -174,20 +174,44 @@ async def test_a_repeated_key_leaves_exactly_one_row(db_session):
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_the_default_ttl_is_the_configured_one(db_session):
-    """With no ttl_seconds the batch takes settings.cache_ttl, the same
-    default cache.set applies -- a batch primitive that quietly used a
-    different window would give batched writes a different lifetime from
-    identical single ones."""
+    """
+    With no ttl_seconds the batch takes settings.cache_ttl, the same default
+    cache.set applies -- a batch primitive that quietly used a different
+    window would give batched writes a different lifetime from identical
+    single ones.
+
+    The window is measured as the interval between the two columns one write
+    filled, rather than by bracketing expires_at between two clock reads the
+    test takes either side of the call. Both columns come from a single `now`
+    the writer reads once per batch -- there is no column default and no
+    server-side now() anywhere on this path -- so their difference is the TTL
+    exactly, whatever any clock did in between.
+
+    The bracket pinned the same TTL only to within the milliseconds the round
+    trip took, and pinned it by requiring three consecutive reads of
+    datetime.now to come back in order. That is CLOCK_REALTIME, which a step
+    correction can walk backwards, so the bracket could go red with nothing
+    wrong with the stored value -- and it did go red once, without ever
+    reproducing. This form reads no clock at all, so it has no way to. What
+    it does have is precision: the round trip through timestamptz is exact to
+    the microsecond, measured over 300 writes against the container, which is
+    what lets the interval be an equality instead of a range.
+
+    What this gives up is the bracket's incidental proof that the stored
+    instant is a current one -- an expiry the right distance from a `now`
+    read at process start would satisfy it. That claim is not dropped, it is
+    made where it does not need a second clock:
+    test_an_already_expired_batch_entry_is_withheld_by_the_read writes one
+    entry an hour dead and one an hour live and has the read side sort them,
+    which no stale `now` more than an hour out survives.
+    """
     from app.services.db.writer import settings
 
-    before = datetime.now(timezone.utc)
     await _cache_set_many(db_session, [(KEY_A, VALUE_A)])
     await db_session.commit()
-    after = datetime.now(timezone.utc)
 
     row = await _row(db_session, KEY_A)
-    assert before + timedelta(seconds=settings.cache_ttl) <= row.expires_at
-    assert row.expires_at <= after + timedelta(seconds=settings.cache_ttl)
+    assert row.expires_at - row.created_at == timedelta(seconds=settings.cache_ttl)
 
 
 @pytest.mark.integration
@@ -196,14 +220,15 @@ async def test_an_explicit_ttl_is_the_one_stored(db_session):
     """ttl_seconds is honoured rather than ignored in favour of the default.
     The values that carry their own TTL are the ones where the default is
     wrong in the unsafe direction -- a degraded author catalogue held for a
-    full day instead of its own short window is served as though whole."""
-    before = datetime.now(timezone.utc)
+    full day instead of its own short window is served as though whole.
+
+    Same interval-between-columns form as the default case above, and for
+    the same reason; that docstring carries it."""
     await _cache_set_many(db_session, [(KEY_A, VALUE_A)], ttl_seconds=60)
     await db_session.commit()
-    after = datetime.now(timezone.utc)
 
     row = await _row(db_session, KEY_A)
-    assert before + timedelta(seconds=60) <= row.expires_at <= after + timedelta(seconds=60)
+    assert row.expires_at - row.created_at == timedelta(seconds=60)
 
 
 @pytest.mark.integration

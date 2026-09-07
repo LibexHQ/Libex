@@ -1249,13 +1249,6 @@ _DEGRADED_ENTRY_SECONDS = 21
 # the only thing that does.
 _FAILING_ENTRY_SECONDS = _statement_timeout_seconds()
 
-# Real seconds per production second. The budget and the per-entry cost are
-# scaled by the same factor so the number of entries a pass admits is the one
-# production would admit; scaling only one of them would choose that number
-# by hand and test the harness.
-_PRESSURE_SCALE = 1 / 1000
-_PRESSURE_BUDGET = _STATS_REFRESH_PASS_BUDGET_SECONDS * _PRESSURE_SCALE
-
 # Enough passes for the head of a fixed order to come due again several times
 # over, which is when a deferral that settles becomes distinguishable from
 # one that rotates. Fewer and both orders merely look slow.
@@ -1407,6 +1400,87 @@ def _clocked_stats_table(life, start=_SIMULATED_START):
         yield table
 
 
+class _SimulatedBudget:
+    """
+    The loop clock the module's own budget check reads, advanced by what the
+    entries a pass admitted cost rather than by wall time.
+
+    _refresh_due_stats stops on asyncio.get_running_loop().time() >= deadline,
+    so how many entries a pass admits is decided by whatever that call
+    returns. Driven by the real loop clock, a simulation that awaits a
+    scaled-down sleep per entry pays the event loop's timer granularity on
+    top of every one of them: measured over a 30-pass outage on an idle host,
+    154 awaits overshot their requested duration by a mean of 0.95ms and a
+    maximum of 2.1ms, against modelled region entries of 1.6ms and 4.7ms.
+    That is a 20% to 60% surcharge per entry with the machine doing nothing
+    else, and it comes out of the budget while the clock the rows age by is
+    advanced from the entries' NOMINAL costs -- so real overshoot silently
+    removes entries from a pass and nothing downstream can tell. The admitted
+    count per pass is the one quantity every assertion in a simulation rests
+    on, which is what makes that a whole family of load-sensitive tests
+    rather than one unlucky case. Reproduced by injecting a further 4ms per
+    await, well inside what a loaded runner adds: the au+br outage at the
+    dear region cost then left db_stats:ca never refreshed again and still
+    expired at the end of the run.
+
+    Advancing this instead makes a pass admit exactly the entries its budget
+    pays for, on any host. What is faked is only how long an entry takes,
+    which this file was already choosing entry by entry; the decision to stop
+    is still the module's own comparison against its own deadline, and a
+    module that stopped checking would run every entry here as it would in
+    production.
+    """
+
+    def __init__(self):
+        self.elapsed = 0.0
+
+    def time(self):
+        return self.elapsed
+
+    def spend(self, seconds):
+        self.elapsed += seconds
+
+
+class _BudgetedAsyncio:
+    """
+    The `asyncio` stats_refresh sees while a simulation runs: the real module
+    in every respect except that get_running_loop() hands back the simulated
+    budget.
+
+    Patched over the module's own name rather than over the stdlib attribute,
+    so nothing else running in the process -- asyncio.sleep included -- sees
+    a loop that is not the loop.
+    """
+
+    def __init__(self, budget):
+        self._budget = budget
+
+    def get_running_loop(self):
+        return self._budget
+
+    def __getattr__(self, name):
+        return getattr(asyncio, name)
+
+
+@contextmanager
+def _simulated_budget():
+    """
+    The simulated budget clock, in force over the module under test for the
+    length of the block.
+
+    Separate from _clocked_stats_table because the module reads two clocks
+    and they are not interchangeable. The due cutoff, the demotion threshold
+    and the rotation pivot come from datetime.now, a wall clock that can be
+    stepped; the pass budget comes from the loop's monotonic clock, which
+    cannot. A simulation that wants one without the other is entitled to it,
+    and collapsing them here would put a wall clock behind a budget that
+    production deliberately keeps off one.
+    """
+    budget = _SimulatedBudget()
+    with patch.object(stats_refresh, "asyncio", _BudgetedAsyncio(budget)):
+        yield budget
+
+
 @pytest.mark.asyncio
 async def test_no_entry_is_starved_when_every_pass_truncates():
     """
@@ -1433,10 +1507,14 @@ async def test_no_entry_is_starved_when_every_pass_truncates():
     refreshes = {key: 0 for key in keys}
     served_per_pass = []
 
-    with _clocked_stats_table(life) as table:
+    with _clocked_stats_table(life) as table, _simulated_budget() as budget:
 
         async def _slow_entry(session, region, refresh):
-            await asyncio.sleep(_DEGRADED_ENTRY_SECONDS * _PRESSURE_SCALE)
+            budget.spend(_DEGRADED_ENTRY_SECONDS)
+            # A suspension point per entry, so the pass is still driven round
+            # the event loop one entry at a time; the cost it charges is the
+            # line above, not the duration of this.
+            await asyncio.sleep(0)
             table.refresh(cache.stats_key(region))
             refreshes[cache.stats_key(region)] += 1
             return _stats_result()
@@ -1444,16 +1522,16 @@ async def test_no_entry_is_starved_when_every_pass_truncates():
         with patch.object(stats_refresh, "get_db_stats", AsyncMock(side_effect=_slow_entry)):
             for _ in range(_PRESSURE_PASSES):
                 before = sum(refreshes.values())
-                deadline = asyncio.get_running_loop().time() + _PRESSURE_BUDGET
+                deadline = budget.time() + _STATS_REFRESH_PASS_BUDGET_SECONDS
                 await _refresh_due_stats(table, deadline)
                 served = sum(refreshes.values()) - before
                 served_per_pass.append(served)
                 # Production seconds the pass and the wait for the next tick
                 # cost, taken from what the pass actually managed rather than
-                # from what it was expected to, so timer jitter moves the
-                # simulated clock with it instead of desynchronising from it.
-                # One call moves the rows and the clock together; see
-                # _FakeStatsCacheTable.age for why it may not be two.
+                # from what it was expected to, so a pass that admitted fewer
+                # entries ages the rows by less instead of desynchronising
+                # from them. One call moves the rows and the clock together;
+                # see _FakeStatsCacheTable.age for why it may not be two.
                 table.age(served * _DEGRADED_ENTRY_SECONDS + STATS_REFRESH_INTERVAL_SECONDS)
 
     # Without this the run could sweep everything every pass and the fairness
@@ -1567,11 +1645,12 @@ async def _run_outage(failing, region_seconds, passes=_OUTAGE_PASSES):
     left expired at the end.
 
     The real _due_stats_entries and _refresh_due_stats do the work. What is
-    simulated is the passage of time: a pass costs whatever the entries it
-    actually admitted cost, and the wait for the next tick is one interval on
-    top. Time spent is accumulated from the entries visited rather than from
-    what the pass was expected to visit, so the simulated clock cannot drift
-    away from the run it is meant to be describing.
+    simulated is the passage of time, on both clocks the module reads: a pass
+    charges its budget whatever the entries it actually admitted cost (see
+    _SimulatedBudget), and the rows then age by that plus one interval for
+    the wait to the next tick. Time spent is accumulated from the entries
+    visited rather than from what the pass was expected to visit, so neither
+    clock can drift away from the run it is meant to be describing.
 
     A failing entry returns the all-zeros fallback with no expiry -- what
     get_db_stats reports when the live query fell over -- and its row is
@@ -1586,15 +1665,18 @@ async def _run_outage(failing, region_seconds, passes=_OUTAGE_PASSES):
     demoted_at_most = 0
     spent = 0.0
 
-    with _clocked_stats_table(life) as table:
+    with _clocked_stats_table(life) as table, _simulated_budget() as budget:
 
         async def _entry(session, region, refresh):
             nonlocal spent
             key = cache.stats_key(region)
             cost = _measured_entry_seconds(key, failing, region_seconds)
             spent += cost
+            budget.spend(cost)
             attempts[key] += 1
-            await asyncio.sleep(cost * _PRESSURE_SCALE)
+            # See the matching note in the healthy simulation: this yields to
+            # the loop, it does not pay the entry's cost.
+            await asyncio.sleep(0)
             if key in failing:
                 return _failed_stats_result()
             table.refresh(key)
@@ -1607,7 +1689,7 @@ async def _run_outage(failing, region_seconds, passes=_OUTAGE_PASSES):
                 spent = 0.0
                 before = sum(attempts.values())
                 due = len(await _due_stats_entries(table))
-                deadline = asyncio.get_running_loop().time() + _PRESSURE_BUDGET
+                deadline = budget.time() + _STATS_REFRESH_PASS_BUDGET_SECONDS
                 await _refresh_due_stats(table, deadline)
                 if sum(attempts.values()) - before < due:
                     truncated += 1

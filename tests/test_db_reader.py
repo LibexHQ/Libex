@@ -2378,3 +2378,73 @@ async def test_get_stored_genres_logs_structured_fields_on_dbapi_error(caplog):
     assert record.region == "us"
     assert record.error_type == "IntegrityError"
     assert record.column_name == "region"
+
+
+# ============================================================
+# get_stored_genres — THE QUERY BEHIND THE FRESHNESS GATE
+#
+# Both halves of this query now decide whether Audible is called at all, not
+# merely what /categories displays. The region predicate picks the marketplace
+# whose taxonomy is read and whose staleness is judged; the min() picks the
+# timestamp that judges it. Widen the first and one region's tree answers for
+# another while suppressing its refresh; turn the second into max() and a
+# single fresh row hides every stale one behind it. Neither shows up in a
+# response body, so nothing downstream can notice.
+# ============================================================
+
+_GENRE_STAMP = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+
+
+def _stored_genres_session(rows):
+    """AsyncSession whose one execute returns the given catalog_genres rows."""
+    result = MagicMock()
+    result.fetchall.return_value = rows
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=result)
+    return session
+
+
+@pytest.mark.asyncio
+async def test_get_stored_genres_filters_by_the_requested_region():
+    """The read is scoped to the caller's region.
+
+    Read out of the compiled statement rather than out of the returned rows,
+    because a mocked session hands back whatever it was given no matter what
+    the WHERE clause says -- rows of another region come back either way, so
+    the result alone certifies nothing. The predicate itself is the thing
+    that has to be there."""
+    session = _stored_genres_session([
+        ("P1", "", "Arts", _GENRE_STAMP),
+        ("P2", "", "Kunst", _GENRE_STAMP),
+    ])
+
+    await get_stored_genres(session, "de")
+
+    compiled = str(
+        session.execute.call_args_list[0][0][0].compile(compile_kwargs={"literal_binds": True})
+    )
+    assert "FROM catalog_genres" in compiled
+    assert "catalog_genres.region = 'de'" in compiled
+
+
+@pytest.mark.asyncio
+async def test_get_stored_genres_returns_the_oldest_last_checked_not_the_newest():
+    """The timestamp handed back is the oldest stamp in the region, so one
+    stale node holds the whole region stale -- the conservative direction.
+
+    The rows are fed newest, oldest, middle so the assertion separates min()
+    from max() and from simply taking the first or the last row: each of
+    those four picks a different one of these three timestamps."""
+    oldest = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    middle = datetime(2026, 3, 1, tzinfo=timezone.utc)
+    newest = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    session = _stored_genres_session([
+        ("P1", "", "Arts", newest),
+        ("C1", "P1", "Design", oldest),
+        ("C2", "P1", "Film", middle),
+    ])
+
+    genres, last_checked = await get_stored_genres(session, "us")
+
+    assert last_checked == oldest
+    assert [g["genre_id"] for g in genres] == ["P1", "C1", "C2"]

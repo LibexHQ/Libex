@@ -31,6 +31,7 @@ from app.services.db.writer import (
     upsert_book,
     upsert_track,
     reconcile_genres,
+    upsert_genres,
 )
 
 settings = get_settings()
@@ -629,6 +630,54 @@ async def test_reconcile_genres_prune_filters_to_region_and_fresh_keys():
     assert "NOT IN" in sql.upper()
     # both fresh ids appear in the keep-set of the NOT IN
     assert "P1" in sql and "C1" in sql
+
+
+# ============================================================
+# upsert_genres / reconcile_genres — THE last_checked STAMP
+#
+# Both writers refresh last_checked on an existing row, not only on a new
+# one. Drop it from the DO UPDATE SET and an established region's rows keep
+# the timestamp they were first inserted with: the oldest stamp never moves,
+# the region reads permanently stale, and /categories goes back to a live
+# Audible fetch plus a full reconcile on every single call -- quietly, with
+# nothing in the response or the logs saying so.
+#
+# The stamp is read out of its own assignment in the SET clause via
+# _set_clauses, and compared against the value the writer's clock returned,
+# so the row's insert-time value in the VALUES list cannot answer for it.
+# ============================================================
+
+_GENRE_STAMP = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+
+_GENRE_NODES = [
+    {"genre_id": "P1", "parent_id": "", "name": "Arts"},
+    {"genre_id": "C1", "parent_id": "P1", "name": "Performing"},
+]
+
+
+@pytest.mark.asyncio
+async def test_upsert_genres_refreshes_last_checked_on_an_existing_row():
+    """An upsert onto a stored node restamps it with the current time."""
+    session = _session(*[MagicMock() for _ in range(len(_GENRE_NODES))])
+
+    with patch("app.services.db.writer._now", return_value=_GENRE_STAMP):
+        await upsert_genres(session, "us", _GENRE_NODES)
+
+    clauses = _set_clauses(_compiled(session.execute.call_args_list[0].args[0]))
+    assert clauses["LAST_CHECKED"] == f"'{_GENRE_STAMP}'"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_genres_refreshes_last_checked_on_an_existing_row():
+    """Reconcile's upserts restamp too -- the prune is not the only thing
+    that has to happen for a region to count as freshly checked."""
+    session = _session(*[MagicMock() for _ in range(len(_GENRE_NODES) + 1)])
+
+    with patch("app.services.db.writer._now", return_value=_GENRE_STAMP):
+        await reconcile_genres(session, "us", _GENRE_NODES)
+
+    clauses = _set_clauses(_compiled(session.execute.call_args_list[0].args[0]))
+    assert clauses["LAST_CHECKED"] == f"'{_GENRE_STAMP}'"
 
 
 # ============================================================

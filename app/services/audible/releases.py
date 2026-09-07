@@ -72,15 +72,26 @@ _GENRE_RECONCILE_MIN_FRACTION = 0.5
 
 # How long a stored genre taxonomy is served without going back to Audible.
 #
-# One day, chosen against the two costs. Staleness costs almost nothing: Audible
+# One day, chosen against the two costs. Staleness costs almost nothing — and
+# this is a freshness floor over a store that's never emptied, not a cache TTL,
+# which is what actually makes that true rather than merely likely: Audible
 # restructures its category tree rarely, a category id that already exists keeps
-# working, and the worst case is that a newly added category shows up in
-# /categories up to a day late. Refetching costs a lot: /categories is public and
-# unauthenticated, so without a gate every single request is an outbound Audible
-# call plus a reconcile against the whole tree — unbounded work driven by
-# whoever is calling. A day caps that at one fetch per region per day, eleven a
-# day across the fleet, and matches the daily rhythm the rest of this module
-# already runs on (the release-window caches expire at the next UTC midnight).
+# working, and _ensure_genres returns the stored set on every path, including a
+# total fetch failure, so the worst case of a too-long window is a newly added
+# category showing up in /categories up to a day late — never a 404, never a
+# shrunken response. "The taxonomy barely moves" only explains why staleness is
+# rare; it's the never-empty store that explains why staleness is harmless when
+# it happens anyway, and that second half is the one that actually justifies the
+# window. Refetching costs a lot: /categories is public and unauthenticated, so
+# without a gate every single request is an outbound Audible call plus a
+# reconcile against the whole tree — unbounded work driven by whoever is
+# calling. A day is a floor, not a cap: there's no single-flight here, so every
+# request that lands against an expired region also fetches, and the true bound
+# is eleven regions times whatever concurrency is live at each one's expiry, not
+# eleven a day. It still turns unbounded per-request work into at most one
+# fetch per region per day absent concurrent expiry, and matches the daily
+# rhythm the rest of this module already runs on (the release-window caches
+# expire at the next UTC midnight).
 _GENRE_FRESHNESS_SECONDS = 24 * 60 * 60
 
 
@@ -139,7 +150,10 @@ def _genre_age_seconds(oldest_checked: datetime | None) -> float | None:
     reading it as fresh would leave an empty region empty forever.
 
     A naive timestamp is read as UTC rather than allowed to raise, since a
-    freshness check is not worth failing a request over.
+    freshness check is not worth failing a request over — and if that
+    assumption is ever wrong, it errs toward serving stale data (a timestamp
+    from a zone ahead of UTC reads as younger than it is), never toward a
+    spurious refetch.
     """
     if oldest_checked is None:
         return None

@@ -146,8 +146,14 @@ async def categories(
     per parent, each with that placement's own ancestry. These are the ids you
     pass as `category`, distinct from /db/genres (the genre/tag *names* attached
     to stored books). The list is read from the local cache of the taxonomy,
-    refreshed from Audible on each call and stored additively. Returns 404 if the
-    taxonomy can't be loaded.
+    which is only refreshed from Audible once the stored copy is more than a day
+    old — a request within that window is served from the store without
+    contacting Audible. A refresh reconciles the stored tree against Audible's
+    current one: new nodes are added, existing ones updated, and placements that
+    no longer exist are pruned — unless the fetch comes back suspiciously small,
+    in which case it's treated as partial and only added to, never pruned, so a
+    transient glitch can't wipe out real branches. Returns 404 if the taxonomy
+    can't be loaded.
     """
     nodes = await _ensure_genres(session, region)
     if not nodes:

@@ -25,9 +25,10 @@ we fetch the taxonomy (/catalog/categories?root=Genres) and flatten EVERY node a
 EVERY level — the tree runs up to five levels deep — then the live scan walks a
 single category by id sorted by -ReleaseDate, applying the window's date gate plus
 a duplicate-page wall stop. The per-genre results are unioned and deduped by ASIN,
-then sorted for the response. The full node list is stored in catalog_genres,
-fetched fresh from Audible on each /categories call and reconciled to match (see
-_ensure_genres) — no background task.
+then sorted for the response. The full node list is stored in catalog_genres and
+refreshed from Audible lazily, on the first /categories call that finds the
+stored copy older than _GENRE_FRESHNESS_SECONDS (see _ensure_genres) — no
+background task.
 """
 
 # Standard library
@@ -68,6 +69,19 @@ _PAGE_SIZE = 50
 # response: we still add what it returned, but we don't prune, so a transient
 # Audible glitch can't wipe real branches out of the stored tree.
 _GENRE_RECONCILE_MIN_FRACTION = 0.5
+
+# How long a stored genre taxonomy is served without going back to Audible.
+#
+# One day, chosen against the two costs. Staleness costs almost nothing: Audible
+# restructures its category tree rarely, a category id that already exists keeps
+# working, and the worst case is that a newly added category shows up in
+# /categories up to a day late. Refetching costs a lot: /categories is public and
+# unauthenticated, so without a gate every single request is an outbound Audible
+# call plus a reconcile against the whole tree — unbounded work driven by
+# whoever is calling. A day caps that at one fetch per region per day, eleven a
+# day across the fleet, and matches the daily rhythm the rest of this module
+# already runs on (the release-window caches expire at the next UTC midnight).
+_GENRE_FRESHNESS_SECONDS = 24 * 60 * 60
 
 
 def _release_dt(book: dict[str, Any]) -> datetime | None:
@@ -116,14 +130,45 @@ async def _fetch_catalog_genres(region: str) -> list[dict[str, str]]:
     return nodes
 
 
+def _genre_age_seconds(oldest_checked: datetime | None) -> float | None:
+    """
+    Returns how many seconds ago the stored taxonomy was last confirmed against
+    Audible, or None when that can't be established — which is the case both
+    when nothing is stored for the region and when the read failed. None means
+    "no evidence of freshness", so callers must treat it as stale and fetch;
+    reading it as fresh would leave an empty region empty forever.
+
+    A naive timestamp is read as UTC rather than allowed to raise, since a
+    freshness check is not worth failing a request over.
+    """
+    if oldest_checked is None:
+        return None
+    if oldest_checked.tzinfo is None:
+        oldest_checked = oldest_checked.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - oldest_checked).total_seconds()
+
+
 async def _ensure_genres(session: AsyncSession, region: str) -> list[dict[str, str]]:
     """
     Returns the catalog genre nodes (every node at every level, each with its
-    parent_id) for a region, fetched fresh from Audible on every call and
-    reconciled into the store so the stored tree mirrors Audible's current one.
+    parent_id) for a region, refreshing them from Audible only when the stored
+    copy has gone stale, and reconciling the refresh into the store so the stored
+    tree mirrors Audible's current one.
 
-    The fetch is a single fast taxonomy request that returns the whole tree at
-    once. When it comes back and looks complete (at least
+    FRESHNESS. The store carries a last_checked per node; get_stored_genres hands
+    back the oldest of them for the region, which is the age of the weakest part
+    of that region's tree. While that age is under _GENRE_FRESHNESS_SECONDS the
+    stored set is served as-is and Audible is not called at all — the taxonomy is
+    near-static and /categories is public, so a request-driven refetch is work
+    nobody asked for. An unknown age (nothing stored yet, or the read failed)
+    counts as stale, so a region with an empty store always fetches. Everything
+    here is scoped to the one region passed in: the timestamp is read for that
+    region, the fetch is made against that region's marketplace, and the write is
+    keyed by it, so a fresh tree in one region never suppresses a fetch in
+    another.
+
+    THE REFRESH. The fetch is a single fast taxonomy request that returns the
+    whole tree at once. When it comes back and looks complete (at least
     _GENRE_RECONCILE_MIN_FRACTION of what's already stored), it's reconciled:
     new nodes are added, existing ones refreshed, and stale placements are pruned
     — so when Audible restructures (e.g. moves a category to a new parent), the
@@ -134,7 +179,20 @@ async def _ensure_genres(session: AsyncSession, region: str) -> list[dict[str, s
     hiccup doesn't empty the response. Either way the stored set is returned,
     which is what the /categories discovery endpoint serves.
     """
-    stored, _ = await get_stored_genres(session, region)
+    stored, oldest_checked = await get_stored_genres(session, region)
+    age = _genre_age_seconds(oldest_checked)
+    if stored and age is not None and age < _GENRE_FRESHNESS_SECONDS:
+        logger.info(
+            "Served genre taxonomy from fresh store",
+            extra={
+                "region": region,
+                "nodes": len(stored),
+                "age_seconds": round(age, 2),
+                "freshness_seconds": _GENRE_FRESHNESS_SECONDS,
+            },
+        )
+        return stored
+
     try:
         nodes = await _fetch_catalog_genres(region)
         if nodes:

@@ -133,6 +133,12 @@ async def get_books_bulk(
     invalid = [a for a in asin_list if not is_valid_asin(a)]
     if invalid:
         raise NotFoundException(f"Invalid ASIN format: {', '.join(invalid)}")
+
+    # The lookup runs on the canonical form -- Audible's catalogue is
+    # case-sensitive, so only that form resolves. notFound entries are kept
+    # against the caller's own strings below: a missing ASIN is not a
+    # product, so there is no canonical value to report it as.
+    original_asin_list = asin_list
     asin_list = [normalise_asin(a) for a in asin_list]
 
     if not asin_list:
@@ -145,9 +151,11 @@ async def get_books_bulk(
     data = await get_books_by_asins(asin_list, region, session, cache, facts=facts)
 
     # notFound reflects what Audible didn't have — computed before filtering, so
-    # a book that was found but filtered out is not reported as missing.
-    found_asins = {book["asin"] for book in data}
-    not_found = [a for a in asin_list if a not in found_asins]
+    # a book that was found but filtered out is not reported as missing. Both
+    # sides are normalised so the caller's form and the product's form are
+    # compared on equal terms.
+    found_asins = {normalise_asin(book["asin"]) for book in data}
+    not_found = [a for a in original_asin_list if normalise_asin(a) not in found_asins]
 
     data = filter_dicts(data, filters.as_kwargs())
     data = sort_dicts(data, sort.value if sort is not None else None, order.value, BOOK_SORT_FIELDS)

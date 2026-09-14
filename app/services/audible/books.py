@@ -394,9 +394,25 @@ def _normalize_product(product: dict, region: str) -> dict[str, Any]:
         "rating": product.get("rating", {}).get("overall_distribution", {}).get("average_rating"),
         "bookFormat": product.get("format_type"),
         "releaseDate": _parse_release_date(product.get("release_date")),
-        "explicit": product.get("is_adult_product", False),
-        "hasPdf": product.get("is_pdf_url_available", False),
-        "whisperSync": product.get("read_along_support", False),
+        # Tri-state like isListenable/isBuyable/isVvab below -- see the
+        # comment there for the full contract; a hard False here on a
+        # missing key would be Libex asserting an answer Audible never
+        # gave, and the writer would take it unguarded and overwrite a
+        # stored True with a fetch that said nothing at all.
+        #
+        # is_adult_product and is_pdf_url_available are present on every
+        # product Audible sends, so this guard is precautionary rather than
+        # a fix for a hole seen in the wild. read_along_support is
+        # genuinely absent for a real, common slice of the catalog --
+        # podcasts and some anthology titles -- and its absence there reads
+        # as "does not apply to this content" rather than Audible declining
+        # to answer. The effect the writer needs to guard against is
+        # identical either way: a response that omits the key is not a
+        # negative assertion, which is why the flag is tri-state rather
+        # than defaulted at normalization time.
+        "explicit": product.get("is_adult_product"),
+        "hasPdf": product.get("is_pdf_url_available"),
+        "whisperSync": product.get("read_along_support"),
         "imageUrl": _best_image(product.get("product_images", {})),
         "lengthMinutes": product.get("runtime_length_min"),
         "link": _audible_link(asin, region),
@@ -426,17 +442,31 @@ def _normalize_product(product: dict, region: str) -> dict[str, Any]:
     }
 
 
-# Settled values for the four tri-state flags above, matched to the columns'
-# own DB defaults (app/db/models.py) so a live-fetched book and a DB-backed
-# one never disagree about the same ASIN once the row exists: True mirrors
-# AudiMeta's own ingest (no ?? false, unlike explicit/hasPdf/whisperSync) for
-# the three it defines, and isVvab -- which AudiMeta doesn't have -- settles
-# to Libex's own prior emitted value rather than inventing a new one.
+# Settled values for the seven tri-state flags above, matched to the
+# columns' own DB defaults (app/db/models.py). Matching the two holds at
+# insert time: a brand-new row and a live fetch settle to the same value,
+# because there is nothing stored yet to disagree with. Once a row holds a
+# real, asserted value and a later fetch is silent on that same key, the
+# writer's shrinkage guard keeps the stored value (see _asserted_bool in
+# writer.py) while the live and cached surfaces still settle to the fixed
+# default here -- the two can disagree at that point, and that is the
+# accepted trade: an asserted answer already sitting in the database
+# outranks a default standing in for silence on the wire.
+# isListenable/isAvailable/isBuyable settle to True, mirroring AudiMeta's
+# own ingest for the three it defines that way. explicit/hasPdf/whisperSync
+# settle to False, mirroring AudiMeta's own ingest the other way -- AudiMeta
+# applies `?? false` to exactly these three -- which is also each column's
+# own DB default (Boolean, nullable=False, default=False). isVvab -- which
+# AudiMeta doesn't have -- settles to Libex's own prior emitted value rather
+# than inventing a new one.
 _FLAG_SETTLE_DEFAULTS: dict[str, bool] = {
     "isListenable": True,
     "isAvailable": True,
     "isBuyable": True,
     "isVvab": False,
+    "explicit": False,
+    "hasPdf": False,
+    "whisperSync": False,
 }
 
 
@@ -457,7 +487,7 @@ def _settle_flags(book: dict[str, Any]) -> dict[str, Any]:
     plans key at all" so the writer's coalesce leaves a stored array alone,
     vs. [] for "Audible said explicitly empty," which overwrites -- see
     _parse_plans), and BookResponse.plans is `list[str]` with no null
-    variant, same as the four flags below. A None here reaches neither
+    variant, same as the seven flags below. A None here reaches neither
     filtering.py's equality match nor BookResponse otherwise: pydantic does
     not fall back to a field's default_factory on an explicit None, it
     raises, and every route this feeds fell over on exactly that until this
@@ -469,7 +499,7 @@ def _settle_flags(book: dict[str, Any]) -> dict[str, Any]:
     settled result under the same call).
 
     Only settles a key that is PRESENT and None -- never adds a key a dict
-    never carried. _normalize_product always carries all four flags plus
+    never carried. _normalize_product always carries all seven flags plus
     plans, so nothing that went through it is affected by the distinction;
     what it protects is a dict from a source outside that contract (the DB
     backstop path's rows always carry real, already-non-null booleans and an
@@ -687,8 +717,8 @@ async def get_books_by_asins(
 ) -> list[dict[str, Any]]:
     """
     Public entry point. Delegates to _get_books_by_asins_unsettled and settles
-    the four tri-state flags (see _settle_flags) on whatever it returns before
-    handing it back.
+    the seven tri-state flags (see _settle_flags) on whatever it returns
+    before handing it back.
 
     That inner function has several return points -- an early cache hit, the
     full-fetch success path, and two different failure fallbacks -- and every

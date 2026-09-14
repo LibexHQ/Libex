@@ -15,8 +15,9 @@ from app.services.audible.client import (
     VALID_REGIONS,
 )
 
+from app.core.asin import is_valid_asin, normalise_asin
 from app.core.exceptions import NotFoundException, RegionException
-from app.core.middleware import is_valid_asin, normalise_asin, valid_asin
+from app.core.middleware import valid_asin
 
 
 # ============================================================

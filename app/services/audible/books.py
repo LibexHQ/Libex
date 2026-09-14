@@ -50,9 +50,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import Book
 
 # Core
+from app.core.asin import is_valid_asin
 from app.core.exceptions import NotFoundException
 from app.core.logging import get_logger
-from app.core.middleware import is_valid_asin
 from app.core.response_headers import (
     REASON_HYDRATION_DEADLINE,
     REASON_HYDRATION_FAILED,

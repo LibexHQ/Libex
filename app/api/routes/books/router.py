@@ -30,7 +30,8 @@ from app.services.filtering import filter_dicts
 
 # Core
 from app.core.exceptions import NotFoundException
-from app.core.middleware import is_valid_asin, normalise_asin, valid_asin, valid_region
+from app.core.asin import is_valid_asin, normalise_asin
+from app.core.middleware import valid_asin, valid_region
 from app.core.response_headers import ResponseFacts
 
 router = APIRouter(prefix="/book", tags=["Books"])

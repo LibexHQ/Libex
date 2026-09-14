@@ -25,11 +25,11 @@ uniform "take the incoming value":
               insert default, a stored false Audible asserted becomes true;
               flattened to the update default, a stored true becomes false.
 
-The boolean pair is also a regression test for a live bug: is_listenable and
-is_buyable used to read their default through _to_bool's default argument on
-insert and through dict.get's default on update, which agree for every value
-except an explicit null and disagree for that one — so a response carrying
-isListenable: null inserted true and updated to false.
+The boolean pair also guards that an explicit null is read the same way on
+both sides of the merge: isListenable: null must count as silence rather
+than as Audible asserting false whether the statement is inserting or
+updating, so a stored true is never flipped to false by a response that
+later comes back null.
 """
 
 # Standard library
@@ -180,7 +180,14 @@ async def test_a_later_title_still_replaces_the_stored_one(db_session):
 @pytest.mark.integration
 @pytest.mark.parametrize(
     "field, column",
-    [("isListenable", "is_listenable"), ("isBuyable", "is_buyable"), ("isVvab", "is_vvab")],
+    [
+        ("isListenable", "is_listenable"),
+        ("isBuyable", "is_buyable"),
+        ("isVvab", "is_vvab"),
+        ("explicit", "explicit"),
+        ("whisperSync", "whisper_sync"),
+        ("hasPdf", "has_pdf"),
+    ],
 )
 @pytest.mark.asyncio
 async def test_an_asserted_false_is_stored(db_session, field, column):
@@ -201,6 +208,9 @@ async def test_an_asserted_false_is_stored(db_session, field, column):
         ("isListenable", "is_listenable", False),
         ("isBuyable", "is_buyable", False),
         ("isVvab", "is_vvab", True),
+        ("explicit", "explicit", True),
+        ("whisperSync", "whisper_sync", True),
+        ("hasPdf", "has_pdf", True),
     ],
 )
 @pytest.mark.asyncio
@@ -225,6 +235,9 @@ async def test_silence_keeps_the_stored_answer(db_session, field, column, assert
         ("isListenable", "is_listenable", True),
         ("isBuyable", "is_buyable", True),
         ("isVvab", "is_vvab", False),
+        ("explicit", "explicit", False),
+        ("whisperSync", "whisper_sync", False),
+        ("hasPdf", "has_pdf", False),
     ],
 )
 @pytest.mark.asyncio
@@ -288,6 +301,40 @@ async def test_a_normalized_thin_product_does_not_flip_a_stored_boolean(db_sessi
     db_session.expire_all()
     stored = await _stored(db_session, "B0NORMBOOL1")
     assert (stored.is_listenable, stored.is_buyable, stored.is_vvab) == (False, False, True)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_normalized_thin_product_does_not_flip_a_stored_flag(db_session):
+    """
+    The same normalizer-sourced guarantee as
+    test_a_normalized_thin_product_does_not_flip_a_stored_boolean, for
+    explicit/hasPdf/whisperSync -- whose defaults are left for the writer's
+    merge to settle rather than baked into the normalizer itself. A
+    hand-built payload that starts life already at Libex's tri-state
+    contract (True/False/absent) cannot exercise that: it never routes
+    through the normalizer's own None-preserving read at all. Built through
+    the real normalizer instead, so a regression in either half -- the
+    normalizer defaulting a missing key, or the writer reading stmt.excluded
+    instead of the bind -- fails this the same way.
+    """
+    rich_product = {
+        "asin": "B0NORMFLAG1",
+        "is_adult_product": True, "is_pdf_url_available": True, "read_along_support": True,
+    }
+    thin_product = {"asin": "B0NORMFLAG1"}
+
+    rich = _normalize_product(rich_product, REGION)
+    thin = _normalize_product(thin_product, REGION)
+    assert (rich["explicit"], rich["hasPdf"], rich["whisperSync"]) == (True, True, True)
+    assert (thin["explicit"], thin["hasPdf"], thin["whisperSync"]) == (None, None, None)
+
+    await upsert_book(db_session, rich)
+    await upsert_book(db_session, thin)
+
+    db_session.expire_all()
+    stored = await _stored(db_session, "B0NORMFLAG1")
+    assert (stored.explicit, stored.has_pdf, stored.whisper_sync) == (True, True, True)
 
 
 @pytest.mark.integration
@@ -451,7 +498,8 @@ _MERGED_COLUMNS = [
     "title", "subtitle", "region", "description", "summary", "publisher", "copyright",
     "isbn", "language", "rating", "release_date", "length_minutes", "image",
     "book_format", "content_type", "content_delivery_type", "episode_number",
-    "episode_type", "sku", "sku_group", "is_listenable", "is_buyable", "is_vvab", "plans",
+    "episode_type", "sku", "sku_group", "is_listenable", "is_buyable", "is_vvab",
+    "explicit", "whisper_sync", "has_pdf", "plans",
 ]
 
 

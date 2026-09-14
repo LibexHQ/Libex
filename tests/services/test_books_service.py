@@ -21,6 +21,7 @@ from app.services.audible.books import (
     _normalize_product,
     _filter_products,
     _parse_release_date,
+    _settle_flags,
 )
 from app.services.cache.manager import book_key
 from app.core.response_headers import (
@@ -559,6 +560,99 @@ def test_normalize_product_episode_fields_set_for_podcast():
 
 
 # ============================================================
+# TRI-STATE FLAGS -- explicit / hasPdf / whisperSync
+# ============================================================
+# These three read Audible's raw key with no default at all, so a response
+# that omits the key normalizes to None rather than to a fabricated False --
+# which is what lets the writer's merge tell "Audible said nothing" apart
+# from "Audible said false" and leave a stored True alone. _settle_flags is
+# what puts a concrete boolean back before anything but persistence ever
+# sees the dict.
+
+_FLAG_CASES = [
+    ("explicit", "is_adult_product"),
+    ("hasPdf", "is_pdf_url_available"),
+    ("whisperSync", "read_along_support"),
+]
+
+
+@pytest.mark.parametrize("field, raw_key", _FLAG_CASES)
+def test_normalize_product_flag_is_none_when_audible_omits_the_key(field, raw_key):
+    """A missing key must normalize to None, not to a fabricated False --
+    None is what tells the writer Audible said nothing at all, so a stored
+    True can survive rather than being overwritten."""
+    product = {
+        "asin": "B08G9PRS1K", "title": "Dune", "authors": [], "narrators": [],
+        "relationships": [], "product_images": {}, "category_ladders": [], "rating": {},
+    }
+    result = _normalize_product(product, "us")
+    assert result[field] is None
+
+
+@pytest.mark.parametrize("field, raw_key", _FLAG_CASES)
+def test_normalize_product_flag_reads_an_explicit_false(field, raw_key):
+    """The complement: Audible actually answering False must still come
+    through as False rather than being folded into the same bucket as
+    silence -- a fix that refused every False would pass the test above and
+    still be wrong."""
+    product = {
+        "asin": "B08G9PRS1K", "title": "Dune", "authors": [], "narrators": [],
+        "relationships": [], "product_images": {}, "category_ladders": [], "rating": {},
+        raw_key: False,
+    }
+    result = _normalize_product(product, "us")
+    assert result[field] is False
+
+
+@pytest.mark.parametrize("field, raw_key", _FLAG_CASES)
+def test_normalize_product_flag_reads_an_explicit_true(field, raw_key):
+    """And the ordinary case, so the two tests above cannot pass by the field
+    having been dropped from the result entirely."""
+    product = {
+        "asin": "B08G9PRS1K", "title": "Dune", "authors": [], "narrators": [],
+        "relationships": [], "product_images": {}, "category_ladders": [], "rating": {},
+        raw_key: True,
+    }
+    result = _normalize_product(product, "us")
+    assert result[field] is True
+
+
+def test_normalize_product_whisper_sync_is_none_for_a_podcast_missing_read_along_support():
+    """The real-world shape this guards: whisperSync is the one of the three
+    flags with actual observed exposure to this bug, and podcasts are the
+    population that showed it -- this uses a podcast shape rather than a
+    synthetic omission because that is where the bug was actually seen."""
+    podcast = {
+        "asin": "B0PODCAST1", "title": "A Podcast", "authors": [], "narrators": [],
+        "relationships": [], "product_images": {}, "category_ladders": [], "rating": {},
+        "content_type": "Podcast",
+    }
+    result = _normalize_product(podcast, "us")
+    assert result["whisperSync"] is None
+
+
+@pytest.mark.parametrize("field", ["explicit", "hasPdf", "whisperSync"])
+def test_settle_flags_defaults_a_missing_flag_to_false(field):
+    """_settle_flags is the last stop before a dict leaves the service layer
+    for anything but persistence, and AudiMeta's own contract for exactly
+    these three fields is `?? false` -- a None reaching a caller would be a
+    drop-in compatibility break, not merely an odd value."""
+    settled = _settle_flags({field: None})
+    assert settled[field] is False
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [(f, v) for f in ("explicit", "hasPdf", "whisperSync") for v in (True, False)],
+)
+def test_settle_flags_leaves_an_asserted_flag_alone(field, value):
+    """The guard only fills silence -- an already-settled True or False must
+    not be disturbed."""
+    settled = _settle_flags({field: value})
+    assert settled[field] is value
+
+
+# ============================================================
 # DB FALLBACK TESTS
 # ============================================================
 
@@ -753,6 +847,75 @@ async def test_get_books_by_asins_all_cache_hits_matches_live_fetch_shape_and_sk
     assert mock_cache_get_many.await_args.args[1] == [book_key(a, "us") for a in asins]
     assert {b["asin"] for b in cached_result} == set(asins)
     assert cached_result == [live_by_asin[a] for a in asins]
+
+
+# ============================================================
+# CACHE HITS CARRY THE UNSETTLED DICT -- THE SIBLINGS ABOVE MISS THIS
+# ============================================================
+# The two parity tests above seed the cache mock with live_dto / live_by_asin
+# -- the value get_books_by_asins itself already returned, which has been
+# through _settle_flags_list and so never carries a None for explicit/hasPdf/
+# whisperSync. That is not what a real cache entry looks like: persist_queue.py
+# caches the same dict write_books persists, which is _normalize_product's
+# output taken before settling, so a book whose Audible response omitted
+# read_along_support sits in the cache with whisperSync: None. Nothing above
+# proves that a cache hit carrying that None still comes out of
+# get_books_by_asins as False -- only that a hit already carrying False stays
+# False, which the wrapper's settle step would pass trivially either way.
+
+def _unsettled_cached_book(asin: str) -> dict:
+    """What persist_queue.py actually writes to the cache for a thin
+    response: the normalizer's own output, flags and all, before
+    _settle_flags ever runs. Built through the real normalizer rather than
+    hand-assembled, so this fails the same way a normalizer regression that
+    stopped emitting None would."""
+    book = _normalize_product({"asin": asin, "title": f"Book {asin}"}, "us")
+    assert book["explicit"] is None and book["hasPdf"] is None and book["whisperSync"] is None
+    return book
+
+
+@pytest.mark.asyncio
+async def test_single_asin_cache_hit_settles_a_null_flag_before_it_reaches_the_caller():
+    """The single-ASIN cache branch (use_cache=True, one ASIN) reads straight
+    from cache.get with no fetch in between -- if this hit's None reached the
+    caller unsettled, a field AudiMeta types as a plain bool would carry null
+    instead of false."""
+    from app.services.audible.books import get_books_by_asins
+
+    asin = "B0FLAGCACH1"
+    unsettled = _unsettled_cached_book(asin)
+
+    with patch("app.services.audible.books.audible_get", new_callable=AsyncMock) as mock_audible_get, \
+         patch("app.services.audible.books.cache.get", new=AsyncMock(return_value=unsettled)):
+        result = await get_books_by_asins([asin], "us", AsyncMock(), use_cache=True)
+
+    mock_audible_get.assert_not_called()
+    assert len(result) == 1
+    assert (result[0]["explicit"], result[0]["hasPdf"], result[0]["whisperSync"]) == (False, False, False)
+
+
+@pytest.mark.asyncio
+async def test_batch_cache_hits_settle_null_flags_before_they_reach_the_caller():
+    """Same guarantee as the single-ASIN sibling above, for the batch cache
+    branch (use_cache=True, more than one ASIN, every ASIN a hit) -- each
+    element cache.get_many hands back is independently unsettled and must be
+    independently settled on the way out."""
+    from app.services.audible.books import get_books_by_asins
+
+    asins = ["B0FLAGCACH2", "B0FLAGCACH3"]
+    hits = {book_key(a, "us"): _unsettled_cached_book(a) for a in asins}
+
+    async def _cache_get_many(session, keys):
+        return {key: hits[key] for key in keys if key in hits}
+
+    with patch("app.services.audible.books.audible_get", new_callable=AsyncMock) as mock_audible_get, \
+         patch("app.services.audible.books.cache.get_many", new=AsyncMock(side_effect=_cache_get_many)):
+        result = await get_books_by_asins(asins, "us", AsyncMock(), use_cache=True)
+
+    mock_audible_get.assert_not_called()
+    assert len(result) == 2
+    for book in result:
+        assert (book["explicit"], book["hasPdf"], book["whisperSync"]) == (False, False, False)
 
 
 # ============================================================

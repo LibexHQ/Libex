@@ -10,6 +10,39 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.22.1]
+
+### Fixed
+- **A missing answer for `explicit`, `whisperSync` or `hasPdf` can no longer
+  overwrite a stored `true` with `false`.** All three read Audible's
+  underlying field through a hard `false` default, so a response that simply
+  omitted the key looked exactly like Audible asserting the negative, and an
+  update took that assertion at face value and erased whatever the row
+  already held. `whisperSync` is the one of the three with observed
+  exposure: a live sample of roughly 340 products across us/uk/de/jp/es
+  found its underlying field missing on 70% of the podcasts sampled. The
+  fields behind `explicit` and `hasPdf` were never seen missing in that same
+  sample, so for those two this closes a path rather than fixing loss
+  already seen in the wild. All three now go through the same tri-state
+  handling `isListenable`, `isBuyable` and `isVvab` already had — an omitted
+  key settles to nothing rather than to `false`, and only the write path
+  turns that nothing into a `false` default, so silence and an actual
+  `false` are no longer read as the same answer. No response shape changes —
+  no field appears, vanishes, or changes type — and a fresh Audible fetch
+  that finds the underlying key missing still settles to `false` on the
+  wire, matching AudiMeta's own default for these three fields. A
+  database-backed response can carry a different value, though: a book
+  whose stored `whisperSync`, `explicit` or `hasPdf` would previously have
+  been silently overwritten to `false` on a later refresh now keeps its
+  stored `true` instead, so a caller reading that book from storage sees
+  `true` where the old behaviour would eventually have produced `false`.
+  Rows already flipped to `false` by the old behaviour are not corrected by
+  this, and a normal refresh will not correct them either — a silent
+  response now correctly leaves a stored `false` alone, and the column has
+  no way to tell "Audible said false" apart from a value the old code
+  invented. This stops the loss going forward; it does not repair what
+  already happened.
+
 ## [1.22.0]
 
 ### Changed

@@ -263,15 +263,6 @@ def _chaptered_wins(new_value, existing_col):
     )
 
 
-def _to_bool(value, default: bool = False) -> bool:
-    """Converts string or bool to bool safely."""
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.lower() == 'true'
-    return default
-
-
 def _asserted_bool(value) -> bool | None:
     """
     Reads a boolean the way the shrinkage rule needs it read: True or False
@@ -286,10 +277,12 @@ def _asserted_bool(value) -> bool | None:
     a response that says false binds False and overwrites, because that is
     Audible answering rather than staying silent.
 
-    Recognises exactly what _to_bool recognises, so the two never disagree
-    about what a value means, only about what an unrecognised one costs:
-    _to_bool substitutes its caller's default, this returns None and lets the
-    statement decide. Anything that is neither a bool nor a string is not an
+    The one reader for every NOT NULL boolean this writer merges, tri-state
+    (is_listenable, is_buyable, is_vvab) and plain (explicit, whisper_sync,
+    has_pdf) alike — the two groups differ only in what the insert side
+    coalesces a silent None to (True, True, False for the tri-state three;
+    False, matching the column default, for the other three), never in how
+    the bind is read. Anything that is neither a bool nor a string is not an
     answer in any form we can read, so it is treated as silence.
     """
     if isinstance(value, bool):
@@ -702,9 +695,9 @@ def _build_book_upsert():
         rating=bindparam("rating"),
         release_date=bindparam("release_date"),
         length_minutes=bindparam("length_minutes"),
-        explicit=bindparam("explicit"),
-        whisper_sync=bindparam("whisper_sync"),
-        has_pdf=bindparam("has_pdf"),
+        explicit=_coalesce(bindparam("explicit"), False),
+        whisper_sync=_coalesce(bindparam("whisper_sync"), False),
+        has_pdf=_coalesce(bindparam("has_pdf"), False),
         image=bindparam("image"),
         book_format=bindparam("book_format"),
         content_type=bindparam("content_type"),
@@ -790,9 +783,20 @@ def _build_book_upsert():
             "rating": _coalesce(stmt.excluded.rating, Book.rating),
             "release_date": _coalesce(stmt.excluded.release_date, Book.release_date),
             "length_minutes": _coalesce(stmt.excluded.length_minutes, Book.length_minutes),
-            "explicit": stmt.excluded.explicit,
-            "whisper_sync": stmt.excluded.whisper_sync,
-            "has_pdf": stmt.excluded.has_pdf,
+            # Same asserted-versus-silent merge as is_listenable/is_buyable/
+            # is_vvab below, and for the same reason: the column is NOT NULL,
+            # so a response that omits explicit/whisperSync/hasPdf cannot be
+            # told apart from one asserting false unless the bind itself
+            # carries that distinction. _asserted_bool reads the raw payload
+            # for these three exactly as it does for the other three; reading
+            # through stmt.excluded here instead of the bindparam would take
+            # the insert side's own coalesce-to-False rather than the bind
+            # Audible actually sent, making a response that omits the field
+            # indistinguishable from one asserting false and silently
+            # discarding a stored true.
+            "explicit": _coalesce(bindparam("explicit"), Book.explicit),
+            "whisper_sync": _coalesce(bindparam("whisper_sync"), Book.whisper_sync),
+            "has_pdf": _coalesce(bindparam("has_pdf"), Book.has_pdf),
             "image": _answered(stmt.excluded.image, Book.image),
             "book_format": _answered(stmt.excluded.book_format, Book.book_format),
             "content_type": _answered(stmt.excluded.content_type, Book.content_type),
@@ -803,10 +807,11 @@ def _build_book_upsert():
             "episode_type": _answered(stmt.excluded.episode_type, Book.episode_type),
             "sku": _answered(stmt.excluded.sku, Book.sku),
             "sku_group": _answered(stmt.excluded.sku_group, Book.sku_group),
-            # The three NOT NULL booleans merge on asserted-versus-silent, not
-            # on true-versus-false: excluded here would carry the insert
-            # default and overwrite a stored answer with one Audible never
-            # gave. See _asserted_bool for why the bind is tri-state.
+            # The other three NOT NULL booleans merge the same way, on
+            # asserted-versus-silent rather than true-versus-false: excluded
+            # here would carry the insert default and overwrite a stored
+            # answer with one Audible never gave. See _asserted_bool for why
+            # the bind is tri-state.
             "is_listenable": _coalesce(bindparam("is_listenable"), Book.is_listenable),
             "is_buyable": _coalesce(bindparam("is_buyable"), Book.is_buyable),
             "is_vvab": _coalesce(bindparam("is_vvab"), Book.is_vvab),
@@ -890,9 +895,11 @@ def _book_params(data: dict, now: datetime) -> dict:
     Every coercion the values clause used to perform in SQL happens here
     instead, because a bind that reaches a NOT NULL column as None is not a
     quiet fallback but an aborted statement — and with a whole chunk sharing
-    one execution, one such row costs all fifty their transaction. The three
-    tri-state booleans are the deliberate exception: their None is answered by
-    a coalesce on both sides of the statement and never reaches the column.
+    one execution, one such row costs all fifty their transaction. The six
+    NOT NULL booleans — is_listenable, is_buyable, is_vvab, explicit,
+    whisper_sync, has_pdf — are the deliberate exception: their None is
+    answered by a coalesce on both sides of the statement and never reaches
+    the column.
     """
     return {
         "asin": data["asin"],
@@ -912,9 +919,9 @@ def _book_params(data: dict, now: datetime) -> dict:
         "rating": data.get("rating"),
         "release_date": _parse_release_date_for_db(data.get("releaseDate")),
         "length_minutes": data.get("lengthMinutes"),
-        "explicit": _to_bool(data.get("explicit")),
-        "whisper_sync": _to_bool(data.get("whisperSync")),
-        "has_pdf": _to_bool(data.get("hasPdf")),
+        "explicit": _asserted_bool(data.get("explicit")),
+        "whisper_sync": _asserted_bool(data.get("whisperSync")),
+        "has_pdf": _asserted_bool(data.get("hasPdf")),
         "image": data.get("imageUrl"),
         "book_format": data.get("bookFormat"),
         "content_type": data.get("contentType"),

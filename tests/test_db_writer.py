@@ -6,6 +6,7 @@ All DB interactions are mocked — we test our logic not SQLAlchemy.
 
 # Standard library
 import asyncio
+import re
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -26,6 +27,7 @@ from app.services.db.persist_queue import (
 from app.services.db.writer import (
     _BLANK_CHARS,
     _BOOK_UPSERT,
+    _book_params,
     _longer_wins,
     upsert_author,
     upsert_book,
@@ -1158,6 +1160,123 @@ def test_the_book_upsert_carries_no_returning_clause():
     the only place it is visible is the statement itself.
     """
     assert "RETURNING" not in _compiled(_BOOK_UPSERT)
+
+
+# ============================================================
+# _book_params — SILENCE VERSUS AN ASSERTED FALSE
+# ============================================================
+# explicit/whisperSync/hasPdf reach _book_params through _asserted_bool, the
+# one reader for all six NOT NULL booleans the writer merges. A missing key
+# and an explicit false must bind differently: a missing key binds None, so
+# the statement's own coalesce can leave a stored answer alone, while an
+# explicit false binds False and overwrites it.
+
+_ASSERTED_BOOL_FIELDS = [("explicit", "explicit"), ("whisperSync", "whisper_sync"), ("hasPdf", "has_pdf")]
+
+
+@pytest.mark.parametrize("field, column", _ASSERTED_BOOL_FIELDS)
+def test_book_params_reads_a_missing_flag_as_none_not_false(field, column):
+    """A payload that never carries the key must bind None, not a
+    fabricated False — a bound None is what lets the statement's own
+    coalesce leave a stored answer alone."""
+    params = _book_params({"asin": "B0PARAMS01", "region": "us"}, datetime.now(timezone.utc))
+
+    assert params[column] is None
+
+
+@pytest.mark.parametrize("field, column", _ASSERTED_BOOL_FIELDS)
+def test_book_params_reads_an_explicit_false_as_false(field, column):
+    """The complement: Audible actually asserting false must still bind
+    False, not get folded into the same None bucket as silence — a version
+    that mapped every falsy value to None would pass the test above and
+    never let a stored True be corrected."""
+    params = _book_params(
+        {"asin": "B0PARAMS02", "region": "us", field: False}, datetime.now(timezone.utc)
+    )
+
+    assert params[column] is False
+
+
+# ============================================================
+# THE NOT NULL BOOLEAN MERGE — THE BIND, NOT stmt.excluded
+# ============================================================
+# explicit/whisper_sync/has_pdf merge exactly like is_listenable/is_buyable/
+# is_vvab: NOT NULL, so there is no null to coalesce against and the merge
+# runs on asserted-versus-silent instead. stmt.excluded.<col> would carry the
+# INSERT side's own coalesce-to-False rather than what Audible actually sent,
+# so a thin update -- the bind itself None -- would read back a concrete
+# False off excluded and overwrite a stored True. The behavioural version of
+# this is proved end to end in
+# tests/integration/test_book_merge_asymmetries.py
+# (test_a_normalized_thin_product_does_not_flip_a_stored_flag); this pins the
+# statement shape a reviewer would otherwise have to remember the reason for.
+
+@pytest.mark.parametrize("column", ["explicit", "whisper_sync", "has_pdf"])
+def test_the_asserted_bool_columns_merge_from_their_own_bind(column):
+    """Fails exactly the way a 'simplification' back to
+    coalesce(excluded.<col>, books.<col>) would, since that version still
+    compiles and still reads as an ordinary coalesce merge."""
+    clause = _book_upsert_set_clauses()[column]
+
+    assert clause == f"coalesce(%({column})s, books.{column})", (
+        f"{column} no longer merges from its own bind parameter: {clause!r}. "
+        f"If this now reads coalesce(excluded.{column}, books.{column}), the "
+        "bind was swapped back for stmt.excluded, which re-loses whether "
+        "Audible said nothing or said false."
+    )
+
+
+def _book_upsert_insert_values() -> dict[str, str]:
+    """The book upsert's INSERT ... VALUES, as column -> its own value
+    expression.
+
+    Mirrors _set_clauses's approach for the insert side: the column list and
+    the VALUES list are both comma-separated at the same positions, but
+    nested calls (coalesce(...), CAST(...)) have commas of their own, so only
+    a comma at paren depth 0 is a real boundary."""
+    sql = str(_BOOK_UPSERT.compile(dialect=postgresql.dialect()))
+    _, separator, rest = sql.partition("INSERT INTO books (")
+    assert separator, "statement has no INSERT INTO books ( ... ) to read"
+    columns_part, separator, rest = rest.partition(") VALUES (")
+    assert separator
+    values_part, separator, _ = rest.partition(") ON CONFLICT")
+    assert separator
+
+    def _split(text: str) -> list[str]:
+        parts, buffer, depth = [], [], 0
+        for char in text:
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+            if char == "," and depth == 0:
+                parts.append("".join(buffer))
+                buffer = []
+                continue
+            buffer.append(char)
+        parts.append("".join(buffer))
+        return [p.strip() for p in parts]
+
+    columns = _split(columns_part)
+    values = _split(values_part)
+    assert len(columns) == len(values)
+    return dict(zip(columns, values))
+
+
+@pytest.mark.parametrize("column", ["explicit", "whisper_sync", "has_pdf"])
+def test_the_insert_side_backstops_a_silent_flag_with_false(column):
+    """The column is NOT NULL, so a bind reaching it as None would abort the
+    whole chunk's statement rather than quietly writing nothing. This is what
+    stands between a first-ever write that omits the flag and that failure —
+    proved landing in a real row in
+    tests/integration/test_book_merge_asymmetries.py
+    (test_a_first_write_without_the_field_takes_the_column_default)."""
+    compiled = _BOOK_UPSERT.compile(dialect=postgresql.dialect())
+    clause = _book_upsert_insert_values()[column]
+
+    match = re.fullmatch(rf"coalesce\(%\({column}\)s, %\((\w+)\)s\)", clause)
+    assert match, f"{column}'s insert value is not a coalesce over its own bind: {clause!r}"
+    assert compiled.params[match.group(1)] is False
 
 
 # ============================================================

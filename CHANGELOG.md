@@ -10,6 +10,36 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.22.2]
+
+### Fixed
+- **`notFound` again reports a missing ASIN in the casing the caller sent,
+  instead of Audible's uppercase form.** The bulk `/book` lookup still parses
+  `asins` the same way it always has — comma-split, each token trimmed of
+  whitespace, casing left untouched — and still runs the actual Audible
+  lookup on the normalised, uppercase form, since that is the only form
+  Audible's case-sensitive catalogue resolves. What changes is which of those
+  two forms `notFound` is built from: it now uses the caller's parsed tokens
+  again rather than the normalised ones. `books[].asin` was never affected
+  either way and keeps carrying Audible's own canonical value.
+
+  This restores how the endpoint answered from when its AudiMeta-compatible
+  bulk format first shipped until 1.22.0, when a fix to a real bug — a
+  lowercase ASIN for a book Libex had was being reported missing even though
+  the book came back in the same response — normalised both sides of the
+  comparison and, as a side effect not called out anywhere at the time,
+  started echoing the normalised casing instead of the caller's own. The
+  lookup fix itself stands; only that side effect is reversed. A caller
+  comparing `notFound` against the ASINs they sent should not expect them
+  case-normalised.
+
+  Comparing both sides on equal footing also closes a contradiction that was
+  possible in principle: an ASIN Audible answers with different casing than
+  it was requested in could previously land in both `books` and `notFound`
+  at once. Nothing on record has hit this against Audible's current
+  behaviour; it falls out of the same fix rather than being something
+  observed in the wild.
+
 ## [1.22.1]
 
 ### Fixed
@@ -80,6 +110,74 @@ capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
   for the existing backlog of books that went permanently chapterless before
   this window existed — they are already past the 30-day mark and will never
   re-enter it — those still need the manual backfill script.
+
+- **`/categories` no longer re-fetches Audible's whole genre taxonomy and
+  reconciles it into storage on every call.** Every request used to trigger a
+  live fetch of the full category tree plus a reconcile of it into the store,
+  no matter how recently the same thing had already happened. It's now served
+  straight from storage while the stored copy is under a day old, judged by
+  the oldest confirmed node in the requested region, and only refreshed once
+  that age is exceeded. There is no coalescing across concurrent requests, so
+  a day is a floor rather than a hard ceiling on outbound calls — several
+  requests landing at once against an expired region will each still trigger
+  their own fetch — but the common case goes from one fetch-and-reconcile per
+  request to roughly one per region per day. The response shape is unchanged,
+  and the stored set is never emptied, so the worst case of too long a window
+  is a newly added category showing up in `/categories` up to a day late,
+  never a shorter list or a 404.
+
+- **Author `asin` values that aren't actually ASINs are now logged when
+  Audible sends one, though they're still stored exactly as received.**
+  Audible's own contributor data occasionally substitutes something else for
+  the identifier — an author's own name, a bare stray character, a role word
+  like the German "Übersetzer," among values seen live — and Libex never
+  checked the shape of that field before writing it through. A caller who
+  sees an `author.asin` that doesn't look like an ASIN is looking at
+  something Audible actually sent, not a Libex-introduced defect. This adds
+  visibility only: a mismatch arriving in a book's own author list is now
+  logged with the product, the author name and the region, so the affected
+  population can eventually be sized. It does not touch anything already
+  stored — nulling or re-casing a value already used to key an existing
+  author row would create a second row for the same person rather than
+  correct anything, since the links between a book and its authors are only
+  ever added, never replaced.
+
+### Fixed
+- **A lowercase ASIN could 404 for a book, author, or series that exists.**
+  Audible's catalogue is case-sensitive and Libex stores ASINs uppercase, so
+  a lowercase ASIN was sent to Audible exactly as received, missed there,
+  missed again in the database fallback, and came back not found for a title
+  that was plainly available. (ISBN-10 check digits can be the letter X, so a
+  lowercase key was a real input some callers were actually sending, not a
+  hypothetical one.) `/book/{asin}` and its chapters route, `/author/{asin}`
+  and `/author/books/{asin}`, `/series/{asin}` and `/series/books/{asin}`,
+  and their `/db/...` equivalents now normalise the ASIN before using it,
+  whatever case it arrives in. The bulk `GET /book?asins=` lookup had the
+  same defect without needing Audible's help at all: `notFound` was worked
+  out by comparing the ASINs asked for against the ones that came back, and
+  what comes back is uppercase, so a lowercase ASIN could be reported missing
+  in the very response that returned its book. `/author/books/{asin}` had a
+  related failure: a lowercase author ASIN could return a list built from
+  only one of the four sources the lookup walks, marked complete, and cached
+  that way for a day, because the endpoint's own internal calls uppercase
+  their ASIN while the incoming one did not.
+
+  One side effect of this fix is worth naming on its own, because it did not
+  stay in place. Computing `notFound` against the normalised ASINs also
+  meant it started reporting a missing ASIN in its uppercased form rather
+  than the caller's own casing — a deliberate, named consequence of the fix
+  at the time, not an oversight, but never written up here until now. 1.22.2
+  reverses that one piece: `notFound` reports the caller's original casing
+  again, while the lookup fix above is unaffected and stands.
+
+  A separate, smaller behaviour change rode along with this one. Eleven
+  routes take both a path ASIN and a `region` query parameter; when a
+  request is invalid in both at once, they used to answer with the region
+  error and now answer with the ASIN error, because of the order the two
+  checks run in internally. A request invalid in only one of the two ways
+  answers exactly as before, and the four `/db/...` routes that take no
+  `region` never differed either way. This is documented current behaviour
+  rather than a designed precedence rule.
 
 ## [1.21.0]
 

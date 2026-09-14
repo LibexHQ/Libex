@@ -301,6 +301,82 @@ async def test_bulk_books_lowercase_asin_is_not_reported_not_found_when_the_book
         assert args[0] == ["B009CFOEGK"]
 
 
+@pytest.mark.asyncio
+async def test_bulk_books_not_found_echoes_the_callers_lowercase_asin(async_client):
+    """A genuinely missing ASIN is reported back in the exact form the caller
+    sent it, not uppercased -- notFound has no canonical value to report a
+    missing ASIN as, so it echoes the request."""
+    with patch("app.api.routes.books.router.get_books_by_asins", new_callable=AsyncMock) as mock:
+        mock.return_value = []
+        response = await async_client.get("/book?asins=b000000001")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["notFound"] == ["b000000001"]
+
+
+@pytest.mark.asyncio
+async def test_bulk_books_found_asin_absent_from_not_found_at_both_casings(async_client):
+    """A book that resolves stays out of notFound and books[].asin stays
+    Audible's canonical value regardless of the casing the caller requested
+    it in. The lowercase leg is the discriminating one -- it is the only
+    casing where a books[].asin-echoes-the-caller bug would show up, since a
+    request already sent uppercase is indistinguishable from the canonical
+    form."""
+    with patch("app.api.routes.books.router.get_books_by_asins", new_callable=AsyncMock) as mock:
+        mock.return_value = [{**MOCK_BOOK, "asin": "B009CFOEGK"}]
+
+        response = await async_client.get("/book?asins=B009CFOEGK")
+        data = response.json()
+        assert data["notFound"] == []
+        assert [b["asin"] for b in data["books"]] == ["B009CFOEGK"]
+
+        response = await async_client.get("/book?asins=b009cfoegk")
+        data = response.json()
+        assert data["notFound"] == []
+        assert [b["asin"] for b in data["books"]] == ["B009CFOEGK"]
+
+
+@pytest.mark.asyncio
+async def test_bulk_books_mixed_batch_found_book_absent_missing_echoed_lowercase(async_client):
+    """One request, one hit and one miss: the found ASIN never appears in
+    notFound and books[].asin stays canonical, while the missing ASIN comes
+    back exactly as the caller typed it."""
+    with patch("app.api.routes.books.router.get_books_by_asins", new_callable=AsyncMock) as mock:
+        mock.return_value = [{**MOCK_BOOK, "asin": "B009CFOEGK"}]
+        response = await async_client.get("/book?asins=B009CFOEGK,b000000001")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["notFound"] == ["b000000001"]
+        assert [b["asin"] for b in data["books"]] == ["B009CFOEGK"]
+
+
+@pytest.mark.asyncio
+async def test_bulk_books_not_found_preserves_request_order(async_client):
+    """notFound is ordered by request order, not by any sort of the ASIN
+    strings -- pinned with two missing ASINs that would come out reversed if
+    something sorted them alphabetically."""
+    with patch("app.api.routes.books.router.get_books_by_asins", new_callable=AsyncMock) as mock:
+        mock.return_value = []
+        response = await async_client.get("/book?asins=B000000005,B000000001")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["notFound"] == ["B000000005", "B000000001"]
+
+
+@pytest.mark.asyncio
+async def test_bulk_books_duplicate_missing_asin_in_different_case_listed_once_per_occurrence(async_client):
+    """The same ASIN sent twice in different casings, both missing, is a
+    deliberate choice: each occurrence is echoed in its own original form
+    rather than deduplicated, so the caller sees their request reflected
+    exactly rather than silently collapsed."""
+    with patch("app.api.routes.books.router.get_books_by_asins", new_callable=AsyncMock) as mock:
+        mock.return_value = []
+        response = await async_client.get("/book?asins=b000000001,B000000001")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["notFound"] == ["b000000001", "B000000001"]
+
+
 def test_book_path_asin_parameter_keeps_its_audible_asin_description_in_openapi():
     """The factory exists so each router's wording survives rather than
     collapsing into one shared string -- pin this route's exact parameter

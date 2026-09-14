@@ -7,6 +7,7 @@ import os
 import queue
 import sys
 import time
+import unicodedata
 
 # Local
 from app.core.config import get_settings
@@ -443,6 +444,69 @@ def setup_logging() -> logging.Logger:
             logger.warning(f"Axiom logging failed to initialize: {e}")
 
     return logger
+
+
+# An allowlisted key earns its value logged verbatim only if that value looks
+# like the short token these params take -- a region code, a number, an enum, a
+# facet name in any language.
+#
+# Judged by Unicode category rather than by a list of permitted characters,
+# because the vocabulary being judged is Audible's and it grows without notice.
+# A literal list has to be extended for every taxonomy a marketplace adds, and
+# the character it misses next is region-specific and invisible from a US test
+# run. Measured across all eleven live taxonomies, an ASCII-shaped rule lost
+# 83% of top-level genre names in us/uk/ca/au/in to "&" alone, all 402 jp names
+# built on "・", the fr and it names spelled with U+2019 instead of the ASCII
+# apostrophe, and every Devanagari, Tamil and Thai name whose letters carry a
+# combining mark -- those redact on their letters, with no punctuation in them
+# at all. Letters, marks, numbers, punctuation, symbols and spaces are what a
+# catalogue name is made of in every script, so that is what the rule names.
+_SAFE_VALUE_CATEGORIES = frozenset({
+    "Lu", "Ll", "Lt", "Lm", "Lo",              # letters, every script
+    "Mn", "Mc", "Me",                          # combining marks
+    "Nd", "Nl", "No",                          # numbers
+    "Pc", "Pd", "Ps", "Pe", "Pi", "Pf", "Po",  # punctuation
+    "Sc", "Sk", "Sm", "So",                    # symbols
+    "Zs",                                      # spaces, ASCII and ideographic
+})
+
+# Excluded by name from the punctuation and symbol categories above, because
+# they are how a whole second query rides inside one value: in "?region=us;
+# Jane+Doe" the whole of "us;Jane Doe" is one param to parse_qsl, which has not
+# split on ";" since CVE-2021-23336, so without this the typed name is logged
+# verbatim.
+_UNSAFE_VALUE_CHARS = frozenset(";=")
+
+# The categories the set above leaves out are left out deliberately: the
+# control and format categories, which is where CR, LF, NUL and U+0085 live,
+# and the line and paragraph separators U+2028 and U+2029. None of them belongs
+# in a catalogue name, and any of them would put part of a value on a log line
+# of its own. urlencode percent-encodes them downstream regardless; the
+# guarantee is held here as well rather than borrowed from a later caller.
+
+# The longest of 6,787 genre names measured across the eleven marketplaces is
+# 62 characters, so the bound costs no real vocabulary. It counts decoded
+# characters rather than bytes, so a name in a multi-byte script is not charged
+# for its encoding.
+_MAX_VALUE_LENGTH = 64
+
+
+def is_safe_log_value(value: str) -> bool:
+    """
+    True if a value is short catalogue vocabulary rather than caller text.
+
+    Public rather than local to this module: it is the one place the
+    value-safety judgment is made, and every other log field that could embed
+    caller-supplied text -- a cache key built from a query param, for one --
+    calls this rather than growing its own copy of the same rule.
+    """
+    if len(value) > _MAX_VALUE_LENGTH:
+        return False
+    return all(
+        ch not in _UNSAFE_VALUE_CHARS
+        and unicodedata.category(ch) in _SAFE_VALUE_CATEGORIES
+        for ch in value
+    )
 
 
 def get_logger() -> logging.Logger:

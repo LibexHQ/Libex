@@ -10,6 +10,44 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.22.0]
+
+### Changed
+- **The seeder's release-window refresh now follows a book for 30 days past
+  release instead of dropping it from rotation the moment it comes out.**
+  With `SEEDER_REFRESH_ENABLED` on (it defaults to off), the refresh phase
+  used to re-fetch only not-yet-released pre-orders, on a cadence that
+  tightened as the release date approached, then stopped watching a title
+  the instant it released, on the assumption that a released book is a
+  settled one. It usually isn't quite yet: a pre-order's runtime is often an
+  estimate, its cover can be a placeholder, and its narrator credits can
+  still be incomplete for a while after the title is actually out. The
+  cadence now runs on the far side of release too, at the same tightness it
+  had approaching it: daily for the first 3 days after release, every 3 days
+  from 3 to 14 days out, every 7 days from 14 to 30 days out, and a book
+  leaves the window for good once it is more than 30 days past release — a
+  book exactly 30 days out is already excluded, not caught at the edge.
+  Pre-release tiers are unchanged. A book only re-enters on the post-release
+  side if Libex already had it on record before it released; one first seen
+  after its own release date arrived with settled data already and gets
+  nothing further from this. Turning the flag on now means noticeably more
+  outbound Audible requests and a wider set of books touched by each refresh
+  cycle than before, scoped to whichever regions `SEEDER_REGIONS` names
+  (default `us`).
+
+  One consequence worth knowing separately, because it reads like a chapters
+  fix and isn't one: 1.19.5 already re-admits a book for a second chapter
+  check once its release date has passed, if the first check happened while
+  it was still a pre-order — but until now the only thing that ever reached
+  a book in that state was the backfill script, run by hand. The seeder's
+  refresh cycle is a second path into that same re-admission, since every
+  book the window carries past release is exactly the shape it looks for, so
+  a book that passes through the window gets its one extra chapter check
+  automatically instead of waiting on a manual backfill run. It does nothing
+  for the existing backlog of books that went permanently chapterless before
+  this window existed — they are already past the 30-day mark and will never
+  re-enter it — those still need the manual backfill script.
+
 ## [1.21.0]
 
 ### Added

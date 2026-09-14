@@ -5,7 +5,6 @@ CORS and request validation.
 
 # Standard library
 from collections.abc import Callable
-import re
 import time
 import unicodedata
 import urllib.parse
@@ -22,6 +21,7 @@ from starlette.requests import Request
 from app.services.audible.client import validate_region
 
 # Core
+from app.core.asin import is_valid_asin, normalise_asin
 from app.core.logging import get_logger
 from app.core.exceptions import NotFoundException, RegionException
 from app.core.migration_notice import MigrationNotice, MIGRATION_HEADER_NAMES, is_new_host_request
@@ -39,29 +39,6 @@ logger = get_logger()
 # ============================================================
 # INPUT VALIDATION
 # ============================================================
-
-ASIN_PATTERN = re.compile(r'^[A-Z0-9]{10}$')
-
-
-def normalise_asin(asin: str) -> str:
-    """
-    Returns the form of an ASIN that Audible and the database both answer to.
-
-    Audible's catalogue is case-sensitive on the ASIN. A lowercase key returns
-    the bare-ASIN shape Libex reads as a miss rather than the product, and
-    stored keys are uppercase, so the database fallback misses the same way --
-    a book that exists is reported absent. Callers may send either case, since
-    is_valid_asin has always accepted both, which makes uppercasing the step
-    that has to happen before the value is used for anything. It lives here
-    beside the validator so no route has to remember it.
-    """
-    return asin.upper()
-
-
-def is_valid_asin(asin: str) -> bool:
-    """Validates that a string matches Audible ASIN format."""
-    return bool(ASIN_PATTERN.fullmatch(normalise_asin(asin)))
-
 
 def valid_asin(description: str) -> Callable[[str], str]:
     """

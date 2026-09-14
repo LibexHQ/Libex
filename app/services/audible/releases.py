@@ -40,7 +40,6 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Core
-from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.core.utils import seconds_until_utc_midnight
 
@@ -58,7 +57,6 @@ from app.services.db.persist_queue import persist_books_background
 from app.services.db.writer import upsert_genres, reconcile_genres
 from app.services.cache import manager as cache
 
-settings = get_settings()
 logger = get_logger()
 
 _PAGE_SIZE = 50

@@ -14,8 +14,8 @@ import time
 from dataclasses import dataclass
 
 # Core
+from app.core.asin import is_valid_asin
 from app.core.logging import get_logger
-from app.core.middleware import is_valid_asin
 
 # Services
 from app.services.audible.client import (

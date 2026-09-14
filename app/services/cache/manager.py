@@ -42,8 +42,7 @@ from app.db.models import Cache
 
 # Core
 from app.core.config import get_settings
-from app.core.logging import get_logger
-from app.core.middleware import is_safe_log_value
+from app.core.logging import get_logger, is_safe_log_value
 from app.services.audible.client import VALID_REGIONS
 
 settings = get_settings()

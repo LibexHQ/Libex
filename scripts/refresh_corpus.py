@@ -103,7 +103,7 @@ from app.db.models import Book
 from app.db.session import AsyncSessionFactory, engine
 
 # Core
-from app.core.exceptions import NotFoundException
+from libex_core.exceptions import NotFoundException
 from app.core.logging import get_logger, setup_logging
 
 # Services

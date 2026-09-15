@@ -738,7 +738,7 @@ async def test_get_books_by_asins_raises_audible_api_exception_when_nothing_back
     that these books do not exist -- the caller must see AudibleAPIException,
     not a bare empty list or NotFoundException."""
     from app.services.audible.books import get_books_by_asins
-    from app.core.exceptions import AudibleAPIException
+    from libex_core.exceptions import AudibleAPIException
 
     mock_session = AsyncMock()
 
@@ -987,7 +987,7 @@ async def test_get_books_by_asins_not_found_chunk_does_not_discard_other_chunks(
     not discard results already fetched from other chunks -- the old
     sequential code discarded every already-fetched chunk on any failure."""
     from app.services.audible.books import get_books_by_asins
-    from app.core.exceptions import NotFoundException
+    from libex_core.exceptions import NotFoundException
 
     mock_session = AsyncMock()
     good_asins = [f"B0GOOD{i:03d}" for i in range(50)]
@@ -1041,7 +1041,7 @@ async def test_get_books_by_asins_not_found_and_transient_together_backstop_scop
     absence, must never appear even though the same DB call would have
     handed it back if the scoping were wrong."""
     from app.services.audible.books import get_books_by_asins
-    from app.core.exceptions import NotFoundException
+    from libex_core.exceptions import NotFoundException
 
     mock_session = AsyncMock()
     good_asins = [f"B0GOOD{i:03d}" for i in range(50)]
@@ -1136,7 +1136,7 @@ async def test_get_books_by_asins_partial_shortfall_warning_fires_on_not_found_a
     """The 'Partial hydration shortfall' warning fires when the not-found
     bucket alone is non-empty, with zero transient failures."""
     from app.services.audible.books import get_books_by_asins
-    from app.core.exceptions import NotFoundException
+    from libex_core.exceptions import NotFoundException
 
     mock_session = AsyncMock()
     good_asins = [f"B0GOOD{i:03d}" for i in range(50)]
@@ -1691,7 +1691,7 @@ async def test_get_chapters_raises_audible_api_exception_when_nothing_backstops_
     that is silence, not Audible confirming this book has no chapters, so
     the caller must see AudibleAPIException, not NotFoundException."""
     from app.services.audible.books import get_chapters
-    from app.core.exceptions import AudibleAPIException
+    from libex_core.exceptions import AudibleAPIException
 
     mock_session = AsyncMock()
 
@@ -1719,7 +1719,7 @@ async def test_get_chapters_logs_warning_before_raising(raised, expected_upstrea
     raised exception's own value when it is an AudibleAPIException, or None
     for any other exception type."""
     from app.services.audible.books import get_chapters
-    from app.core.exceptions import AudibleAPIException
+    from libex_core.exceptions import AudibleAPIException
 
     exc = (
         AudibleAPIException("upstream 503", upstream_status=503)
@@ -1789,7 +1789,7 @@ async def test_fetch_and_store_chapters_none_when_no_chapter_info():
 async def test_fetch_and_store_chapters_not_found_marks_checked():
     """A 404 (NotFoundException) is terminal: marks checked, returns 'not_found'."""
     from app.services.audible.books import fetch_and_store_chapters
-    from app.core.exceptions import NotFoundException
+    from libex_core.exceptions import NotFoundException
 
     mock_session = AsyncMock()
 

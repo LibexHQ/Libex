@@ -7,7 +7,7 @@ Ensures exceptions carry correct status codes and messages.
 import pytest
 
 # Local
-from app.core.exceptions import (
+from libex_core.exceptions import (
     LibexException,
     NotFoundException,
     AudibleAPIException,

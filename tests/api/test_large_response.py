@@ -16,7 +16,7 @@ from fastapi import Response
 from pydantic import TypeAdapter
 
 # Local
-from app.api.routes.books.schemas import BookResponse
+from libex_core.models import BookResponse
 from app.api.routes.large_response import (
     LARGE_RESPONSE_THREAD_THRESHOLD,
     build_large_list_response,

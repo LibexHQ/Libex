@@ -15,7 +15,7 @@ from app.db.session import get_session
 
 # Routes
 from app.api.routes.audible_outage import outage_as_not_found
-from app.api.routes.books.schemas import BookResponse, AbsBookResponse, AbsSearchResponse, AbsSeriesRef
+from app.api.routes.books.schemas import AbsBookResponse, AbsSearchResponse, AbsSeriesRef
 from app.api.routes.cache_param import CacheInertParam, CacheStandardParam, apply_cache_control
 
 # Services
@@ -24,7 +24,8 @@ from app.services.audible.client import validate_region
 
 # Core
 from app.core.middleware import valid_region
-from app.core.exceptions import NotFoundException, RegionException
+from libex_core.exceptions import NotFoundException, RegionException
+from libex_core.models import BookResponse
 
 router = APIRouter(tags=["Search"])
 

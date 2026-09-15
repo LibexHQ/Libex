@@ -41,7 +41,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 # Local
-from app.core.exceptions import AudibleAPIException, NotFoundException
+from libex_core.exceptions import AudibleAPIException, NotFoundException
 from app.services.db import writer
 from scripts.backfill_chapters import (
     _BackoffWindow,

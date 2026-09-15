@@ -17,14 +17,14 @@ from app.db.session import get_session
 
 # Routes
 from app.api.routes.audible_outage import outage_as_not_found
-from app.api.routes.books.schemas import BookResponse
 from app.api.routes.cache_param import CacheInertParam, apply_cache_control
 
 # Services
 from app.services.audible.search import search
 
 # Core
-from app.core.exceptions import NotFoundException
+from libex_core.exceptions import NotFoundException
+from libex_core.models import BookResponse
 from app.core.middleware import valid_region
 
 router = APIRouter(prefix="/narrator", tags=["Narrators"])

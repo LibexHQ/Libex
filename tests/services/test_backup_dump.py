@@ -702,7 +702,7 @@ def test_undecodable_bytes_become_replacement_characters_rather_than_an_exceptio
 def test_dump_errors_are_not_on_the_api_exception_hierarchy():
     """A LibexException carries a .message the middleware copies into an HTTP
     response body. Nothing in this package may be able to reach that path."""
-    from app.core.exceptions import LibexException
+    from libex_core.exceptions import LibexException
 
     for exception in (DumpError, PrecheckError, VerificationError):
         assert not issubclass(exception, LibexException)

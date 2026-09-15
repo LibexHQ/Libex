@@ -13,7 +13,7 @@ from httpx import AsyncClient, ASGITransport
 
 # Local
 from app.main import app
-from app.core.exceptions import AudibleAPIException, NotFoundException
+from libex_core.exceptions import AudibleAPIException, NotFoundException
 from app.core.response_headers import SOURCE_AUDIBLE, SOURCE_CACHE, record_source, record_source_keys
 
 MOCK_SERIES = {

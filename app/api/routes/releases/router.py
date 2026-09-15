@@ -17,7 +17,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_session
 
 # Routes
-from app.api.routes.books.schemas import BookResponse
 from app.api.routes.sort_params import BookSortField, SortOrder
 from app.api.routes.filter_params import LiveBookFilters
 from app.api.routes.release_params import ReleaseWindow
@@ -29,7 +28,8 @@ from app.services.filtering import filter_dicts
 
 # Core
 from app.core.middleware import valid_region
-from app.core.exceptions import NotFoundException
+from libex_core.exceptions import NotFoundException
+from libex_core.models import BookResponse
 
 router = APIRouter(tags=["Releases"])
 

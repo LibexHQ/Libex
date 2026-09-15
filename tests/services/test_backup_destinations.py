@@ -770,6 +770,6 @@ def test_the_reply_code_is_read_and_the_text_is_not(message, expected):
 
 
 def test_destination_error_is_not_on_the_api_exception_hierarchy():
-    from app.core.exceptions import LibexException
+    from libex_core.exceptions import LibexException
 
     assert not issubclass(DestinationError, LibexException)

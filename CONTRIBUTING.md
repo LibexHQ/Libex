@@ -37,7 +37,7 @@ refactor: Extract book normalization into helper
 Every PR must pass both of these locally before pushing:
 
 ```bash
-ruff check app/ migrations/ scripts/ tests/ --ignore E501
+ruff check app/ libex_core/ migrations/ scripts/ tests/ --ignore E501
 pytest tests/ -v
 ```
 
@@ -81,7 +81,7 @@ All response field names use **camelCase** to match AudiMeta's `BookDto` format.
 
 Examples: `releaseDate`, `lengthMinutes`, `imageUrl`, `whisperSync`, `contentDeliveryType`, `isVvab`, `bookFormat`
 
-Response schemas live in `app/api/routes/<resource>/schemas.py`.
+The book, chapter and series response models (`BookResponse`, `BulkBookResponse`, `ChapterResponse`, `SeriesResponse` and the objects nested in them) live in `libex_core/models.py`. The rest stay in `app/api/routes/<resource>/schemas.py`, such as `AuthorResponse`, `NarratorProfileResponse`, the search query parameters and the Audiobookshelf format.
 
 ---
 
@@ -90,7 +90,7 @@ Response schemas live in `app/api/routes/<resource>/schemas.py`.
 ```bash
 git checkout -b feat/my-feature
 # make changes
-ruff check app/ migrations/ scripts/ tests/ --ignore E501
+ruff check app/ libex_core/ migrations/ scripts/ tests/ --ignore E501
 pytest tests/ -v
 git add <files>
 git commit -m "feat: description"

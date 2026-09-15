@@ -11,7 +11,7 @@ import pytest
 
 # Local
 from app.services.audible.series import _normalize_series
-from app.core.utils import strip_html
+from libex_core.text import strip_html
 
 
 # ============================================================
@@ -174,7 +174,7 @@ async def test_get_series_writes_to_db_on_success():
 @pytest.mark.asyncio
 async def test_get_series_raises_audible_api_exception_when_nothing_backstops_it():
     from app.services.audible.series import get_series
-    from app.core.exceptions import AudibleAPIException
+    from libex_core.exceptions import AudibleAPIException
 
     mock_session = AsyncMock()
 
@@ -202,7 +202,7 @@ async def test_get_series_logs_warning_before_raising(raised, expected_upstream_
     raised exception's own value when it is an AudibleAPIException, or None
     for any other exception type."""
     from app.services.audible.series import get_series
-    from app.core.exceptions import AudibleAPIException
+    from libex_core.exceptions import AudibleAPIException
 
     exc = (
         AudibleAPIException("upstream 503", upstream_status=503)
@@ -232,7 +232,7 @@ async def test_get_series_logs_warning_before_raising(raised, expected_upstream_
 @pytest.mark.asyncio
 async def test_get_series_books_raises_audible_api_exception_when_nothing_backstops_it():
     from app.services.audible.series import get_series_books
-    from app.core.exceptions import AudibleAPIException
+    from libex_core.exceptions import AudibleAPIException
 
     mock_session = AsyncMock()
 
@@ -259,7 +259,7 @@ async def test_get_series_books_logs_warning_before_raising(raised, expected_ups
     raised exception's own value when it is an AudibleAPIException, or None
     for any other exception type."""
     from app.services.audible.series import get_series_books
-    from app.core.exceptions import AudibleAPIException
+    from libex_core.exceptions import AudibleAPIException
 
     exc = (
         AudibleAPIException("upstream 502", upstream_status=502)
@@ -291,7 +291,7 @@ async def test_search_series_raises_audible_api_exception_on_total_failure():
     back to, must raise -- not return an empty list a caller could confuse
     with a genuine zero-result search."""
     from app.services.audible.series import search_series
-    from app.core.exceptions import AudibleAPIException
+    from libex_core.exceptions import AudibleAPIException
 
     mock_session = AsyncMock()
 
@@ -317,7 +317,7 @@ async def test_search_series_outer_failure_logs_warning_before_raising(raised, e
     the raised exception's own value, and the caller-authored name must
     never appear in the log call."""
     from app.services.audible.series import search_series
-    from app.core.exceptions import AudibleAPIException
+    from libex_core.exceptions import AudibleAPIException
 
     exc = (
         AudibleAPIException("upstream 500", upstream_status=500)
@@ -358,7 +358,7 @@ async def test_search_series_skips_an_unreachable_related_series_and_keeps_the_r
     is logged and skipped, and the remaining, reachable series still come
     back."""
     from app.services.audible.series import search_series
-    from app.core.exceptions import AudibleAPIException
+    from libex_core.exceptions import AudibleAPIException
 
     mock_session = AsyncMock()
     reachable = {

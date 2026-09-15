@@ -377,7 +377,7 @@ def test_retention_unsafe_is_not_on_the_api_exception_hierarchy():
     HTTP response body. Nothing in the backup package may be able to reach
     that path, and inheritance is the only way it could.
     """
-    from app.core.exceptions import LibexException
+    from libex_core.exceptions import LibexException
 
     assert not issubclass(RetentionUnsafe, LibexException)
 

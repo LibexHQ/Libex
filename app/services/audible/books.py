@@ -50,8 +50,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import Book
 
 # Core
-from app.core.asin import is_valid_asin
-from app.core.exceptions import NotFoundException
+from libex_core.asin import is_valid_asin
+from libex_core.exceptions import NotFoundException
+from libex_core.text import strip_html, strip_image_size_suffix
 from app.core.logging import get_logger
 from app.core.response_headers import (
     REASON_HYDRATION_DEADLINE,
@@ -65,7 +66,6 @@ from app.core.response_headers import (
     record_source,
     record_source_keys,
 )
-from app.core.utils import strip_html, strip_image_size_suffix
 
 # Services
 from app.services.audible.client import (

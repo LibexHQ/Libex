@@ -285,7 +285,7 @@ async def test_get_author_raises_audible_api_exception_when_nothing_backstops_it
     author, that is silence -- not Audible confirming the author does not
     exist -- so the caller must see AudibleAPIException."""
     from app.services.audible.authors import get_author
-    from app.core.exceptions import AudibleAPIException
+    from libex_core.exceptions import AudibleAPIException
 
     mock_session = AsyncMock()
 
@@ -313,7 +313,7 @@ async def test_get_author_logs_warning_before_raising(raised, expected_upstream_
     raised exception's own value when it is an AudibleAPIException, or None
     for any other exception type."""
     from app.services.audible.authors import get_author
-    from app.core.exceptions import AudibleAPIException
+    from libex_core.exceptions import AudibleAPIException
 
     exc = (
         AudibleAPIException("upstream 503", upstream_status=503)
@@ -499,7 +499,7 @@ async def test_get_author_books_by_name_raises_audible_api_exception_on_failure(
     AudibleAPIException, not NotFoundException -- Libex could not find out,
     Audible never got the chance to say no."""
     from app.services.audible.authors import get_author_books_by_name
-    from app.core.exceptions import AudibleAPIException
+    from libex_core.exceptions import AudibleAPIException
 
     mock_session = AsyncMock()
 
@@ -528,7 +528,7 @@ async def test_get_author_books_by_name_logs_warning_before_raising(raised, expe
     exception's own value, and the caller-authored name must never appear
     in the log call -- not in the message, not in any extra value."""
     from app.services.audible.authors import get_author_books_by_name
-    from app.core.exceptions import AudibleAPIException
+    from libex_core.exceptions import AudibleAPIException
 
     exc = (
         AudibleAPIException("upstream 502", upstream_status=502)
@@ -564,7 +564,7 @@ async def test_get_author_books_by_name_still_raises_not_found_on_a_genuine_empt
     """A clean empty result (Audible answered, no books) must still raise
     NotFoundException, unaffected by the outage-contract change above."""
     from app.services.audible.authors import get_author_books_by_name
-    from app.core.exceptions import NotFoundException
+    from libex_core.exceptions import NotFoundException
 
     mock_session = AsyncMock()
 
@@ -581,7 +581,7 @@ async def test_search_authors_raises_audible_api_exception_on_total_failure():
     """The suggestions call itself failing must raise, not silently return
     an empty list a caller could mistake for a genuine zero-result search."""
     from app.services.audible.authors import search_authors
-    from app.core.exceptions import AudibleAPIException
+    from libex_core.exceptions import AudibleAPIException
 
     mock_session = AsyncMock()
 
@@ -609,7 +609,7 @@ async def test_search_authors_outer_failure_logs_warning_before_raising(raised, 
     the raised exception's own value, and the caller-authored name must
     never appear in the log call."""
     from app.services.audible.authors import search_authors
-    from app.core.exceptions import AudibleAPIException
+    from libex_core.exceptions import AudibleAPIException
 
     exc = (
         AudibleAPIException("upstream 500", upstream_status=500)
@@ -646,7 +646,7 @@ async def test_search_authors_skips_an_unreachable_suggested_author_and_keeps_th
     already has other hits to show -- it is logged and skipped, and the
     reachable author still comes back."""
     from app.services.audible.authors import search_authors
-    from app.core.exceptions import AudibleAPIException
+    from libex_core.exceptions import AudibleAPIException
 
     mock_session = AsyncMock()
     reachable = {
@@ -2732,7 +2732,7 @@ async def test_get_author_books_all_legitimately_empty_raises_not_found_without_
     NotFoundException raised for it must propagate as-is — not get swallowed
     into the generic 'Audible unavailable' message."""
     from app.services.audible.authors import get_author_books
-    from app.core.exceptions import NotFoundException
+    from libex_core.exceptions import NotFoundException
 
     mock_session = AsyncMock()
     empty_screen = _screen_result([], pages_fetched=0)
@@ -2775,7 +2775,7 @@ async def test_get_author_books_transient_failure_all_empty_raises_audible_api_e
     the honest type is AudibleAPIException, not NotFoundException; see
     _walk_author_books' own degraded-path raise."""
     from app.services.audible.authors import get_author_books
-    from app.core.exceptions import AudibleAPIException
+    from libex_core.exceptions import AudibleAPIException
 
     mock_session = AsyncMock()
     empty_screen = _screen_result([], pages_fetched=0)
@@ -2835,7 +2835,7 @@ async def test_get_author_books_releases_session_again_on_empty_union_fallback()
     NotFoundException raised right after it. Same call-count-pin caveat as
     the sibling test above."""
     from app.services.audible.authors import get_author_books
-    from app.core.exceptions import NotFoundException
+    from libex_core.exceptions import NotFoundException
 
     mock_session = AsyncMock()
     empty_screen = _screen_result([], pages_fetched=0)
@@ -4168,7 +4168,7 @@ async def test_resolve_author_name_returns_none_on_contributor_404():
     """A confirmed Audible 404 on the contributor is the terminal
     'no name on record' case and must return None, not raise."""
     from app.services.audible.authors import _resolve_author_name
-    from app.core.exceptions import NotFoundException
+    from libex_core.exceptions import NotFoundException
 
     mock_session = AsyncMock()
     with patch("app.services.audible.authors.get_author_from_db", new=AsyncMock(return_value=None)), \
@@ -4199,7 +4199,7 @@ async def test_resolve_author_name_propagates_non_404_exception():
     caller so get_author_books can set name_error, rather than collapsing
     into the same silent None as a genuine no-name-on-record author."""
     from app.services.audible.authors import _resolve_author_name
-    from app.core.exceptions import AudibleAPIException
+    from libex_core.exceptions import AudibleAPIException
 
     mock_session = AsyncMock()
     with patch("app.services.audible.authors.get_author_from_db", new=AsyncMock(return_value=None)), \
@@ -4402,7 +4402,7 @@ async def test_get_author_books_total_failure_logs_warning_before_raising():
     failing is a degraded source, not Audible confirming an empty catalog;
     see _walk_author_books' own degraded-path raise."""
     from app.services.audible.authors import get_author_books
-    from app.core.exceptions import AudibleAPIException
+    from libex_core.exceptions import AudibleAPIException
 
     mock_session = AsyncMock()
     empty_screen = _screen_result(
@@ -4439,7 +4439,7 @@ async def test_fetch_author_books_by_screen_page_error_distinguishes_exception_t
     make a genuine code defect indistinguishable from an upstream failure
     downstream in logs."""
     from app.services.audible.authors import _fetch_author_books_by_screen
-    from app.core.exceptions import AudibleAPIException, NotFoundException
+    from libex_core.exceptions import AudibleAPIException, NotFoundException
 
     cases = [
         (AudibleAPIException("upstream 502"), "AudibleAPIException: upstream 502"),
@@ -4782,7 +4782,7 @@ async def test_fetch_author_books_by_screen_every_warning_line_carries_author_as
     from app.services.audible.authors import (
         get_author_books, _fetch_author_books_by_screen,
     )
-    from app.core.exceptions import NotFoundException
+    from libex_core.exceptions import NotFoundException
 
     asin = "B000TARGET"
     collected_extras = []

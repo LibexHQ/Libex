@@ -15,8 +15,8 @@ from app.services.audible.client import (
     VALID_REGIONS,
 )
 
-from app.core.asin import is_valid_asin, normalise_asin
-from app.core.exceptions import NotFoundException, RegionException
+from libex_core.asin import is_valid_asin, normalise_asin
+from libex_core.exceptions import NotFoundException, RegionException
 from app.core.middleware import valid_asin
 
 
@@ -379,7 +379,7 @@ async def test_request_error_with_empty_message_includes_type():
     import httpx
     from unittest.mock import patch, AsyncMock
     from app.services.audible.client import audible_get
-    from app.core.exceptions import AudibleAPIException
+    from libex_core.exceptions import AudibleAPIException
 
     # httpx.ConnectError("") stringifies to "" — the case that produced the
     # blank "Audible API request failed: " in the wild.
@@ -400,7 +400,7 @@ async def test_request_error_with_empty_message_includes_type():
 
 def test_upstream_status_of_returns_the_status_from_an_audible_api_exception():
     from app.services.audible.client import upstream_status_of
-    from app.core.exceptions import AudibleAPIException
+    from libex_core.exceptions import AudibleAPIException
 
     exc = AudibleAPIException("Audible API returned 503 for https://api.audible.com/x", upstream_status=503)
 
@@ -409,7 +409,7 @@ def test_upstream_status_of_returns_the_status_from_an_audible_api_exception():
 
 def test_upstream_status_of_none_when_the_audible_api_exception_carried_none():
     from app.services.audible.client import upstream_status_of
-    from app.core.exceptions import AudibleAPIException
+    from libex_core.exceptions import AudibleAPIException
 
     exc = AudibleAPIException("Audible API timed out: TimeoutException for https://api.audible.com/x")
 
@@ -441,7 +441,7 @@ def test_as_audible_failure_uses_the_sites_own_message_not_str_exc():
     an AudibleAPIException, whose own message is built from an internal
     Audible URL that has no business reaching a response body."""
     from app.services.audible.client import as_audible_failure
-    from app.core.exceptions import AudibleAPIException
+    from libex_core.exceptions import AudibleAPIException
 
     exc = AudibleAPIException("Audible API returned 502 for https://api.audible.com/internal")
     result = as_audible_failure(exc, "Audible unavailable and no cached data found")
@@ -452,7 +452,7 @@ def test_as_audible_failure_uses_the_sites_own_message_not_str_exc():
 
 def test_as_audible_failure_carries_upstream_status_from_an_audible_api_exception():
     from app.services.audible.client import as_audible_failure
-    from app.core.exceptions import AudibleAPIException
+    from libex_core.exceptions import AudibleAPIException
 
     exc = AudibleAPIException("Audible API returned 503 for https://api.audible.com/x", upstream_status=503)
     result = as_audible_failure(exc, "Audible unavailable and no cached data found")
@@ -466,7 +466,7 @@ def test_as_audible_failure_upstream_status_none_when_the_audible_api_exception_
     AudibleAPIException carries upstream_status=None already -- that has to
     survive the rewrite, not silently become a different kind of None."""
     from app.services.audible.client import as_audible_failure
-    from app.core.exceptions import AudibleAPIException
+    from libex_core.exceptions import AudibleAPIException
 
     exc = AudibleAPIException("Audible API timed out: TimeoutException for https://api.audible.com/x")
     result = as_audible_failure(exc, "Audible unavailable and no cached data found")
@@ -480,7 +480,7 @@ def test_as_audible_failure_upstream_status_none_for_a_non_audible_exception():
     transport failure is, and gets upstream_status left at None since there
     is no HTTP response to attribute it to."""
     from app.services.audible.client import as_audible_failure
-    from app.core.exceptions import AudibleAPIException
+    from libex_core.exceptions import AudibleAPIException
 
     result = as_audible_failure(RuntimeError("Audible down"), "Audible unavailable and no cached data found")
 
@@ -494,7 +494,7 @@ def test_as_audible_failure_always_returns_a_new_exception_not_the_original():
     always get an AudibleAPIException carrying the site's own message, even
     when exc already was one."""
     from app.services.audible.client import as_audible_failure
-    from app.core.exceptions import AudibleAPIException
+    from libex_core.exceptions import AudibleAPIException
 
     original = AudibleAPIException("Audible API returned 500 for https://api.audible.com/x", upstream_status=500)
     result = as_audible_failure(original, "Audible search failed")
@@ -560,7 +560,7 @@ async def test_audible_get_exhausts_retries_and_raises():
     never retried indefinitely."""
     from unittest.mock import AsyncMock, patch
     from app.services.audible.client import audible_get, AUDIBLE_MAX_ATTEMPTS
-    from app.core.exceptions import AudibleAPIException
+    from libex_core.exceptions import AudibleAPIException
 
     get_mock = AsyncMock(return_value=_mock_response(429))
 
@@ -587,7 +587,7 @@ async def test_audible_get_404_is_never_retried():
     nothing."""
     from unittest.mock import AsyncMock, patch
     from app.services.audible.client import audible_get
-    from app.core.exceptions import NotFoundException
+    from libex_core.exceptions import NotFoundException
 
     get_mock = AsyncMock(return_value=_mock_response(404))
 
@@ -606,7 +606,7 @@ async def test_audible_get_other_4xx_not_retried():
     immediately on the first attempt, never retried."""
     from unittest.mock import AsyncMock, patch
     from app.services.audible.client import audible_get
-    from app.core.exceptions import AudibleAPIException
+    from libex_core.exceptions import AudibleAPIException
 
     get_mock = AsyncMock(return_value=_mock_response(400))
 
@@ -631,7 +631,7 @@ async def test_audible_get_timeout_not_retried():
     import httpx
     from unittest.mock import AsyncMock, patch
     from app.services.audible.client import audible_get
-    from app.core.exceptions import AudibleAPIException
+    from libex_core.exceptions import AudibleAPIException
 
     get_mock = AsyncMock(side_effect=httpx.TimeoutException("timed out"))
 
@@ -656,7 +656,7 @@ async def test_audible_get_request_error_not_retried():
     import httpx
     from unittest.mock import AsyncMock, patch
     from app.services.audible.client import audible_get
-    from app.core.exceptions import AudibleAPIException
+    from libex_core.exceptions import AudibleAPIException
 
     get_mock = AsyncMock(side_effect=httpx.ConnectError("refused"))
 

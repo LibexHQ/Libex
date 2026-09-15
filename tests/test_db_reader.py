@@ -361,7 +361,7 @@ async def test_get_book_from_db_null_plans_row_satisfies_the_response_model():
     """The reader's output for a NULL-plans row must validate against the
     response model that the route declares — the reader returning [] is only
     half the contract."""
-    from app.api.routes.books.schemas import BookResponse
+    from libex_core.models import BookResponse
 
     book = _make_book()
     book.plans = None

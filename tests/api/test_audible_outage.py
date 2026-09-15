@@ -13,7 +13,7 @@ import pytest
 
 # Local
 from app.api.routes.audible_outage import outage_as_not_found
-from app.core.exceptions import AudibleAPIException, NotFoundException
+from libex_core.exceptions import AudibleAPIException, NotFoundException
 
 
 async def _raise(exc):

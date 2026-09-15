@@ -14,7 +14,7 @@ from httpx import AsyncClient, ASGITransport
 # Local
 from app.main import app
 from app.api.routes.large_response import LARGE_RESPONSE_THREAD_THRESHOLD
-from app.core.exceptions import AudibleAPIException, NotFoundException
+from libex_core.exceptions import AudibleAPIException, NotFoundException
 from app.core.response_headers import (
     REASON_HYDRATION_FAILED,
     SOURCE_AUDIBLE,

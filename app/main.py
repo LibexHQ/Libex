@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 # Core
 from app.core.config import get_settings, check_retired_env_vars
 from app.core.logging import setup_logging, stop_axiom_listener
-from app.core.exceptions import LibexException
+from libex_core.exceptions import LibexException
 from app.core.middleware import setup_middleware
 from app.core.migration_notice import build_migration_notice, is_new_host_request, MIGRATION_HEADER_NAMES
 from app.core.response_headers import HEADER_REQUEST_ID, EXPOSED_HEADER_NAMES

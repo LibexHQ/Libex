@@ -79,7 +79,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.db.models import Book, Track
 
 # Core
-from app.core.exceptions import AudibleAPIException, NotFoundException
+from libex_core.exceptions import AudibleAPIException, NotFoundException
 from app.core.logging import get_logger, setup_logging
 
 # Services

@@ -52,7 +52,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 # Core
-from app.core.exceptions import NotFoundException
+from libex_core.exceptions import NotFoundException
 
 # Services
 from app.services import seeder

@@ -14,14 +14,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 # Local
 from app.api.routes.authors.schemas import AuthorResponse
-from app.api.routes.books.schemas import BookResponse, ChapterResponse
 from app.api.routes.large_response import build_large_list_response
 from app.api.routes.narrators.schemas import NarratorProfileResponse
-from app.api.routes.series.schemas import SeriesResponse
-from app.core.exceptions import NotFoundException
 from app.core.middleware import valid_asin, valid_region
 from app.db.session import get_session
 from app.services.audible.client import validate_region
+from libex_core.exceptions import NotFoundException
+from libex_core.models import BookResponse, ChapterResponse, SeriesResponse
 from app.api.routes.db.badge import badge_router
 from app.api.routes.db.filters import (
     book_filters,

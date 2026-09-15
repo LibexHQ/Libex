@@ -10,8 +10,14 @@
 # local file reaching it is not recoverable by deleting it afterwards.
 #
 # .env is here for the same structural reason and is the more immediate one:
-# it holds real credentials, sits in the repo root, and `COPY . .` would bake
-# it into a layer.
+# it holds real credentials, and `COPY . .` would bake it into a layer. The
+# deny-all keeps the repo-root .env out, but it cannot reach a .env inside a
+# directory admitted below, so .env and .env.* are also re-excluded by
+# pattern at every depth at the bottom of this file. Only the repo-root
+# .env.example is admitted back: a tracked template of defaults and
+# placeholders, never real credentials. A nested .env.example stays
+# excluded: none is tracked, nothing in the image reads one, and a file by
+# that name outside git is as likely to hold real values as not.
 #
 # CI has never shipped any of this, because it builds from a git checkout
 # where those files do not exist. That makes today's published image safe by
@@ -41,6 +47,7 @@
 !docker-compose.seeder.yml
 !docker-compose.yml
 !docker-entrypoint.sh
+!libex_core/
 !migrations/
 !pytest.ini
 !requirements-dev.lock
@@ -64,3 +71,10 @@
 **/__pycache__/
 **/*.py[cod]
 app/static/docs/
+
+# Credential files, excluded wherever they sit. **/ matches the top level as
+# well, which is why the repo-root .env.example has to be admitted again on
+# the last line: a later match wins, so moving it above these would exclude it.
+**/.env
+**/.env.*
+!.env.example

@@ -10,7 +10,8 @@ holds the line:
   (a) registry consistency -- every emitted-header constant is registered,
       and CORSMiddleware's expose_headers is exactly the registry unioned
       with the migration headers.
-  (b) source scan -- walks app/ for four literal assignment forms --
+  (b) source scan -- walks app/ and libex_core/ for four literal assignment
+      forms --
       `response.headers["Literal"] = ...`, `Response(headers={"Literal": ...})`,
       `response.headers.update({"Literal": ...})`, and
       `response.headers.setdefault("Literal", ...)` -- and asserts every
@@ -346,8 +347,12 @@ async def test_a_multi_reason_incomplete_value_renders_through_a_real_response(a
 # (b) SOURCE SCAN -- the part that actually holds the line
 # ============================================================
 
-# app/ two directories up from this file (tests/test_response_headers.py).
+# app/ and libex_core/, both two directories up from this file
+# (tests/test_response_headers.py) -- a response's headers can originate in
+# either tree, since libex_core carries no web-framework dependency of its
+# own but its callers still build responses directly out of what it returns.
 _APP_DIR = Path(__file__).resolve().parent.parent / "app"
+_LIBEX_CORE_DIR = Path(__file__).resolve().parent.parent / "libex_core"
 
 # Four literal assignment shapes, matched against raw source text rather
 # than executed:
@@ -396,17 +401,17 @@ def _extract_custom_headers(text: str) -> set[str]:
     different, already-standard vocabulary with no registry of their own
     and are deliberately not in scope here.
 
-    Takes raw text rather than reading app/ itself, so the extraction logic
-    can be proven correct against a fixture (see
+    Takes raw text rather than reading app/ or libex_core/ itself, so the
+    extraction logic can be proven correct against a fixture (see
     test_header_assignment_regex_extracts_a_known_positive below) as well as
-    run for real over app/'s own source (see
+    run for real over both trees' own source (see
     _custom_headers_assigned_in_app). The two are deliberately split: unlike
     the original single-form scan, app/ does not assign zero custom headers
     this way -- see _KNOWN_NON_RESPONSE_HEADER_NAMES below for the two names
     the widened scan currently finds and why neither is registered -- so a
-    fixture that does not depend on what app/ currently contains is what
-    tells a broken regex apart from a codebase whose only findings are the
-    ones already named.
+    fixture that does not depend on what either tree currently contains is
+    what tells a broken regex apart from a codebase whose only findings are
+    the ones already named.
     """
     found = set()
     for match in _HEADER_ASSIGNMENT_RE.finditer(text):
@@ -426,10 +431,12 @@ def _extract_custom_headers(text: str) -> set[str]:
 
 
 def _custom_headers_assigned_in_app() -> set[str]:
-    """_extract_custom_headers run for real over every .py file in app/."""
+    """_extract_custom_headers run for real over every .py file in app/ and
+    libex_core/."""
     found = set()
-    for path in _APP_DIR.rglob("*.py"):
-        found |= _extract_custom_headers(path.read_text())
+    for directory in (_APP_DIR, _LIBEX_CORE_DIR):
+        for path in directory.rglob("*.py"):
+            found |= _extract_custom_headers(path.read_text())
     return found
 
 
@@ -498,19 +505,20 @@ _KNOWN_NON_RESPONSE_HEADER_NAMES = frozenset({
 
 def test_every_custom_header_assigned_in_app_resolves_into_the_registry():
     """The one part of this module that inspection alone can't verify: a
-    header assigned somewhere in app/ under a hand-typed literal name, with
-    that literal never added to EXPOSED_HEADER_NAMES, is exactly the defect
-    this test exists to catch -- now across all four assignment forms, not
-    only the subscript one. The two names in
+    header assigned somewhere in app/ or libex_core/ under a hand-typed
+    literal name, with that literal never added to EXPOSED_HEADER_NAMES, is
+    exactly the defect this test exists to catch -- now across all four
+    assignment forms, not only the subscript one. The two names in
     _KNOWN_NON_RESPONSE_HEADER_NAMES are asserted for exactly, not merely
-    excluded: this test fails if app/ ever assigns a third unregistered
-    custom header this way, and also fails if either of the two named ones
-    stops being found, so a stale exception cannot outlive the code it was
-    written against."""
+    excluded: this test fails if either tree ever assigns a third
+    unregistered custom header this way, and also fails if either of the two
+    named ones stops being found, so a stale exception cannot outlive the
+    code it was written against."""
     found = _custom_headers_assigned_in_app()
     unregistered = found - set(EXPOSED_HEADER_NAMES)
     assert unregistered == _KNOWN_NON_RESPONSE_HEADER_NAMES, (
-        "assigned in app/ but never registered in EXPOSED_HEADER_NAMES, and "
+        "assigned in app/ or libex_core/ but never registered in "
+        "EXPOSED_HEADER_NAMES, and "
         "not matching the already-identified exceptions above -- "
         f"unexpected: {unregistered - _KNOWN_NON_RESPONSE_HEADER_NAMES}, "
         f"missing: {_KNOWN_NON_RESPONSE_HEADER_NAMES - unregistered}"

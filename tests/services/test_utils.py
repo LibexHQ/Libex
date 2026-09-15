@@ -3,7 +3,7 @@ Core utility function tests.
 """
 
 # Local
-from app.core.utils import strip_html, strip_image_size_suffix
+from libex_core.text import strip_html, strip_image_size_suffix
 
 
 # ============================================================

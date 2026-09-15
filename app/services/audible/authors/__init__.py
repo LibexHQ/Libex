@@ -22,7 +22,8 @@ from typing import Any, NamedTuple
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Core
-from app.core.exceptions import AudibleAPIException, NotFoundException
+from libex_core.exceptions import AudibleAPIException, NotFoundException
+from libex_core.text import strip_html
 from app.core.logging import get_logger
 from app.core.response_headers import (
     ResponseFacts,
@@ -31,7 +32,6 @@ from app.core.response_headers import (
     SOURCE_DB,
     record_source,
 )
-from app.core.utils import strip_html
 
 # Services
 from app.services.audible.client import (

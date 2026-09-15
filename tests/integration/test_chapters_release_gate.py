@@ -32,7 +32,7 @@ import pytest
 from sqlalchemy import insert, select
 
 # Local
-from app.core.exceptions import NotFoundException
+from libex_core.exceptions import NotFoundException
 from app.db.models import Book
 from app.services import seeder
 from app.services.audible.books import _mark_chapters_checked

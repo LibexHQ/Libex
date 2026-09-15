@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 # Local
-from app.core.exceptions import AudibleAPIException
+from libex_core.exceptions import AudibleAPIException
 
 
 MOCK_BOOK = {

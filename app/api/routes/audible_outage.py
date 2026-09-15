@@ -16,7 +16,7 @@ the stack can still catch AudibleAPIException on its own terms.
 from typing import Awaitable, TypeVar
 
 # Core
-from app.core.exceptions import AudibleAPIException, NotFoundException
+from libex_core.exceptions import AudibleAPIException, NotFoundException
 
 T = TypeVar("T")
 

@@ -15,8 +15,6 @@ from app.db.session import get_session
 
 # Routes
 from app.api.routes.audible_outage import outage_as_not_found
-from app.api.routes.series.schemas import SeriesResponse
-from app.api.routes.books.schemas import BookResponse
 from app.api.routes.cache_param import CacheStandardParam, apply_cache_control
 from app.api.routes.facts_headers import FACTS_RESPONSE_HEADERS, stamp_facts_headers
 from app.api.routes.sort_params import BookSortField, SortOrder
@@ -30,7 +28,8 @@ from app.services.filtering import filter_dicts
 
 # Core
 from app.core.middleware import valid_asin, valid_region
-from app.core.exceptions import NotFoundException
+from libex_core.exceptions import NotFoundException
+from libex_core.models import BookResponse, SeriesResponse
 from app.core.response_headers import ResponseFacts
 
 router = APIRouter(prefix="/series", tags=["Series"])

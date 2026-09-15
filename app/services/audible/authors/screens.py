@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass
 
 # Core
-from app.core.asin import is_valid_asin
+from libex_core.asin import is_valid_asin
 from app.core.logging import get_logger
 
 # Services

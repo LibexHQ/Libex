@@ -139,7 +139,7 @@ def test_clamps_reports_only_a_schedule_that_can_land_off_the_end_of_a_month(per
 
 
 def test_schedule_error_is_not_on_the_api_exception_hierarchy():
-    from app.core.exceptions import LibexException
+    from libex_core.exceptions import LibexException
 
     assert not issubclass(ScheduleError, LibexException)
 

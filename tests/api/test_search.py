@@ -11,7 +11,7 @@ from httpx import AsyncClient, ASGITransport
 
 # Local
 from app.main import app
-from app.core.exceptions import AudibleAPIException
+from libex_core.exceptions import AudibleAPIException
 
 MOCK_BOOK = {
     "asin": "B08G9PRS1K",

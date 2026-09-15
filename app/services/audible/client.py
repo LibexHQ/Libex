@@ -24,8 +24,8 @@ import httpx
 
 # Local
 from app.core.config import get_settings
-from app.core.exceptions import AudibleAPIException, RegionException
 from app.core.logging import get_logger
+from libex_core.exceptions import AudibleAPIException, RegionException
 
 settings = get_settings()
 logger = get_logger()
@@ -578,7 +578,7 @@ async def audible_get(
                 )
 
         if response.status_code == 404:
-            from app.core.exceptions import NotFoundException
+            from libex_core.exceptions import NotFoundException
             raise NotFoundException()
 
         if response.status_code == 200:

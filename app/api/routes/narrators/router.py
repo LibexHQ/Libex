@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_session
 
 # Routes
+from app.api.routes.audible_outage import outage_as_not_found
 from app.api.routes.books.schemas import BookResponse
 from app.api.routes.cache_param import CacheInertParam, apply_cache_control
 
@@ -49,14 +50,18 @@ async def get_narrator_books(
     Get books by narrator name.
     Searches the Audible catalog by narrator and returns full book metadata.
     """
-    results = await search(
-        region=region,
-        session=session,
-        narrator=name,
-        limit=limit,
-        page=page,
+    not_found_message = f"No books found for narrator: {name}"
+    results = await outage_as_not_found(
+        search(
+            region=region,
+            session=session,
+            narrator=name,
+            limit=limit,
+            page=page,
+        ),
+        not_found_message,
     )
     if not results:
-        raise NotFoundException(f"No books found for narrator: {name}")
+        raise NotFoundException(not_found_message)
     apply_cache_control(response, cache)
     return results

@@ -732,6 +732,28 @@ async def test_get_books_outage_cache_fallback_reads_all_misses_in_one_lookup():
 
 
 @pytest.mark.asyncio
+async def test_get_books_by_asins_raises_audible_api_exception_when_nothing_backstops_it():
+    """When Audible is down and neither the DB nor the cache has anything
+    for any of the requested ASINs, that is silence, not Audible answering
+    that these books do not exist -- the caller must see AudibleAPIException,
+    not a bare empty list or NotFoundException."""
+    from app.services.audible.books import get_books_by_asins
+    from app.core.exceptions import AudibleAPIException
+
+    mock_session = AsyncMock()
+
+    with patch("app.services.audible.books.audible_get", side_effect=RuntimeError("Audible down")), \
+         patch("app.services.audible.books.get_books_from_db", new_callable=AsyncMock, return_value=[]), \
+         patch("app.services.audible.books.cache.get_many", new=AsyncMock(return_value={})), \
+         patch("app.services.audible.books.cache.get", return_value=None):
+        with pytest.raises(AudibleAPIException) as exc:
+            await get_books_by_asins(["B08G9PRS1K"], "us", mock_session)
+
+    assert exc.value.message == "Audible unavailable and no cached data found"
+    assert exc.value.upstream_status is None
+
+
+@pytest.mark.asyncio
 async def test_get_books_writes_to_db_on_success():
     """Writes book data to DB after successful Audible fetch."""
     from app.services.audible.books import get_books_by_asins
@@ -1661,6 +1683,67 @@ async def test_get_chapters_falls_back_to_db():
          patch("app.services.audible.books.cache.get", return_value=None):
         result = await get_chapters("B08G9PRS1K", "us", mock_session)
         assert result == cached_chapters
+
+
+@pytest.mark.asyncio
+async def test_get_chapters_raises_audible_api_exception_when_nothing_backstops_it():
+    """Neither a stored copy nor a cached one exists when Audible is down --
+    that is silence, not Audible confirming this book has no chapters, so
+    the caller must see AudibleAPIException, not NotFoundException."""
+    from app.services.audible.books import get_chapters
+    from app.core.exceptions import AudibleAPIException
+
+    mock_session = AsyncMock()
+
+    with patch("app.services.audible.books.audible_get", side_effect=RuntimeError("Audible down")), \
+         patch("app.services.audible.books.get_track_from_db", new_callable=AsyncMock, return_value=None), \
+         patch("app.services.audible.books.cache.get", new=AsyncMock(return_value=None)):
+        with pytest.raises(AudibleAPIException) as exc:
+            await get_chapters("B08G9PRS1K", "us", mock_session)
+
+    assert exc.value.message == "Audible unavailable and no cached chapter data found"
+    assert exc.value.upstream_status is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raised,expected_upstream_status",
+    [
+        pytest.param("audible_api", 503, id="audible_api_exception_carries_its_status"),
+        pytest.param("plain", None, id="plain_exception_has_no_status"),
+    ],
+)
+async def test_get_chapters_logs_warning_before_raising(raised, expected_upstream_status):
+    """The no-backstop outage path must log a WARNING carrying every
+    diagnostic field before raising, and upstream_status must reflect the
+    raised exception's own value when it is an AudibleAPIException, or None
+    for any other exception type."""
+    from app.services.audible.books import get_chapters
+    from app.core.exceptions import AudibleAPIException
+
+    exc = (
+        AudibleAPIException("upstream 503", upstream_status=503)
+        if raised == "audible_api"
+        else RuntimeError("Audible down")
+    )
+    mock_session = AsyncMock()
+
+    with patch("app.services.audible.books.audible_get", side_effect=exc), \
+         patch("app.services.audible.books.get_track_from_db", new_callable=AsyncMock, return_value=None), \
+         patch("app.services.audible.books.cache.get", new=AsyncMock(return_value=None)), \
+         patch("app.services.audible.books.logger") as mock_logger:
+        with pytest.raises(AudibleAPIException):
+            await get_chapters("B08G9PRS1K", "us", mock_session)
+
+    mock_logger.warning.assert_called_once_with(
+        "Audible unavailable and no cached chapter data found",
+        extra={
+            "asin": "B08G9PRS1K",
+            "region": "us",
+            "error": str(exc),
+            "upstream_status": expected_upstream_status,
+        },
+    )
 
 # ============================================================
 # FETCH AND STORE CHAPTERS TESTS

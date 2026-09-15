@@ -68,7 +68,13 @@ from app.core.response_headers import (
 from app.core.utils import strip_html, strip_image_size_suffix
 
 # Services
-from app.services.audible.client import audible_get, author_books_concurrency, REGION_MAP
+from app.services.audible.client import (
+    as_audible_failure,
+    audible_get,
+    author_books_concurrency,
+    upstream_status_of,
+    REGION_MAP,
+)
 from app.services.cache import manager as cache
 from app.services.cache.manager import book_key, chapters_key
 from app.services.db.persist_queue import (
@@ -1064,7 +1070,7 @@ async def _get_books_by_asins_unsettled(
     except NotFoundException:
         raise
 
-    except Exception:
+    except Exception as e:
         await session.rollback()
         logger.warning(
             "Audible unavailable, attempting DB fallback",
@@ -1111,7 +1117,13 @@ async def _get_books_by_asins_unsettled(
                 record_incomplete(facts, REASON_HYDRATION_FAILED)
             return cached_results + fallback_results
 
-        raise NotFoundException("Audible unavailable and no cached data found")
+        # Neither a stored copy nor a cached one exists -- that is silence,
+        # not a confirmed absence, so what reaches the caller has to say
+        # Audible could not be reached rather than that these books are not
+        # there.
+        raise as_audible_failure(
+            e, "Audible unavailable and no cached data found"
+        ) from e
 
 
 async def get_book_by_asin(
@@ -1175,7 +1187,7 @@ async def get_chapters(
     except NotFoundException:
         raise
 
-    except Exception:
+    except Exception as e:
         # Try DB first
         db_result = await get_track_from_db(session, asin)
         if db_result:
@@ -1188,7 +1200,19 @@ async def get_chapters(
             record_source(facts, SOURCE_CACHE)
             return cached
 
-        raise NotFoundException("Audible unavailable and no cached chapter data found")
+        # Neither a stored copy nor a cached one exists -- that is silence,
+        # not a confirmed absence, so what reaches the caller has to say
+        # Audible could not be reached rather than that this book has no
+        # chapters.
+        logger.warning("Audible unavailable and no cached chapter data found", extra={
+            "asin": asin,
+            "region": region,
+            "error": str(e),
+            "upstream_status": upstream_status_of(e),
+        })
+        raise as_audible_failure(
+            e, "Audible unavailable and no cached chapter data found"
+        ) from e
 
 
 async def fetch_and_store_chapters(

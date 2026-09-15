@@ -22,7 +22,7 @@ from typing import Any, NamedTuple
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Core
-from app.core.exceptions import NotFoundException
+from app.core.exceptions import AudibleAPIException, NotFoundException
 from app.core.logging import get_logger
 from app.core.response_headers import (
     ResponseFacts,
@@ -34,7 +34,13 @@ from app.core.response_headers import (
 from app.core.utils import strip_html
 
 # Services
-from app.services.audible.client import audible_get, author_books_concurrency, LOCALE_MAP
+from app.services.audible.client import (
+    as_audible_failure,
+    audible_get,
+    author_books_concurrency,
+    upstream_status_of,
+    LOCALE_MAP,
+)
 from app.services.audible.authors.screens import (
     _fetch_author_books_by_screen,
     _ScreenBooksResult,
@@ -306,7 +312,7 @@ async def get_author(
 
     except NotFoundException:
         raise
-    except Exception:
+    except Exception as e:
         # Try DB first
         db_result = await get_author_from_db(session, asin, region)
         if db_result:
@@ -319,7 +325,19 @@ async def get_author(
             record_source(facts, SOURCE_CACHE)
             return cached
 
-        raise NotFoundException("Audible unavailable and no cached author data found")
+        # Neither a stored copy nor a cached one exists -- that is silence,
+        # not a confirmed absence, so what reaches the caller has to say
+        # Audible could not be reached rather than that the author is not
+        # there.
+        logger.warning("Audible unavailable and no cached author data found", extra={
+            "author_asin": asin,
+            "region": region,
+            "error": str(e),
+            "upstream_status": upstream_status_of(e),
+        })
+        raise as_audible_failure(
+            e, "Audible unavailable and no cached author data found"
+        ) from e
 
 
 async def get_author_books(
@@ -487,8 +505,14 @@ async def _walk_author_books(
 
     A source that fails (screens raises, or every catalog sort errors)
     does not fail the whole request -- whatever the other sources and the
-    DB union surfaced is still served. Only when every source came back
-    entirely empty, live and DB alike, is NotFoundException raised.
+    DB union surfaced is still served. When the union is empty, which of
+    the two exceptions comes back depends on why: if every source came
+    back clean and simply confirmed nothing, NotFoundException is raised,
+    same as Audible answering that the author has no books. If any source
+    failed instead of confirming an empty result -- screens raised, the
+    catalog walk degraded, name resolution failed, or the DB backstop read
+    itself failed -- the empty union never established that this author
+    has no books, so AudibleAPIException is raised instead.
     """
     start = time.monotonic()
     # time_budget rather than the constant directly: the background
@@ -646,7 +670,8 @@ async def _walk_author_books(
         # back here for the same reason, so this rare empty-union path
         # can't leave session idle-in-transaction through the rest of this
         # branch either, whether it returns the cache hit below or falls
-        # through to raise NotFoundException.
+        # through to raise whichever of NotFoundException or
+        # AudibleAPIException the empty union earns (see the branch below).
         await session.rollback()
         if cached:
             # Complete by the same invariant get_author_books' own hit
@@ -669,7 +694,22 @@ async def _walk_author_books(
             or name_resolution_error is not None
             or db_error is not None
         ):
-            raise NotFoundException("Audible unavailable and no cached author books found")
+            # At least one of the four sources failed rather than confirming
+            # an empty catalog, and neither the DB nor the cache backstop
+            # had anything either -- that is silence, not Audible answering
+            # that this author has no books, so the honest type is the one
+            # that says the walk could not find out.
+            #
+            # upstream_status stays None: this is a union of up to four
+            # independent sources (name resolution, the screens walk, the
+            # catalog walk, the DB read), each folded into its own error
+            # string as soon as it fails, and catalog_degraded alone covers
+            # several conditions -- a truncated deadline, incomplete category
+            # slicing -- that never carried an HTTP status to begin with. No
+            # single status could describe which of up to four failures this
+            # actually is without restructuring the walk to keep the
+            # original exception objects instead of their string form.
+            raise AudibleAPIException("Audible unavailable and no cached author books found")
         raise NotFoundException(f"No books found for author: {asin}")
 
     author_book_took = round((time.monotonic() - start) * 1000, 2)
@@ -944,8 +984,16 @@ async def get_author_books_by_name(
 
     except NotFoundException:
         raise
-    except Exception:
-        raise NotFoundException("Failed to fetch author books by name")
+    except Exception as e:
+        # name is caller-authored and never logged -- see the "Deliberately
+        # no author_name field" note above, which applies here too.
+        logger.warning("Failed to fetch author books by name", extra={
+            "name_length": len(name),
+            "region": region,
+            "error": str(e),
+            "upstream_status": upstream_status_of(e),
+        })
+        raise as_audible_failure(e, "Failed to fetch author books by name") from e
 
 
 async def search_authors(
@@ -985,16 +1033,44 @@ async def search_authors(
             return []
 
         authors = []
+        skipped_asins: list[str] = []
         for asin in asins:
             try:
                 author = await get_author(asin, region, session)
                 authors.append(author)
             except NotFoundException:
                 continue
+            except AudibleAPIException:
+                # One suggested author being unreachable does not sink a
+                # search that already has other hits to show. get_author
+                # itself already logs the failure that produced this
+                # exception, so collecting the ASIN here and warning once
+                # below, after the loop, avoids a second warning per item
+                # on top of that.
+                skipped_asins.append(asin)
+                continue
+
+        if skipped_asins:
+            logger.warning(
+                "Author search: could not resolve one or more suggested authors, skipping",
+                extra={
+                    "region": region,
+                    "skipped_num": len(skipped_asins),
+                    "skipped_asins": skipped_asins,
+                },
+            )
 
         return authors
 
     except NotFoundException:
         raise
-    except Exception:
-        raise NotFoundException("Author search failed")
+    except Exception as e:
+        # name is caller-authored and never logged -- see the "Deliberately
+        # no author_name field" note on get_author_books_by_name above.
+        logger.warning("Author search failed", extra={
+            "name_length": len(name),
+            "region": region,
+            "error": str(e),
+            "upstream_status": upstream_status_of(e),
+        })
+        raise as_audible_failure(e, "Author search failed") from e

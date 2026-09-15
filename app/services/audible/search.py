@@ -11,11 +11,11 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Core
-from app.core.exceptions import NotFoundException
+from app.core.exceptions import AudibleAPIException, NotFoundException
 from app.core.logging import get_logger
 
 # Services
-from app.services.audible.client import audible_get
+from app.services.audible.client import as_audible_failure, audible_get
 from app.services.audible.books import (
     get_books_by_asins,
     _normalize_product,
@@ -122,7 +122,11 @@ async def search(
         return []
     except Exception as e:
         logger.error("Search failed", extra={"region": region, "error": str(e)})
-        return []
+        # Whatever this was, it is not Audible answering that nothing
+        # matched -- an empty list here would be indistinguishable from a
+        # genuine zero-result search, which is exactly the ambiguity a
+        # caller must not be handed.
+        raise as_audible_failure(e, "Audible search failed") from e
 
 
 async def quick_search(
@@ -200,13 +204,21 @@ async def quick_search(
                     "region": region,
                 })
 
-                catalog_results = await search(
-                    region=region,
-                    session=session,
-                    title=parsed_title,
-                    author=parsed_author,
-                    limit=10,
-                )
+                try:
+                    catalog_results = await search(
+                        region=region,
+                        session=session,
+                        title=parsed_title,
+                        author=parsed_author,
+                        limit=10,
+                    )
+                except AudibleAPIException:
+                    # A transport failure inside this one fallback avenue is
+                    # not the end of the request -- the local DB is a third,
+                    # independent source for a compound query, so it still
+                    # gets tried below exactly as it does on a genuine
+                    # zero-result catalog search.
+                    catalog_results = []
                 if catalog_results:
                     return catalog_results
 
@@ -222,6 +234,16 @@ async def quick_search(
 
         return []
 
+    except NotFoundException:
+        return []
     except Exception as e:
         logger.error("Quick search failed", extra={"region": region, "error": str(e)})
-        return []
+        # Whatever this was, it is not Audible answering that nothing
+        # matched -- an empty list here would be indistinguishable from a
+        # genuine zero-result search, which is exactly the ambiguity a
+        # caller must not be handed. Only the catalog leg of the
+        # compound-query fallback gets its own narrower catch above, so it
+        # can still hand off to the local DB; a failure of the suggestions
+        # lookup itself, or of hydrating the ASINs suggestions returned, has
+        # no further fallback left and reaches here directly.
+        raise as_audible_failure(e, "Audible quick search failed") from e

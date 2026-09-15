@@ -9,6 +9,9 @@ from unittest.mock import AsyncMock, patch
 # Third party
 import pytest
 
+# Local
+from app.core.exceptions import AudibleAPIException
+
 
 MOCK_BOOK = {
     "asin": "B08G9PRS1K",
@@ -176,3 +179,38 @@ async def test_narrator_books_cache_true_sends_no_cache_control_header(async_cli
         mock.return_value = [MOCK_BOOK]
         response = await async_client.get("/narrator/books?name=Scott+Brick&region=us&cache=true")
     assert "cache-control" not in response.headers
+
+
+# ============================================================
+# AUDIBLE OUTAGE CONTRACT — the route's own literal, not the
+# service's message, must reach the caller.
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_get_narrator_books_outage_returns_404_with_the_routes_own_literal(async_client):
+    with patch("app.api.routes.narrators.router.search", new_callable=AsyncMock) as mock:
+        mock.side_effect = AudibleAPIException("Audible search failed")
+        response = await async_client.get("/narrator/books?name=Scott+Brick&region=us")
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": "No books found for narrator: Scott Brick",
+        "status_code": 404,
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_narrator_books_genuine_absence_is_unchanged(async_client):
+    """search() returns [] on a genuine zero-result search -- unaffected by
+    outage_as_not_found, which only ever applies to a raised
+    AudibleAPIException."""
+    with patch("app.api.routes.narrators.router.search", new_callable=AsyncMock) as mock:
+        mock.return_value = []
+        response = await async_client.get("/narrator/books?name=Nobody&region=us")
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": "No books found for narrator: Nobody",
+        "status_code": 404,
+    }

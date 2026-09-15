@@ -14,6 +14,7 @@ from httpx import AsyncClient, ASGITransport
 # Local
 from app.main import app
 from app.api.routes.large_response import LARGE_RESPONSE_THREAD_THRESHOLD
+from app.core.exceptions import AudibleAPIException, NotFoundException
 from app.core.response_headers import (
     REASON_HYDRATION_FAILED,
     SOURCE_AUDIBLE,
@@ -773,3 +774,77 @@ async def test_bulk_books_above_threshold_still_carries_facts_and_cache_headers(
     assert response.headers["x-libex-source"] == "audible"
     assert response.headers["x-libex-complete"] == "true"
     assert response.headers["cache-control"] == "no-store"
+
+
+# ============================================================
+# AUDIBLE OUTAGE CONTRACT — AudibleAPIException still comes back as the
+# same 404 HEAD produced, byte for byte, via outage_as_not_found
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_get_book_outage_returns_404_matching_head(async_client):
+    with patch("app.api.routes.books.router.get_book_by_asin", new_callable=AsyncMock) as mock:
+        mock.side_effect = AudibleAPIException("Audible unavailable and no cached data found")
+        response = await async_client.get("/book/B08G9PRS1K")
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": "Audible unavailable and no cached data found",
+        "status_code": 404,
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_book_chapters_outage_returns_404_matching_head(async_client):
+    with patch("app.api.routes.books.router.get_chapters", new_callable=AsyncMock) as mock:
+        mock.side_effect = AudibleAPIException("Audible unavailable and no cached chapter data found")
+        response = await async_client.get("/book/B08G9PRS1K/chapters")
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": "Audible unavailable and no cached chapter data found",
+        "status_code": 404,
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_book_chapters_legacy_outage_returns_404_matching_head(async_client):
+    """Legacy twin (/book/chapters/{asin}) must not diverge."""
+    with patch("app.api.routes.books.router.get_chapters", new_callable=AsyncMock) as mock:
+        mock.side_effect = AudibleAPIException("Audible unavailable and no cached chapter data found")
+        response = await async_client.get("/book/chapters/B08G9PRS1K")
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": "Audible unavailable and no cached chapter data found",
+        "status_code": 404,
+    }
+
+
+@pytest.mark.asyncio
+async def test_bulk_books_outage_returns_404_matching_head(async_client):
+    with patch("app.api.routes.books.router.get_books_by_asins", new_callable=AsyncMock) as mock:
+        mock.side_effect = AudibleAPIException("Audible unavailable and no cached data found")
+        response = await async_client.get("/book?asins=B08G9PRS1K")
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": "Audible unavailable and no cached data found",
+        "status_code": 404,
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_book_genuine_absence_is_unchanged(async_client):
+    """A real NotFoundException must be completely unaffected by
+    outage_as_not_found -- same status and body as any other confirmed
+    absence."""
+    with patch("app.api.routes.books.router.get_book_by_asin", new_callable=AsyncMock) as mock:
+        mock.side_effect = NotFoundException("Book not found: B08G9PRS1K")
+        response = await async_client.get("/book/B08G9PRS1K")
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": "Book not found: B08G9PRS1K",
+        "status_code": 404,
+    }

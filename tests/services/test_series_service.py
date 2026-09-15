@@ -163,6 +163,275 @@ async def test_get_series_writes_to_db_on_success():
         mock_persist.assert_called_once()
 
 
+# ============================================================
+# TOTAL FAILURE -- AUDIBLE DOWN, NOTHING BACKSTOPS IT
+# ============================================================
+# When Audible is unreachable and neither the DB nor the cache has anything
+# to answer with, that is silence -- Libex could not find out -- not
+# Audible confirming an absence. Each of these must raise
+# AudibleAPIException, not NotFoundException and not an empty result.
+
+@pytest.mark.asyncio
+async def test_get_series_raises_audible_api_exception_when_nothing_backstops_it():
+    from app.services.audible.series import get_series
+    from app.core.exceptions import AudibleAPIException
+
+    mock_session = AsyncMock()
+
+    with patch("app.services.audible.series.audible_get", side_effect=RuntimeError("Audible down")), \
+         patch("app.services.audible.series.get_series_from_db", new_callable=AsyncMock, return_value=None), \
+         patch("app.services.audible.series.cache.get", new=AsyncMock(return_value=None)):
+        with pytest.raises(AudibleAPIException) as exc:
+            await get_series("B000SERIES1", "us", mock_session)
+
+    assert exc.value.message == "Audible unavailable and no cached series data found"
+    assert exc.value.upstream_status is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raised,expected_upstream_status",
+    [
+        pytest.param("audible_api", 503, id="audible_api_exception_carries_its_status"),
+        pytest.param("plain", None, id="plain_exception_has_no_status"),
+    ],
+)
+async def test_get_series_logs_warning_before_raising(raised, expected_upstream_status):
+    """The no-backstop outage path must log a WARNING carrying every
+    diagnostic field before raising, and upstream_status must reflect the
+    raised exception's own value when it is an AudibleAPIException, or None
+    for any other exception type."""
+    from app.services.audible.series import get_series
+    from app.core.exceptions import AudibleAPIException
+
+    exc = (
+        AudibleAPIException("upstream 503", upstream_status=503)
+        if raised == "audible_api"
+        else RuntimeError("Audible down")
+    )
+    mock_session = AsyncMock()
+
+    with patch("app.services.audible.series.audible_get", side_effect=exc), \
+         patch("app.services.audible.series.get_series_from_db", new_callable=AsyncMock, return_value=None), \
+         patch("app.services.audible.series.cache.get", new=AsyncMock(return_value=None)), \
+         patch("app.services.audible.series.logger") as mock_logger:
+        with pytest.raises(AudibleAPIException):
+            await get_series("B000SERIES1", "us", mock_session)
+
+    mock_logger.warning.assert_called_once_with(
+        "Audible unavailable and no cached series data found",
+        extra={
+            "series_asin": "B000SERIES1",
+            "region": "us",
+            "error": str(exc),
+            "upstream_status": expected_upstream_status,
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_series_books_raises_audible_api_exception_when_nothing_backstops_it():
+    from app.services.audible.series import get_series_books
+    from app.core.exceptions import AudibleAPIException
+
+    mock_session = AsyncMock()
+
+    with patch("app.services.audible.series.audible_get", side_effect=RuntimeError("Audible down")), \
+         patch("app.services.audible.series.cache.get", new=AsyncMock(return_value=None)):
+        with pytest.raises(AudibleAPIException) as exc:
+            await get_series_books("B000SERIES1", "us", mock_session)
+
+    assert exc.value.message == "Audible unavailable and no cached series books found"
+    assert exc.value.upstream_status is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raised,expected_upstream_status",
+    [
+        pytest.param("audible_api", 502, id="audible_api_exception_carries_its_status"),
+        pytest.param("plain", None, id="plain_exception_has_no_status"),
+    ],
+)
+async def test_get_series_books_logs_warning_before_raising(raised, expected_upstream_status):
+    """The no-backstop outage path must log a WARNING carrying every
+    diagnostic field before raising, and upstream_status must reflect the
+    raised exception's own value when it is an AudibleAPIException, or None
+    for any other exception type."""
+    from app.services.audible.series import get_series_books
+    from app.core.exceptions import AudibleAPIException
+
+    exc = (
+        AudibleAPIException("upstream 502", upstream_status=502)
+        if raised == "audible_api"
+        else RuntimeError("Audible down")
+    )
+    mock_session = AsyncMock()
+
+    with patch("app.services.audible.series.audible_get", side_effect=exc), \
+         patch("app.services.audible.series.cache.get", new=AsyncMock(return_value=None)), \
+         patch("app.services.audible.series.logger") as mock_logger:
+        with pytest.raises(AudibleAPIException):
+            await get_series_books("B000SERIES1", "us", mock_session)
+
+    mock_logger.warning.assert_called_once_with(
+        "Audible unavailable and no cached series books found",
+        extra={
+            "series_asin": "B000SERIES1",
+            "region": "us",
+            "error": str(exc),
+            "upstream_status": expected_upstream_status,
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_search_series_raises_audible_api_exception_on_total_failure():
+    """The Audible products search itself failing, with nothing to fall
+    back to, must raise -- not return an empty list a caller could confuse
+    with a genuine zero-result search."""
+    from app.services.audible.series import search_series
+    from app.core.exceptions import AudibleAPIException
+
+    mock_session = AsyncMock()
+
+    with patch("app.services.audible.series.audible_get", side_effect=RuntimeError("Audible down")), \
+         patch("app.services.audible.series.search_series_from_db", new=AsyncMock(return_value=[])):
+        with pytest.raises(AudibleAPIException) as exc:
+            await search_series("Dune", "us", mock_session)
+
+    assert exc.value.message == "Series search failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raised,expected_upstream_status",
+    [
+        pytest.param("audible_api", 500, id="audible_api_exception_carries_its_status"),
+        pytest.param("plain", None, id="plain_exception_has_no_status"),
+    ],
+)
+async def test_search_series_outer_failure_logs_warning_before_raising(raised, expected_upstream_status):
+    """The products search failing outright must log a WARNING with the
+    expected diagnostic fields before raising, upstream_status must reflect
+    the raised exception's own value, and the caller-authored name must
+    never appear in the log call."""
+    from app.services.audible.series import search_series
+    from app.core.exceptions import AudibleAPIException
+
+    exc = (
+        AudibleAPIException("upstream 500", upstream_status=500)
+        if raised == "audible_api"
+        else RuntimeError("Audible down")
+    )
+    name = "Dune"
+    mock_session = AsyncMock()
+
+    with patch("app.services.audible.series.audible_get", side_effect=exc), \
+         patch("app.services.audible.series.search_series_from_db", new=AsyncMock(return_value=[])), \
+         patch("app.services.audible.series.logger") as mock_logger:
+        with pytest.raises(AudibleAPIException):
+            await search_series(name, "us", mock_session)
+
+    mock_logger.warning.assert_called_once_with(
+        "Series search failed",
+        extra={
+            "name_length": len(name),
+            "region": "us",
+            "error": str(exc),
+            "upstream_status": expected_upstream_status,
+        },
+    )
+    logged_message, logged_kwargs = mock_logger.warning.call_args
+    assert name not in logged_message[0]
+    assert name not in logged_kwargs["extra"].values()
+
+
+# ============================================================
+# SEARCH -- PER-ITEM SKIP ON AN UNREACHABLE RELATED SERIES
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_search_series_skips_an_unreachable_related_series_and_keeps_the_rest():
+    """One series relationship being unreachable (Audible down for that one
+    fetch) must not sink a search that already has other hits to show -- it
+    is logged and skipped, and the remaining, reachable series still come
+    back."""
+    from app.services.audible.series import search_series
+    from app.core.exceptions import AudibleAPIException
+
+    mock_session = AsyncMock()
+    reachable = {
+        "asin": "B000SERIES2", "name": "Reachable Series",
+        "description": None, "region": "us", "position": None, "updatedAt": None,
+    }
+
+    audible_product_response = {
+        "products": [
+            {
+                "asin": "B08G9PRS1K",
+                "relationships": [
+                    {"relationship_type": "series", "asin": "B000SERIES1"},
+                    {"relationship_type": "series", "asin": "B000SERIES2"},
+                ],
+            }
+        ]
+    }
+
+    async def fake_get_series(asin, region, session):
+        if asin == "B000SERIES1":
+            raise AudibleAPIException("Audible unavailable and no cached series data found")
+        return reachable
+
+    with patch("app.services.audible.series.audible_get", return_value=audible_product_response), \
+         patch("app.services.audible.series.get_series", new=AsyncMock(side_effect=fake_get_series)), \
+         patch("app.services.audible.series.search_series_from_db", new=AsyncMock(return_value=[])), \
+         patch("app.services.audible.series.logger") as mock_logger:
+        results = await search_series("Dune", "us", mock_session)
+
+    assert results == [reachable]
+    mock_logger.warning.assert_called_once_with(
+        "Series search: could not resolve one or more related series, skipping",
+        extra={
+            "region": "us",
+            "skipped_num": 1,
+            "skipped_asins": ["B000SERIES1"],
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_search_series_emits_no_summary_warning_when_nothing_was_skipped():
+    """The summary warning is conditional on the skip list -- a search where
+    every related series resolves cleanly must not log at all."""
+    from app.services.audible.series import search_series
+
+    mock_session = AsyncMock()
+    reachable = {
+        "asin": "B000SERIES2", "name": "Reachable Series",
+        "description": None, "region": "us", "position": None, "updatedAt": None,
+    }
+    audible_product_response = {
+        "products": [
+            {
+                "asin": "B08G9PRS1K",
+                "relationships": [
+                    {"relationship_type": "series", "asin": "B000SERIES2"},
+                ],
+            }
+        ]
+    }
+
+    with patch("app.services.audible.series.audible_get", return_value=audible_product_response), \
+         patch("app.services.audible.series.get_series", new=AsyncMock(return_value=reachable)), \
+         patch("app.services.audible.series.search_series_from_db", new=AsyncMock(return_value=[])), \
+         patch("app.services.audible.series.logger") as mock_logger:
+        results = await search_series("Dune", "us", mock_session)
+
+    assert results == [reachable]
+    mock_logger.warning.assert_not_called()
+
+
 @pytest.mark.asyncio
 async def test_search_series_includes_db_results():
     """Series search augments Audible results with DB matches."""

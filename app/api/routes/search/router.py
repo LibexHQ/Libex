@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_session
 
 # Routes
+from app.api.routes.audible_outage import outage_as_not_found
 from app.api.routes.books.schemas import BookResponse, AbsBookResponse, AbsSearchResponse, AbsSeriesRef
 from app.api.routes.cache_param import CacheInertParam, CacheStandardParam, apply_cache_control
 
@@ -83,12 +84,16 @@ async def search_books(
     # query param maps to title if title not provided (AudiMeta behavior)
     effective_title = title or (query if not title else None)
 
-    books = await search(
-        region, session, effective_title, author, keywords,
-        limit, narrator, publisher, products_sort_by, page
+    not_found_message = "No books found"
+    books = await outage_as_not_found(
+        search(
+            region, session, effective_title, author, keywords,
+            limit, narrator, publisher, products_sort_by, page
+        ),
+        not_found_message,
     )
     if not books:
-        raise NotFoundException("No books found")
+        raise NotFoundException(not_found_message)
     apply_cache_control(response, cache)
     return [BookResponse(**b) for b in books]
 
@@ -106,9 +111,12 @@ async def quick_search_books(
     session: AsyncSession = Depends(get_session),
 ) -> list[BookResponse]:
     """Quick search using Audible suggestions. Returns 404 if nothing found."""
-    books = await quick_search(keywords, region, session, cache)
+    not_found_message = "No books found"
+    books = await outage_as_not_found(
+        quick_search(keywords, region, session, cache), not_found_message
+    )
     if not books:
-        raise NotFoundException("No books found")
+        raise NotFoundException(not_found_message)
     apply_cache_control(response, cache)
     return [BookResponse(**b) for b in books]
 
@@ -132,9 +140,13 @@ async def abs_search(
         raise NotFoundException(f"Invalid region: {region}")
 
     effective_title = title or query
-    books = await search(validated_region, session, effective_title, author, keywords, 5)
+    not_found_message = "No books found"
+    books = await outage_as_not_found(
+        search(validated_region, session, effective_title, author, keywords, 5),
+        not_found_message,
+    )
     if not books:
-        raise NotFoundException("No books found")
+        raise NotFoundException(not_found_message)
     return AbsSearchResponse(matches=[_to_abs_book(b) for b in books])
 
 
@@ -163,8 +175,11 @@ async def abs_quick_search(
     if not effective_keywords:
         raise NotFoundException("No search terms provided")
 
-    books = await quick_search(effective_keywords, validated_region, session, cache)
+    not_found_message = "No books found"
+    books = await outage_as_not_found(
+        quick_search(effective_keywords, validated_region, session, cache), not_found_message
+    )
     if not books:
-        raise NotFoundException("No books found")
+        raise NotFoundException(not_found_message)
     apply_cache_control(response, cache)
     return AbsSearchResponse(matches=[_to_abs_book(b) for b in books])

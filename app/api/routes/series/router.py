@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_session
 
 # Routes
+from app.api.routes.audible_outage import outage_as_not_found
 from app.api.routes.series.schemas import SeriesResponse
 from app.api.routes.books.schemas import BookResponse
 from app.api.routes.cache_param import CacheStandardParam, apply_cache_control
@@ -45,7 +46,7 @@ async def search(
     session: AsyncSession = Depends(get_session),
 ) -> list[SeriesResponse]:
     """Search for series by name. Returns 404 if none found."""
-    results = await search_series(name, region, session)
+    results = await outage_as_not_found(search_series(name, region, session))
     if not results:
         raise NotFoundException("No series found")
     return [SeriesResponse(**s) for s in results]
@@ -58,7 +59,7 @@ async def search_legacy(
     session: AsyncSession = Depends(get_session),
 ) -> list[SeriesResponse]:
     """Legacy endpoint. Use /series/search instead."""
-    results = await search_series(name, region, session)
+    results = await outage_as_not_found(search_series(name, region, session))
     if not results:
         raise NotFoundException("No series found")
     return [SeriesResponse(**s) for s in results]
@@ -81,11 +82,13 @@ async def get_books_by_series(
     Defaults to series position order; passing a sort field overrides it.
     Returns full book objects matching AudiMeta's BookDto format.
     """
-    asins = await get_series_books(asin, region, session, cache)
+    asins = await outage_as_not_found(get_series_books(asin, region, session, cache))
     if not asins:
         raise NotFoundException("No books found for series")
     facts = ResponseFacts()
-    books = await get_books_by_asins(asins, region, session, use_cache=cache, facts=facts)
+    books = await outage_as_not_found(
+        get_books_by_asins(asins, region, session, use_cache=cache, facts=facts)
+    )
     books = filter_dicts(books, filters.as_kwargs())
     books = sort_dicts(books, sort.value if sort is not None else None, order.value, BOOK_SORT_FIELDS)
     apply_cache_control(response, cache)
@@ -110,11 +113,13 @@ async def get_books_by_series_primary(
     session: AsyncSession = Depends(get_session),
 ) -> list[BookResponse]:
     """Legacy endpoint. Use /series/books/{asin} instead."""
-    asins = await get_series_books(asin, region, session, cache)
+    asins = await outage_as_not_found(get_series_books(asin, region, session, cache))
     if not asins:
         raise NotFoundException("No books found for series")
     facts = ResponseFacts()
-    books = await get_books_by_asins(asins, region, session, use_cache=cache, facts=facts)
+    books = await outage_as_not_found(
+        get_books_by_asins(asins, region, session, use_cache=cache, facts=facts)
+    )
     books = filter_dicts(books, filters.as_kwargs())
     books = sort_dicts(books, sort.value if sort is not None else None, order.value, BOOK_SORT_FIELDS)
     apply_cache_control(response, cache)
@@ -132,7 +137,7 @@ async def get_series_by_asin(
 ) -> SeriesResponse:
     """Get series metadata by ASIN."""
     facts = ResponseFacts()
-    data = await get_series(asin, region, session, cache, facts=facts)
+    data = await outage_as_not_found(get_series(asin, region, session, cache, facts=facts))
     apply_cache_control(response, cache)
     stamp_facts_headers(response, facts, has_entities=True)
     return SeriesResponse(**data)

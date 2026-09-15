@@ -17,13 +17,13 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Core
-from app.core.exceptions import NotFoundException
+from app.core.exceptions import AudibleAPIException, NotFoundException
 from app.core.logging import get_logger
 from app.core.response_headers import ResponseFacts, SOURCE_AUDIBLE, SOURCE_CACHE, SOURCE_DB, record_source
 from app.core.utils import strip_html
 
 # Services
-from app.services.audible.client import audible_get
+from app.services.audible.client import as_audible_failure, audible_get, upstream_status_of
 from app.services.cache import manager as cache
 from app.services.cache.manager import series_key, series_books_key
 from app.services.db.persist_queue import persist_series_background, persist_cache_background
@@ -113,7 +113,7 @@ async def get_series(
     except NotFoundException:
         raise
 
-    except Exception:
+    except Exception as e:
         # Try DB first
         db_result = await get_series_from_db(session, asin)
         if db_result:
@@ -126,7 +126,19 @@ async def get_series(
             record_source(facts, SOURCE_CACHE)
             return cached
 
-        raise NotFoundException("Audible unavailable and no cached series data found")
+        # Neither a stored copy nor a cached one exists -- that is silence,
+        # not a confirmed absence, so what reaches the caller has to say
+        # Audible could not be reached rather than that the series is not
+        # there.
+        logger.warning("Audible unavailable and no cached series data found", extra={
+            "series_asin": asin,
+            "region": region,
+            "error": str(e),
+            "upstream_status": upstream_status_of(e),
+        })
+        raise as_audible_failure(
+            e, "Audible unavailable and no cached series data found"
+        ) from e
 
 
 async def get_series_books(
@@ -206,11 +218,19 @@ async def get_series_books(
     except NotFoundException:
         raise
 
-    except Exception:
+    except Exception as e:
         cached = await cache.get(session, series_books_key(asin, region))
         if cached:
             return cached
-        raise NotFoundException("Audible unavailable and no cached series books found")
+        logger.warning("Audible unavailable and no cached series books found", extra={
+            "series_asin": asin,
+            "region": region,
+            "error": str(e),
+            "upstream_status": upstream_status_of(e),
+        })
+        raise as_audible_failure(
+            e, "Audible unavailable and no cached series books found"
+        ) from e
 
 
 async def search_series(
@@ -253,12 +273,32 @@ async def search_series(
 
         # Step 3: Fetch full series metadata
         results = []
+        skipped_asins: list[str] = []
         for asin in series_asins:
             try:
                 series = await get_series(asin, region, session)
                 results.append(series)
             except NotFoundException:
                 continue
+            except AudibleAPIException:
+                # One series relationship being unreachable does not sink a
+                # search that already has other hits to show. get_series
+                # itself already logs the failure that produced this
+                # exception, so collecting the ASIN here and warning once
+                # below, after the loop, avoids a second warning per item
+                # on top of that.
+                skipped_asins.append(asin)
+                continue
+
+        if skipped_asins:
+            logger.warning(
+                "Series search: could not resolve one or more related series, skipping",
+                extra={
+                    "region": region,
+                    "skipped_num": len(skipped_asins),
+                    "skipped_asins": skipped_asins,
+                },
+            )
 
         # Also check DB for additional matches not found via Audible
         db_results = await search_series_from_db(session, name)
@@ -283,5 +323,14 @@ async def search_series(
 
     except NotFoundException:
         raise
-    except Exception:
-        raise NotFoundException("Series search failed")
+    except Exception as e:
+        # name is caller-authored and never logged -- only its length is,
+        # the same rule search.py's quick_search follows for its own
+        # caller-authored keywords.
+        logger.warning("Series search failed", extra={
+            "name_length": len(name),
+            "region": region,
+            "error": str(e),
+            "upstream_status": upstream_status_of(e),
+        })
+        raise as_audible_failure(e, "Series search failed") from e

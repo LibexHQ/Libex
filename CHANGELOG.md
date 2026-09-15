@@ -10,6 +10,38 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.22.3]
+
+### Fixed
+- **An Audible outage with nothing stored or cached to fall back on is no
+  longer indistinguishable, internally, from Audible confirming a record
+  doesn't exist.** Book, chapter, author and series lookups, and author and
+  series search, used to raise the same "not found" signal whether Audible
+  had actually answered that nothing matched or Libex simply couldn't reach
+  Audible and had nothing on file to fall back on either — collapsing
+  "confirmed absent" and "couldn't find out" into one outcome. The two now
+  raise distinctly internally, and several of these paths that previously
+  failed without logging anything now log a warning carrying the real HTTP
+  status Audible sent, when it sent one. Author and series search each log a
+  single summary warning when one item among several results couldn't be
+  resolved, instead of that going unrecorded. None of this changes what a
+  caller of the API sees: every route still turns the outage into the same
+  404 it already returned for a confirmed absence, byte-identical to before.
+
+- **The corpus refresh script's failure tracking no longer misses a
+  sustained Audible outage.** A chunk whose re-fetch hit an outage with
+  nothing in the database to fall back on used to be counted the same as a
+  chunk of books Audible confirmed it doesn't have — filed under the
+  not-found tally, with no effect on the run's own failure accounting. That
+  meant a genuine, sustained outage during a refresh run could never trip
+  the run's own abort safeguard (25% of the last 40 chunks failing, by
+  default) or slow its concurrency ramp-up, because none of those failed
+  chunks were ever counted as failures. Such a chunk now counts as a failed
+  chunk: it feeds the abort check and resets the affected region's clean
+  run streak, delaying the next step up in concurrency. A single failed
+  chunk does not by itself step concurrency down — that still requires the
+  separate latency-based degrade check.
+
 ## [1.22.2]
 
 ### Fixed

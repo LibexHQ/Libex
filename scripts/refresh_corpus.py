@@ -578,10 +578,18 @@ async def _refresh_chunk(region: str, asins: list[str], run: _Run, ramp: _Ramp) 
             run.books_refreshed += len(books)
             run.books_not_found += max(0, len(asins) - len(books))
     except NotFoundException:
-        # Terminal for this chunk and never a retry signal: the ASINs are not
-        # in this marketplace. Only a single-ASIN tail chunk can reach here,
-        # since the bulk endpoint answers 200 with an empty products array
-        # rather than 404. Not counted as a failure.
+        # Not counted as a failure, and never a retry signal. get_books_by_asins
+        # raises this only for an empty ASIN list, and _chunks_for_page never
+        # hands this caller one -- every chunk it builds carries at least one
+        # ASIN. A 404 for an individual ASIN never reaches here either: it is
+        # absorbed into the normal return as a shortfall between what was asked
+        # for and what came back, which the success branch above already
+        # counts via books_not_found. An outage with nothing in the DB to fall
+        # back on is what reaches the generic except below instead, as an
+        # AudibleAPIException, and does count as a failed chunk there -- which
+        # resets the region's clean streak. This branch is kept for the
+        # exception get_books_by_asins can still raise, not because the
+        # current chunking reaches it.
         run.books_not_found += len(asins)
     except Exception as exc:
         failed = True

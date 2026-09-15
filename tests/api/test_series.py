@@ -13,7 +13,7 @@ from httpx import AsyncClient, ASGITransport
 
 # Local
 from app.main import app
-from app.core.exceptions import NotFoundException
+from app.core.exceptions import AudibleAPIException, NotFoundException
 from app.core.response_headers import SOURCE_AUDIBLE, SOURCE_CACHE, record_source, record_source_keys
 
 MOCK_SERIES = {
@@ -622,3 +622,118 @@ async def test_get_series_books_primary_marks_incomplete_on_a_hollow_stub_with_n
     assert [b["asin"] for b in body] == [found_asin]
     assert response.headers["x-libex-complete"] == "false"
     assert response.headers["x-libex-incomplete-reason"] == "hydration-not-found"
+
+
+# ============================================================
+# AUDIBLE OUTAGE CONTRACT — AudibleAPIException still comes back as the
+# same 404 HEAD produced, byte for byte, via outage_as_not_found
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_search_series_outage_returns_404_matching_head(async_client):
+    with patch("app.api.routes.series.router.search_series", new_callable=AsyncMock) as mock:
+        mock.side_effect = AudibleAPIException("Series search failed")
+        response = await async_client.get("/series/search?name=Dune")
+
+    assert response.status_code == 404
+    assert response.json() == {"error": "Series search failed", "status_code": 404}
+
+
+@pytest.mark.asyncio
+async def test_search_series_legacy_outage_returns_404_matching_head(async_client):
+    """Legacy twin (/series) must not diverge."""
+    with patch("app.api.routes.series.router.search_series", new_callable=AsyncMock) as mock:
+        mock.side_effect = AudibleAPIException("Series search failed")
+        response = await async_client.get("/series?name=Dune")
+
+    assert response.status_code == 404
+    assert response.json() == {"error": "Series search failed", "status_code": 404}
+
+
+@pytest.mark.asyncio
+async def test_get_books_by_series_outage_on_discovery_returns_404_matching_head(async_client):
+    """/series/books/{asin} -- a route whose 404 message comes from the
+    service, not a route literal."""
+    with patch("app.api.routes.series.router.get_series_books", new_callable=AsyncMock) as mock:
+        mock.side_effect = AudibleAPIException("Audible unavailable and no cached series books found")
+        response = await async_client.get("/series/books/B00SERIES1")
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": "Audible unavailable and no cached series books found",
+        "status_code": 404,
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_books_by_series_outage_on_hydration_returns_404_matching_head(async_client):
+    with patch("app.api.routes.series.router.get_series_books", new_callable=AsyncMock) as mock_series, \
+         patch("app.api.routes.series.router.get_books_by_asins", new_callable=AsyncMock) as mock_books:
+        mock_series.return_value = ["B08G9PRS1K"]
+        mock_books.side_effect = AudibleAPIException("Audible unavailable and no cached data found")
+        response = await async_client.get("/series/books/B00SERIES1")
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": "Audible unavailable and no cached data found",
+        "status_code": 404,
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_books_by_series_primary_outage_on_discovery_returns_404_matching_head(async_client):
+    """Legacy twin (/series/{asin}/books) must not diverge."""
+    with patch("app.api.routes.series.router.get_series_books", new_callable=AsyncMock) as mock:
+        mock.side_effect = AudibleAPIException("Audible unavailable and no cached series books found")
+        response = await async_client.get("/series/B00SERIES1/books")
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": "Audible unavailable and no cached series books found",
+        "status_code": 404,
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_books_by_series_primary_outage_on_hydration_returns_404_matching_head(async_client):
+    """Legacy twin (/series/{asin}/books) must not diverge."""
+    with patch("app.api.routes.series.router.get_series_books", new_callable=AsyncMock) as mock_series, \
+         patch("app.api.routes.series.router.get_books_by_asins", new_callable=AsyncMock) as mock_books:
+        mock_series.return_value = ["B08G9PRS1K"]
+        mock_books.side_effect = AudibleAPIException("Audible unavailable and no cached data found")
+        response = await async_client.get("/series/B00SERIES1/books")
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": "Audible unavailable and no cached data found",
+        "status_code": 404,
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_series_by_asin_outage_returns_404_matching_head(async_client):
+    with patch("app.api.routes.series.router.get_series", new_callable=AsyncMock) as mock:
+        mock.side_effect = AudibleAPIException("Audible unavailable and no cached series data found")
+        response = await async_client.get("/series/B00SERIES1")
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": "Audible unavailable and no cached series data found",
+        "status_code": 404,
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_series_by_asin_genuine_absence_is_unchanged(async_client):
+    """A real NotFoundException must be completely unaffected by
+    outage_as_not_found -- same status and body as any other confirmed
+    absence."""
+    with patch("app.api.routes.series.router.get_series", new_callable=AsyncMock) as mock:
+        mock.side_effect = NotFoundException("Series not found: B00SERIES1")
+        response = await async_client.get("/series/B00SERIES1")
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": "Series not found: B00SERIES1",
+        "status_code": 404,
+    }

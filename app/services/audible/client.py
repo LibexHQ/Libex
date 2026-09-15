@@ -618,3 +618,48 @@ async def audible_get(
             f"Audible API returned {response.status_code} for {url}",
             upstream_status=response.status_code,
         )
+
+
+# ============================================================
+# EXCEPTION HELPERS
+# ============================================================
+
+def upstream_status_of(exc: BaseException) -> int | None:
+    """
+    Returns the HTTP status Audible actually sent, when exc is an
+    AudibleAPIException carrying one, else None. Shared by every warning log
+    that precedes raising an AudibleAPIException and by as_audible_failure
+    itself, so the status a caller logs and the status it raises always
+    agree instead of being derived twice and risking drift between them.
+    """
+    return exc.upstream_status if isinstance(exc, AudibleAPIException) else None
+
+
+def as_audible_failure(exc: Exception, message: str) -> AudibleAPIException:
+    """
+    Turns a caught exception into the type every Audible service module
+    raises when it could not find out whether a record exists, as distinct
+    from NotFoundException, which is reserved for Audible actually
+    answering and saying no.
+
+    Always carries `message` -- the calling site's own description of what
+    it was doing when the caller lost the ability to answer -- rather than
+    whatever str(exc) happened to be. That matters most when exc is itself
+    an AudibleAPIException: audible_get's own message is built from the
+    request URL (`f"Audible API returned {status} for {url}"`), which is
+    both meaningless to a caller of the service layer and an internal
+    Audible endpoint that has no business reaching a response body.
+
+    upstream_status is carried over from exc when exc is an
+    AudibleAPIException -- the real HTTP status Audible sent, or None when
+    no response ever arrived at all -- so that distinction survives the
+    message rewrite. Anything else -- a bug elsewhere in the surrounding
+    service logic, caught by the same broad `except Exception` that also
+    catches a genuine transport failure -- gets upstream_status left at
+    None, since there is no HTTP response to attribute it to either. Both
+    cases mean the same thing to a caller of the service layer: the
+    record's existence was never actually established, so a 404 would be
+    asserting something nobody confirmed.
+    """
+    upstream_status = upstream_status_of(exc)
+    return AudibleAPIException(message, upstream_status=upstream_status)

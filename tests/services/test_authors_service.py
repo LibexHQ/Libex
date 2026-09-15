@@ -279,6 +279,68 @@ async def test_get_author_writes_to_db_on_success():
         mock_persist.assert_called_once()
 
 
+@pytest.mark.asyncio
+async def test_get_author_raises_audible_api_exception_when_nothing_backstops_it():
+    """When Audible is down and neither the DB nor the cache has this
+    author, that is silence -- not Audible confirming the author does not
+    exist -- so the caller must see AudibleAPIException."""
+    from app.services.audible.authors import get_author
+    from app.core.exceptions import AudibleAPIException
+
+    mock_session = AsyncMock()
+
+    with patch("app.services.audible.authors.audible_get", side_effect=RuntimeError("Audible down")), \
+         patch("app.services.audible.authors.get_author_from_db", new_callable=AsyncMock, return_value=None), \
+         patch("app.services.audible.authors.cache.get", new=AsyncMock(return_value=None)):
+        with pytest.raises(AudibleAPIException) as exc:
+            await get_author("B000APF21M", "us", mock_session)
+
+    assert exc.value.message == "Audible unavailable and no cached author data found"
+    assert exc.value.upstream_status is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raised,expected_upstream_status",
+    [
+        pytest.param("audible_api", 503, id="audible_api_exception_carries_its_status"),
+        pytest.param("plain", None, id="plain_exception_has_no_status"),
+    ],
+)
+async def test_get_author_logs_warning_before_raising(raised, expected_upstream_status):
+    """The no-backstop outage path must log a WARNING carrying every
+    diagnostic field before raising, and upstream_status must reflect the
+    raised exception's own value when it is an AudibleAPIException, or None
+    for any other exception type."""
+    from app.services.audible.authors import get_author
+    from app.core.exceptions import AudibleAPIException
+
+    exc = (
+        AudibleAPIException("upstream 503", upstream_status=503)
+        if raised == "audible_api"
+        else RuntimeError("Audible down")
+    )
+
+    mock_session = AsyncMock()
+
+    with patch("app.services.audible.authors.audible_get", side_effect=exc), \
+         patch("app.services.audible.authors.get_author_from_db", new=AsyncMock(return_value=None)), \
+         patch("app.services.audible.authors.cache.get", new=AsyncMock(return_value=None)), \
+         patch("app.services.audible.authors.logger") as mock_logger:
+        with pytest.raises(AudibleAPIException):
+            await get_author("B000APF21M", "us", mock_session)
+
+    mock_logger.warning.assert_called_once_with(
+        "Audible unavailable and no cached author data found",
+        extra={
+            "author_asin": "B000APF21M",
+            "region": "us",
+            "error": str(exc),
+            "upstream_status": expected_upstream_status,
+        },
+    )
+
+
 # ============================================================
 # AUTHOR BOOKS BY NAME — catalog search fallback
 # (fetch_author_books_by_name: renamed from the private
@@ -425,6 +487,230 @@ async def test_fetch_author_books_by_name_never_overrides_concurrency():
         await fetch_author_books_by_name("Frank Herbert", "us")
 
     assert "concurrency" not in mock_detailed.await_args.kwargs
+
+
+# ============================================================
+# GET_AUTHOR_BOOKS_BY_NAME / SEARCH_AUTHORS — OUTAGE CONTRACT
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_get_author_books_by_name_raises_audible_api_exception_on_failure():
+    """A failure with no fallback (this call has none) must raise
+    AudibleAPIException, not NotFoundException -- Libex could not find out,
+    Audible never got the chance to say no."""
+    from app.services.audible.authors import get_author_books_by_name
+    from app.core.exceptions import AudibleAPIException
+
+    mock_session = AsyncMock()
+
+    with patch(
+        "app.services.audible.authors.fetch_author_books_by_name",
+        new=AsyncMock(side_effect=RuntimeError("Audible down")),
+    ):
+        with pytest.raises(AudibleAPIException) as exc:
+            await get_author_books_by_name("Frank Herbert", "us", mock_session)
+
+    assert exc.value.message == "Failed to fetch author books by name"
+    assert exc.value.upstream_status is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raised,expected_upstream_status",
+    [
+        pytest.param("audible_api", 502, id="audible_api_exception_carries_its_status"),
+        pytest.param("plain", None, id="plain_exception_has_no_status"),
+    ],
+)
+async def test_get_author_books_by_name_logs_warning_before_raising(raised, expected_upstream_status):
+    """The failure path must log a WARNING with the expected diagnostic
+    fields before raising, upstream_status must reflect the raised
+    exception's own value, and the caller-authored name must never appear
+    in the log call -- not in the message, not in any extra value."""
+    from app.services.audible.authors import get_author_books_by_name
+    from app.core.exceptions import AudibleAPIException
+
+    exc = (
+        AudibleAPIException("upstream 502", upstream_status=502)
+        if raised == "audible_api"
+        else RuntimeError("Audible down")
+    )
+    name = "Frank Herbert"
+    mock_session = AsyncMock()
+
+    with patch(
+        "app.services.audible.authors.fetch_author_books_by_name",
+        new=AsyncMock(side_effect=exc),
+    ), patch("app.services.audible.authors.logger") as mock_logger:
+        with pytest.raises(AudibleAPIException):
+            await get_author_books_by_name(name, "us", mock_session)
+
+    mock_logger.warning.assert_called_once_with(
+        "Failed to fetch author books by name",
+        extra={
+            "name_length": len(name),
+            "region": "us",
+            "error": str(exc),
+            "upstream_status": expected_upstream_status,
+        },
+    )
+    logged_message, logged_kwargs = mock_logger.warning.call_args
+    assert name not in logged_message[0]
+    assert name not in logged_kwargs["extra"].values()
+
+
+@pytest.mark.asyncio
+async def test_get_author_books_by_name_still_raises_not_found_on_a_genuine_empty_result():
+    """A clean empty result (Audible answered, no books) must still raise
+    NotFoundException, unaffected by the outage-contract change above."""
+    from app.services.audible.authors import get_author_books_by_name
+    from app.core.exceptions import NotFoundException
+
+    mock_session = AsyncMock()
+
+    with patch(
+        "app.services.audible.authors.fetch_author_books_by_name",
+        new=AsyncMock(return_value=([], 1)),
+    ):
+        with pytest.raises(NotFoundException):
+            await get_author_books_by_name("Nobody At All", "us", mock_session)
+
+
+@pytest.mark.asyncio
+async def test_search_authors_raises_audible_api_exception_on_total_failure():
+    """The suggestions call itself failing must raise, not silently return
+    an empty list a caller could mistake for a genuine zero-result search."""
+    from app.services.audible.authors import search_authors
+    from app.core.exceptions import AudibleAPIException
+
+    mock_session = AsyncMock()
+
+    with patch(
+        "app.services.audible.authors.audible_get",
+        new=AsyncMock(side_effect=RuntimeError("Audible down")),
+    ):
+        with pytest.raises(AudibleAPIException) as exc:
+            await search_authors("Frank Herbert", "us", mock_session)
+
+    assert exc.value.message == "Author search failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raised,expected_upstream_status",
+    [
+        pytest.param("audible_api", 500, id="audible_api_exception_carries_its_status"),
+        pytest.param("plain", None, id="plain_exception_has_no_status"),
+    ],
+)
+async def test_search_authors_outer_failure_logs_warning_before_raising(raised, expected_upstream_status):
+    """The suggestions call failing outright must log a WARNING with the
+    expected diagnostic fields before raising, upstream_status must reflect
+    the raised exception's own value, and the caller-authored name must
+    never appear in the log call."""
+    from app.services.audible.authors import search_authors
+    from app.core.exceptions import AudibleAPIException
+
+    exc = (
+        AudibleAPIException("upstream 500", upstream_status=500)
+        if raised == "audible_api"
+        else RuntimeError("Audible down")
+    )
+    name = "Frank Herbert"
+    mock_session = AsyncMock()
+
+    with patch(
+        "app.services.audible.authors.audible_get",
+        new=AsyncMock(side_effect=exc),
+    ), patch("app.services.audible.authors.logger") as mock_logger:
+        with pytest.raises(AudibleAPIException):
+            await search_authors(name, "us", mock_session)
+
+    mock_logger.warning.assert_called_once_with(
+        "Author search failed",
+        extra={
+            "name_length": len(name),
+            "region": "us",
+            "error": str(exc),
+            "upstream_status": expected_upstream_status,
+        },
+    )
+    logged_message, logged_kwargs = mock_logger.warning.call_args
+    assert name not in logged_message[0]
+    assert name not in logged_kwargs["extra"].values()
+
+
+@pytest.mark.asyncio
+async def test_search_authors_skips_an_unreachable_suggested_author_and_keeps_the_rest():
+    """One suggested author being unreachable must not sink a search that
+    already has other hits to show -- it is logged and skipped, and the
+    reachable author still comes back."""
+    from app.services.audible.authors import search_authors
+    from app.core.exceptions import AudibleAPIException
+
+    mock_session = AsyncMock()
+    reachable = {
+        "id": None, "asin": "B000REACH01", "name": "Reachable Author",
+        "region": "us", "regions": ["us"], "description": None,
+        "image": None, "genres": [], "updatedAt": None,
+    }
+    suggestions_response = {
+        "model": {
+            "items": [
+                {"view": {"template": "AuthorItemV2"}, "model": {"person_metadata": {"asin": "B000UNREACH1"}}},
+                {"view": {"template": "AuthorItemV2"}, "model": {"person_metadata": {"asin": "B000REACH01"}}},
+            ]
+        }
+    }
+
+    async def fake_get_author(asin, region, session):
+        if asin == "B000UNREACH1":
+            raise AudibleAPIException("Audible unavailable and no cached author data found")
+        return reachable
+
+    with patch("app.services.audible.authors.audible_get", new=AsyncMock(return_value=suggestions_response)), \
+         patch("app.services.audible.authors.get_author", new=AsyncMock(side_effect=fake_get_author)), \
+         patch("app.services.audible.authors.logger") as mock_logger:
+        results = await search_authors("Frank Herbert", "us", mock_session)
+
+    assert results == [reachable]
+    mock_logger.warning.assert_called_once_with(
+        "Author search: could not resolve one or more suggested authors, skipping",
+        extra={
+            "region": "us",
+            "skipped_num": 1,
+            "skipped_asins": ["B000UNREACH1"],
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_search_authors_emits_no_summary_warning_when_nothing_was_skipped():
+    """The summary warning is conditional on the skip list -- a search where
+    every suggested author resolves cleanly must not log at all."""
+    from app.services.audible.authors import search_authors
+
+    mock_session = AsyncMock()
+    reachable = {
+        "id": None, "asin": "B000REACH01", "name": "Reachable Author",
+        "region": "us", "regions": ["us"], "description": None,
+        "image": None, "genres": [], "updatedAt": None,
+    }
+    suggestions_response = {
+        "model": {
+            "items": [
+                {"view": {"template": "AuthorItemV2"}, "model": {"person_metadata": {"asin": "B000REACH01"}}},
+            ]
+        }
+    }
+
+    with patch("app.services.audible.authors.audible_get", new=AsyncMock(return_value=suggestions_response)), \
+         patch("app.services.audible.authors.get_author", new=AsyncMock(return_value=reachable)), \
+         patch("app.services.audible.authors.logger") as mock_logger:
+        results = await search_authors("Frank Herbert", "us", mock_session)
+
+    assert results == [reachable]
+    mock_logger.warning.assert_not_called()
 
 
 # ============================================================
@@ -2483,9 +2769,13 @@ async def test_get_author_books_transient_catalog_failure_falls_to_db_then_cache
 
 
 @pytest.mark.asyncio
-async def test_get_author_books_transient_failure_all_empty_raises_not_found():
+async def test_get_author_books_transient_failure_all_empty_raises_audible_api_exception():
+    """A degraded walk (catalog raised, everything else empty) is Libex
+    failing to find out, not Audible answering that there are no books --
+    the honest type is AudibleAPIException, not NotFoundException; see
+    _walk_author_books' own degraded-path raise."""
     from app.services.audible.authors import get_author_books
-    from app.core.exceptions import NotFoundException
+    from app.core.exceptions import AudibleAPIException
 
     mock_session = AsyncMock()
     empty_screen = _screen_result([], pages_fetched=0)
@@ -2495,8 +2785,11 @@ async def test_get_author_books_transient_failure_all_empty_raises_not_found():
          patch("app.services.audible.authors._fetch_author_books_by_catalog", new=AsyncMock(side_effect=RuntimeError("Audible down"))), \
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
          patch("app.services.audible.authors.cache.get", return_value=None):
-        with pytest.raises(NotFoundException):
+        with pytest.raises(AudibleAPIException) as exc:
             await get_author_books("B000AUTHOR", "us", mock_session)
+
+    assert exc.value.message == "Audible unavailable and no cached author books found"
+    assert exc.value.upstream_status is None
 
 
 @pytest.mark.asyncio
@@ -4099,13 +4392,17 @@ async def test_fetch_author_books_by_screen_grid_beyond_section_cap_is_not_misat
 @pytest.mark.asyncio
 async def test_get_author_books_total_failure_logs_warning_before_raising():
     """The total-failure branch must log a WARNING carrying every diagnostic
-    field before raising NotFoundException -- it must not raise silently.
-    Name resolution failing outright means author_name stays None, so the
-    catalog wave is never scheduled at all (see get_author_books' own
-    docstring) -- catalog_error and catalog_sort_errors reflect that "never
-    ran" state rather than a catalog-specific failure."""
+    field before raising -- it must not raise silently. Name resolution
+    failing outright means author_name stays None, so the catalog wave is
+    never scheduled at all (see get_author_books' own docstring) --
+    catalog_error and catalog_sort_errors reflect that "never ran" state
+    rather than a catalog-specific failure.
+
+    Raises AudibleAPIException, not NotFoundException: name resolution
+    failing is a degraded source, not Audible confirming an empty catalog;
+    see _walk_author_books' own degraded-path raise."""
     from app.services.audible.authors import get_author_books
-    from app.core.exceptions import NotFoundException, AudibleAPIException
+    from app.core.exceptions import AudibleAPIException
 
     mock_session = AsyncMock()
     empty_screen = _screen_result(
@@ -4118,8 +4415,10 @@ async def test_get_author_books_total_failure_logs_warning_before_raising():
          patch("app.services.audible.authors.get_author_book_asins_from_db", new=AsyncMock(return_value=[])), \
          patch("app.services.audible.authors.cache.get", return_value=None), \
          patch("app.services.audible.authors.logger") as mock_logger:
-        with pytest.raises(NotFoundException):
+        with pytest.raises(AudibleAPIException) as exc:
             await get_author_books("B000AUTHOR", "us", mock_session)
+
+    assert exc.value.message == "Audible unavailable and no cached author books found"
 
     mock_logger.warning.assert_called_once()
     warning_extra = mock_logger.warning.call_args.kwargs["extra"]

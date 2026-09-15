@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_session
 
 # Routes
+from app.api.routes.audible_outage import outage_as_not_found
 from app.api.routes.authors.schemas import AuthorResponse
 from app.api.routes.books.schemas import BookResponse
 from app.api.routes.cache_param import CacheAuthorBooksParam, CacheStandardParam, apply_cache_control
@@ -58,7 +59,7 @@ async def search(
     session: AsyncSession = Depends(get_session),
 ) -> list[AuthorResponse]:
     """Search for authors by name. Returns 404 if none found."""
-    authors = await search_authors(name, region, session)
+    authors = await outage_as_not_found(search_authors(name, region, session))
     if not authors:
         raise NotFoundException("No authors found")
     return [AuthorResponse(**a) for a in authors]
@@ -78,10 +79,10 @@ async def get_books_by_author_name(
     Used when no author ASIN is available.
     Returns full book objects matching AudiMeta's BookDto format.
     """
-    asins = await get_author_books_by_name(name, region, session)
+    asins = await outage_as_not_found(get_author_books_by_name(name, region, session))
     if not asins:
         raise NotFoundException("No books found for author")
-    books = await get_books_by_asins(asins, region, session)
+    books = await outage_as_not_found(get_books_by_asins(asins, region, session))
     books = filter_dicts(books, filters.as_kwargs())
     books = sort_dicts(books, sort.value if sort is not None else None, order.value, BOOK_SORT_FIELDS)
     return await build_large_list_response(
@@ -212,7 +213,9 @@ async def get_books_by_author(
     # discovery budget plus an unbounded fan-out, on a request the proxy was
     # already timing out on. Sharing it means the two cannot add up past it.
     deadline = time.monotonic() + AUTHOR_BOOKS_TIME_BUDGET_SECONDS
-    walk = await get_author_books(asin, region, session, cache, deadline=deadline)
+    walk = await outage_as_not_found(
+        get_author_books(asin, region, session, cache, deadline=deadline)
+    )
     asins = walk.asins
     if not asins:
         raise NotFoundException("No books found for author")
@@ -228,8 +231,10 @@ async def get_books_by_author(
     # pairing running serialized behind the default Audible concurrency pool
     # -- see get_books_by_asins' own docstring and client.py's
     # AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT for the measurements.
-    books = await get_books_by_asins(
-        asins, region, session, use_cache=cache, high_concurrency=True, deadline=deadline
+    books = await outage_as_not_found(
+        get_books_by_asins(
+            asins, region, session, use_cache=cache, high_concurrency=True, deadline=deadline
+        )
     )
     # Marked here rather than above, and given the hydrated books rather than
     # the walk alone. walk.is_complete describes DISCOVERY -- whether the ASIN
@@ -281,15 +286,19 @@ async def get_books_by_author_primary(
     # One deadline shared by both phases, same as get_books_by_author above
     # -- this is its legacy-route twin; see that call site's comment.
     deadline = time.monotonic() + AUTHOR_BOOKS_TIME_BUDGET_SECONDS
-    walk = await get_author_books(asin, region, session, cache, deadline=deadline)
+    walk = await outage_as_not_found(
+        get_author_books(asin, region, session, cache, deadline=deadline)
+    )
     asins = walk.asins
     if not asins:
         raise NotFoundException("No books found for author")
     # use_cache=cache and high_concurrency=True: same pairing as
     # get_books_by_author above (this is its legacy-route twin) -- see that
     # call site's comments.
-    books = await get_books_by_asins(
-        asins, region, session, use_cache=cache, high_concurrency=True, deadline=deadline
+    books = await outage_as_not_found(
+        get_books_by_asins(
+            asins, region, session, use_cache=cache, high_concurrency=True, deadline=deadline
+        )
     )
     # Marked here rather than above, and given the hydrated books rather than
     # the walk alone. walk.is_complete describes DISCOVERY -- whether the ASIN
@@ -338,7 +347,7 @@ async def get_author_by_asin(
 ) -> AuthorResponse:
     """Get author profile by ASIN."""
     facts = ResponseFacts()
-    data = await get_author(asin, region, session, cache, facts=facts)
+    data = await outage_as_not_found(get_author(asin, region, session, cache, facts=facts))
     apply_cache_control(response, cache)
     stamp_facts_headers(response, facts, has_entities=True)
     return AuthorResponse(**data)

@@ -395,6 +395,115 @@ async def test_request_error_with_empty_message_includes_type():
 
 
 # ============================================================
+# UPSTREAM_STATUS_OF
+# ============================================================
+
+def test_upstream_status_of_returns_the_status_from_an_audible_api_exception():
+    from app.services.audible.client import upstream_status_of
+    from app.core.exceptions import AudibleAPIException
+
+    exc = AudibleAPIException("Audible API returned 503 for https://api.audible.com/x", upstream_status=503)
+
+    assert upstream_status_of(exc) == 503
+
+
+def test_upstream_status_of_none_when_the_audible_api_exception_carried_none():
+    from app.services.audible.client import upstream_status_of
+    from app.core.exceptions import AudibleAPIException
+
+    exc = AudibleAPIException("Audible API timed out: TimeoutException for https://api.audible.com/x")
+
+    assert upstream_status_of(exc) is None
+
+
+def test_upstream_status_of_none_for_a_plain_exception():
+    from app.services.audible.client import upstream_status_of
+
+    assert upstream_status_of(RuntimeError("Audible down")) is None
+
+
+def test_upstream_status_of_none_for_a_libex_exception_that_is_not_an_audible_api_exception():
+    """NotFoundException carries its own status_code, but that is the code
+    Libex returns to its own callers -- not an HTTP status Audible sent, so
+    upstream_status_of must not mistake one for the other."""
+    from app.services.audible.client import upstream_status_of
+
+    assert upstream_status_of(NotFoundException("Book not found")) is None
+
+
+# ============================================================
+# AS_AUDIBLE_FAILURE
+# ============================================================
+
+def test_as_audible_failure_uses_the_sites_own_message_not_str_exc():
+    """message is always the calling site's own description, never
+    whatever str(exc) happened to produce -- this matters most when exc is
+    an AudibleAPIException, whose own message is built from an internal
+    Audible URL that has no business reaching a response body."""
+    from app.services.audible.client import as_audible_failure
+    from app.core.exceptions import AudibleAPIException
+
+    exc = AudibleAPIException("Audible API returned 502 for https://api.audible.com/internal")
+    result = as_audible_failure(exc, "Audible unavailable and no cached data found")
+
+    assert isinstance(result, AudibleAPIException)
+    assert result.message == "Audible unavailable and no cached data found"
+
+
+def test_as_audible_failure_carries_upstream_status_from_an_audible_api_exception():
+    from app.services.audible.client import as_audible_failure
+    from app.core.exceptions import AudibleAPIException
+
+    exc = AudibleAPIException("Audible API returned 503 for https://api.audible.com/x", upstream_status=503)
+    result = as_audible_failure(exc, "Audible unavailable and no cached data found")
+
+    assert result.upstream_status == 503
+
+
+def test_as_audible_failure_upstream_status_none_when_the_audible_api_exception_carried_none():
+    """A transport failure (timeout, connection error) reaches audible_get's
+    own except blocks with no HTTP response at all, so its
+    AudibleAPIException carries upstream_status=None already -- that has to
+    survive the rewrite, not silently become a different kind of None."""
+    from app.services.audible.client import as_audible_failure
+    from app.core.exceptions import AudibleAPIException
+
+    exc = AudibleAPIException("Audible API timed out: TimeoutException for https://api.audible.com/x")
+    result = as_audible_failure(exc, "Audible unavailable and no cached data found")
+
+    assert result.upstream_status is None
+
+
+def test_as_audible_failure_upstream_status_none_for_a_non_audible_exception():
+    """A bug elsewhere in the surrounding service logic -- a KeyError, a
+    RuntimeError -- is caught by the same broad `except Exception` a genuine
+    transport failure is, and gets upstream_status left at None since there
+    is no HTTP response to attribute it to."""
+    from app.services.audible.client import as_audible_failure
+    from app.core.exceptions import AudibleAPIException
+
+    result = as_audible_failure(RuntimeError("Audible down"), "Audible unavailable and no cached data found")
+
+    assert isinstance(result, AudibleAPIException)
+    assert result.upstream_status is None
+
+
+def test_as_audible_failure_always_returns_a_new_exception_not_the_original():
+    """The original exception object is never handed back unchanged -- a
+    caller relying on as_audible_failure to normalize the failure type must
+    always get an AudibleAPIException carrying the site's own message, even
+    when exc already was one."""
+    from app.services.audible.client import as_audible_failure
+    from app.core.exceptions import AudibleAPIException
+
+    original = AudibleAPIException("Audible API returned 500 for https://api.audible.com/x", upstream_status=500)
+    result = as_audible_failure(original, "Audible search failed")
+
+    assert result is not original
+    assert result.message == "Audible search failed"
+
+
+# ============================================================
 # RETRY / BACKOFF / CONCURRENCY
 # ============================================================
 

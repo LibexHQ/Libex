@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_session
 
 # Routes
+from app.api.routes.audible_outage import outage_as_not_found
 from app.api.routes.books.schemas import BookResponse, BulkBookResponse, ChapterResponse
 from app.api.routes.cache_param import CacheStandardParam, apply_cache_control
 from app.api.routes.facts_headers import FACTS_RESPONSE_HEADERS, stamp_facts_headers
@@ -68,7 +69,7 @@ async def get_book(
     Returns a single book object directly.
     """
     facts = ResponseFacts()
-    data = await get_book_by_asin(asin, region, session, cache, facts=facts)
+    data = await outage_as_not_found(get_book_by_asin(asin, region, session, cache, facts=facts))
     apply_cache_control(response, cache)
     stamp_facts_headers(response, facts, has_entities=True)
     return BookResponse(**data)
@@ -83,7 +84,7 @@ async def get_book_chapters(
 ) -> ChapterResponse:
     """Get chapter information for a book by ASIN."""
     facts = ResponseFacts()
-    data = await get_chapters(asin, region, session, facts=facts)
+    data = await outage_as_not_found(get_chapters(asin, region, session, facts=facts))
     stamp_facts_headers(response, facts, has_entities=True)
     return ChapterResponse(**data)
 
@@ -102,7 +103,7 @@ async def get_book_chapters_legacy(
 ) -> ChapterResponse:
     """Legacy endpoint. Use /book/{asin}/chapters instead."""
     facts = ResponseFacts()
-    data = await get_chapters(asin, region, session, facts=facts)
+    data = await outage_as_not_found(get_chapters(asin, region, session, facts=facts))
     stamp_facts_headers(response, facts, has_entities=True)
     return ChapterResponse(**data)
 
@@ -148,7 +149,9 @@ async def get_books_bulk(
         raise NotFoundException("Maximum 1000 ASINs per request")
 
     facts = ResponseFacts()
-    data = await get_books_by_asins(asin_list, region, session, cache, facts=facts)
+    data = await outage_as_not_found(
+        get_books_by_asins(asin_list, region, session, cache, facts=facts)
+    )
 
     # notFound reflects what Audible didn't have — computed before filtering, so
     # a book that was found but filtered out is not reported as missing. Both

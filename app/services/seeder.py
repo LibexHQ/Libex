@@ -219,10 +219,13 @@ async def _fetch_and_persist(missing: list[str], region: str, delay: float) -> b
 
     Returns False if any chunk of this call did not reach storage, whether
     the background persist queue shed it or the fetch/persist call raised
-    before it could report an outcome at all -- get_books_by_asins raises
-    NotFoundException when a chunk's ASINs are in neither Audible, the DB,
-    nor the cache, and a chunk that raised persisted nothing just as surely
-    as one the queue shed. Both are treated as not-admitted so whichever
+    before it could report an outcome at all. A chunk Audible confirms has
+    no matching records returns an empty list rather than raising, and
+    costs nothing here -- there is nothing to persist. get_books_by_asins
+    raises AudibleAPIException instead when a chunk's ASINs are in neither
+    Audible, the DB, nor the cache -- a genuine outage, not a confirmed
+    absence -- and a chunk that raised persisted nothing just as surely as
+    one the queue shed. Both are treated as not-admitted so whichever
     entity discovered these books (an author, series, or narrator) is not
     stamped as seeded over books that never reached storage -- or they stay
     invisible for SEED_STALE_DAYS with nothing left pointing back at them.

@@ -3,6 +3,7 @@ Test configuration and fixtures.
 """
 
 # Standard library
+import os
 import socket
 from unittest.mock import AsyncMock, patch
 
@@ -10,6 +11,19 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi.testclient import TestClient
 from httpx import AsyncClient, ASGITransport
+
+# A test run must never ship telemetry, whatever a developer's .env file or
+# already-exported shell environment holds for these two names. Forced to
+# empty here, before app.main (and so app.core.logging.setup_logging()) is
+# imported below, because pydantic-settings resolves its environment source
+# ahead of its .env file, and on the pinned pydantic-settings version an
+# environment key explicitly set to "" still wins over a non-empty .env value
+# (env_ignore_empty defaults to False) -- only a variable that is entirely
+# unset falls through to the file. Assigned outright rather than via
+# setdefault, so a real token already exported in the calling shell is
+# blanked too, not only one sitting unset and coming from .env.
+os.environ["AXIOM_TOKEN"] = ""
+os.environ["AXIOM_DATASET"] = ""
 
 # Local
 from app.main import app

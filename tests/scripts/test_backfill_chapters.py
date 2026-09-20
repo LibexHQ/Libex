@@ -15,10 +15,8 @@ Covers:
   reaching the dispatcher through the real run loop without the ramp, the
   back-off window or the NONE-rate guard seeing anything that was never
   requested.
-- Containment: _proxy_host_for_log never letting a full (possibly
-  credentialed) AUDIBLE_PROXY_URL reach a log record, and
-  _verify_dedicated_proxy refusing to start against anything but this
-  script's own dedicated exit.
+- Containment: _verify_dedicated_proxy refusing to start against anything
+  but this script's own dedicated exit.
 
 Nothing here exercises the script's DB I/O -- _read_page's and _mark_checked's
 actual SQL against a real database -- beyond what proves the proxy check runs
@@ -41,6 +39,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 # Local
+import libex_core.audible.client as audible_client
 from libex_core.exceptions import AudibleAPIException, NotFoundException
 from app.services.db import writer
 from scripts.backfill_chapters import (
@@ -59,7 +58,6 @@ from scripts.backfill_chapters import (
     _is_backoff_signal,
     _log_exit_ip,
     _process_one,
-    _proxy_host_for_log,
     _run,
     _select_work,
     _verify_dedicated_proxy,
@@ -1163,6 +1161,13 @@ async def _drive_run(*pages, limit=None):
     than asserting on _select_work alone -- a rule that is right in isolation
     and never reaches the dispatcher is worth nothing, and what the
     concurrency machinery observes is itself part of the claim.
+
+    Configures a backfill-named proxy directly through configure_transport()
+    -- _verify_dedicated_proxy reads transport_summary(), not the
+    environment, so setting AUDIBLE_PROXY_URL alone would no longer clear
+    the guard. Every caller of this helper must also depend on the
+    restore_audible_transport fixture so this configured proxy doesn't leak
+    into a test that runs afterward.
     """
     seen: list[tuple[str, str]] = []
     captured: dict = {}
@@ -1189,8 +1194,9 @@ async def _drive_run(*pages, limit=None):
         __aenter__=AsyncMock(return_value=AsyncMock()), __aexit__=AsyncMock(return_value=False)
     ))
 
+    audible_client.configure_transport("http://libex-backfill-vpn:8888")
+
     with patch.dict("os.environ", {
-        "AUDIBLE_PROXY_URL": "http://libex-backfill-vpn:8888",
         "DATABASE_URL": "postgresql+asyncpg://unused/unused",
     }), \
          patch("scripts.backfill_chapters.create_async_engine", MagicMock(return_value=AsyncMock())), \
@@ -1208,7 +1214,7 @@ async def _drive_run(*pages, limit=None):
 
 
 @pytest.mark.asyncio
-async def test_run_dispatches_a_re_admitted_book_end_to_end():
+async def test_run_dispatches_a_re_admitted_book_end_to_end(restore_audible_transport):
     """The rule reaching the thing that acts on it. _select_work being right
     in isolation proves nothing if the loop still filters on `checked is
     None` of its own accord, which is exactly what it did before this slice
@@ -1231,7 +1237,7 @@ async def test_run_dispatches_a_re_admitted_book_end_to_end():
 
 
 @pytest.mark.asyncio
-async def test_run_keeps_settled_books_out_of_the_concurrency_machinery():
+async def test_run_keeps_settled_books_out_of_the_concurrency_machinery(restore_audible_transport):
     """A book nobody asked Audible about is no evidence at all about the
     exit, so a page mostly of settled records must leave the ramp, the
     back-off window and the NONE-rate guard holding only what was really
@@ -1262,40 +1268,20 @@ async def test_run_keeps_settled_books_out_of_the_concurrency_machinery():
 
 
 # ============================================================
-# _proxy_host_for_log -- containment: no full proxy value in any log record
+# _log_exit_ip -- containment: no full proxy value in any log record
 # ============================================================
 
 CREDENTIALED_PROXY = "http://opsuser:s3cr3t-token@libex-backfill-vpn:8888"
 
 
-def test_proxy_host_for_log_strips_credentials():
-    """The hostname is what a log line needs to say which exit is in use;
-    the embedded user:pass must never survive into it."""
-    host = _proxy_host_for_log(CREDENTIALED_PROXY)
-    assert host == "libex-backfill-vpn"
-    assert "opsuser" not in host
-    assert "s3cr3t-token" not in host
-
-
-def test_proxy_host_for_log_direct_when_unset():
-    assert _proxy_host_for_log(None) == "direct"
-    assert _proxy_host_for_log("") == "direct"
-
-
-def test_proxy_host_for_log_never_raises_on_malformed_value():
-    """A logging call must never take the run down over an unparseable env
-    var. httpx.URL raises InvalidURL on some malformed strings -- confirmed
-    directly against the installed httpx: 'http://[::1' is one of them --
-    so this must catch it and return a sentinel, not propagate."""
-    assert _proxy_host_for_log("http://[::1") == "(unparseable)"
-
-
 @pytest.mark.asyncio
-async def test_log_exit_ip_never_logs_the_full_credentialed_proxy(monkeypatch, caplog):
+async def test_log_exit_ip_never_logs_the_full_credentialed_proxy(
+    restore_audible_transport, caplog,
+):
     """The exit-IP startup probe logs 'via <host>'. Proves the credentialed
     value never reaches the record that would otherwise go to stdout and,
     with AXIOM_TOKEN set, to Axiom."""
-    monkeypatch.setenv("AUDIBLE_PROXY_URL", CREDENTIALED_PROXY)
+    audible_client.configure_transport(CREDENTIALED_PROXY)
 
     class _FakeResponse:
         text = "203.0.113.9"
@@ -1325,31 +1311,52 @@ async def test_log_exit_ip_never_logs_the_full_credentialed_proxy(monkeypatch, c
 
 # ============================================================
 # _verify_dedicated_proxy -- containment: refuse to egress from the host
+#
+# _verify_dedicated_proxy reads audible_client.transport_summary(), never
+# AUDIBLE_PROXY_URL directly -- the transport is configured exactly once, at
+# app.services.audible's own import time, so a test exercising this guard has
+# to call configure_transport() itself to put a particular state in place.
+# restore_audible_transport (tests/scripts/conftest.py) snapshots and
+# restores the module's transport around every test below, so none of them
+# leak their configured state into a test that runs after them.
 # ============================================================
 
-def test_verify_dedicated_proxy_raises_when_unset(monkeypatch):
-    """Unset means httpx.AsyncClient would get proxy=None and this script's
-    traffic would egress direct from the container -- the production
-    host's own address. Must refuse before anything else runs."""
-    monkeypatch.delenv("AUDIBLE_PROXY_URL", raising=False)
-    with pytest.raises(SystemExit, match="unset"):
+def test_verify_dedicated_proxy_refuses_when_unconfigured(restore_audible_transport):
+    """The pristine, never-configured state -- distinct from a deliberately
+    configured direct egress -- must refuse exactly like a wrongly-named
+    proxy."""
+    audible_client._transport = audible_client._TransportSnapshot(
+        mode="unconfigured", proxy=None, host=None
+    )
+    with pytest.raises(SystemExit, match="unconfigured"):
         _verify_dedicated_proxy()
 
 
-def test_verify_dedicated_proxy_raises_on_non_backfill_hostname(monkeypatch):
+def test_verify_dedicated_proxy_refuses_on_configured_direct_egress(restore_audible_transport):
+    """None (and, by configure_transport's own contract, "") both configure
+    direct egress -- httpx.AsyncClient would get proxy=None and this
+    script's traffic would egress direct from the container, the production
+    host's own address. Must refuse exactly like the unconfigured state."""
+    audible_client.configure_transport(None)
+    with pytest.raises(SystemExit, match="direct"):
+        _verify_dedicated_proxy()
+
+
+def test_verify_dedicated_proxy_refuses_when_the_configured_host_does_not_qualify(restore_audible_transport):
     """A hostname naming some OTHER exit -- the shared production proxy, or
-    refresh_corpus's own dedicated one -- must fail exactly like unset. This
-    is what stops a copy-pasted refresh exit from being reused here."""
-    monkeypatch.setenv("AUDIBLE_PROXY_URL", "http://libex-refresh-vpn:8888")
+    refresh_corpus's own dedicated one -- must fail exactly like
+    unconfigured. This is what stops a copy-pasted refresh exit from being
+    reused here."""
+    audible_client.configure_transport("http://libex-refresh-vpn:8888")
     with pytest.raises(SystemExit, match="libex-refresh-vpn"):
         _verify_dedicated_proxy()
 
 
-def test_verify_dedicated_proxy_failure_never_names_credentials(monkeypatch):
+def test_verify_dedicated_proxy_failure_never_names_credentials(restore_audible_transport):
     """The failure message names the hostname only, proving a credentialed
     but wrongly-named value can't leak into the SystemExit text either."""
-    monkeypatch.setenv(
-        "AUDIBLE_PROXY_URL", "http://opsuser:s3cr3t-token@libex-refresh-vpn:8888"
+    audible_client.configure_transport(
+        "http://opsuser:s3cr3t-token@libex-refresh-vpn:8888"
     )
     with pytest.raises(SystemExit) as exc_info:
         _verify_dedicated_proxy()
@@ -1357,17 +1364,21 @@ def test_verify_dedicated_proxy_failure_never_names_credentials(monkeypatch):
     assert "opsuser" not in str(exc_info.value)
 
 
-def test_verify_dedicated_proxy_passes_on_backfill_hostname(monkeypatch):
-    monkeypatch.setenv("AUDIBLE_PROXY_URL", "http://libex-backfill-vpn:8888")
+def test_verify_dedicated_proxy_passes_when_a_backfill_named_proxy_is_configured(restore_audible_transport):
+    audible_client.configure_transport("http://libex-backfill-vpn:8888")
     _verify_dedicated_proxy()  # must not raise
 
 
-def test_verify_dedicated_proxy_logs_error_before_raising_on_unset(monkeypatch, caplog):
+def test_verify_dedicated_proxy_logs_error_before_raising_when_unconfigured(
+    restore_audible_transport, caplog,
+):
     """SystemExit alone never reaches the libex logger -- it propagates
     straight out of the process, so unattended it would survive only as
     stderr text. The refusal must also land as a structured ERROR record
     (rotating file handler, Axiom) before the raise, not instead of it."""
-    monkeypatch.delenv("AUDIBLE_PROXY_URL", raising=False)
+    audible_client._transport = audible_client._TransportSnapshot(
+        mode="unconfigured", proxy=None, host=None
+    )
     with caplog.at_level(logging.ERROR, logger="libex"):
         with pytest.raises(SystemExit):
             _verify_dedicated_proxy()
@@ -1380,12 +1391,14 @@ def test_verify_dedicated_proxy_logs_error_before_raising_on_unset(monkeypatch, 
     assert record.proxy_configured is False
 
 
-def test_verify_dedicated_proxy_logs_error_with_hostname_when_wrongly_named(monkeypatch, caplog):
+def test_verify_dedicated_proxy_logs_error_with_hostname_when_wrongly_named(
+    restore_audible_transport, caplog,
+):
     """A wrongly-named but set value logs proxy_configured=True and the
-    actual (safe) hostname it resolved to -- distinct from the unset case,
-    and still never the raw, possibly-credentialed value."""
-    monkeypatch.setenv(
-        "AUDIBLE_PROXY_URL", "http://opsuser:s3cr3t-token@libex-refresh-vpn:8888"
+    actual (safe) hostname it resolved to -- distinct from the unconfigured
+    case, and still never the raw, possibly-credentialed value."""
+    audible_client.configure_transport(
+        "http://opsuser:s3cr3t-token@libex-refresh-vpn:8888"
     )
     with caplog.at_level(logging.ERROR, logger="libex"):
         with pytest.raises(SystemExit):
@@ -1403,54 +1416,13 @@ def test_verify_dedicated_proxy_logs_error_with_hostname_when_wrongly_named(monk
     assert "opsuser" not in full_text
 
 
-def test_verify_dedicated_proxy_logs_error_on_malformed_value(monkeypatch, caplog):
-    """A value that is set but unparseable (a typo'd port is the realistic
-    case -- a Portainer env field is free text) must take the exact same
-    logged-then-refused path as unset or wrongly-named, not escape as an
-    uncaught httpx.InvalidURL that skips both the log line and the
-    deliberate SystemExit message. Live-reproduced by the security review
-    against pinned httpx 0.28.1: 'notaport' raises InvalidURL."""
-    monkeypatch.setenv(
-        "AUDIBLE_PROXY_URL",
-        "http://opsuser:s3cr3t-token@libex-backfill-vpn:notaport",
-    )
-    with caplog.at_level(logging.ERROR, logger="libex"):
-        with pytest.raises(SystemExit) as exc_info:
-            _verify_dedicated_proxy()
-
-    error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
-    assert len(error_records) == 1
-    record = error_records[0]
-    assert record.proxy_host == "(unparseable)"
-    assert record.proxy_configured is True
-    full_text = record.getMessage() + " ".join(
-        str(v) for v in vars(record).values() if isinstance(v, str)
-    ) + str(exc_info.value)
-    assert "s3cr3t-token" not in full_text
-    assert "opsuser" not in full_text
-
-
-@pytest.mark.asyncio
-async def test_run_dies_before_touching_the_db_when_proxy_malformed(monkeypatch):
-    """The malformed case must die in _run before the DB engine exists,
-    exactly like the unset and wrongly-named cases -- not merely log
-    correctly and then still blow up somewhere else uncaught."""
-    monkeypatch.setenv(
-        "AUDIBLE_PROXY_URL",
-        "http://opsuser:s3cr3t-token@libex-backfill-vpn:notaport",
-    )
-    monkeypatch.delenv("DATABASE_URL", raising=False)
-    with patch("scripts.backfill_chapters.create_async_engine") as create_engine:
-        with pytest.raises(SystemExit):
-            await _run(limit=1)
-    create_engine.assert_not_called()
-
-
-def test_verify_dedicated_proxy_logs_nothing_at_error_when_correctly_named(monkeypatch, caplog):
+def test_verify_dedicated_proxy_logs_nothing_at_error_when_correctly_named(
+    restore_audible_transport, caplog,
+):
     """The success path must not also emit the refusal record -- proves the
     logger.error call is gated on the same condition as the raise, not
     unconditional."""
-    monkeypatch.setenv("AUDIBLE_PROXY_URL", "http://libex-backfill-vpn:8888")
+    audible_client.configure_transport("http://libex-backfill-vpn:8888")
     with caplog.at_level(logging.ERROR, logger="libex"):
         _verify_dedicated_proxy()
     assert [r for r in caplog.records if r.levelno == logging.ERROR] == []
@@ -1461,13 +1433,15 @@ def test_verify_dedicated_proxy_logs_nothing_at_error_when_correctly_named(monke
 # ============================================================
 
 @pytest.mark.asyncio
-async def test_run_dies_before_touching_the_db_when_proxy_unset(monkeypatch):
+async def test_run_dies_before_touching_the_db_when_proxy_unset(
+    restore_audible_transport, monkeypatch,
+):
     """Proves the guard runs first in startup, not merely somewhere: with
-    DATABASE_URL also absent, an unset proxy must still surface as the
+    DATABASE_URL also absent, direct egress must still surface as the
     proxy's own SystemExit, never as a KeyError from reading DATABASE_URL,
     and create_async_engine must never be reached at all -- exactly the
     'dies before a single request goes out' requirement."""
-    monkeypatch.delenv("AUDIBLE_PROXY_URL", raising=False)
+    audible_client.configure_transport(None)
     monkeypatch.delenv("DATABASE_URL", raising=False)
     with patch("scripts.backfill_chapters.create_async_engine") as create_engine:
         with pytest.raises(SystemExit):
@@ -1476,13 +1450,15 @@ async def test_run_dies_before_touching_the_db_when_proxy_unset(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_proceeds_past_the_check_when_correctly_named(monkeypatch):
+async def test_run_proceeds_past_the_check_when_correctly_named(
+    restore_audible_transport, monkeypatch,
+):
     """A correctly-named proxy lets the run past the guard -- proven by the
     failure moving on to the next real requirement (DATABASE_URL) instead of
     the proxy check itself. This is also the --limit trial path: a trial
     still calls Audible for real, so it must clear the same guard as the
     unlimited run, with no bypass."""
-    monkeypatch.setenv("AUDIBLE_PROXY_URL", "http://libex-backfill-vpn:8888")
+    audible_client.configure_transport("http://libex-backfill-vpn:8888")
     monkeypatch.delenv("DATABASE_URL", raising=False)
     with patch("scripts.backfill_chapters._log_exit_ip", new=AsyncMock()):
         with pytest.raises(KeyError, match="DATABASE_URL"):

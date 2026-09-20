@@ -7,15 +7,15 @@ live -- a bad proxy check lets its traffic egress from the live service's own
 address, a swapped drain/dispose order silently abandons in-flight persist
 writes, and a wrong exit code hides "a worker broke" behind "finished clean"
 from whatever supervises the container. Scoped to what is pure and testable
-without a live Audible/Postgres pair: _proxy_host_for_log and
-_verify_dedicated_proxy (mirroring scripts/backfill_chapters.py and
-scripts/refresh_corpus.py's own tests for the identical pair, adjusted for
-this script's own "seeder" hostname convention), _env_float, _Stopper's
-cancel-on-request behavior, _drain_persist_queue's timeout/success return, and
-_run's ordering and exit-code logic with both workers and the drain/dispose
-calls replaced by fakes. The dispatch loops themselves (run_seeder,
-run_new_releases_seeder) are app/services/seeder.py's own content and covered
-there, not re-tested here.
+without a live Audible/Postgres pair: _verify_dedicated_proxy (mirroring
+scripts/backfill_chapters.py and scripts/refresh_corpus.py's own tests for
+the identical function, adjusted for this script's own "seeder" hostname
+convention), _env_float, _Stopper's cancel-on-request behavior,
+_drain_persist_queue's timeout/success return, and _run's ordering and
+exit-code logic with both workers and the drain/dispose calls replaced by
+fakes. The dispatch loops themselves (run_seeder, run_new_releases_seeder)
+are app/services/seeder.py's own content and covered there, not re-tested
+here.
 """
 
 # Standard library
@@ -28,11 +28,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 # Local
+import libex_core.audible.client as audible_client
 from scripts.seed import (
     DRAIN_TIMEOUT_SECONDS,
     _drain_persist_queue,
     _env_float,
-    _proxy_host_for_log,
     _run,
     _Stopper,
     _verify_dedicated_proxy,
@@ -71,54 +71,63 @@ def test_drain_timeout_seconds_default_matches_the_documented_value():
 
 
 # ============================================================
-# _proxy_host_for_log -- containment: no full proxy value in any log record
-# ============================================================
-
-CREDENTIALED_PROXY = "http://opsuser:s3cr3t-token@libex-seeder-vpn:8888"
-
-
-def test_proxy_host_for_log_strips_credentials():
-    host = _proxy_host_for_log(CREDENTIALED_PROXY)
-    assert host == "libex-seeder-vpn"
-    assert "opsuser" not in host
-    assert "s3cr3t-token" not in host
-
-
-def test_proxy_host_for_log_direct_when_unset():
-    assert _proxy_host_for_log(None) == "direct"
-    assert _proxy_host_for_log("") == "direct"
-
-
-def test_proxy_host_for_log_never_raises_on_malformed_value():
-    """httpx.URL raises InvalidURL on some malformed strings -- confirmed
-    directly against the installed httpx: 'http://[::1' is one of them -- so
-    this must catch it and return a sentinel, not propagate."""
-    assert _proxy_host_for_log("http://[::1") == "(unparseable)"
-
-
-# ============================================================
 # _verify_dedicated_proxy -- containment: refuse to egress from the host
+#
+# _verify_dedicated_proxy reads audible_client.transport_summary(), never
+# AUDIBLE_PROXY_URL directly -- the transport is configured exactly once,
+# at app.services.audible's own import time, so a test exercising this guard
+# has to call configure_transport() itself to put a particular state in
+# place. restore_audible_transport (tests/scripts/conftest.py) snapshots and
+# restores the module's transport around every test below, so none of them
+# leak their configured state into a test that runs after them.
 # ============================================================
 
-def test_verify_dedicated_proxy_raises_when_unset(monkeypatch):
-    monkeypatch.delenv("AUDIBLE_PROXY_URL", raising=False)
-    with pytest.raises(SystemExit, match="unset"):
+def test_verify_dedicated_proxy_passes_when_a_seeder_named_proxy_is_configured(
+    restore_audible_transport,
+):
+    audible_client.configure_transport("http://libex-seeder-vpn:8888")
+    _verify_dedicated_proxy()  # must not raise
+
+
+def test_verify_dedicated_proxy_refuses_when_unconfigured(restore_audible_transport):
+    """The pristine, never-configured state -- distinct from a deliberately
+    configured direct egress -- must refuse exactly like a wrongly-named
+    proxy."""
+    audible_client._transport = audible_client._TransportSnapshot(
+        mode="unconfigured", proxy=None, host=None
+    )
+    with pytest.raises(SystemExit, match="unconfigured"):
         _verify_dedicated_proxy()
 
 
-def test_verify_dedicated_proxy_raises_on_non_seeder_hostname(monkeypatch):
+def test_verify_dedicated_proxy_refuses_on_configured_direct_egress(
+    restore_audible_transport,
+):
+    """None (and, by configure_transport's own contract, "") both configure
+    direct egress -- this must refuse exactly like the unconfigured state,
+    not be mistaken for a proxy."""
+    audible_client.configure_transport(None)
+    with pytest.raises(SystemExit, match="direct"):
+        _verify_dedicated_proxy()
+
+
+def test_verify_dedicated_proxy_refuses_when_the_configured_host_does_not_qualify(
+    restore_audible_transport,
+):
     """A hostname naming some OTHER exit -- the shared production proxy, or
     backfill_chapters's/refresh_corpus's own dedicated ones -- must fail
-    exactly like unset. This is what stops a copy-pasted exit from being
-    reused here."""
-    monkeypatch.setenv("AUDIBLE_PROXY_URL", "http://libex-backfill-vpn:8888")
+    exactly like unconfigured. This is what stops a copy-pasted exit from
+    being reused here."""
+    audible_client.configure_transport("http://libex-backfill-vpn:8888")
     with pytest.raises(SystemExit, match="libex-backfill-vpn"):
         _verify_dedicated_proxy()
 
 
-def test_verify_dedicated_proxy_failure_never_names_credentials(monkeypatch):
-    monkeypatch.setenv(
-        "AUDIBLE_PROXY_URL", "http://opsuser:s3cr3t-token@libex-backfill-vpn:8888"
+def test_verify_dedicated_proxy_failure_never_names_credentials(
+    restore_audible_transport,
+):
+    audible_client.configure_transport(
+        "http://opsuser:s3cr3t-token@libex-backfill-vpn:8888"
     )
     with pytest.raises(SystemExit) as exc_info:
         _verify_dedicated_proxy()
@@ -126,13 +135,12 @@ def test_verify_dedicated_proxy_failure_never_names_credentials(monkeypatch):
     assert "opsuser" not in str(exc_info.value)
 
 
-def test_verify_dedicated_proxy_passes_on_seeder_hostname(monkeypatch):
-    monkeypatch.setenv("AUDIBLE_PROXY_URL", "http://libex-seeder-vpn:8888")
-    _verify_dedicated_proxy()  # must not raise
-
-
-def test_verify_dedicated_proxy_logs_error_before_raising_on_unset(monkeypatch, caplog):
-    monkeypatch.delenv("AUDIBLE_PROXY_URL", raising=False)
+def test_verify_dedicated_proxy_logs_error_before_raising_when_unconfigured(
+    restore_audible_transport, caplog,
+):
+    audible_client._transport = audible_client._TransportSnapshot(
+        mode="unconfigured", proxy=None, host=None
+    )
     with caplog.at_level(logging.ERROR, logger="libex"):
         with pytest.raises(SystemExit):
             _verify_dedicated_proxy()
@@ -145,9 +153,11 @@ def test_verify_dedicated_proxy_logs_error_before_raising_on_unset(monkeypatch, 
     assert record.proxy_configured is False
 
 
-def test_verify_dedicated_proxy_logs_error_with_hostname_when_wrongly_named(monkeypatch, caplog):
-    monkeypatch.setenv(
-        "AUDIBLE_PROXY_URL", "http://opsuser:s3cr3t-token@libex-backfill-vpn:8888"
+def test_verify_dedicated_proxy_logs_error_with_hostname_when_wrongly_named(
+    restore_audible_transport, caplog,
+):
+    audible_client.configure_transport(
+        "http://opsuser:s3cr3t-token@libex-backfill-vpn:8888"
     )
     with caplog.at_level(logging.ERROR, logger="libex"):
         with pytest.raises(SystemExit):
@@ -165,8 +175,10 @@ def test_verify_dedicated_proxy_logs_error_with_hostname_when_wrongly_named(monk
     assert "opsuser" not in full_text
 
 
-def test_verify_dedicated_proxy_logs_nothing_at_error_when_correctly_named(monkeypatch, caplog):
-    monkeypatch.setenv("AUDIBLE_PROXY_URL", "http://libex-seeder-vpn:8888")
+def test_verify_dedicated_proxy_logs_nothing_at_error_when_correctly_named(
+    restore_audible_transport, caplog,
+):
+    audible_client.configure_transport("http://libex-seeder-vpn:8888")
     with caplog.at_level(logging.ERROR, logger="libex"):
         _verify_dedicated_proxy()
     assert [r for r in caplog.records if r.levelno == logging.ERROR] == []
@@ -264,11 +276,13 @@ async def test_drain_persist_queue_returns_true_immediately_when_already_empty()
 # _run -- drain-before-dispose ordering, --once threading, exit codes
 # ============================================================
 
-def _patched_run(monkeypatch, *, seeder=None, releases=None, drained=True):
+def _patched_run(*, seeder=None, releases=None, drained=True):
     """Sets a valid seeder proxy and patches both workers, the drain, and the
     engine so `_run` can be exercised without asyncio.gather touching real
-    coroutines or a real database engine."""
-    monkeypatch.setenv("AUDIBLE_PROXY_URL", "http://libex-seeder-vpn:8888")
+    coroutines or a real database engine. Callers must also depend on the
+    restore_audible_transport fixture so this configured proxy doesn't leak
+    into a test that runs afterward."""
+    audible_client.configure_transport("http://libex-seeder-vpn:8888")
     seeder = seeder or AsyncMock(return_value=None)
     releases = releases or AsyncMock(return_value=None)
     fake_engine = MagicMock()
@@ -283,12 +297,12 @@ def _patched_run(monkeypatch, *, seeder=None, releases=None, drained=True):
 
 
 @pytest.mark.asyncio
-async def test_run_drains_the_persist_queue_before_disposing_the_engine(monkeypatch):
+async def test_run_drains_the_persist_queue_before_disposing_the_engine(restore_audible_transport):
     """Ordering is the point: a drain that runs AFTER dispose would abandon
     whatever persist_queue's fire-and-forget tasks were still writing through
     a connection nothing is driving anymore."""
     order = []
-    monkeypatch.setenv("AUDIBLE_PROXY_URL", "http://libex-seeder-vpn:8888")
+    audible_client.configure_transport("http://libex-seeder-vpn:8888")
 
     async def _fake_drain(_timeout):
         order.append("drain")
@@ -315,10 +329,10 @@ async def test_run_drains_the_persist_queue_before_disposing_the_engine(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_run_passes_once_through_to_both_workers(monkeypatch):
+async def test_run_passes_once_through_to_both_workers(restore_audible_transport):
     seeder = AsyncMock(return_value=None)
     releases = AsyncMock(return_value=None)
-    with _patched_run(monkeypatch, seeder=seeder, releases=releases):
+    with _patched_run(seeder=seeder, releases=releases):
         await _run(once=True)
 
     seeder.assert_awaited_once_with(once=True)
@@ -326,10 +340,10 @@ async def test_run_passes_once_through_to_both_workers(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_passes_once_false_through_when_not_requested(monkeypatch):
+async def test_run_passes_once_false_through_when_not_requested(restore_audible_transport):
     seeder = AsyncMock(return_value=None)
     releases = AsyncMock(return_value=None)
-    with _patched_run(monkeypatch, seeder=seeder, releases=releases):
+    with _patched_run(seeder=seeder, releases=releases):
         await _run(once=False)
 
     seeder.assert_awaited_once_with(once=False)
@@ -337,32 +351,32 @@ async def test_run_passes_once_false_through_when_not_requested(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_returns_0_when_clean_and_drained(monkeypatch):
-    with _patched_run(monkeypatch, drained=True):
+async def test_run_returns_0_when_clean_and_drained(restore_audible_transport):
+    with _patched_run(drained=True):
         exit_code = await _run(once=True)
     assert exit_code == 0
 
 
 @pytest.mark.asyncio
-async def test_run_returns_1_when_a_worker_raises(monkeypatch):
+async def test_run_returns_1_when_a_worker_raises(restore_audible_transport):
     async def _boom(once):
         raise RuntimeError("boom")
 
-    with _patched_run(monkeypatch, seeder=_boom, drained=True):
+    with _patched_run(seeder=_boom, drained=True):
         exit_code = await _run(once=True)
 
     assert exit_code == 1
 
 
 @pytest.mark.asyncio
-async def test_run_returns_2_when_drain_times_out_with_no_worker_failures(monkeypatch):
-    with _patched_run(monkeypatch, drained=False):
+async def test_run_returns_2_when_drain_times_out_with_no_worker_failures(restore_audible_transport):
+    with _patched_run(drained=False):
         exit_code = await _run(once=True)
     assert exit_code == 2
 
 
 @pytest.mark.asyncio
-async def test_run_failure_exit_code_takes_priority_over_a_drain_timeout(monkeypatch):
+async def test_run_failure_exit_code_takes_priority_over_a_drain_timeout(restore_audible_transport):
     """Both a worker failure and an undrained queue at once must report 1,
     not 2 -- a supervisor needs to know "a worker broke" even if the queue
     also failed to drain, not have that fact hidden behind the drain's own
@@ -370,14 +384,14 @@ async def test_run_failure_exit_code_takes_priority_over_a_drain_timeout(monkeyp
     async def _boom(once):
         raise RuntimeError("boom")
 
-    with _patched_run(monkeypatch, seeder=_boom, drained=False):
+    with _patched_run(seeder=_boom, drained=False):
         exit_code = await _run(once=True)
 
     assert exit_code == 1
 
 
 @pytest.mark.asyncio
-async def test_run_still_drains_and_disposes_when_a_worker_raises(monkeypatch):
+async def test_run_still_drains_and_disposes_when_a_worker_raises(restore_audible_transport):
     """A worker exception must not skip the shutdown sequence -- the drain
     and dispose still have to run so nothing gets abandoned just because one
     of the two loops broke."""
@@ -387,7 +401,7 @@ async def test_run_still_drains_and_disposes_when_a_worker_raises(monkeypatch):
     fake_engine = MagicMock()
     fake_engine.dispose = AsyncMock()
     drain = AsyncMock(return_value=True)
-    monkeypatch.setenv("AUDIBLE_PROXY_URL", "http://libex-seeder-vpn:8888")
+    audible_client.configure_transport("http://libex-seeder-vpn:8888")
 
     with patch.multiple(
         seed,
@@ -403,10 +417,10 @@ async def test_run_still_drains_and_disposes_when_a_worker_raises(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_dies_before_starting_any_worker_when_proxy_unset(monkeypatch):
+async def test_run_dies_before_starting_any_worker_when_proxy_unset(restore_audible_transport):
     """The proxy check is the first thing _run does -- neither worker may
     ever be started against an unverified exit."""
-    monkeypatch.delenv("AUDIBLE_PROXY_URL", raising=False)
+    audible_client.configure_transport(None)
     seeder = AsyncMock(return_value=None)
     releases = AsyncMock(return_value=None)
 
@@ -419,7 +433,7 @@ async def test_run_dies_before_starting_any_worker_when_proxy_unset(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_run_creates_and_tracks_both_tasks_before_registering_signal_handlers(monkeypatch):
+async def test_run_creates_and_tracks_both_tasks_before_registering_signal_handlers(restore_audible_transport):
     """Ordering is the point, not mere presence: a test asserting only that
     both tasks end up tracked and both handlers end up registered would pass
     under the old, broken order too (register handlers -> create tasks ->
@@ -427,7 +441,7 @@ async def test_run_creates_and_tracks_both_tasks_before_registering_signal_handl
     against an empty task list -- requested=True got set, but there was
     nothing yet to cancel, and the tasks created afterward were never told."""
     order = []
-    monkeypatch.setenv("AUDIBLE_PROXY_URL", "http://libex-seeder-vpn:8888")
+    audible_client.configure_transport("http://libex-seeder-vpn:8888")
 
     real_create_task = asyncio.create_task
 

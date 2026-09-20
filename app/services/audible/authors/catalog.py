@@ -15,10 +15,8 @@ from dataclasses import dataclass
 from typing import Any
 
 # Core
+from libex_core.audible.client import audible_get
 from app.core.logging import get_logger
-
-# Services
-from app.services.audible.client import audible_get
 
 logger = get_logger()
 

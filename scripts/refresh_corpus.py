@@ -103,12 +103,12 @@ from app.db.models import Book
 from app.db.session import AsyncSessionFactory, engine
 
 # Core
+from libex_core.audible import client as audible_client
 from libex_core.exceptions import NotFoundException
 from app.core.logging import get_logger, setup_logging
 
 # Services
 from app.services.audible import books as books_service
-from app.services.audible import client as audible_client
 from app.services.db import persist_queue
 
 logger = get_logger()
@@ -689,39 +689,25 @@ def _log_progress(run: _Run, gate: _Gate, ramp: _Ramp, remaining_books: int) -> 
 # PROCESS LIMITS
 # ============================================================
 
-def _proxy_host_for_log(proxy: str | None) -> str:
-    """
-    Best-effort hostname for a log line -- never the raw AUDIBLE_PROXY_URL,
-    since httpx's proxy= accepts embedded credentials
-    (http://user:pass@host:port) and Settings stores this as a plain str.
-    Never raises -- a malformed value becomes "(unparseable)".
-    """
-    if not proxy:
-        return "direct"
-    try:
-        host = httpx.URL(proxy).host
-    except Exception:
-        return "(unparseable)"
-    return host or "(unparseable)"
-
-
 def _verify_dedicated_proxy() -> None:
     """
-    Refuses to start unless AUDIBLE_PROXY_URL is set and its hostname
-    contains "refresh" -- protects the shared exit from
-    _raise_process_limits' 48-wide ceiling. Checked against the hostname
-    only, since the real proxy value may carry embedded credentials and must
-    never reach a log line or exception message. Logged before the
+    Refuses to start unless the configured transport is a proxy whose
+    hostname contains "refresh" -- protects the shared exit from
+    _raise_process_limits' 48-wide ceiling. Reads audible_client's own
+    transport_summary() rather than AUDIBLE_PROXY_URL directly: the value
+    configure_transport() actually validated and stored, checked against its
+    hostname only, since the real proxy value may carry embedded credentials
+    and must never reach a log line or exception message. Logged before the
     SystemExit, since SystemExit alone never reaches the log handlers.
     """
-    proxy = os.environ.get("AUDIBLE_PROXY_URL", "")
-    host = _proxy_host_for_log(proxy) if proxy else ""
-    if not proxy or "refresh" not in host:
-        detail = f"host {host!r}" if proxy else "unset"
+    summary = audible_client.transport_summary()
+    host = summary.host or ""
+    if summary.mode != "proxy" or "refresh" not in host:
+        detail = f"host {host!r}" if summary.mode == "proxy" else summary.mode
         logger.error(
             "Refresh: refusing to start, AUDIBLE_PROXY_URL does not name "
             "a refresh-dedicated exit",
-            extra={"proxy_host": host or "unset", "proxy_configured": bool(proxy)},
+            extra={"proxy_host": host or "unset", "proxy_configured": summary.mode == "proxy"},
         )
         raise SystemExit(
             f"AUDIBLE_PROXY_URL ({detail}) does not name a "
@@ -866,7 +852,7 @@ async def _run(cursor: str | None) -> int:
         "ramp_step": RAMP_STEP,
         "ramp_interval": RAMP_INTERVAL,
         "page_size": PAGE_SIZE,
-        "proxy": bool(os.environ.get("AUDIBLE_PROXY_URL")),
+        "proxy": audible_client.transport_summary().mode == "proxy",
     })
 
     inflight: set[asyncio.Task] = set()

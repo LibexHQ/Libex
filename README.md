@@ -429,7 +429,7 @@ Copy `.env.example` to `.env` and configure:
 | `LOG_RETENTION_DAYS` | `7` | Days of rotated logs to keep. `0` = infinite, no rotation |
 | `AXIOM_TOKEN` | — | Axiom API token (optional — leave blank for stdout only) |
 | `AXIOM_DATASET` | `libex` | Axiom dataset name |
-| `AUDIBLE_PROXY_URL` | — | Proxy URL for outbound Audible requests only. Supports `http://`, `https://`, `socks5://`. API serving is unaffected |
+| `AUDIBLE_PROXY_URL` | — | Proxy URL for outbound Audible requests only. Supports `http://` and `https://` only — a value using any other scheme, or one that doesn't parse as a proxy URL at all, makes the process refuse to start rather than fall back to unproxied egress. API serving is unaffected |
 | `SEED_SECRET` | — | PBKDF2 hash for the internal seed endpoint. Empty = endpoint disabled. Generate with `python -m app.api.routes.internal.router` |
 
 `DATABASE_URL` is constructed automatically by docker-compose from `DB_NAME`, `DB_USER`, and `DB_PASSWORD`. Only set it manually if running outside of Docker — and whatever it points at must be PostgreSQL 14 or newer, see Self-Hosting Notes below.
@@ -489,7 +489,7 @@ Libex is API-compatible with AudiMeta. To migrate:
   Requires `SEEDER_PROXY_URL` — its hostname must contain `seeder`, or the seeder refuses to start rather than risk sending sustained, unattended traffic out through the API's own exit IP.
 
   To turn it off, stop or remove the `docker-compose.seeder.yml` stack. It's a separate stack, so this has no effect on the API.
-- **VPN proxy:** Set `AUDIBLE_PROXY_URL` (API stack) or `SEEDER_PROXY_URL` (seeder stack) to route that stack's outbound Audible requests through a proxy. Only Audible requests are affected — API serving, database connections, and logging are unaffected either way, and the two variables are independent so the stacks never share an exit IP. Any HTTP, HTTPS, or SOCKS5 proxy works. Add your VPN proxy container as a service in the same compose file as the stack that needs it — it's reachable there by service name over that stack's own default network, no extra network to create. Leave the variable blank to disable
+- **VPN proxy:** Set `AUDIBLE_PROXY_URL` (API stack) or `SEEDER_PROXY_URL` (seeder stack) to route that stack's outbound Audible requests through a proxy. Only Audible requests are affected — API serving, database connections, and logging are unaffected either way, and the two variables are independent so the stacks never share an exit IP; neither picks up an ambient proxy or certificate setting from the host or container environment; only the variable itself decides where Audible traffic goes. Only HTTP and HTTPS proxies are supported — anything else (including a SOCKS proxy) makes the stack refuse to start rather than send traffic out unproxied. Add your VPN proxy container as a service in the same compose file as the stack that needs it — it's reachable there by service name over that stack's own default network, no extra network to create. Leave the variable blank to disable
 
 ---
 

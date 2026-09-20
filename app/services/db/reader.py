@@ -19,7 +19,7 @@ from sqlalchemy.orm import selectinload
 from app.db.models import Book, Author, Narrator, Series, Track, Genre, CatalogGenre, author_book, book_narrator, book_series
 
 # Services
-from app.services.audible.client import REGION_MAP
+from libex_core.audible.client import REGION_MAP
 from app.services.cache import manager as cache
 from app.services.sorting import apply_sort, BOOK_SORT_FIELDS, NARRATOR_SORT_FIELDS
 from app.services.db.filtering import apply_book_filters, apply_narrator_filters

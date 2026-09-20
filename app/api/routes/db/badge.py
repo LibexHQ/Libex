@@ -49,8 +49,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # Local
 from app.api.routes.db.stats_headers import stats_cache_control
 from app.db.session import get_session
-from app.services.audible.client import validate_region
 from app.services.db.reader import get_db_stats
+from libex_core.audible.client import validate_region
 from libex_core.exceptions import RegionException
 
 badge_router = APIRouter(prefix="/stats/badge", tags=["Database"])

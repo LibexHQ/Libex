@@ -15,14 +15,12 @@ from dataclasses import dataclass
 
 # Core
 from libex_core.asin import is_valid_asin
-from app.core.logging import get_logger
-
-# Services
-from app.services.audible.client import (
+from libex_core.audible.client import (
     audible_get,
     ANDROID_DEVICE_TYPE_ID,
     AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT,
 )
+from app.core.logging import get_logger
 
 logger = get_logger()
 

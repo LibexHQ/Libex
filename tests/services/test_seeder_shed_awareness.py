@@ -58,7 +58,7 @@ from libex_core.exceptions import NotFoundException
 from app.services import seeder
 from app.services.db.persist_queue import PersistOutcome
 
-_AUDIBLE_CLIENT_GET = "app.services.audible.client.audible_get"
+_AUDIBLE_CLIENT_GET = "libex_core.audible.client.audible_get"
 
 
 def _hydration_product(asin):

@@ -10,6 +10,36 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.22.5]
+
+### Security
+- **`libex_core` now refuses to make any Audible request if its transport
+  was never configured**, rather than treating that as an implicit choice to
+  egress directly. A process that never calls `configure_transport()` used
+  to build an HTTP client with no proxy set — identical, at the wire, to a
+  deliberate no-proxy choice — with nothing recording that nobody had
+  actually configured anything. It now raises `RuntimeError` before a
+  client is even built. Hosted Libex configures its transport at import, on
+  every startup, so this is unreachable there; it matters for `libex_core`
+  used standalone.
+
+- **A blank or missing proxy URL no longer configures direct egress by
+  itself.** `configure_transport()` gains a keyword-only
+  `allow_direct_egress` parameter, `False` by default; passing `None` or
+  `""` without also passing `allow_direct_egress=True` now raises
+  `ValueError` instead of silently resolving to unproxied egress.
+  `libex_core` is not yet published as an installable package, so this
+  affects no current consumer, but it sets the contract ahead of that: an
+  embedded process running on someone else's machine has no single operator
+  to decide, deliberately, that its traffic should leave unproxied, so a
+  proxy setting left empty by mistake there would otherwise send that
+  person's own IP, together with whatever they looked up, straight to
+  Audible with nothing recording that no one chose it. **Hosted Libex is
+  unaffected** — its call into `configure_transport()` already passes
+  `allow_direct_egress=True` unconditionally, so leaving `AUDIBLE_PROXY_URL`
+  blank to disable the proxy still works exactly as documented in the
+  self-hosting instructions.
+
 ## [1.22.4]
 
 ### Fixed

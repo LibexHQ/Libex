@@ -1334,10 +1334,11 @@ def test_verify_dedicated_proxy_refuses_when_unconfigured(restore_audible_transp
 
 def test_verify_dedicated_proxy_refuses_on_configured_direct_egress(restore_audible_transport):
     """None (and, by configure_transport's own contract, "") both configure
-    direct egress -- httpx.AsyncClient would get proxy=None and this
-    script's traffic would egress direct from the container, the production
-    host's own address. Must refuse exactly like the unconfigured state."""
-    audible_client.configure_transport(None)
+    direct egress when allow_direct_egress=True is passed alongside them --
+    httpx.AsyncClient would get proxy=None and this script's traffic would
+    egress direct from the container, the production host's own address.
+    Must refuse exactly like the unconfigured state."""
+    audible_client.configure_transport(None, allow_direct_egress=True)
     with pytest.raises(SystemExit, match="direct"):
         _verify_dedicated_proxy()
 
@@ -1441,7 +1442,7 @@ async def test_run_dies_before_touching_the_db_when_proxy_unset(
     proxy's own SystemExit, never as a KeyError from reading DATABASE_URL,
     and create_async_engine must never be reached at all -- exactly the
     'dies before a single request goes out' requirement."""
-    audible_client.configure_transport(None)
+    audible_client.configure_transport(None, allow_direct_egress=True)
     monkeypatch.delenv("DATABASE_URL", raising=False)
     with patch("scripts.backfill_chapters.create_async_engine") as create_engine:
         with pytest.raises(SystemExit):

@@ -16,11 +16,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
-# Services
-from app.services.audible.client import validate_region
-
 # Core
 from libex_core.asin import is_valid_asin, normalise_asin
+from libex_core.audible.client import validate_region
 from app.core.logging import get_logger, is_safe_log_value
 from libex_core.exceptions import NotFoundException, RegionException
 from app.core.migration_notice import MigrationNotice, MIGRATION_HEADER_NAMES, is_new_host_request

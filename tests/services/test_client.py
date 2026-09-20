@@ -6,7 +6,7 @@ Tests region validation, URL building, and header generation.
 # Third party
 import pytest
 
-from app.services.audible.client import (
+from libex_core.audible.client import (
     validate_region,
     get_audible_url,
     get_region_headers,
@@ -279,7 +279,7 @@ def test_get_region_headers_never_carries_device_type_id():
     audible_get's extra_headers and must never leak into the shared
     get_region_headers output — every other call site would otherwise be
     silently stamped with a stable per-device id."""
-    from app.services.audible.client import ANDROID_DEVICE_TYPE_ID
+    from libex_core.audible.client import ANDROID_DEVICE_TYPE_ID
 
     for region in VALID_REGIONS:
         headers = get_region_headers(region)
@@ -292,7 +292,7 @@ def test_android_device_type_id_pinned_literal_value():
     A wrong device id doesn't raise anywhere in this path — the screens
     endpoint 200s with an empty page — so this is the one assertion in the
     suite that would actually catch that value silently changing."""
-    from app.services.audible.client import ANDROID_DEVICE_TYPE_ID
+    from libex_core.audible.client import ANDROID_DEVICE_TYPE_ID
 
     assert ANDROID_DEVICE_TYPE_ID == "A10KISP2GWF0E4"
 
@@ -306,7 +306,7 @@ async def test_audible_get_without_extra_headers_uses_region_headers_unchanged()
     """Omitting extra_headers (every pre-existing call site) leaves the headers
     byte-identical to get_region_headers' own output — no stray keys added."""
     from unittest.mock import AsyncMock, MagicMock, patch
-    from app.services.audible import client as client_module
+    from libex_core.audible import client as client_module
 
     fixed_headers = {"User-Agent": "fixed", "X-ADP-SW": "12345678"}
     captured = {}
@@ -334,7 +334,7 @@ async def test_audible_get_extra_headers_overlays_region_headers():
     """extra_headers is overlaid on top of get_region_headers for that one call
     only, without dropping or mutating the base headers."""
     from unittest.mock import AsyncMock, MagicMock, patch
-    from app.services.audible import client as client_module
+    from libex_core.audible import client as client_module
 
     fixed_headers = {"User-Agent": "fixed", "X-ADP-SW": "12345678"}
     captured = {}
@@ -378,7 +378,7 @@ async def test_request_error_with_empty_message_includes_type():
     message (the exception type + URL), not a blank one."""
     import httpx
     from unittest.mock import patch, AsyncMock
-    from app.services.audible.client import audible_get
+    from libex_core.audible.client import audible_get
     from libex_core.exceptions import AudibleAPIException
 
     # httpx.ConnectError("") stringifies to "" — the case that produced the
@@ -399,7 +399,7 @@ async def test_request_error_with_empty_message_includes_type():
 # ============================================================
 
 def test_upstream_status_of_returns_the_status_from_an_audible_api_exception():
-    from app.services.audible.client import upstream_status_of
+    from libex_core.audible.client import upstream_status_of
     from libex_core.exceptions import AudibleAPIException
 
     exc = AudibleAPIException("Audible API returned 503 for https://api.audible.com/x", upstream_status=503)
@@ -408,7 +408,7 @@ def test_upstream_status_of_returns_the_status_from_an_audible_api_exception():
 
 
 def test_upstream_status_of_none_when_the_audible_api_exception_carried_none():
-    from app.services.audible.client import upstream_status_of
+    from libex_core.audible.client import upstream_status_of
     from libex_core.exceptions import AudibleAPIException
 
     exc = AudibleAPIException("Audible API timed out: TimeoutException for https://api.audible.com/x")
@@ -417,7 +417,7 @@ def test_upstream_status_of_none_when_the_audible_api_exception_carried_none():
 
 
 def test_upstream_status_of_none_for_a_plain_exception():
-    from app.services.audible.client import upstream_status_of
+    from libex_core.audible.client import upstream_status_of
 
     assert upstream_status_of(RuntimeError("Audible down")) is None
 
@@ -426,7 +426,7 @@ def test_upstream_status_of_none_for_a_libex_exception_that_is_not_an_audible_ap
     """NotFoundException carries its own status_code, but that is the code
     Libex returns to its own callers -- not an HTTP status Audible sent, so
     upstream_status_of must not mistake one for the other."""
-    from app.services.audible.client import upstream_status_of
+    from libex_core.audible.client import upstream_status_of
 
     assert upstream_status_of(NotFoundException("Book not found")) is None
 
@@ -440,7 +440,7 @@ def test_as_audible_failure_uses_the_sites_own_message_not_str_exc():
     whatever str(exc) happened to produce -- this matters most when exc is
     an AudibleAPIException, whose own message is built from an internal
     Audible URL that has no business reaching a response body."""
-    from app.services.audible.client import as_audible_failure
+    from libex_core.audible.client import as_audible_failure
     from libex_core.exceptions import AudibleAPIException
 
     exc = AudibleAPIException("Audible API returned 502 for https://api.audible.com/internal")
@@ -451,7 +451,7 @@ def test_as_audible_failure_uses_the_sites_own_message_not_str_exc():
 
 
 def test_as_audible_failure_carries_upstream_status_from_an_audible_api_exception():
-    from app.services.audible.client import as_audible_failure
+    from libex_core.audible.client import as_audible_failure
     from libex_core.exceptions import AudibleAPIException
 
     exc = AudibleAPIException("Audible API returned 503 for https://api.audible.com/x", upstream_status=503)
@@ -465,7 +465,7 @@ def test_as_audible_failure_upstream_status_none_when_the_audible_api_exception_
     own except blocks with no HTTP response at all, so its
     AudibleAPIException carries upstream_status=None already -- that has to
     survive the rewrite, not silently become a different kind of None."""
-    from app.services.audible.client import as_audible_failure
+    from libex_core.audible.client import as_audible_failure
     from libex_core.exceptions import AudibleAPIException
 
     exc = AudibleAPIException("Audible API timed out: TimeoutException for https://api.audible.com/x")
@@ -479,7 +479,7 @@ def test_as_audible_failure_upstream_status_none_for_a_non_audible_exception():
     RuntimeError -- is caught by the same broad `except Exception` a genuine
     transport failure is, and gets upstream_status left at None since there
     is no HTTP response to attribute it to."""
-    from app.services.audible.client import as_audible_failure
+    from libex_core.audible.client import as_audible_failure
     from libex_core.exceptions import AudibleAPIException
 
     result = as_audible_failure(RuntimeError("Audible down"), "Audible unavailable and no cached data found")
@@ -493,7 +493,7 @@ def test_as_audible_failure_always_returns_a_new_exception_not_the_original():
     caller relying on as_audible_failure to normalize the failure type must
     always get an AudibleAPIException carrying the site's own message, even
     when exc already was one."""
-    from app.services.audible.client import as_audible_failure
+    from libex_core.audible.client import as_audible_failure
     from libex_core.exceptions import AudibleAPIException
 
     original = AudibleAPIException("Audible API returned 500 for https://api.audible.com/x", upstream_status=500)
@@ -522,7 +522,7 @@ async def test_audible_get_retries_429_then_succeeds():
     """A 429 is retried, not raised immediately, and the eventual 200 is
     returned once the retry succeeds."""
     from unittest.mock import AsyncMock, patch
-    from app.services.audible.client import audible_get
+    from libex_core.audible.client import audible_get
 
     responses = [_mock_response(429), _mock_response(200, json_body={"ok": True})]
     get_mock = AsyncMock(side_effect=responses)
@@ -540,7 +540,7 @@ async def test_audible_get_retries_429_then_succeeds():
 async def test_audible_get_retries_5xx_then_succeeds():
     """A 5xx is retried the same way a 429 is."""
     from unittest.mock import AsyncMock, patch
-    from app.services.audible.client import audible_get
+    from libex_core.audible.client import audible_get
 
     responses = [_mock_response(502), _mock_response(200, json_body={"ok": True})]
     get_mock = AsyncMock(side_effect=responses)
@@ -559,7 +559,7 @@ async def test_audible_get_exhausts_retries_and_raises():
     total (1 initial + AUDIBLE_MAX_ATTEMPTS - 1 retries), then raises --
     never retried indefinitely."""
     from unittest.mock import AsyncMock, patch
-    from app.services.audible.client import audible_get, AUDIBLE_MAX_ATTEMPTS
+    from libex_core.audible.client import audible_get, AUDIBLE_MAX_ATTEMPTS
     from libex_core.exceptions import AudibleAPIException
 
     get_mock = AsyncMock(return_value=_mock_response(429))
@@ -586,7 +586,7 @@ async def test_audible_get_404_is_never_retried():
     would burn requests against an already-throttled-once shared IP for
     nothing."""
     from unittest.mock import AsyncMock, patch
-    from app.services.audible.client import audible_get
+    from libex_core.audible.client import audible_get
     from libex_core.exceptions import NotFoundException
 
     get_mock = AsyncMock(return_value=_mock_response(404))
@@ -605,7 +605,7 @@ async def test_audible_get_other_4xx_not_retried():
     """Every 4xx other than 404 or 429 is a real answer too -- raised
     immediately on the first attempt, never retried."""
     from unittest.mock import AsyncMock, patch
-    from app.services.audible.client import audible_get
+    from libex_core.audible.client import audible_get
     from libex_core.exceptions import AudibleAPIException
 
     get_mock = AsyncMock(return_value=_mock_response(400))
@@ -630,7 +630,7 @@ async def test_audible_get_timeout_not_retried():
     connection."""
     import httpx
     from unittest.mock import AsyncMock, patch
-    from app.services.audible.client import audible_get
+    from libex_core.audible.client import audible_get
     from libex_core.exceptions import AudibleAPIException
 
     get_mock = AsyncMock(side_effect=httpx.TimeoutException("timed out"))
@@ -655,7 +655,7 @@ async def test_audible_get_request_error_not_retried():
     either -- a single attempt, then AudibleAPIException."""
     import httpx
     from unittest.mock import AsyncMock, patch
-    from app.services.audible.client import audible_get
+    from libex_core.audible.client import audible_get
     from libex_core.exceptions import AudibleAPIException
 
     get_mock = AsyncMock(side_effect=httpx.ConnectError("refused"))
@@ -678,7 +678,7 @@ async def test_audible_get_honors_retry_after_numeric_seconds_over_computed_back
     the sleep duration must equal the header's value, not a jittered
     exponential guess."""
     from unittest.mock import AsyncMock, patch
-    from app.services.audible.client import audible_get
+    from libex_core.audible.client import audible_get
 
     responses = [
         _mock_response(429, headers={"Retry-After": "3"}),
@@ -699,7 +699,7 @@ async def test_audible_get_retry_after_is_capped():
     not honored verbatim -- one large value must not stall a fan-out far
     past what a few retries should ever cost."""
     from unittest.mock import AsyncMock, patch
-    from app.services.audible.client import audible_get, AUDIBLE_RETRY_AFTER_CAP_SECONDS
+    from libex_core.audible.client import audible_get, AUDIBLE_RETRY_AFTER_CAP_SECONDS
 
     responses = [
         _mock_response(429, headers={"Retry-After": "9999"}),
@@ -721,7 +721,7 @@ async def test_audible_get_backoff_used_when_no_retry_after_header():
     the ceiling it was called with, rather than asserting an exact sleep
     duration (which is randomized by design)."""
     from unittest.mock import AsyncMock, patch
-    from app.services.audible.client import audible_get, AUDIBLE_RETRY_BASE_SECONDS
+    from libex_core.audible.client import audible_get, AUDIBLE_RETRY_BASE_SECONDS
 
     responses = [_mock_response(429), _mock_response(200, json_body={"ok": True})]
     get_mock = AsyncMock(side_effect=responses)
@@ -739,21 +739,21 @@ async def test_audible_get_backoff_used_when_no_retry_after_header():
 
 def test_parse_retry_after_numeric_seconds():
     """A plain numeric Retry-After is parsed as seconds."""
-    from app.services.audible.client import _parse_retry_after
+    from libex_core.audible.client import _parse_retry_after
 
     assert _parse_retry_after("5") == 5.0
 
 
 def test_parse_retry_after_strips_whitespace():
     """Whitespace around the header value is stripped before parsing."""
-    from app.services.audible.client import _parse_retry_after
+    from libex_core.audible.client import _parse_retry_after
 
     assert _parse_retry_after("  7  ") == 7.0
 
 
 def test_parse_retry_after_negative_clamped_to_zero():
     """A negative numeric value is clamped to 0.0, never a negative sleep."""
-    from app.services.audible.client import _parse_retry_after
+    from libex_core.audible.client import _parse_retry_after
 
     assert _parse_retry_after("-5") == 0.0
 
@@ -763,7 +763,7 @@ def test_parse_retry_after_http_date_form():
     positive number of seconds when it names a near-future time."""
     from email.utils import format_datetime
     import datetime
-    from app.services.audible.client import _parse_retry_after
+    from libex_core.audible.client import _parse_retry_after
 
     future = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=5)
     result = _parse_retry_after(format_datetime(future, usegmt=True))
@@ -774,14 +774,14 @@ def test_parse_retry_after_http_date_form():
 def test_parse_retry_after_returns_none_for_none():
     """A missing header returns None so the caller falls back to computed
     backoff."""
-    from app.services.audible.client import _parse_retry_after
+    from libex_core.audible.client import _parse_retry_after
 
     assert _parse_retry_after(None) is None
 
 
 def test_parse_retry_after_returns_none_for_empty_string():
     """An empty header value returns None."""
-    from app.services.audible.client import _parse_retry_after
+    from libex_core.audible.client import _parse_retry_after
 
     assert _parse_retry_after("") is None
 
@@ -789,7 +789,7 @@ def test_parse_retry_after_returns_none_for_empty_string():
 def test_parse_retry_after_returns_none_for_unparseable_garbage():
     """A value that is neither a number nor an HTTP-date returns None
     rather than raising."""
-    from app.services.audible.client import _parse_retry_after
+    from libex_core.audible.client import _parse_retry_after
 
     assert _parse_retry_after("not-a-valid-value") is None
 
@@ -797,7 +797,7 @@ def test_parse_retry_after_returns_none_for_unparseable_garbage():
 def test_compute_backoff_seconds_prefers_retry_after_when_present():
     """When Retry-After is present, it wins outright over the exponential
     computation, capped."""
-    from app.services.audible.client import _compute_backoff_seconds, AUDIBLE_RETRY_AFTER_CAP_SECONDS
+    from libex_core.audible.client import _compute_backoff_seconds, AUDIBLE_RETRY_AFTER_CAP_SECONDS
 
     assert _compute_backoff_seconds(attempt=0, retry_after=2.0) == 2.0
     assert _compute_backoff_seconds(attempt=5, retry_after=2.0) == 2.0  # attempt is irrelevant here
@@ -810,7 +810,7 @@ def test_compute_backoff_seconds_exponential_ceiling_capped():
     pinned by patching random.uniform to report the ceiling it was called
     with."""
     from unittest.mock import patch
-    from app.services.audible.client import (
+    from libex_core.audible.client import (
         _compute_backoff_seconds, AUDIBLE_RETRY_MAX_BACKOFF_SECONDS, AUDIBLE_RETRY_BASE_SECONDS,
     )
 
@@ -826,14 +826,14 @@ def test_compute_backoff_seconds_exponential_ceiling_capped():
 
 def test_is_retryable_status_429():
     """429 is retryable."""
-    from app.services.audible.client import _is_retryable_status
+    from libex_core.audible.client import _is_retryable_status
 
     assert _is_retryable_status(429) is True
 
 
 def test_is_retryable_status_5xx_range():
     """Every 5xx in range is retryable."""
-    from app.services.audible.client import _is_retryable_status
+    from libex_core.audible.client import _is_retryable_status
 
     assert _is_retryable_status(500) is True
     assert _is_retryable_status(503) is True
@@ -842,14 +842,14 @@ def test_is_retryable_status_5xx_range():
 
 def test_is_retryable_status_404_not_retryable():
     """404 is explicitly not in the retryable set -- terminal."""
-    from app.services.audible.client import _is_retryable_status
+    from libex_core.audible.client import _is_retryable_status
 
     assert _is_retryable_status(404) is False
 
 
 def test_is_retryable_status_other_4xx_not_retryable():
     """A non-429 4xx is not retryable."""
-    from app.services.audible.client import _is_retryable_status
+    from libex_core.audible.client import _is_retryable_status
 
     assert _is_retryable_status(400) is False
     assert _is_retryable_status(403) is False
@@ -857,7 +857,7 @@ def test_is_retryable_status_other_4xx_not_retryable():
 
 def test_is_retryable_status_600_out_of_range_not_retryable():
     """Anything at or past 600 falls outside the 5xx retry range."""
-    from app.services.audible.client import _is_retryable_status
+    from libex_core.audible.client import _is_retryable_status
 
     assert _is_retryable_status(600) is False
 
@@ -872,7 +872,7 @@ async def test_get_audible_semaphore_bounds_in_flight_requests(monkeypatch):
     AUDIBLE_CONCURRENCY_LIMIT -- proven by driving real concurrency past the
     limit and watching the observed peak never exceed it."""
     import asyncio as asyncio_module
-    from app.services.audible import client as client_module
+    from libex_core.audible import client as client_module
 
     monkeypatch.setattr(client_module, "AUDIBLE_CONCURRENCY_LIMIT", 2)
     monkeypatch.setattr(client_module, "_audible_semaphore", None)
@@ -902,7 +902,7 @@ def test_get_audible_semaphore_reuses_instance_within_same_running_loop():
     exact same Semaphore instance, not a fresh one -- otherwise waiters from
     the first instance would never see permits released via the second."""
     import asyncio as asyncio_module
-    from app.services.audible import client as client_module
+    from libex_core.audible import client as client_module
 
     client_module._audible_semaphore = None
     client_module._audible_semaphore_loop = None
@@ -929,7 +929,7 @@ def test_get_audible_semaphore_rekeys_when_running_loop_changes():
     module safe under pytest's own function-scoped event loops, each of
     which is a 'new running loop' from this function's point of view."""
     import asyncio as asyncio_module
-    from app.services.audible import client as client_module
+    from libex_core.audible import client as client_module
 
     client_module._audible_semaphore = None
     client_module._audible_semaphore_loop = None

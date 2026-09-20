@@ -97,7 +97,7 @@ from app.db.models import Cache
 from app.db.session import AsyncSessionFactory, engine
 
 # Services
-from app.services.audible.client import VALID_REGIONS
+from libex_core.audible.client import VALID_REGIONS
 from app.services.cache import manager as cache
 from app.services.db.reader import STATS_CACHE_TTL_SECONDS, get_db_stats
 from app.services.db.writer import _failure_fields

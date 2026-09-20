@@ -41,7 +41,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.db import session as db_session
 from app.db.models import Cache
-from app.services.audible.client import VALID_REGIONS
+from libex_core.audible.client import VALID_REGIONS
 from app.services.cache import manager as cache
 from app.services.db.reader import STATS_CACHE_TTL_SECONDS, DbStatsResult
 from app.services.db import stats_refresh

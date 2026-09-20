@@ -51,13 +51,11 @@ import os
 import signal
 import time
 
-# Third party
-import httpx
-
 # Database
 from app.db.session import engine
 
 # Core
+from libex_core.audible import client as audible_client
 from app.core.config import check_retired_env_vars
 from app.core.logging import get_logger, setup_logging
 
@@ -101,40 +99,26 @@ SEEDER_DB_WRITE_CONCURRENCY = 4
 
 # --- proxy containment (unchanged pattern; see LIBEX_LESSONS_HARD_WON.md) ---
 
-def _proxy_host_for_log(proxy: str | None) -> str:
-    """
-    Best-effort hostname for a log line -- never the raw AUDIBLE_PROXY_URL,
-    since httpx's proxy= accepts embedded credentials
-    (http://user:pass@host:port) and Settings stores this as a plain str.
-    Never raises -- a malformed value becomes "(unparseable)".
-    """
-    if not proxy:
-        return "direct"
-    try:
-        host = httpx.URL(proxy).host
-    except Exception:
-        return "(unparseable)"
-    return host or "(unparseable)"
-
-
 def _verify_dedicated_proxy() -> None:
     """
-    Refuses to start unless AUDIBLE_PROXY_URL is set and its hostname
-    contains "seeder" -- otherwise this script's Audible traffic would
-    egress from the container's own address, the same one the live service
-    answers on. Checked against the hostname only, since the real proxy
-    value may carry embedded credentials and must never reach a log line or
-    exception message. Logged before the SystemExit, since SystemExit alone
-    never reaches the log handlers.
+    Refuses to start unless the configured transport is a proxy whose
+    hostname contains "seeder" -- otherwise this script's Audible traffic
+    would egress from the container's own address, the same one the live
+    service answers on. Reads audible_client's own transport_summary()
+    rather than AUDIBLE_PROXY_URL directly: the value configure_transport()
+    actually validated and stored, checked against its hostname only, since
+    the real proxy value may carry embedded credentials and must never
+    reach a log line or exception message. Logged before the SystemExit,
+    since SystemExit alone never reaches the log handlers.
     """
-    proxy = os.environ.get("AUDIBLE_PROXY_URL", "")
-    host = _proxy_host_for_log(proxy) if proxy else ""
-    if not proxy or "seeder" not in host:
-        detail = f"host {host!r}" if proxy else "unset"
+    summary = audible_client.transport_summary()
+    host = summary.host or ""
+    if summary.mode != "proxy" or "seeder" not in host:
+        detail = f"host {host!r}" if summary.mode == "proxy" else summary.mode
         logger.error(
             "Seeder: refusing to start, AUDIBLE_PROXY_URL does not name "
             "a seeder-dedicated exit",
-            extra={"proxy_host": host or "unset", "proxy_configured": bool(proxy)},
+            extra={"proxy_host": host or "unset", "proxy_configured": summary.mode == "proxy"},
         )
         raise SystemExit(
             f"AUDIBLE_PROXY_URL ({detail}) does not name a "
@@ -202,9 +186,10 @@ async def _run(once: bool) -> int:
     # run's own dedicated exit -- see _verify_dedicated_proxy.
     _verify_dedicated_proxy()
 
+    proxy_summary = audible_client.transport_summary()
     logger.info(
         "Seeder: standalone run starting",
-        extra={"proxy_host": _proxy_host_for_log(os.environ.get("AUDIBLE_PROXY_URL")), "once": once},
+        extra={"proxy_host": proxy_summary.host or proxy_summary.mode, "once": once},
     )
 
     # Tasks are created and tracked BEFORE the signal handlers are registered,

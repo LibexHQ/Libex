@@ -17,13 +17,13 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Core
+from libex_core.audible.client import as_audible_failure, audible_get, upstream_status_of
 from libex_core.exceptions import AudibleAPIException, NotFoundException
 from libex_core.text import strip_html
 from app.core.logging import get_logger
 from app.core.response_headers import ResponseFacts, SOURCE_AUDIBLE, SOURCE_CACHE, SOURCE_DB, record_source
 
 # Services
-from app.services.audible.client import as_audible_failure, audible_get, upstream_status_of
 from app.services.cache import manager as cache
 from app.services.cache.manager import series_key, series_books_key
 from app.services.db.persist_queue import persist_series_background, persist_cache_background

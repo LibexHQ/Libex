@@ -8,14 +8,22 @@ Every call that reaches this client goes straight to Audible -- it holds
 no cache of its own and never consults one. Whether a request reaches this
 client at all, or is answered from a cache first, is decided by the caller
 before it gets here.
+
+This module reads no environment and constructs no application settings --
+how it egresses (direct, or through a proxy) is set once, at process start,
+by whoever embeds it, through configure_transport() below. See that
+function's own docstring for what it accepts and what calling it again
+means for a request already in flight.
 """
 
 # Standard library
 import asyncio
 import datetime
+import logging
 import random
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from typing import Any, Iterator
 
@@ -23,12 +31,13 @@ from typing import Any, Iterator
 import httpx
 
 # Local
-from app.core.config import get_settings
-from app.core.logging import get_logger
-from libex_core.exceptions import AudibleAPIException, RegionException
+from libex_core.exceptions import AudibleAPIException, NotFoundException, RegionException
 
-settings = get_settings()
-logger = get_logger()
+# The same logger object the hosted application's own get_logger() returns --
+# this package cannot import that function, since doing so would pull in the
+# hosted application's settings and environment behind it, so it names the
+# logger directly instead.
+logger = logging.getLogger("libex")
 
 # ============================================================
 # REGION MAPS
@@ -336,6 +345,117 @@ def _current_audible_semaphore() -> asyncio.Semaphore:
 
 
 # ============================================================
+# TRANSPORT CONFIGURATION
+# ============================================================
+
+# _TransportSnapshot is the whole configured transport, immutable once built.
+# configure_transport() below only ever replaces it wholesale -- assigning a
+# freshly built snapshot alongside a bumped generation counter in one
+# statement -- rather than mutating fields on the existing one, so a reader
+# elsewhere in this module never observes a half-updated transport.
+_VALID_PROXY_SCHEMES = ("http", "https")
+_DEFAULT_PROXY_PORTS = {"http": 80, "https": 443}
+
+
+@dataclass(frozen=True)
+class _TransportSnapshot:
+    """The whole configured transport at one point in time. Never handed to
+    a caller outside this module -- transport_summary() below is the
+    read-only view external code is allowed to see, deliberately narrower
+    than this: `proxy` can carry embedded credentials and must never reach a
+    log line or an exception message."""
+    mode: str  # "unconfigured", "direct", or "proxy"
+    proxy: httpx.Proxy | None
+    host: str | None
+
+
+@dataclass(frozen=True)
+class TransportSummary:
+    """Read-only view of the configured transport, safe to log or assert
+    against: which of the three states configure_transport() last set, and
+    -- in the "proxy" state only -- the hostname it resolves to. Never the
+    URL, never any credentials it might embed."""
+    mode: str
+    host: str | None
+
+
+_transport = _TransportSnapshot(mode="unconfigured", proxy=None, host=None)
+_transport_generation = 0
+
+
+def configure_transport(proxy_url: str | None) -> None:
+    """
+    Sets how every subsequent audible_get call egresses: directly, or through
+    an HTTP(S) proxy. A setup-time call, meant to run exactly once before any
+    request-handling code runs -- see the hosted application's own audible
+    package init for the one place it makes this call.
+
+    None or "" configure direct egress. Any other value is parsed eagerly as
+    a proxy URL and must name an http or https scheme, a host, and a port
+    (explicit, or the scheme's own default); anything else raises ValueError
+    with a fixed message that never contains any part of the supplied value.
+    That's deliberate, not merely tidy: a scheme-less value such as
+    "user:pass@host:port" makes httpx's own proxy parser raise a ValueError
+    whose message embeds the credentials, and that exception has reached a
+    log field before -- eagerly validating here, and re-raising a message
+    with none of the original text via `from None`, is what stops it
+    happening again. Raising also means a malformed value crashes at import,
+    at the hosted application's own call site, rather than silently
+    resolving to direct egress.
+
+    Calling this again replaces the configured transport outright; it never
+    merges with whatever was configured before. A request already in flight
+    when that happens keeps running against the client built for the
+    transport generation active when it started -- it is not moved onto the
+    new transport, and if it fails afterward it is not retried onto one
+    either. That holds for a request's own retry, which fetches the client
+    fresh each attempt (see _get_audible_client) and so already sees a
+    generation bump between attempts. It does not hold for a second call to
+    this function landing while a request built on the transport it is
+    about to replace is still using that same client to read from or write
+    to a socket: closing that client out from under it raises
+    httpx.ReadError (or another transport error) for that request, since
+    aclose() tears down open connections regardless of who still holds them.
+    No current call site reconfigures after startup -- this function is
+    called exactly once, at import, before any request-handling code runs
+    -- so that condition does not arise today; it would only matter if a
+    future caller reconfigured the transport during live traffic.
+    """
+    global _transport, _transport_generation
+
+    if not proxy_url:
+        snapshot = _TransportSnapshot(mode="direct", proxy=None, host=None)
+    else:
+        try:
+            proxy = httpx.Proxy(proxy_url)
+        except Exception:
+            raise ValueError(
+                "proxy URL could not be parsed"
+            ) from None
+        scheme = proxy.url.scheme
+        if scheme not in _VALID_PROXY_SCHEMES:
+            raise ValueError(
+                "proxy URL must use the http or https scheme"
+            ) from None
+        host = proxy.url.host
+        port = proxy.url.port or _DEFAULT_PROXY_PORTS.get(scheme)
+        if not host or not port or not (0 < port < 65536):
+            raise ValueError(
+                "proxy URL must include a host and a valid port"
+            ) from None
+        snapshot = _TransportSnapshot(mode="proxy", proxy=proxy, host=host)
+
+    _transport, _transport_generation = snapshot, _transport_generation + 1
+
+
+def transport_summary() -> TransportSummary:
+    """Read-only view of the currently configured transport -- see
+    TransportSummary's own docstring for exactly what it does and doesn't
+    expose."""
+    return TransportSummary(mode=_transport.mode, host=_transport.host)
+
+
+# ============================================================
 # SHARED HTTP CLIENT
 # ============================================================
 
@@ -394,15 +514,24 @@ _AUDIBLE_POOL_LIMITS = httpx.Limits(
 # uvicorn that's once for the life of the process; under pytest-asyncio,
 # which hands every test function its own loop, each test gets its own client
 # instead of reusing pooled connections tied to a loop that's already gone.
+#
+# _audible_client_generation tracks _transport_generation the same way
+# _audible_client_loop tracks the running loop: a mismatch on either means
+# the client on hand no longer reflects reality and must be rebuilt before
+# the next request goes out. configure_transport() only ever bumps the
+# generation counter -- it never touches this client or the loop directly --
+# so this is the one place that difference is noticed and acted on.
 _audible_client: httpx.AsyncClient | None = None
 _audible_client_loop: asyncio.AbstractEventLoop | None = None
+_audible_client_generation: int | None = None
 
 
 async def _close_stale_client(client: httpx.AsyncClient) -> None:
-    """Closes a client left behind by a loop change. Best-effort: the client
-    may never have opened a real connection (nothing to close), and awaiting
-    aclose() on a loop other than the one that built it is unusual enough
-    that a failure here should never surface as this request's error."""
+    """Closes a client left behind by a loop change or a reconfigure.
+    Best-effort: the client may never have opened a real connection (nothing
+    to close), and awaiting aclose() on a loop other than the one that built
+    it is unusual enough that a failure here should never surface as this
+    request's error."""
     try:
         await client.aclose()
     except Exception:
@@ -410,19 +539,28 @@ async def _close_stale_client(client: httpx.AsyncClient) -> None:
 
 
 def _get_audible_client() -> httpx.AsyncClient:
-    global _audible_client, _audible_client_loop
+    global _audible_client, _audible_client_loop, _audible_client_generation
     loop = asyncio.get_running_loop()
-    if _audible_client is None or _audible_client_loop is not loop:
+    if (
+        _audible_client is None
+        or _audible_client_loop is not loop
+        or _audible_client_generation != _transport_generation
+    ):
         stale = _audible_client
-        # settings is process-wide and never reloaded at runtime (get_settings
-        # is lru_cache'd), so reading audible_proxy_url once at construction
-        # here -- instead of per call, as the old per-request client did --
-        # can't go stale for the life of the process.
+        transport = _transport
+        # trust_env=False: httpx's default otherwise reads HTTPS_PROXY and
+        # SSL_CERT_FILE/SSL_CERT_DIR straight from the process environment,
+        # which would make configure_transport's explicit direct/proxy
+        # choice only half the story -- an unrelated environment variable
+        # could still redirect this traffic. The proxy this client uses is
+        # exactly, and only, what configure_transport was told.
         _audible_client = httpx.AsyncClient(
-            proxy=settings.audible_proxy_url or None,
+            proxy=transport.proxy,
             limits=_AUDIBLE_POOL_LIMITS,
+            trust_env=False,
         )
         _audible_client_loop = loop
+        _audible_client_generation = _transport_generation
         if stale is not None:
             asyncio.create_task(_close_stale_client(stale))
     return _audible_client
@@ -546,6 +684,18 @@ async def audible_get(
     author_books_concurrency's own docstring for why. Every call site in
     this codebase is unaffected either way; only whether it currently runs
     inside an author_books_concurrency() block changes.
+
+    The client is fetched inside the loop, once per attempt, rather than
+    once before it: configure_transport() can run between two attempts of
+    the same call (a reconfigure is a setup-time operation, but nothing
+    stops one landing while a retry is pending), and _get_audible_client
+    already knows how to hand back a fresh client when the transport
+    generation has moved on. Fetching it once before the loop would instead
+    keep retrying against a client built for a transport that no longer
+    applies -- and if configure_transport's own generation bump has by then
+    caused that old client to be closed underneath it, httpx raises a plain
+    RuntimeError on a closed client, not a RequestError, so it would escape
+    the except clauses below entirely rather than being retried.
     """
     region = validate_region(region)
     url = get_audible_url(region, path)
@@ -553,8 +703,8 @@ async def audible_get(
     if extra_headers:
         headers = {**headers, **extra_headers}
 
-    client = _get_audible_client()
     for attempt in range(AUDIBLE_MAX_ATTEMPTS):
+        client = _get_audible_client()
         async with _current_audible_semaphore():
             try:
                 response = await client.get(
@@ -578,7 +728,6 @@ async def audible_get(
                 )
 
         if response.status_code == 404:
-            from libex_core.exceptions import NotFoundException
             raise NotFoundException()
 
         if response.status_code == 200:

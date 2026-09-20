@@ -20,10 +20,10 @@ from app.api.routes.cache_param import CacheInertParam, CacheStandardParam, appl
 
 # Services
 from app.services.audible.search import search, quick_search
-from app.services.audible.client import validate_region
 
 # Core
 from app.core.middleware import valid_region
+from libex_core.audible.client import validate_region
 from libex_core.exceptions import NotFoundException, RegionException
 from libex_core.models import BookResponse
 

@@ -79,12 +79,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.db.models import Book, Track
 
 # Core
+from libex_core.audible import client as audible_client
+from libex_core.audible.client import audible_get
 from libex_core.exceptions import AudibleAPIException, NotFoundException
 from app.core.logging import get_logger, setup_logging
 
 # Services
-from app.services.audible import client as audible_client
-from app.services.audible.client import audible_get
 from app.services.audible.books import _normalize_chapters
 from app.services.db.writer import _chapter_count, _chaptered_wins
 
@@ -210,40 +210,26 @@ class _Stopper:
 
 # --- proxy containment (unchanged; see LIBEX_LESSONS_HARD_WON.md) ----------
 
-def _proxy_host_for_log(proxy: str | None) -> str:
-    """
-    Best-effort hostname for a log line -- never the raw AUDIBLE_PROXY_URL,
-    since httpx's proxy= accepts embedded credentials
-    (http://user:pass@host:port) and Settings stores this as a plain str.
-    Never raises -- a malformed value becomes "(unparseable)".
-    """
-    if not proxy:
-        return "direct"
-    try:
-        host = httpx.URL(proxy).host
-    except Exception:
-        return "(unparseable)"
-    return host or "(unparseable)"
-
-
 def _verify_dedicated_proxy() -> None:
     """
-    Refuses to start unless AUDIBLE_PROXY_URL is set and its hostname
-    contains "backfill" -- otherwise this script's Audible traffic would
-    egress from the container's own address, the same one the live service
-    answers on. Checked against the hostname only, since the real proxy
-    value may carry embedded credentials and must never reach a log line or
-    exception message. Logged before the SystemExit, since SystemExit alone
-    never reaches the log handlers.
+    Refuses to start unless the configured transport is a proxy whose
+    hostname contains "backfill" -- otherwise this script's Audible traffic
+    would egress from the container's own address, the same one the live
+    service answers on. Reads audible_client's own transport_summary()
+    rather than AUDIBLE_PROXY_URL directly: the value configure_transport()
+    actually validated and stored, checked against its hostname only, since
+    the real proxy value may carry embedded credentials and must never
+    reach a log line or exception message. Logged before the SystemExit,
+    since SystemExit alone never reaches the log handlers.
     """
-    proxy = os.environ.get("AUDIBLE_PROXY_URL", "")
-    host = _proxy_host_for_log(proxy) if proxy else ""
-    if not proxy or "backfill" not in host:
-        detail = f"host {host!r}" if proxy else "unset"
+    summary = audible_client.transport_summary()
+    host = summary.host or ""
+    if summary.mode != "proxy" or "backfill" not in host:
+        detail = f"host {host!r}" if summary.mode == "proxy" else summary.mode
         logger.error(
             "Backfill: refusing to start, AUDIBLE_PROXY_URL does not name "
             "a backfill-dedicated exit",
-            extra={"proxy_host": host or "unset", "proxy_configured": bool(proxy)},
+            extra={"proxy_host": host or "unset", "proxy_configured": summary.mode == "proxy"},
         )
         raise SystemExit(
             f"AUDIBLE_PROXY_URL ({detail}) does not name a "
@@ -259,14 +245,21 @@ async def _log_exit_ip() -> None:
 
     Also called again by the ratchet's first trip (see _Ratchet and its call
     site in _run) -- a floor-and-freeze is exactly the moment worth
-    reconfirming which IP just got throttled or blocked."""
-    proxy = os.environ.get("AUDIBLE_PROXY_URL") or None
+    reconfirming which IP just got throttled or blocked.
+
+    Builds its client from audible_client's own stored transport rather than
+    re-reading AUDIBLE_PROXY_URL, so this check cannot drift from whatever
+    configure_transport actually validated and every other Audible call in
+    this process is using."""
+    summary = audible_client.transport_summary()
     try:
-        async with httpx.AsyncClient(proxy=proxy, timeout=15.0) as client:
+        async with httpx.AsyncClient(
+            proxy=audible_client._transport.proxy, timeout=15.0, trust_env=False
+        ) as client:
             resp = await client.get("https://api.ipify.org")
             logger.info(
                 f"Backfill: exit IP {resp.text.strip()} "
-                f"(via {_proxy_host_for_log(proxy)})"
+                f"(via {summary.host or summary.mode})"
             )
     except Exception as e:
         logger.warning(f"Backfill: could not determine exit IP: {type(e).__name__}: {e}")
@@ -1059,11 +1052,11 @@ async def _run(limit: int | None) -> int:
     # for real, so it needs the same containment, not a bypass.
     _verify_dedicated_proxy()
 
-    proxy = os.environ.get("AUDIBLE_PROXY_URL")
+    proxy_summary = audible_client.transport_summary()
     logger.info(
         "Backfill: starting",
         extra={
-            "proxy_host": _proxy_host_for_log(proxy),
+            "proxy_host": proxy_summary.host or proxy_summary.mode,
             "limit": limit if limit is not None else "all",
             "concurrency_start": CONCURRENCY_START,
             "concurrency_ceiling": CONCURRENCY_CEILING,

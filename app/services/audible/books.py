@@ -51,6 +51,13 @@ from app.db.models import Book
 
 # Core
 from libex_core.asin import is_valid_asin
+from libex_core.audible.client import (
+    as_audible_failure,
+    audible_get,
+    author_books_concurrency,
+    upstream_status_of,
+    REGION_MAP,
+)
 from libex_core.exceptions import NotFoundException
 from libex_core.text import strip_html, strip_image_size_suffix
 from app.core.logging import get_logger
@@ -68,13 +75,6 @@ from app.core.response_headers import (
 )
 
 # Services
-from app.services.audible.client import (
-    as_audible_failure,
-    audible_get,
-    author_books_concurrency,
-    upstream_status_of,
-    REGION_MAP,
-)
 from app.services.cache import manager as cache
 from app.services.cache.manager import book_key, chapters_key
 from app.services.db.persist_queue import (

@@ -11,7 +11,7 @@ Resilience: each node is walked independently, so one failed Audible call skips
 that node and the scan continues — it does not abort the whole cycle.
 
 These tests mock the deferred Audible client (audible_get is imported inside the
-seeder's functions, so it's patched at its source, app.services.audible.client),
+seeder's functions, so it's patched at its source, libex_core.audible.client),
 the DB-missing check, and the persist boundary, so we exercise the collect-all
 walk, the duplicate-page wall, parent+leaf coverage, cross-node dedupe, the junk
 filter, the persist-only-missing behavior, and per-node resilience — without
@@ -27,7 +27,7 @@ import pytest
 # Services
 from app.services import seeder
 
-_AUDIBLE_GET = "app.services.audible.client.audible_get"
+_AUDIBLE_GET = "libex_core.audible.client.audible_get"
 
 
 def _product(asin, days_offset, title=None):

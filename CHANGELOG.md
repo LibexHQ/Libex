@@ -10,6 +10,36 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.22.4]
+
+### Fixed
+- **A malformed `AUDIBLE_PROXY_URL` now fails at startup instead of surfacing
+  later, mid-request.** The value is parsed and validated once, before the
+  process starts serving requests or running its scheduled work, rather than
+  lazily the first time an Audible call needed the shared HTTP client — this
+  covers the seeder, the corpus-refresh script and the chapter-backfill
+  script as well as the API itself. A bad value still never reaches a log
+  line or error message that could carry embedded credentials; it is just
+  caught immediately now, rather than after other startup work has already
+  run.
+
+- **Outbound Audible traffic no longer picks up `HTTPS_PROXY`,
+  `SSL_CERT_FILE`, or similar proxy or certificate environment variables set
+  on the host or in the container.** Only the explicitly configured
+  `AUDIBLE_PROXY_URL` decides where Audible requests go. Previously, one of
+  these ambient variables — set for an unrelated reason, or left over from a
+  different process — could silently redirect Audible egress or substitute a
+  certificate without that ever being the intended configuration.
+
+- **`AUDIBLE_PROXY_URL` now only accepts `http://` or `https://`.** A
+  `socks5://` value was never actually functional — the SOCKS support httpx
+  needs for it has never been part of Libex's dependencies — so it used to
+  pass unchecked into the shared client and only fail the first time an
+  Audible call was made, after the process had already started and begun
+  serving other traffic. It now fails the same startup check as any other
+  unsupported value, so a `socks5://` configuration stops the process before
+  it starts instead of appearing to run normally.
+
 ## [1.22.3]
 
 ### Fixed

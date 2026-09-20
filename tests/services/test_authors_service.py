@@ -1194,7 +1194,7 @@ async def test_fetch_author_books_by_screen_token_travels_in_params_not_path():
 @pytest.mark.asyncio
 async def test_fetch_author_books_by_screen_sends_device_header():
     from app.services.audible.authors import _fetch_author_books_by_screen
-    from app.services.audible.client import ANDROID_DEVICE_TYPE_ID
+    from libex_core.audible.client import ANDROID_DEVICE_TYPE_ID
 
     page = {"sections": [_asin_section([_row("B0DEVICE01")], pagination=None)]}
     mock_get = AsyncMock(return_value=page)
@@ -1693,7 +1693,7 @@ async def test_fetch_author_books_by_screen_threads_region_for_all_regions():
     """Region is threaded through the screens URL for every supported
     region, not just US."""
     from app.services.audible.authors import _fetch_author_books_by_screen
-    from app.services.audible.client import VALID_REGIONS
+    from libex_core.audible.client import VALID_REGIONS
 
     empty_page = {"sections": []}
     for region in sorted(VALID_REGIONS):

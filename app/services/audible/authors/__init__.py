@@ -22,6 +22,13 @@ from typing import Any, NamedTuple
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Core
+from libex_core.audible.client import (
+    as_audible_failure,
+    audible_get,
+    author_books_concurrency,
+    upstream_status_of,
+    LOCALE_MAP,
+)
 from libex_core.exceptions import AudibleAPIException, NotFoundException
 from libex_core.text import strip_html
 from app.core.logging import get_logger
@@ -34,13 +41,6 @@ from app.core.response_headers import (
 )
 
 # Services
-from app.services.audible.client import (
-    as_audible_failure,
-    audible_get,
-    author_books_concurrency,
-    upstream_status_of,
-    LOCALE_MAP,
-)
 from app.services.audible.authors.screens import (
     _fetch_author_books_by_screen,
     _ScreenBooksResult,

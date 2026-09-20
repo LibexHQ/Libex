@@ -24,7 +24,7 @@ from pathlib import Path
 # Local
 import libex_core as _libex_core_package
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 LIBEX_CORE_DIR = REPO_ROOT / "libex_core"
 
 # What a genuinely standalone libex_core must never pull in. Each of these

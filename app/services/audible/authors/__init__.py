@@ -24,7 +24,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # Core
 from libex_core.audible.client import (
     as_audible_failure,
-    audible_get,
     author_books_concurrency,
     upstream_status_of,
     LOCALE_MAP,
@@ -41,6 +40,7 @@ from app.core.response_headers import (
 )
 
 # Services
+from app.services.audible import audible_get
 from app.services.audible.authors.screens import (
     _fetch_author_books_by_screen,
     _ScreenBooksResult,

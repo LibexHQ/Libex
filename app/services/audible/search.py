@@ -11,11 +11,12 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Core
-from libex_core.audible.client import as_audible_failure, audible_get
+from libex_core.audible.client import as_audible_failure
 from libex_core.exceptions import AudibleAPIException, NotFoundException
 from app.core.logging import get_logger
 
 # Services
+from app.services.audible import audible_get
 from app.services.audible.books import (
     get_books_by_asins,
     _normalize_product,

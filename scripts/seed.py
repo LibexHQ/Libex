@@ -55,11 +55,11 @@ import time
 from app.db.session import engine
 
 # Core
-from libex_core.audible import client as audible_client
 from app.core.config import check_retired_env_vars
 from app.core.logging import get_logger, setup_logging
 
 # Services
+import app.services.audible as audible_service
 from app.services.db import persist_queue
 from app.services.seeder import run_new_releases_seeder, run_seeder
 
@@ -104,14 +104,22 @@ def _verify_dedicated_proxy() -> None:
     Refuses to start unless the configured transport is a proxy whose
     hostname contains "seeder" -- otherwise this script's Audible traffic
     would egress from the container's own address, the same one the live
-    service answers on. Reads audible_client's own transport_summary()
-    rather than AUDIBLE_PROXY_URL directly: the value configure_transport()
-    actually validated and stored, checked against its hostname only, since
-    the real proxy value may carry embedded credentials and must never
-    reach a log line or exception message. Logged before the SystemExit,
-    since SystemExit alone never reaches the log handlers.
+    service answers on. Reads the hosted LibexClient's own
+    transport_summary() rather than AUDIBLE_PROXY_URL directly: the value
+    app.services.audible actually validated and built the hosted client
+    from, checked against its hostname only, since the real proxy value may
+    carry embedded credentials and must never reach a log line or exception
+    message. Logged before the SystemExit, since SystemExit alone never
+    reaches the log handlers.
+
+    Reached through the app.services.audible module object rather than a
+    name bound into this module's own namespace at import -- a test fixture
+    that swaps the hosted instance for a fresh one between tests replaces
+    the attribute on that module, and a name captured here at import time
+    would keep pointing at the instance that existed when this script was
+    first imported instead of picking up the replacement.
     """
-    summary = audible_client.transport_summary()
+    summary = audible_service._hosted_client.transport_summary()
     host = summary.host or ""
     if summary.mode != "proxy" or "seeder" not in host:
         detail = f"host {host!r}" if summary.mode == "proxy" else summary.mode
@@ -186,7 +194,7 @@ async def _run(once: bool) -> int:
     # run's own dedicated exit -- see _verify_dedicated_proxy.
     _verify_dedicated_proxy()
 
-    proxy_summary = audible_client.transport_summary()
+    proxy_summary = audible_service._hosted_client.transport_summary()
     logger.info(
         "Seeder: standalone run starting",
         extra={"proxy_host": proxy_summary.host or proxy_summary.mode, "once": once},

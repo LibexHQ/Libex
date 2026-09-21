@@ -53,7 +53,6 @@ from app.db.models import Book
 from libex_core.asin import is_valid_asin
 from libex_core.audible.client import (
     as_audible_failure,
-    audible_get,
     author_books_concurrency,
     upstream_status_of,
     REGION_MAP,
@@ -75,6 +74,7 @@ from app.core.response_headers import (
 )
 
 # Services
+from app.services.audible import audible_get
 from app.services.cache import manager as cache
 from app.services.cache.manager import book_key, chapters_key
 from app.services.db.persist_queue import (

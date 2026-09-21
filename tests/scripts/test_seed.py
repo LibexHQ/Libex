@@ -28,7 +28,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 # Local
-import libex_core.audible.client as audible_client
+from tests.scripts.conftest import set_hosted_transport
 from scripts.seed import (
     DRAIN_TIMEOUT_SECONDS,
     _drain_persist_queue,
@@ -73,41 +73,35 @@ def test_drain_timeout_seconds_default_matches_the_documented_value():
 # ============================================================
 # _verify_dedicated_proxy -- containment: refuse to egress from the host
 #
-# _verify_dedicated_proxy reads audible_client.transport_summary(), never
-# AUDIBLE_PROXY_URL directly -- the transport is configured exactly once,
-# at app.services.audible's own import time, so a test exercising this guard
-# has to call configure_transport() itself to put a particular state in
-# place. restore_audible_transport (tests/scripts/conftest.py) snapshots and
-# restores the module's transport around every test below, so none of them
-# leak their configured state into a test that runs after them.
+# _verify_dedicated_proxy reads app.services.audible._hosted_client's own
+# transport_summary(), never AUDIBLE_PROXY_URL directly -- the hosted
+# instance is built exactly once, at app.services.audible's own import time,
+# so a test exercising this guard has to install a LibexClient of its own as
+# that name (set_hosted_transport, tests/scripts/conftest.py) to put a
+# particular transport in place. restore_audible_transport snapshots and
+# restores the original instance around every test below, by identity, so
+# none of them leak their configured state into a test that runs after
+# them. There is no "unconfigured" state to exercise separately from
+# "direct" anymore -- a LibexClient always has a concrete direct-or-proxy
+# transport the moment it is constructed, so the case below (a blank proxy,
+# allow_direct_egress=True) is the only way this guard is ever reached
+# without a proxy.
 # ============================================================
 
 def test_verify_dedicated_proxy_passes_when_a_seeder_named_proxy_is_configured(
     restore_audible_transport,
 ):
-    audible_client.configure_transport("http://libex-seeder-vpn:8888")
+    set_hosted_transport("http://libex-seeder-vpn:8888")
     _verify_dedicated_proxy()  # must not raise
-
-
-def test_verify_dedicated_proxy_refuses_when_unconfigured(restore_audible_transport):
-    """The pristine, never-configured state -- distinct from a deliberately
-    configured direct egress -- must refuse exactly like a wrongly-named
-    proxy."""
-    audible_client._transport = audible_client._TransportSnapshot(
-        mode="unconfigured", proxy=None, host=None
-    )
-    with pytest.raises(SystemExit, match="unconfigured"):
-        _verify_dedicated_proxy()
 
 
 def test_verify_dedicated_proxy_refuses_on_configured_direct_egress(
     restore_audible_transport,
 ):
-    """None (and, by configure_transport's own contract, "") both configure
-    direct egress when allow_direct_egress=True is passed alongside them --
-    this must refuse exactly like the unconfigured state, not be mistaken
-    for a proxy."""
-    audible_client.configure_transport(None, allow_direct_egress=True)
+    """None (and, by LibexClient's own contract, "") both configure direct
+    egress when allow_direct_egress=True is passed alongside them -- this
+    must refuse, not be mistaken for a proxy."""
+    set_hosted_transport(None, allow_direct_egress=True)
     with pytest.raises(SystemExit, match="direct"):
         _verify_dedicated_proxy()
 
@@ -117,9 +111,9 @@ def test_verify_dedicated_proxy_refuses_when_the_configured_host_does_not_qualif
 ):
     """A hostname naming some OTHER exit -- the shared production proxy, or
     backfill_chapters's/refresh_corpus's own dedicated ones -- must fail
-    exactly like unconfigured. This is what stops a copy-pasted exit from
+    exactly like a direct egress. This is what stops a copy-pasted exit from
     being reused here."""
-    audible_client.configure_transport("http://libex-backfill-vpn:8888")
+    set_hosted_transport("http://libex-backfill-vpn:8888")
     with pytest.raises(SystemExit, match="libex-backfill-vpn"):
         _verify_dedicated_proxy()
 
@@ -127,7 +121,7 @@ def test_verify_dedicated_proxy_refuses_when_the_configured_host_does_not_qualif
 def test_verify_dedicated_proxy_failure_never_names_credentials(
     restore_audible_transport,
 ):
-    audible_client.configure_transport(
+    set_hosted_transport(
         "http://opsuser:s3cr3t-token@libex-backfill-vpn:8888"
     )
     with pytest.raises(SystemExit) as exc_info:
@@ -136,12 +130,10 @@ def test_verify_dedicated_proxy_failure_never_names_credentials(
     assert "opsuser" not in str(exc_info.value)
 
 
-def test_verify_dedicated_proxy_logs_error_before_raising_when_unconfigured(
+def test_verify_dedicated_proxy_logs_error_before_raising_on_direct_egress(
     restore_audible_transport, caplog,
 ):
-    audible_client._transport = audible_client._TransportSnapshot(
-        mode="unconfigured", proxy=None, host=None
-    )
+    set_hosted_transport(None, allow_direct_egress=True)
     with caplog.at_level(logging.ERROR, logger="libex"):
         with pytest.raises(SystemExit):
             _verify_dedicated_proxy()
@@ -157,7 +149,7 @@ def test_verify_dedicated_proxy_logs_error_before_raising_when_unconfigured(
 def test_verify_dedicated_proxy_logs_error_with_hostname_when_wrongly_named(
     restore_audible_transport, caplog,
 ):
-    audible_client.configure_transport(
+    set_hosted_transport(
         "http://opsuser:s3cr3t-token@libex-backfill-vpn:8888"
     )
     with caplog.at_level(logging.ERROR, logger="libex"):
@@ -179,7 +171,7 @@ def test_verify_dedicated_proxy_logs_error_with_hostname_when_wrongly_named(
 def test_verify_dedicated_proxy_logs_nothing_at_error_when_correctly_named(
     restore_audible_transport, caplog,
 ):
-    audible_client.configure_transport("http://libex-seeder-vpn:8888")
+    set_hosted_transport("http://libex-seeder-vpn:8888")
     with caplog.at_level(logging.ERROR, logger="libex"):
         _verify_dedicated_proxy()
     assert [r for r in caplog.records if r.levelno == logging.ERROR] == []
@@ -283,7 +275,7 @@ def _patched_run(*, seeder=None, releases=None, drained=True):
     coroutines or a real database engine. Callers must also depend on the
     restore_audible_transport fixture so this configured proxy doesn't leak
     into a test that runs afterward."""
-    audible_client.configure_transport("http://libex-seeder-vpn:8888")
+    set_hosted_transport("http://libex-seeder-vpn:8888")
     seeder = seeder or AsyncMock(return_value=None)
     releases = releases or AsyncMock(return_value=None)
     fake_engine = MagicMock()
@@ -303,7 +295,7 @@ async def test_run_drains_the_persist_queue_before_disposing_the_engine(restore_
     whatever persist_queue's fire-and-forget tasks were still writing through
     a connection nothing is driving anymore."""
     order = []
-    audible_client.configure_transport("http://libex-seeder-vpn:8888")
+    set_hosted_transport("http://libex-seeder-vpn:8888")
 
     async def _fake_drain(_timeout):
         order.append("drain")
@@ -402,7 +394,7 @@ async def test_run_still_drains_and_disposes_when_a_worker_raises(restore_audibl
     fake_engine = MagicMock()
     fake_engine.dispose = AsyncMock()
     drain = AsyncMock(return_value=True)
-    audible_client.configure_transport("http://libex-seeder-vpn:8888")
+    set_hosted_transport("http://libex-seeder-vpn:8888")
 
     with patch.multiple(
         seed,
@@ -421,7 +413,7 @@ async def test_run_still_drains_and_disposes_when_a_worker_raises(restore_audibl
 async def test_run_dies_before_starting_any_worker_when_proxy_unset(restore_audible_transport):
     """The proxy check is the first thing _run does -- neither worker may
     ever be started against an unverified exit."""
-    audible_client.configure_transport(None, allow_direct_egress=True)
+    set_hosted_transport(None, allow_direct_egress=True)
     seeder = AsyncMock(return_value=None)
     releases = AsyncMock(return_value=None)
 
@@ -442,7 +434,7 @@ async def test_run_creates_and_tracks_both_tasks_before_registering_signal_handl
     against an empty task list -- requested=True got set, but there was
     nothing yet to cancel, and the tasks created afterward were never told."""
     order = []
-    audible_client.configure_transport("http://libex-seeder-vpn:8888")
+    set_hosted_transport("http://libex-seeder-vpn:8888")
 
     real_create_task = asyncio.create_task
 

@@ -348,7 +348,7 @@ async def _expand_series(region: str, delay: float) -> dict[str, int]:
     stats = {"series_processed": 0, "books_discovered": 0, "errors": 0}
     cutoff = _stale_cutoff()
 
-    from libex_core.audible.client import audible_get
+    from app.services.audible import audible_get
 
     async with SessionFactory() as session:
         result = await session.execute(
@@ -444,7 +444,7 @@ async def _expand_narrators(region: str, delay: float) -> dict[str, int]:
     stats = {"narrators_processed": 0, "books_discovered": 0, "errors": 0}
     cutoff = _stale_cutoff()
 
-    from libex_core.audible.client import audible_get
+    from app.services.audible import audible_get
 
     async with SessionFactory() as session:
         result = await session.execute(
@@ -557,7 +557,7 @@ async def _fetch_catalog_genres(region: str) -> list[dict[str, str]]:
     parent_id="" ; every other node gets its parent's id. A node that appears under
     two parents yields one row per parent. Deduped by (genre_id, parent_id).
     """
-    from libex_core.audible.client import audible_get
+    from app.services.audible import audible_get
 
     data = await audible_get(
         region,
@@ -593,7 +593,7 @@ async def _walk_genre_for_asins(
     by SEEDER_REQUEST_DELAY. Raises on an Audible failure — the caller decides
     whether one bad category should stop the whole scan (it shouldn't).
     """
-    from libex_core.audible.client import audible_get
+    from app.services.audible import audible_get
 
     asins: list[str] = []
     pages = 0

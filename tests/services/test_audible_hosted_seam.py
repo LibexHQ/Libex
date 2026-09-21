@@ -1,16 +1,16 @@
 """
 app.services.audible's own package init: the one seam where the hosted
 application's config -- audible_proxy_url, read through app.core.config --
-crosses into libex_core.audible.client.configure_transport().
+crosses into libex_core.audible.client.LibexClient's constructor.
 
 Run as a subprocess against a fresh interpreter for both tests below, not
 against a plain patch of get_settings() in this process: get_settings() is
-lru_cache'd and app.services.audible's module-level configure_transport()
-call runs exactly once, at import, so once either has already run in this
-test process (as it has, well before this file's own collection, via
-tests/conftest.py's app imports) there is no way to make either run again
-with a different AUDIBLE_PROXY_URL. Only a child process that has imported
-nothing yet proves what happens at that one import.
+lru_cache'd and app.services.audible's module-level LibexClient(...)
+construction of _hosted_client runs exactly once, at import, so once either
+has already run in this test process (as it has, well before this file's
+own collection, via tests/conftest.py's app imports) there is no way to make
+either run again with a different AUDIBLE_PROXY_URL. Only a child process
+that has imported nothing yet proves what happens at that one import.
 """
 
 # Standard library
@@ -21,10 +21,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 _CHILD_SCRIPT = """
-import app.services.audible
-import libex_core.audible.client as client
+import app.services.audible as audible_service
 
-summary = client.transport_summary()
+summary = audible_service._hosted_client.transport_summary()
 print("MODE:" + summary.mode)
 print("HOST:" + (summary.host or ""))
 """
@@ -87,9 +86,9 @@ def test_blank_audible_proxy_url_resolves_to_direct_egress_without_raising(tmp_p
 # ============================================================
 # MALFORMED AUDIBLE_PROXY_URL -- still raises at import, unchanged
 #
-# allow_direct_egress is ignored whenever proxy_url is non-empty (see
-# configure_transport's own docstring), so a malformed value must fail
-# exactly as it did before this seam started passing the flag.
+# allow_direct_egress is ignored whenever proxy_url is non-empty, so a
+# malformed value must fail exactly as it did before this seam started
+# passing the flag.
 # ============================================================
 
 def test_malformed_audible_proxy_url_still_raises_at_import(tmp_path):

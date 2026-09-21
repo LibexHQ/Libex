@@ -80,11 +80,12 @@ from app.db.models import Book, Track
 
 # Core
 from libex_core.audible import client as audible_client
-from libex_core.audible.client import audible_get
 from libex_core.exceptions import AudibleAPIException, NotFoundException
 from app.core.logging import get_logger, setup_logging
 
 # Services
+import app.services.audible as audible_service
+from app.services.audible import audible_get
 from app.services.audible.books import _normalize_chapters
 from app.services.db.writer import _chapter_count, _chaptered_wins
 
@@ -215,14 +216,22 @@ def _verify_dedicated_proxy() -> None:
     Refuses to start unless the configured transport is a proxy whose
     hostname contains "backfill" -- otherwise this script's Audible traffic
     would egress from the container's own address, the same one the live
-    service answers on. Reads audible_client's own transport_summary()
-    rather than AUDIBLE_PROXY_URL directly: the value configure_transport()
-    actually validated and stored, checked against its hostname only, since
-    the real proxy value may carry embedded credentials and must never
-    reach a log line or exception message. Logged before the SystemExit,
-    since SystemExit alone never reaches the log handlers.
+    service answers on. Reads the hosted LibexClient's own
+    transport_summary() rather than AUDIBLE_PROXY_URL directly: the value
+    app.services.audible actually validated and built the hosted client
+    from, checked against its hostname only, since the real proxy value may
+    carry embedded credentials and must never reach a log line or exception
+    message. Logged before the SystemExit, since SystemExit alone never
+    reaches the log handlers.
+
+    Reached through the app.services.audible module object rather than a
+    name bound into this module's own namespace at import -- a test fixture
+    that swaps the hosted instance for a fresh one between tests replaces
+    the attribute on that module, and a name captured here at import time
+    would keep pointing at the instance that existed when this script was
+    first imported instead of picking up the replacement.
     """
-    summary = audible_client.transport_summary()
+    summary = audible_service._hosted_client.transport_summary()
     host = summary.host or ""
     if summary.mode != "proxy" or "backfill" not in host:
         detail = f"host {host!r}" if summary.mode == "proxy" else summary.mode
@@ -247,14 +256,22 @@ async def _log_exit_ip() -> None:
     site in _run) -- a floor-and-freeze is exactly the moment worth
     reconfirming which IP just got throttled or blocked.
 
-    Builds its client from audible_client's own stored transport rather than
-    re-reading AUDIBLE_PROXY_URL, so this check cannot drift from whatever
-    configure_transport actually validated and every other Audible call in
-    this process is using."""
-    summary = audible_client.transport_summary()
+    Builds its client from the hosted LibexClient's own validated transport
+    (its _proxy) rather than re-reading AUDIBLE_PROXY_URL, so this check
+    cannot drift from whatever app.services.audible actually validated and
+    every other Audible call in this process is using -- re-deriving a
+    proxy from settings here instead would risk exactly the drift this
+    check exists to rule out, on a value that is a plain, unmasked string
+    with no other reader in this script. _proxy is read-only and
+    single-underscore rather than a public LibexClient attribute: it exists
+    for exactly this class of reader, an operator script confirming which
+    proxy object actually carries a running process's own traffic, and is
+    documented on LibexClient itself as being for that use only."""
+    hosted = audible_service._hosted_client
+    summary = hosted.transport_summary()
     try:
         async with httpx.AsyncClient(
-            proxy=audible_client._transport.proxy, timeout=15.0, trust_env=False
+            proxy=hosted._proxy, timeout=15.0, trust_env=False
         ) as client:
             resp = await client.get("https://api.ipify.org")
             logger.info(
@@ -1052,7 +1069,7 @@ async def _run(limit: int | None) -> int:
     # for real, so it needs the same containment, not a bypass.
     _verify_dedicated_proxy()
 
-    proxy_summary = audible_client.transport_summary()
+    proxy_summary = audible_service._hosted_client.transport_summary()
     logger.info(
         "Backfill: starting",
         extra={

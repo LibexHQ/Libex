@@ -39,7 +39,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 # Local
-import libex_core.audible.client as audible_client
+from tests.scripts.conftest import set_hosted_transport
 from libex_core.exceptions import AudibleAPIException, NotFoundException
 from app.services.db import writer
 from scripts.backfill_chapters import (
@@ -1162,7 +1162,7 @@ async def _drive_run(*pages, limit=None):
     and never reaches the dispatcher is worth nothing, and what the
     concurrency machinery observes is itself part of the claim.
 
-    Configures a backfill-named proxy directly through configure_transport()
+    Configures a backfill-named proxy directly through set_hosted_transport()
     -- _verify_dedicated_proxy reads transport_summary(), not the
     environment, so setting AUDIBLE_PROXY_URL alone would no longer clear
     the guard. Every caller of this helper must also depend on the
@@ -1194,7 +1194,7 @@ async def _drive_run(*pages, limit=None):
         __aenter__=AsyncMock(return_value=AsyncMock()), __aexit__=AsyncMock(return_value=False)
     ))
 
-    audible_client.configure_transport("http://libex-backfill-vpn:8888")
+    set_hosted_transport("http://libex-backfill-vpn:8888")
 
     with patch.dict("os.environ", {
         "DATABASE_URL": "postgresql+asyncpg://unused/unused",
@@ -1281,7 +1281,7 @@ async def test_log_exit_ip_never_logs_the_full_credentialed_proxy(
     """The exit-IP startup probe logs 'via <host>'. Proves the credentialed
     value never reaches the record that would otherwise go to stdout and,
     with AXIOM_TOKEN set, to Axiom."""
-    audible_client.configure_transport(CREDENTIALED_PROXY)
+    set_hosted_transport(CREDENTIALED_PROXY)
 
     class _FakeResponse:
         text = "203.0.113.9"
@@ -1312,43 +1312,38 @@ async def test_log_exit_ip_never_logs_the_full_credentialed_proxy(
 # ============================================================
 # _verify_dedicated_proxy -- containment: refuse to egress from the host
 #
-# _verify_dedicated_proxy reads audible_client.transport_summary(), never
-# AUDIBLE_PROXY_URL directly -- the transport is configured exactly once, at
-# app.services.audible's own import time, so a test exercising this guard has
-# to call configure_transport() itself to put a particular state in place.
-# restore_audible_transport (tests/scripts/conftest.py) snapshots and
-# restores the module's transport around every test below, so none of them
-# leak their configured state into a test that runs after them.
+# _verify_dedicated_proxy reads app.services.audible._hosted_client's own
+# transport_summary(), never AUDIBLE_PROXY_URL directly -- the hosted
+# instance is built exactly once, at app.services.audible's own import time,
+# so a test exercising this guard has to install a LibexClient of its own as
+# that name (set_hosted_transport, tests/scripts/conftest.py) to put a
+# particular transport in place. restore_audible_transport snapshots and
+# restores the original instance around every test below, by identity, so
+# none of them leak their configured state into a test that runs after
+# them. There is no "unconfigured" state to exercise separately from
+# "direct" anymore -- a LibexClient always has a concrete direct-or-proxy
+# transport the moment it is constructed, so the case below (a blank proxy,
+# allow_direct_egress=True) is the only way this guard is ever reached
+# without a proxy.
 # ============================================================
 
-def test_verify_dedicated_proxy_refuses_when_unconfigured(restore_audible_transport):
-    """The pristine, never-configured state -- distinct from a deliberately
-    configured direct egress -- must refuse exactly like a wrongly-named
-    proxy."""
-    audible_client._transport = audible_client._TransportSnapshot(
-        mode="unconfigured", proxy=None, host=None
-    )
-    with pytest.raises(SystemExit, match="unconfigured"):
-        _verify_dedicated_proxy()
-
-
 def test_verify_dedicated_proxy_refuses_on_configured_direct_egress(restore_audible_transport):
-    """None (and, by configure_transport's own contract, "") both configure
-    direct egress when allow_direct_egress=True is passed alongside them --
+    """None (and, by LibexClient's own contract, "") both configure direct
+    egress when allow_direct_egress=True is passed alongside them --
     httpx.AsyncClient would get proxy=None and this script's traffic would
     egress direct from the container, the production host's own address.
-    Must refuse exactly like the unconfigured state."""
-    audible_client.configure_transport(None, allow_direct_egress=True)
+    Must refuse."""
+    set_hosted_transport(None, allow_direct_egress=True)
     with pytest.raises(SystemExit, match="direct"):
         _verify_dedicated_proxy()
 
 
 def test_verify_dedicated_proxy_refuses_when_the_configured_host_does_not_qualify(restore_audible_transport):
     """A hostname naming some OTHER exit -- the shared production proxy, or
-    refresh_corpus's own dedicated one -- must fail exactly like
-    unconfigured. This is what stops a copy-pasted refresh exit from being
+    refresh_corpus's own dedicated one -- must fail exactly like a direct
+    egress. This is what stops a copy-pasted refresh exit from being
     reused here."""
-    audible_client.configure_transport("http://libex-refresh-vpn:8888")
+    set_hosted_transport("http://libex-refresh-vpn:8888")
     with pytest.raises(SystemExit, match="libex-refresh-vpn"):
         _verify_dedicated_proxy()
 
@@ -1356,7 +1351,7 @@ def test_verify_dedicated_proxy_refuses_when_the_configured_host_does_not_qualif
 def test_verify_dedicated_proxy_failure_never_names_credentials(restore_audible_transport):
     """The failure message names the hostname only, proving a credentialed
     but wrongly-named value can't leak into the SystemExit text either."""
-    audible_client.configure_transport(
+    set_hosted_transport(
         "http://opsuser:s3cr3t-token@libex-refresh-vpn:8888"
     )
     with pytest.raises(SystemExit) as exc_info:
@@ -1366,20 +1361,18 @@ def test_verify_dedicated_proxy_failure_never_names_credentials(restore_audible_
 
 
 def test_verify_dedicated_proxy_passes_when_a_backfill_named_proxy_is_configured(restore_audible_transport):
-    audible_client.configure_transport("http://libex-backfill-vpn:8888")
+    set_hosted_transport("http://libex-backfill-vpn:8888")
     _verify_dedicated_proxy()  # must not raise
 
 
-def test_verify_dedicated_proxy_logs_error_before_raising_when_unconfigured(
+def test_verify_dedicated_proxy_logs_error_before_raising_on_direct_egress(
     restore_audible_transport, caplog,
 ):
     """SystemExit alone never reaches the libex logger -- it propagates
     straight out of the process, so unattended it would survive only as
     stderr text. The refusal must also land as a structured ERROR record
     (rotating file handler, Axiom) before the raise, not instead of it."""
-    audible_client._transport = audible_client._TransportSnapshot(
-        mode="unconfigured", proxy=None, host=None
-    )
+    set_hosted_transport(None, allow_direct_egress=True)
     with caplog.at_level(logging.ERROR, logger="libex"):
         with pytest.raises(SystemExit):
             _verify_dedicated_proxy()
@@ -1396,9 +1389,9 @@ def test_verify_dedicated_proxy_logs_error_with_hostname_when_wrongly_named(
     restore_audible_transport, caplog,
 ):
     """A wrongly-named but set value logs proxy_configured=True and the
-    actual (safe) hostname it resolved to -- distinct from the unconfigured
+    actual (safe) hostname it resolved to -- distinct from the direct-egress
     case, and still never the raw, possibly-credentialed value."""
-    audible_client.configure_transport(
+    set_hosted_transport(
         "http://opsuser:s3cr3t-token@libex-refresh-vpn:8888"
     )
     with caplog.at_level(logging.ERROR, logger="libex"):
@@ -1423,7 +1416,7 @@ def test_verify_dedicated_proxy_logs_nothing_at_error_when_correctly_named(
     """The success path must not also emit the refusal record -- proves the
     logger.error call is gated on the same condition as the raise, not
     unconditional."""
-    audible_client.configure_transport("http://libex-backfill-vpn:8888")
+    set_hosted_transport("http://libex-backfill-vpn:8888")
     with caplog.at_level(logging.ERROR, logger="libex"):
         _verify_dedicated_proxy()
     assert [r for r in caplog.records if r.levelno == logging.ERROR] == []
@@ -1442,7 +1435,7 @@ async def test_run_dies_before_touching_the_db_when_proxy_unset(
     proxy's own SystemExit, never as a KeyError from reading DATABASE_URL,
     and create_async_engine must never be reached at all -- exactly the
     'dies before a single request goes out' requirement."""
-    audible_client.configure_transport(None, allow_direct_egress=True)
+    set_hosted_transport(None, allow_direct_egress=True)
     monkeypatch.delenv("DATABASE_URL", raising=False)
     with patch("scripts.backfill_chapters.create_async_engine") as create_engine:
         with pytest.raises(SystemExit):
@@ -1459,7 +1452,7 @@ async def test_run_proceeds_past_the_check_when_correctly_named(
     the proxy check itself. This is also the --limit trial path: a trial
     still calls Audible for real, so it must clear the same guard as the
     unlimited run, with no bypass."""
-    audible_client.configure_transport("http://libex-backfill-vpn:8888")
+    set_hosted_transport("http://libex-backfill-vpn:8888")
     monkeypatch.delenv("DATABASE_URL", raising=False)
     with patch("scripts.backfill_chapters._log_exit_ip", new=AsyncMock()):
         with pytest.raises(KeyError, match="DATABASE_URL"):

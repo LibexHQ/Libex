@@ -10,6 +10,38 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.22.6]
+
+### Changed
+- **`libex_core`'s Audible transport now has its own independent version
+  line, starting at `0.1.0` in this release rather than sharing Libex's own
+  version numbers.** The rewrite behind it — a per-instance `LibexClient`
+  in place of the old module-level `configure_transport()` and
+  `audible_get()`, and a fix for a request-path host-injection bug in its
+  low-level URL builder — is documented in `libex_core`'s own changelog
+  rather than duplicated here, since none of it is reachable through the
+  hosted API or observable by a hosted operator. Nothing about how hosted
+  Libex starts, serves requests, or responds changes: it builds the exact
+  same single `LibexClient` at import that it built as a module-level
+  transport before, every call site is unaffected, and the request-path bug
+  was never reachable from any hosted call site either way.
+- **`PRIVACY.md` gains a section on embedding `libex_core` in another
+  application.** Everything above it in the page describes a request to a
+  server Libex runs; none of it describes a copy of `libex_core` running
+  inside someone else's application, on that person's own machine, with no
+  Libex server in the picture at all. The new section explains why that is
+  a different question — an embedded copy's traffic leaves on the user's
+  own address, together with the ASINs it looks up, where the hosted
+  instance's leaves only on its operator's — and is explicit that
+  `LibexClient` forcing the embedding application to decide, by name, how
+  its traffic egresses is not itself a privacy guarantee: that decision
+  can still be to egress directly on the user's own address, and routing
+  through a proxy instead replaces "Audible sees the user" with "the
+  proxy's operator sees the user," not with nobody seeing them. It also
+  names what stays the embedding application's to answer rather than
+  `libex_core`'s — whether it proxies and who runs the proxy, whether it
+  keeps what was looked up, whether it forwards its own logs anywhere.
+
 ## [1.22.5]
 
 ### Security

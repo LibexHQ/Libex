@@ -6,7 +6,11 @@ This is the privacy policy for the **public Libex instance** at
 4 November 2026).
 
 If you run your own copy of Libex, most of this does not apply to you — see
-[Self-hosting](#self-hosting) at the end.
+[Self-hosting](#self-hosting) at the end. And if what you're looking at is
+`libex_core` — the part of Libex that runs *inside* another application rather
+than answering it over the network — almost none of this applies, and the
+differences are the whole point: see
+[Embedding Libex in another application](#embedding-libex-in-another-application).
 
 Libex has no accounts, no logins, no API keys and no cookies. Nothing here
 describes a profile of you, because there isn't one to describe. What this
@@ -655,6 +659,175 @@ What carries over to your instance:
 If you expose your instance to other people, this document isn't yours to
 point them at — you're the one who decides what you log and who you ship it
 to, and the answers will be different from mine.
+
+---
+
+## Embedding Libex in another application
+
+Everything above this point describes a request that travels over a network to
+a Libex server — mine, or one somebody else runs. There is a second shape.
+`libex_core` is the part of Libex that carries no database, no cache, no web
+framework and no configuration of its own, so it can be embedded directly
+inside another application and fetch from Audible in that application's own
+process, with no Libex server in the picture at all.
+
+**Two different people might be reading this.** One is a developer deciding
+whether to put this library inside something they ship. The other has installed
+an application that uses it and wants to know what that means for them. If
+you're the second: the application you installed decides most of what follows,
+and its privacy policy, not this one, is the one that binds. What's below is
+the part of the answer that belongs to Libex, and the questions worth putting
+to whoever wrote the rest.
+
+**Nothing is published yet, and that wording is deliberate.** `libex_core`
+exists in this repository and is not on PyPI or any other package index, so
+there is no released version for an application to depend on. This section
+describes the library as the source stands today, ahead of a release rather
+than after one, because the alternative is a privacy page that catches up with
+the behaviour afterwards. Everything in it is in
+`libex_core/audible/client.py`.
+
+### Why this is a different question from the hosted instance
+
+The public instance is one server with one operator. Whatever it asks Audible,
+it asks from its own address, and Audible sees that address and nothing about
+the person who prompted the lookup. Traffic from everyone who calls it leaves
+through one door.
+
+An embedded copy inverts that. It runs on each user's own machine, so when it
+fetches, **that machine's own address reaches Audible**, together with the
+ASINs it looks up. A list of the titles someone looks up is their library,
+which says something about what they read, and it arrives at Audible attached
+to their home connection. Nobody asked Audible for that, and in the hosted
+shape nobody could have handed it over even by accident.
+
+That is the reason the library behaves the way it does below, and it belongs
+before the mechanics rather than after them.
+
+### It will not fetch until someone has decided how
+
+`libex_core` cannot reach Audible at all until the embedding application says,
+in so many words, how the traffic leaves. The client is constructed as
+`LibexClient(proxy_url=..., allow_direct_egress=...)`:
+
+- `proxy_url` has **no default**. Leaving it out isn't "no proxy" — it's a
+  `TypeError` from Python itself, before anything runs.
+- A blank or missing `proxy_url` on its own is refused. Going out directly, on
+  the machine's own address, requires `allow_direct_egress=True` as a separate,
+  explicit second answer.
+- Anything else is parsed as a proxy URL there and then, and a malformed one
+  fails at that point rather than quietly resolving to direct egress.
+
+So "nobody ever decided" isn't a state this library can be in. The reason for
+the second flag is narrow and worth being plain about: an empty proxy setting
+looks exactly like a forgotten one, and the two are indistinguishable at the
+wire. One operator configuring one server can fairly be taken at their word
+when they leave it blank. Ten thousand copies on ten thousand machines can't
+be, because there is no operator standing behind any of them to have meant it.
+
+**Supplying a proxy is the application's job, not the library's.**
+`libex_core` does not go looking for one, does not read a setting anywhere to
+find one, and never falls back to one. If the application doesn't hand it a
+proxy, there isn't one.
+
+**And the refusal is not privacy by itself.** It forces a decision; it does not
+make it. An application that passes `allow_direct_egress=True` egresses on its
+user's own address, and for some applications that is a perfectly reasonable
+thing to have chosen. What the refusal buys is that it can never happen by
+accident, out of a configuration value that came through empty.
+
+### The environment can't redirect it
+
+The HTTP client is built with `trust_env=False`. `HTTPS_PROXY`, `ALL_PROXY`,
+`SSL_CERT_FILE` and `SSL_CERT_DIR` in the process environment are ignored
+outright: the only proxy the traffic can go through is the one the application
+passed in, and the only trust store is the default one. That matters more on
+somebody's own computer than it ever did in a container, because those
+variables are routinely set there — by an employer's device management, by a
+local intercepting proxy, by a tool someone ran once and forgot. Without that
+flag, any of them could quietly take over where Audible traffic went.
+
+### Proxy credentials stay out of the logs
+
+A proxy URL can carry a username and password. The library parses and checks
+the URL when the client is built, and if it's malformed the error it raises
+contains none of the supplied value — because the underlying HTTP library's own
+parser puts the whole credentialed URL into *its* error text, and an exception
+shaped like that has reached a log field before. The read-only view of a
+client's transport reports only whether it is direct or proxied and, when
+proxied, the proxy's hostname. Never the URL, never what it might have embedded
+in it.
+
+### Where the requests go, and what's in them
+
+Requests go to Audible's API for the region asked for, and nowhere else. The
+path is checked before any URL is built from it, and the finished URL is
+checked again — host, scheme and port — against what it was meant to be, so a
+crafted path can't move the request to some other host.
+
+What leaves with it is a fixed set of headers: an Audible app user agent, the
+locale for the region, and a random number in the header Audible's own app puts
+one in, generated fresh for every request rather than being a stable identifier
+for the machine. The one constant that looks like a device id is a device
+*type* id — identical in every copy of Libex, so it says what the software
+claims to be and nothing about who is running it. Nothing about the user, the
+machine or the surrounding application is added to any of this.
+
+**There is no telemetry.** No analytics, no usage reporting, no version check,
+no crash reporting, no call home of any kind. Audible is the only host this
+library contacts. Axiom, which the sections above describe receiving the hosted
+instance's logs, belongs to the server application and is not part of this
+library — `libex_core` can't even import it, and a test fails if that ever
+stops being true.
+
+### It stores nothing, and it logs into your application
+
+`libex_core` writes no files, opens no database, keeps no cache of its own, and
+reads no environment variables. Nothing about a lookup survives the call that
+made it.
+
+It does write log records, and where those end up is the embedding
+application's decision rather than Libex's: they go to the ordinary Python
+logger named `libex`, so they land wherever that application's logging is
+configured to send them — including a hosted log service, if it uses one.
+There are two. One is a debug line written when closing a connection that has
+gone stale fails, carrying that failure's own traceback. The other is a warning
+when Audible throttles or degrades a request, recording the status, the region,
+the API path the application asked for, which attempt it was, and how long
+Audible asked it to wait. For a single-title lookup that path contains the
+ASIN. Query parameters — which is where a search someone typed would be — are
+not on that line.
+
+### What the application around it still has to answer
+
+The library's guarantees stop at its own edge, and the questions on the other
+side of that edge are the ones that decide how any of this actually feels to a
+user:
+
+- **Direct or proxied, and if proxied, who runs the proxy?** Routing through a
+  proxy doesn't make a lookup private — it changes who sees it. Audible stops
+  seeing the user's address and the proxy's operator starts seeing every
+  request instead. That can be a real improvement, and it is not the same thing
+  as nobody seeing it.
+- **Does the application keep what was looked up?** Libex doesn't. Whether the
+  application does is its own answer to give.
+- **Does it ship its logs anywhere?** If it does, the warning described above
+  goes with them.
+
+If you embed this library in something you give to other people, this page is
+not yours to point them at. You're the one deciding how their traffic leaves
+and what your application keeps, and the answers will be yours rather than
+mine.
+
+### One thing that doesn't exist yet
+
+There is no storage in `libex_core` today — the section above is the whole of
+it, and what it says is that nothing is kept. An optional store on the user's
+own machine, recording which titles have been seen, has been sketched out and
+**not built**: no code, no schema, no setting to turn on, nothing shipped or
+shippable. It's named here only so that its absence is on the record rather
+than assumed from silence. If it is ever built, this section changes in the
+same commit, the same way the note below says the rest of this page does.
 
 ---
 

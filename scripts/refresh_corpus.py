@@ -108,6 +108,7 @@ from libex_core.exceptions import NotFoundException
 from app.core.logging import get_logger, setup_logging
 
 # Services
+import app.services.audible as audible_service
 from app.services.audible import books as books_service
 from app.services.db import persist_queue
 
@@ -693,14 +694,22 @@ def _verify_dedicated_proxy() -> None:
     """
     Refuses to start unless the configured transport is a proxy whose
     hostname contains "refresh" -- protects the shared exit from
-    _raise_process_limits' 48-wide ceiling. Reads audible_client's own
-    transport_summary() rather than AUDIBLE_PROXY_URL directly: the value
-    configure_transport() actually validated and stored, checked against its
-    hostname only, since the real proxy value may carry embedded credentials
-    and must never reach a log line or exception message. Logged before the
-    SystemExit, since SystemExit alone never reaches the log handlers.
+    _raise_process_limits' 48-wide ceiling. Reads the hosted LibexClient's
+    own transport_summary() rather than AUDIBLE_PROXY_URL directly: the
+    value app.services.audible actually validated and built the hosted
+    client from, checked against its hostname only, since the real proxy
+    value may carry embedded credentials and must never reach a log line or
+    exception message. Logged before the SystemExit, since SystemExit alone
+    never reaches the log handlers.
+
+    Reached through the app.services.audible module object rather than a
+    name bound into this module's own namespace at import -- a test fixture
+    that swaps the hosted instance for a fresh one between tests replaces
+    the attribute on that module, and a name captured here at import time
+    would keep pointing at the instance that existed when this script was
+    first imported instead of picking up the replacement.
     """
-    summary = audible_client.transport_summary()
+    summary = audible_service._hosted_client.transport_summary()
     host = summary.host or ""
     if summary.mode != "proxy" or "refresh" not in host:
         detail = f"host {host!r}" if summary.mode == "proxy" else summary.mode
@@ -753,11 +762,28 @@ def _raise_process_limits() -> None:
     Both are sized for the API process; neither constraint applies to a
     dedicated one-off container, so they're rebound here rather than made
     environment-driven in application code for a script that gets deleted
-    after one night. The asserts are the safety: both application objects
-    are built lazily on first use, so a later caller would otherwise
-    silently get the old limits.
+    after one night. The asserts are the safety: the hosted LibexClient
+    instance and the module-level semaphore are both built lazily on first
+    use, so a later caller would otherwise silently get the old limits.
+
+    AUDIBLE_CONCURRENCY_LIMIT and _AUDIBLE_POOL_LIMITS are rebound directly
+    on libex_core.audible.client, not on the hosted LibexClient instance:
+    both stayed module-level constants through the move to LibexClient, read
+    by module scope at use time rather than captured once per instance, so
+    rebinding them here still reaches every LibexClient this process ever
+    builds, hosted one included, with no per-instance plumbing needed.
+
+    The first assert used to mean "no Audible client exists anywhere in this
+    process" -- a single module-level client made that a whole-process fact.
+    Now it means only "the one hosted instance this script knows about has
+    not opened a live client yet": is_open is a property of that one
+    instance, not a process-wide fact, so a second LibexClient built
+    elsewhere in this same process would be invisible to this check. Nothing
+    in this script builds a second one, so the guard still does its job here
+    -- but the guarantee it gives has narrowed, and a reader relying on it
+    for a broader claim would be relying on more than it now proves.
     """
-    assert audible_client._audible_client is None, "Audible client already built"
+    assert not audible_service._hosted_client.is_open, "Audible client already built"
     assert audible_client._audible_semaphore is None, "Audible semaphore already built"
     assert persist_queue._bg_write_semaphore is None, "Persist semaphore already built"
 
@@ -852,7 +878,7 @@ async def _run(cursor: str | None) -> int:
         "ramp_step": RAMP_STEP,
         "ramp_interval": RAMP_INTERVAL,
         "page_size": PAGE_SIZE,
-        "proxy": audible_client.transport_summary().mode == "proxy",
+        "proxy": audible_service._hosted_client.transport_summary().mode == "proxy",
     })
 
     inflight: set[asyncio.Task] = set()

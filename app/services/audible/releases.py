@@ -40,11 +40,11 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Core
-from libex_core.audible.client import audible_get
 from app.core.logging import get_logger
 from app.core.utils import seconds_until_utc_midnight
 
 # Services
+from app.services.audible import audible_get
 from app.services.audible.books import (
     _normalize_product,
     _filter_products,

@@ -26,12 +26,13 @@ mirroring scripts/backfill_chapters.py's own tests for the same function.
 # Standard library
 import asyncio
 import logging
+from unittest.mock import patch
 
 # Third party
 import pytest
 
 # Local
-import libex_core.audible.client as audible_client
+from tests.scripts.conftest import set_hosted_transport
 from scripts.refresh_corpus import (
     _Gate,
     _RegionSignal,
@@ -423,45 +424,113 @@ async def test_the_ramp_does_not_freeze_on_first_window_jitter():
 
 
 # ============================================================
-# _verify_dedicated_proxy -- containment: refuse to egress from the host
+# _install_audible_observer -- PROVES A CALL IS ACTUALLY RECORDED
 #
-# _verify_dedicated_proxy reads audible_client.transport_summary(), never
-# AUDIBLE_PROXY_URL directly -- the transport is configured exactly once, at
-# app.services.audible's own import time, so a test exercising this guard has
-# to call configure_transport() itself to put a particular state in place.
-# restore_audible_transport (tests/scripts/conftest.py) snapshots and
-# restores the module's transport around every test below, so none of them
-# leak their configured state into a test that runs after them.
+# Every downstream guard in this script (the ramp's latency step-down, the
+# 5xx abort, the chunk-failure abort) reads `record is not None` off the
+# per-chunk ContextVar this wrapper populates. If the wrapper stopped being
+# installed, or stopped writing into the record it's handed, the run would
+# lose its own latency and failure signal silently -- nothing here raises
+# on that, it just stops slowing down or aborting when it should. Proving
+# installation happened is not enough; this proves a call is recorded.
 # ============================================================
 
-def test_verify_dedicated_proxy_refuses_when_unconfigured(restore_audible_transport):
-    """The pristine, never-configured state -- distinct from a deliberately
-    configured direct egress -- must refuse exactly like a wrongly-named
-    proxy."""
-    audible_client._transport = audible_client._TransportSnapshot(
-        mode="unconfigured", proxy=None, host=None
-    )
-    with pytest.raises(SystemExit, match="unconfigured"):
-        _verify_dedicated_proxy()
+@pytest.mark.asyncio
+async def test_install_audible_observer_records_a_successful_call(monkeypatch):
+    async def _fake_audible_get(region, path, params=None, extra_headers=None):
+        return {"ok": True}
 
+    monkeypatch.setattr(refresh_corpus.books_service, "audible_get", _fake_audible_get)
+    refresh_corpus._install_audible_observer()
+
+    record: dict = {}
+    token = refresh_corpus._chunk_observation.set(record)
+    try:
+        result = await refresh_corpus.books_service.audible_get("us", "/1.0/catalog/products")
+    finally:
+        refresh_corpus._chunk_observation.reset(token)
+
+    assert result == {"ok": True}
+    assert record["failed"] is False
+    assert isinstance(record["elapsed"], float)
+
+
+@pytest.mark.asyncio
+async def test_install_audible_observer_records_a_failed_call(monkeypatch):
+    """The exception path is what the ramp's failure signal and the
+    chunk-failure abort both depend on -- a wrapper that only recorded the
+    success branch would leave every real fetch failure invisible to
+    _refresh_chunk's own observer read."""
+    async def _fake_audible_get(region, path, params=None, extra_headers=None):
+        raise RuntimeError("Audible unavailable")
+
+    monkeypatch.setattr(refresh_corpus.books_service, "audible_get", _fake_audible_get)
+    refresh_corpus._install_audible_observer()
+
+    record: dict = {}
+    token = refresh_corpus._chunk_observation.set(record)
+    try:
+        with pytest.raises(RuntimeError):
+            await refresh_corpus.books_service.audible_get("us", "/1.0/catalog/products")
+    finally:
+        refresh_corpus._chunk_observation.reset(token)
+
+    assert record["failed"] is True
+    assert record["error_type"] == "RuntimeError"
+    assert isinstance(record["elapsed"], float)
+
+
+@pytest.mark.asyncio
+async def test_install_audible_observer_is_a_noop_when_no_record_is_current():
+    """Outside of _refresh_chunk's own ContextVar.set() window (the default,
+    None), the wrapper must still forward the call and its result/exception
+    unchanged -- it observes, it never gates."""
+    async def _fake_audible_get(region, path, params=None, extra_headers=None):
+        return {"ok": True}
+
+    with patch.object(refresh_corpus.books_service, "audible_get", _fake_audible_get):
+        refresh_corpus._install_audible_observer()
+        assert refresh_corpus._chunk_observation.get() is None
+        result = await refresh_corpus.books_service.audible_get("us", "/1.0/catalog/products")
+
+    assert result == {"ok": True}
+
+
+# ============================================================
+# _verify_dedicated_proxy -- containment: refuse to egress from the host
+#
+# _verify_dedicated_proxy reads app.services.audible._hosted_client's own
+# transport_summary(), never AUDIBLE_PROXY_URL directly -- the hosted
+# instance is built exactly once, at app.services.audible's own import time,
+# so a test exercising this guard has to install a LibexClient of its own as
+# that name (set_hosted_transport, tests/scripts/conftest.py) to put a
+# particular transport in place. restore_audible_transport snapshots and
+# restores the original instance around every test below, by identity, so
+# none of them leak their configured state into a test that runs after
+# them. There is no "unconfigured" state to exercise separately from
+# "direct" anymore -- a LibexClient always has a concrete direct-or-proxy
+# transport the moment it is constructed, so the case below (a blank proxy,
+# allow_direct_egress=True) is the only way this guard is ever reached
+# without a proxy.
+# ============================================================
 
 def test_verify_dedicated_proxy_refuses_on_configured_direct_egress(restore_audible_transport):
-    """None (and, by configure_transport's own contract, "") both configure
-    direct egress when allow_direct_egress=True is passed alongside them --
+    """None (and, by LibexClient's own contract, "") both configure direct
+    egress when allow_direct_egress=True is passed alongside them --
     httpx.AsyncClient would get proxy=None and this script's traffic would
     egress direct from the container, the production host's own address.
-    Must refuse exactly like the unconfigured state."""
-    audible_client.configure_transport(None, allow_direct_egress=True)
+    Must refuse."""
+    set_hosted_transport(None, allow_direct_egress=True)
     with pytest.raises(SystemExit, match="direct"):
         _verify_dedicated_proxy()
 
 
 def test_verify_dedicated_proxy_refuses_when_the_configured_host_does_not_qualify(restore_audible_transport):
     """A hostname naming some OTHER exit -- the shared production proxy, or
-    backfill_chapters's own dedicated one -- must fail exactly like
-    unconfigured. This is what stops a copy-pasted backfill exit from being
+    backfill_chapters's own dedicated one -- must fail exactly like a direct
+    egress. This is what stops a copy-pasted backfill exit from being
     reused here."""
-    audible_client.configure_transport("http://libex-backfill-vpn:8888")
+    set_hosted_transport("http://libex-backfill-vpn:8888")
     with pytest.raises(SystemExit, match="libex-backfill-vpn"):
         _verify_dedicated_proxy()
 
@@ -469,7 +538,7 @@ def test_verify_dedicated_proxy_refuses_when_the_configured_host_does_not_qualif
 def test_verify_dedicated_proxy_failure_never_names_credentials(restore_audible_transport):
     """The failure message names the hostname only, proving a credentialed
     but wrongly-named value can't leak into the SystemExit text either."""
-    audible_client.configure_transport(
+    set_hosted_transport(
         "http://opsuser:s3cr3t-token@libex-backfill-vpn:8888"
     )
     with pytest.raises(SystemExit) as exc_info:
@@ -479,20 +548,18 @@ def test_verify_dedicated_proxy_failure_never_names_credentials(restore_audible_
 
 
 def test_verify_dedicated_proxy_passes_when_a_refresh_named_proxy_is_configured(restore_audible_transport):
-    audible_client.configure_transport("http://libex-refresh-vpn:8888")
+    set_hosted_transport("http://libex-refresh-vpn:8888")
     _verify_dedicated_proxy()  # must not raise
 
 
-def test_verify_dedicated_proxy_logs_error_before_raising_when_unconfigured(
+def test_verify_dedicated_proxy_logs_error_before_raising_on_direct_egress(
     restore_audible_transport, caplog,
 ):
     """SystemExit alone never reaches the libex logger -- it propagates
     straight out of the process, so unattended it would survive only as
     stderr text. The refusal must also land as a structured ERROR record
     (rotating file handler, Axiom) before the raise, not instead of it."""
-    audible_client._transport = audible_client._TransportSnapshot(
-        mode="unconfigured", proxy=None, host=None
-    )
+    set_hosted_transport(None, allow_direct_egress=True)
     with caplog.at_level(logging.ERROR, logger="libex"):
         with pytest.raises(SystemExit):
             _verify_dedicated_proxy()
@@ -509,9 +576,9 @@ def test_verify_dedicated_proxy_logs_error_with_hostname_when_wrongly_named(
     restore_audible_transport, caplog,
 ):
     """A wrongly-named but set value logs proxy_configured=True and the
-    actual (safe) hostname it resolved to -- distinct from the unconfigured
+    actual (safe) hostname it resolved to -- distinct from the direct-egress
     case, and still never the raw, possibly-credentialed value."""
-    audible_client.configure_transport(
+    set_hosted_transport(
         "http://opsuser:s3cr3t-token@libex-backfill-vpn:8888"
     )
     with caplog.at_level(logging.ERROR, logger="libex"):
@@ -536,7 +603,7 @@ def test_verify_dedicated_proxy_logs_nothing_at_error_when_correctly_named(
     """The success path must not also emit the refusal record -- proves the
     logger.error call is gated on the same condition as the raise, not
     unconditional."""
-    audible_client.configure_transport("http://libex-refresh-vpn:8888")
+    set_hosted_transport("http://libex-refresh-vpn:8888")
     with caplog.at_level(logging.ERROR, logger="libex"):
         _verify_dedicated_proxy()
     assert [r for r in caplog.records if r.levelno == logging.ERROR] == []

@@ -447,10 +447,11 @@ def test_verify_dedicated_proxy_refuses_when_unconfigured(restore_audible_transp
 
 def test_verify_dedicated_proxy_refuses_on_configured_direct_egress(restore_audible_transport):
     """None (and, by configure_transport's own contract, "") both configure
-    direct egress -- httpx.AsyncClient would get proxy=None and this
-    script's traffic would egress direct from the container, the production
-    host's own address. Must refuse exactly like the unconfigured state."""
-    audible_client.configure_transport(None)
+    direct egress when allow_direct_egress=True is passed alongside them --
+    httpx.AsyncClient would get proxy=None and this script's traffic would
+    egress direct from the container, the production host's own address.
+    Must refuse exactly like the unconfigured state."""
+    audible_client.configure_transport(None, allow_direct_egress=True)
     with pytest.raises(SystemExit, match="direct"):
         _verify_dedicated_proxy()
 

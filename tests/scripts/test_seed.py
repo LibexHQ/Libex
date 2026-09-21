@@ -104,9 +104,10 @@ def test_verify_dedicated_proxy_refuses_on_configured_direct_egress(
     restore_audible_transport,
 ):
     """None (and, by configure_transport's own contract, "") both configure
-    direct egress -- this must refuse exactly like the unconfigured state,
-    not be mistaken for a proxy."""
-    audible_client.configure_transport(None)
+    direct egress when allow_direct_egress=True is passed alongside them --
+    this must refuse exactly like the unconfigured state, not be mistaken
+    for a proxy."""
+    audible_client.configure_transport(None, allow_direct_egress=True)
     with pytest.raises(SystemExit, match="direct"):
         _verify_dedicated_proxy()
 
@@ -420,7 +421,7 @@ async def test_run_still_drains_and_disposes_when_a_worker_raises(restore_audibl
 async def test_run_dies_before_starting_any_worker_when_proxy_unset(restore_audible_transport):
     """The proxy check is the first thing _run does -- neither worker may
     ever be started against an unverified exit."""
-    audible_client.configure_transport(None)
+    audible_client.configure_transport(None, allow_direct_egress=True)
     seeder = AsyncMock(return_value=None)
     releases = AsyncMock(return_value=None)
 

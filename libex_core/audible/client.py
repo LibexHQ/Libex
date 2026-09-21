@@ -13,7 +13,13 @@ This module reads no environment and constructs no application settings --
 how it egresses (direct, or through a proxy) is set once, at process start,
 by whoever embeds it, through configure_transport() below. See that
 function's own docstring for what it accepts and what calling it again
-means for a request already in flight.
+means for a request already in flight. Until configure_transport() has been
+called at least once, no request is sent at all -- see _get_audible_client's
+own docstring for why an embedder that never configures a transport is
+refused rather than defaulted to direct egress. Direct egress itself is
+refused too, unless the embedder asks for it by name -- an empty or missing
+proxy URL alone is never enough, because that is exactly the shape of an
+embedder who meant to configure a proxy and simply left the setting unset.
 """
 
 # Standard library
@@ -383,25 +389,44 @@ _transport = _TransportSnapshot(mode="unconfigured", proxy=None, host=None)
 _transport_generation = 0
 
 
-def configure_transport(proxy_url: str | None) -> None:
+def configure_transport(proxy_url: str | None, *, allow_direct_egress: bool = False) -> None:
     """
     Sets how every subsequent audible_get call egresses: directly, or through
     an HTTP(S) proxy. A setup-time call, meant to run exactly once before any
     request-handling code runs -- see the hosted application's own audible
     package init for the one place it makes this call.
 
-    None or "" configure direct egress. Any other value is parsed eagerly as
-    a proxy URL and must name an http or https scheme, a host, and a port
-    (explicit, or the scheme's own default); anything else raises ValueError
-    with a fixed message that never contains any part of the supplied value.
-    That's deliberate, not merely tidy: a scheme-less value such as
+    None or "" configure direct egress, but only alongside
+    allow_direct_egress=True -- passed without it, a blank proxy_url raises
+    ValueError instead of silently egressing unproxied. The two are refused
+    together on purpose: this module cannot tell "I want every request from
+    this process to leave on its own IP" from "my proxy setting happened to
+    come through empty", and the second is indistinguishable, at the wire,
+    from the first unless something forces the caller to say which one they
+    meant. An embedder calling configure_transport(None) bare, by forgetting
+    to configure a proxy rather than by deciding against one, is exactly the
+    caller this guards -- hosted Libex has one operator-controlled egress IP
+    and can make that decision deliberately (see
+    app.services.audible's own package init for how it turns a documented
+    blank AUDIBLE_PROXY_URL into this opt-in); an embedder distributed to run
+    on many separate machines cannot make it silently, because every one of
+    those machines egresses on its own IP together with whatever ASINs it
+    looks up -- a caller's reading history, from their own address, with
+    nothing here to stop it.
+
+    Any other value for proxy_url is parsed eagerly as a proxy URL and must
+    name an http or https scheme, a host, and a port (explicit, or the
+    scheme's own default); anything else raises ValueError with a fixed
+    message that never contains any part of the supplied value. That's
+    deliberate, not merely tidy: a scheme-less value such as
     "user:pass@host:port" makes httpx's own proxy parser raise a ValueError
     whose message embeds the credentials, and that exception has reached a
     log field before -- eagerly validating here, and re-raising a message
     with none of the original text via `from None`, is what stops it
     happening again. Raising also means a malformed value crashes at import,
     at the hosted application's own call site, rather than silently
-    resolving to direct egress.
+    resolving to direct egress. allow_direct_egress is ignored whenever
+    proxy_url is non-empty -- it only ever governs the blank-proxy case.
 
     Calling this again replaces the configured transport outright; it never
     merges with whatever was configured before. A request already in flight
@@ -424,6 +449,15 @@ def configure_transport(proxy_url: str | None) -> None:
     global _transport, _transport_generation
 
     if not proxy_url:
+        if not allow_direct_egress:
+            raise ValueError(
+                "a blank or missing proxy URL no longer configures direct "
+                "egress by itself -- pass allow_direct_egress=True to "
+                "configure_transport() if egressing to Audible without a "
+                "proxy is really what's intended, so a proxy setting that "
+                "came through empty by mistake fails loudly instead of "
+                "sending every request out on this process's own IP"
+            )
         snapshot = _TransportSnapshot(mode="direct", proxy=None, host=None)
     else:
         try:
@@ -539,7 +573,35 @@ async def _close_stale_client(client: httpx.AsyncClient) -> None:
 
 
 def _get_audible_client() -> httpx.AsyncClient:
+    """Builds or reuses the shared client for the currently configured
+    transport -- see the module comment above for the loop/generation
+    rebuild rules.
+
+    Refuses outright, with RuntimeError, while the transport is still at
+    its "unconfigured" default -- nobody has ever called
+    configure_transport() in this process. That default builds an
+    httpx.AsyncClient with proxy=None, which is indistinguishable, at the
+    wire, from a deliberate configure_transport(None, allow_direct_egress=True)
+    direct-egress choice; without this check the two would behave
+    identically and this process's Audible traffic would leave over
+    whatever IP the host happens to have, with nothing anywhere recording
+    that the choice was never actually made. This is the sole place every
+    fetch attempt gets its client (audible_get calls this once per attempt,
+    including retries, and nothing else in this codebase builds one), so a
+    guard here holds for every caller rather than only the usual one.
+    configure_transport(None, allow_direct_egress=True) itself is
+    unaffected -- that sets mode="direct", a distinct, deliberate state this
+    check never touches. A bare configure_transport(None) never reaches this
+    state at all -- configure_transport itself already refused it.
+    """
     global _audible_client, _audible_client_loop, _audible_client_generation
+    if _transport.mode == "unconfigured":
+        raise RuntimeError(
+            "Audible transport has not been configured in this process -- "
+            "call configure_transport() (with a proxy URL, or with "
+            "allow_direct_egress=True to opt into direct egress) before "
+            "making any Audible request."
+        )
     loop = asyncio.get_running_loop()
     if (
         _audible_client is None
@@ -669,6 +731,10 @@ async def audible_get(
     Makes a GET request to the Audible API.
     Returns parsed JSON response.
     Raises AudibleAPIException on non-200 responses.
+    Raises RuntimeError, before any request is sent, if this process has
+    never called configure_transport() -- see _get_audible_client's own
+    docstring for why that state is refused rather than treated as direct
+    egress.
 
     extra_headers overlays get_region_headers for this call only and must
     contain module-level constants only — never a request-derived value.

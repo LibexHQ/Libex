@@ -603,6 +603,80 @@ def validate_region(region: str) -> str:
     return region
 
 
+# Checked by get_audible_url as its second guard, kept as its own function
+# rather than inlined so everything it tests for -- a literal dot segment,
+# its percent-encoded spelling or an encoded separator inside a segment,
+# and the two characters that end the path component -- reads as one
+# property with one comment, not several similar-looking conditions a
+# future edit could drift apart.
+#
+# "?" and "#" are refused outright, before any segment is examined, because
+# neither one is a path character: each TERMINATES the path component. A
+# dot segment sitting immediately in front of either is therefore invisible
+# to a split on "/", while still being a trailing dot segment in the bytes
+# that leave this process, and httpx collapses it exactly as it collapses
+# the between-slashes form. "/1.0/catalog/products/..?x" is transmitted
+# with a raw path of "/1.0/catalog?x", a directory above the prefix this
+# function was asked to build; "/1.0/catalog/products/.#" is transmitted as
+# "/1.0/catalog/products", the fragment never reaching a server at all. The
+# post-build host, scheme and port assertion cannot see any of it, for the
+# same reason it cannot see an ordinary dot segment: none of those three
+# things move.
+#
+# Refusing the two characters, rather than hunting for dot segments in
+# front of them, is what makes this the whole class rather than whichever
+# spellings someone thought to enumerate -- and it costs nothing real. A
+# query string reaches Audible through LibexClient.get's own params
+# argument, which httpx appends to the URL get_audible_url returns, so a
+# query string has no business in the path string to begin with; no path
+# template in this codebase contains either character; and a fragment is
+# meaningless in a server-bound request. Re-permitting "?" here so a caller
+# can inline a query string brings the collapse back with it.
+#
+# A caller-supplied path reaches this module already interpolated into a
+# fixed template, so nothing here is decoding untrusted input in order to
+# route on the result; the check runs purely on the literal characters of
+# path itself and rejects a shape, never a decoded value. Comparing
+# lower-cased segment text against fixed encoded and unencoded spellings of
+# "." and ".." is what keeps this a plain string comparison rather than a
+# decoder: it does not chase every encoding of a dot segment -- nested or
+# double encoding, non-ASCII normalization, or any %2e/%2f/%5c spelling
+# beyond the single-byte one -- because there is no evidence any real
+# traversal needs them and matching every possible spelling of "." is an
+# arms race with no end. What it does chase is deliberately wider than what
+# this module's own transport can be shown to act on: httpx never decodes
+# an encoded separator into a real "/" before a request leaves this
+# process, so a segment like "..%2F..%2Finternal" reaches Audible as one
+# literal, inert-to-httpx path segment rather than the multi-segment
+# traversal it spells out -- but what happens to that segment once it
+# reaches Audible's own edge or origin is infrastructure this module cannot
+# see, cannot test, and does not control, and a server that decodes before
+# routing would land on exactly the endpoint the unencoded form would have
+# reached. Both encoded separators are refused on that one footing: %2f for
+# "/", and %5c for the backslash, which get_audible_url's first check
+# already rejects in its literal form precisely because some parsers read
+# it as a separator. Which byte an encoded separator happens to be spelled
+# with is not a difference worth resting safety on. No call site anywhere
+# in this codebase ever produces a percent-encoded path segment -- every
+# one interpolates a bare ASIN or ISBN-keyed id -- so rejecting one costs
+# no legitimate request, while accepting one would rest safety on an
+# assumption about a third party's decoding behaviour this module has no
+# way to verify. When the safe reading costs nothing real, it is the one to
+# take.
+def _has_unsafe_path_segment(path: str) -> bool:
+    if "?" in path or "#" in path:
+        return True
+    for segment in path.split("/"):
+        lowered = segment.lower()
+        if lowered in (".", ".."):
+            return True
+        if "%2f" in lowered or "%5c" in lowered:
+            return True
+        if lowered.replace("%2e", ".") in (".", ".."):
+            return True
+    return False
+
+
 def get_audible_url(region: str, path: str) -> str:
     """
     Builds a full Audible API URL for the given region and path.
@@ -623,13 +697,42 @@ def get_audible_url(region: str, path: str) -> str:
     never receives, and so can never leak into that message, any params or
     headers a caller also passed alongside it.
 
-    The second check, after the URL is built, is deliberately redundant
-    with the first: it parses the finished URL and asserts the host, scheme
+    A "." or ".." path segment is rejected the same way, wherever it falls
+    in path, not only at the front, and so is its percent-encoded spelling
+    or a segment carrying an encoded separator -- see
+    _has_unsafe_path_segment's own comment for why the encoded forms are
+    rejected on top of the literal one. The literal case is the one httpx
+    itself acts on: it applies RFC 3986 dot-segment removal when it parses
+    the URL this function builds, so a segment like
+    "../../../internal/thing" placed after a fixed prefix collapses onto an
+    endpoint this function never intended to address, while leaving host,
+    scheme and port -- the only things the third check below verifies --
+    completely untouched. Every real caller interpolates a variable ASIN or
+    ISBN-keyed id as exactly one path segment, never a "." or ".." spelling
+    in any of these forms, so this rejects nothing a well-formed call was
+    ever going to send.
+
+    A path containing "?" or "#" is rejected outright, whether or not a dot
+    segment is visible anywhere in it. Both characters end the path
+    component rather than belonging to it, so whatever stands in front of
+    one is the path's final segment -- and when that final segment is "."
+    or "..", httpx collapses it in the bytes actually transmitted while a
+    split on "/" never sees a segment there at all. Refusing the two
+    characters removes that entire shape instead of the particular
+    spellings of it, and loses nothing legitimate: query parameters belong
+    in get's own params argument, which httpx appends to the URL this
+    function returns, and a fragment is never sent to a server in the first
+    place.
+
+    The third check, after the URL is built, is deliberately redundant with
+    the first two: it parses the finished URL and asserts the host, scheme
     and port are exactly what this function meant to build, so a bypass of
-    the first check -- found later, or introduced by some future edit to it
-    -- still cannot reach a host or port this function did not intend.
+    either check above -- found later, or introduced by some future edit to
+    them -- still cannot reach a host or port this function did not intend.
     """
     if not path.startswith("/") or path.startswith("//") or "\\" in path:
+        raise ValueError(f"invalid Audible API path: {path!r}")
+    if _has_unsafe_path_segment(path):
         raise ValueError(f"invalid Audible API path: {path!r}")
     tld = REGION_MAP.get(region, ".com")
     url = f"https://api.audible{tld}{path}"

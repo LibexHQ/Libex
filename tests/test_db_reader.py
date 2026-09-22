@@ -110,6 +110,16 @@ def _make_book(asin="B08G9PRS1K", title="Test Book", region="us"):
     b.sku_group = None
     b.is_listenable = True
     b.is_buyable = True
+    b.is_vvab = False
+    b.plans = ["US Minerva"]
+    b.num_ratings = 1234
+    b.num_reviews = 56
+    b.publication_name = "A Publication"
+    b.publication_datetime = datetime(2021, 1, 1, tzinfo=timezone.utc)
+    b.extended_product_description = "An extended description."
+    b.product_state = "AVAILABLE"
+    b.audible_extras = {}
+    b.extras_withheld = None
     b.updated_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
     b.authors = [_make_author()]
     b.narrators = [_make_narrator()]

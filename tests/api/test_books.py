@@ -24,6 +24,7 @@ from app.core.response_headers import (
     record_source,
     record_source_keys,
 )
+from tests.fixtures.audible_product import AUDIBLE_PRODUCT
 
 
 @pytest.fixture
@@ -489,6 +490,90 @@ async def test_cache_hit_serves_the_identical_response_body_a_live_fetch_would(a
     mock_audible_get.assert_not_called()
     assert cached_response.status_code == 200
     assert cached_response.json() == live_body
+
+
+# The fields a cache entry written by an earlier response shape does not
+# carry. Every one is declared on BookResponse with a default, so a serving
+# route has something to fall back on -- which is what the test below pins,
+# because nothing else in the suite makes that fallback observable.
+_KEYS_AN_OLDER_ENTRY_LACKS = [
+    "numRatings", "numReviews", "publicationName", "publicationDatetime",
+    "extendedProductDescription", "productState", "audibleExtras",
+    "extrasWithheld",
+]
+
+
+@pytest.mark.asyncio
+async def test_a_cache_entry_missing_newer_fields_is_still_served(async_client):
+    """A stored entry whose key set is narrower than the response model's is
+    served, with the fields it lacks defaulted rather than failing the
+    request.
+
+    The parity test above cannot see this, and the reason is structural
+    rather than an oversight in it: it seeds the cache by calling the
+    current normalizer, so both sides of its comparison are the same
+    version by construction and it can only ever prove a shape agrees with
+    itself. What is never exercised there is a stored entry written by a
+    different version -- which is the ordinary state of the cache for as
+    long as settings.cache_ttl (86400 seconds) after any deploy that
+    changes the shape, on the default request path, because book_key
+    identifies the ASIN and the region and carries nothing that says which
+    shape wrote the value.
+
+    So the window is real and is accepted: the alternative is a key that
+    invalidates the whole cache on every deploy. What the acceptance costs
+    is a serving route that has to tolerate a narrower entry, and this is
+    where that tolerance is stated. The fields come back null for those 24
+    hours -- not absent, and not an error -- and the rest of the response
+    is unchanged.
+    """
+    from app.services.audible.books import get_books_by_asins
+
+    asin = "B0STALE001"
+    product = {**AUDIBLE_PRODUCT, "asin": asin}
+
+    with patch("app.services.audible.books.audible_get",
+               return_value={"product": product}), \
+         patch("app.services.audible.books.persist_books_background"), \
+         patch("app.services.audible.books.cache.get", return_value=None):
+        live_response = await async_client.get(f"/book/{asin}")
+        normalized = (await get_books_by_asins([asin], "us", AsyncMock()))[0]
+    assert live_response.status_code == 200
+    live_body = live_response.json()
+
+    # Nothing is proved by defaulting a field the current shape leaves null
+    # too, so the product is one that answers them. extrasWithheld is the
+    # exception by design: it is emitted only when something was actually
+    # withheld, and this product came through whole.
+    answered = {key for key in _KEYS_AN_OLDER_ENTRY_LACKS if live_body[key] is not None}
+    assert answered == set(_KEYS_AN_OLDER_ENTRY_LACKS) - {"extrasWithheld"}, (
+        f"The live response answers only {sorted(answered)}, so serving an "
+        "entry without those fields would be compared against nulls either way."
+    )
+
+    older_entry = {
+        key: value for key, value in normalized.items()
+        if key not in _KEYS_AN_OLDER_ENTRY_LACKS
+    }
+
+    with patch("app.services.audible.books.audible_get", new_callable=AsyncMock) as mock_audible_get, \
+         patch("app.services.audible.books.cache.get", new=AsyncMock(return_value=older_entry)):
+        cached_response = await async_client.get(f"/book/{asin}?cache=true")
+
+    mock_audible_get.assert_not_called()
+    assert cached_response.status_code == 200
+    cached_body = cached_response.json()
+
+    defaulted = {key: cached_body.get(key, "absent") for key in _KEYS_AN_OLDER_ENTRY_LACKS}
+    assert defaulted == dict.fromkeys(_KEYS_AN_OLDER_ENTRY_LACKS), (
+        f"The fields the stored entry lacked came back as {defaulted}, not null."
+    )
+
+    unchanged = {k: v for k, v in cached_body.items() if k not in _KEYS_AN_OLDER_ENTRY_LACKS}
+    assert unchanged == {
+        k: v for k, v in live_body.items() if k not in _KEYS_AN_OLDER_ENTRY_LACKS
+    }
+
 
 # ============================================================
 # CACHE DEFAULT FLIP -- omitting cache now reads the cache

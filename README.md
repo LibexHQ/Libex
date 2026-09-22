@@ -276,6 +276,8 @@ what a task actually did.
 
 **Audible plans:** Book responses include `plans` (list of Audible plan names such as `"US Minerva"` or `"AccessViaMusic"`), letting clients determine subscription availability programmatically.
 
+**Everything else Audible sends:** Book responses include `audibleExtras`, every top-level field from Audible's response that no other field on the book already covers — so a field Audible adds later shows up here instead of being dropped. It's `null` when nothing has been captured for that book yet, `{}` when Audible had nothing extra to add, and a populated object otherwise; treat its contents as untrusted upstream data. The accumulation lives in the local database rather than in each response — the stored record unions the keys from every fetch it has seen, so a key Audible stops sending is still kept there and the `/db/*` endpoints are where you read it deliberately, while a book served from a live Audible fetch or from cache carries just that one fetch's blob. `extrasWithheld` is `null` unless something was left out (for example a podcast's per-episode entries, or a blob too large to keep), in which case it records what and why.
+
 **Narrator profiles:** Narrator responses from `/db/narrator` include enrichment data sourced from [NarratorList.com](https://narratorlist.com) and [AussieNarrator.com](https://aussienarrator.com) where available. When profile data is present, the response includes `source`, `sourceUrl` (link to the narrator's full profile), `sourceUpdatedAt`, and an `attribution` string (e.g. `"Profile data provided by NarratorList.com, retrieved May 2026"`). Consumers displaying narrator data should include this attribution where practical.
 
 ---

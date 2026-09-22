@@ -10,6 +10,133 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.23.0]
+
+### Added
+- **Books now carry the rest of what Audible sends, not just the quarter of
+  it Libex had fields for.** Eight keys are added to every book object;
+  nothing existing moved, changed shape or went away. `numRatings` and
+  `numReviews` are the two most callers will want — Libex has always
+  returned an average rating with no way to tell 4.8 out of three ratings
+  from 4.8 out of two hundred thousand. `publicationName` and
+  `publicationDatetime` place a periodical or podcast episode in its
+  publication, the second as the full instant Audible sends rather than the
+  bare calendar date `releaseDate` carries. `extendedProductDescription` is
+  Audible's long-form description with its markup left intact, where
+  `description` and `summary` are flattened to plain text; it is upstream
+  HTML that Libex neither validates nor rewrites, so encode it on output.
+  `productState` is Audible's own state string for the product, passed
+  through as sent — match it as an opaque string, because the vocabulary is
+  Audible's and can grow without notice.
+
+- **`audibleExtras` carries every remaining top-level key of Audible's
+  response for a product, verbatim.** It is a catch-all rather than a list
+  of named fields on purpose: a key Audible invents next month arrives in it
+  on its own, instead of disappearing between the fetch and the response
+  with nothing recording it was ever there. Nothing inside it is ever lifted
+  to the top level of the book object, so an upstream key called `asin`
+  cannot collide with the field of that name — it stays nested and is read
+  there. It is unvalidated upstream data: values include URLs and markup,
+  Libex neither checks nor rewrites them, and a URL found in it has not been
+  vetted by anyone. It is tri-state: `{}` means Audible sent nothing beyond
+  the named fields, an object is content, and `null` means no extras were
+  available on whichever path answered the request — which is not one
+  circumstance but several, and leads directly to the next point. Books
+  stored before this release read `null` until a request for them reaches
+  Audible, and the seeder does not revisit titles that have already
+  released, so the corpus fills in over a refresh pass rather than on
+  upgrade.
+
+- **What `audibleExtras` holds depends on how the response was served, and
+  there are three answers rather than one.** This is the part to read before
+  building anything on the field, because every path serves a differently
+  sourced value under the same name. A request that actually reaches Audible
+  serves that one fetch's blob, merged with nothing. A cache hit serves a
+  past fetch's blob in whatever shape it had when it was stored — cached
+  book entries are keyed by book and region alone, carry nothing describing
+  the blob inside them, and live 24 hours by default. Only a response read
+  out of Libex's own stored copy of a book serves the accumulated union of
+  every fetch that has written it, and the `/db/*` routes are where a caller
+  can ask for that deliberately. Two consequences are worth stating plainly.
+  In ordinary operation the first two paths are what answer, so the value in
+  hand is usually one fetch's, not the accumulation. And a caller who wants
+  the accumulated value should query the `/db/*` route for it rather than
+  try to force a fresh fetch: forcing one returns that single fetch's blob,
+  which can hold less than the stored copy already does — or nothing at all,
+  where that fetch's extras were dropped whole — and it replaces the cached
+  entry with that thinner value for every other caller until it expires.
+
+- **In Libex's stored copy the blob accumulates, in two ways that are easy
+  to be wrong about.** A key Audible stops sending is kept, carried forward
+  from the last response that had it, so the stored value is not a picture
+  of the latest fetch — but that accumulation is one level deep: whatever
+  sits nested under a key is replaced wholesale by the most recent response
+  carrying that key, so an array inside the blob is one response's version
+  of it rather than a growing set. And it accumulates across marketplaces as
+  well as across time, because a book is stored under its ASIN alone and the
+  same ASIN can be sold in several of them — a key only the German or
+  Japanese marketplace sends can therefore turn up on a US response for a
+  shared ASIN. None of this applies to a blob served straight off a fetch or
+  out of the cache, which is one marketplace's single response either way.
+
+- **`extrasWithheld` records anything deliberately left out of
+  `audibleExtras`, so an omission is stated rather than inferred from an
+  absence.** A podcast's per-episode and per-season relationship entries are
+  stripped, with a count kept per type — one sampled show carried 4,412
+  episode entries and one season entry, 440 KB of a 448 KB product. A blob
+  over 64 KB, or nested deeper than 32 levels, is dropped whole rather than
+  pruned, because a partly pruned blob looks complete and is not; one that
+  will not encode at all goes the same way. Null characters, non-finite
+  floats and numbers too wide to render are removed and counted, since
+  Postgres rejects all three and a single one would otherwise fail that
+  book's write on every attempt, permanently. The key is always present on
+  a book object rather than appearing only when there is something to say:
+  it reads `null` whenever the path that answered has no withholding to
+  report, which is also what an untouched book reads, so nothing can be
+  inferred from the key being there — only from its value. It is not tri-state the way
+  `audibleExtras` is, and a `null` draws no distinction between a blob that
+  came through complete and a book nothing has been captured for at all.
+  It travels the same three paths `audibleExtras` does, and describes
+  whatever that path served: on a live fetch it records that fetch, on a
+  cache hit the fetch that was stored, and only in Libex's own stored copy
+  is it accumulated — kept per kind of withholding, each kind holding what
+  the most recent fetch that hit it left behind, with a fetch that withholds
+  nothing leaving the record standing rather than clearing it. Read the
+  accumulated form as evidence that something was dropped at some point, not
+  as an inventory of what is missing from the blob as it stands: a key
+  withheld once and supplied by a later fetch is in the blob and still named
+  here. The two fields are sourced together on every path, so the record and
+  the blob it describes always cover the same span.
+
+### Changed
+- **Responses are larger, and how much larger depends on which path
+  answered.** `audibleExtras` is where nearly all of the growth is, and on a
+  product carrying a lot beyond what Libex already modelled it can outweigh
+  the rest of the book object. The 64 KB limit is applied to a single
+  fetch's blob before that blob is stored, so it does bound what arrives on
+  the two paths that serve one fetch — a request that reaches Audible, and a
+  cache hit, which is a stored copy of one such fetch. It does not bound a
+  response read out of Libex's own copy of the book, where the blob is the
+  accumulated union of every fetch that has written it and can be larger
+  than any one of them was. No measurement of a whole serialized response
+  before and after this change exists, so no growth figure or multiple is
+  quoted here — a caller working to a size or parse budget on a bulk request
+  should expect a materially larger response and measure it against its own
+  traffic.
+
+- **The upgrade adds eight nullable columns to `books` and does not rewrite
+  the table.** Measured on a 1.8M-row copy at a few milliseconds of schema
+  change with no row data touched, so however large the table has grown, the
+  migration itself is not an outage. Existing rows read `null` for the new
+  fields until a refresh fills them.
+
+### Fixed
+- **A product Audible returns with a null ASIN no longer takes the whole
+  response down with it.** The ASIN now reads as an empty string. It
+  previously became the literal text `None` — a product link ending
+  `/pd/None`, on a book object that then failed validation on the way out,
+  costing the entire request rather than the one book.
+
 ## [1.22.7]
 
 ### Security

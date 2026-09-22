@@ -70,6 +70,65 @@ def _parse_release_date_for_db(iso_str: str | None) -> datetime | None:
         return None
 
 
+def _parse_publication_datetime(raw, asin: str | None) -> datetime | None:
+    """
+    Converts Audible's publication_datetime to a datetime for DB storage.
+
+    Not _parse_release_date_for_db, and the difference is the last character.
+    That function reverses _parse_release_date, which reads a bare "%Y-%m-%d"
+    and re-emits isoformat() with a numeric offset; publication_datetime
+    arrives from Audible as a full instant ending in a literal Z, which is how
+    the unreleased sentinel is written too ("2200-01-01T00:00:00Z"). Python's
+    fromisoformat only learned to accept that Z in 3.11, and this module's
+    except returns None, so reusing the release-date parser would leave the
+    correctness of a whole column resting on the interpreter version: the
+    Dockerfile pins python:3.12-slim and it would work, right up until the pin
+    moved back, at which point every book would write NULL here and nothing
+    would say so. The Z is rewritten to an explicit offset before parsing so
+    that no version of Python is being relied on to recognise it.
+
+    A value that still will not parse is logged rather than quietly nulled,
+    for the same reason: this column is written on every book in the corpus,
+    so a systematic failure has to be visible from the outside. That is
+    affordable only because the version dependence above is gone -- what is
+    left to fail is a genuinely malformed value, which is rare. It logs and
+    returns None rather than raising: a chunk of fifty books shares one
+    execution, and raising here would cost the other forty-nine their write
+    over one bad date.
+
+    The value itself never reaches the log. type is enough to tell a
+    non-string apart from a malformed string, which is the whole diagnosis.
+
+    A parsed value with no offset at all is given UTC explicitly rather than
+    handed naive to a timestamptz column, where Postgres would read it in
+    whatever the session's TimeZone happens to be.
+    """
+    if not raw:
+        return None
+    if not isinstance(raw, str):
+        logger.warning(
+            "Unreadable publication datetime",
+            extra={"asin": asin, "value_type": type(raw).__name__},
+        )
+        return None
+
+    candidate = raw.strip()
+    if candidate.endswith(("Z", "z")):
+        candidate = candidate[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError:
+        logger.warning(
+            "Unreadable publication datetime",
+            extra={"asin": asin, "value_type": type(raw).__name__},
+        )
+        return None
+
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 # Every character Unicode gives the White_Space property, for btrim's second
 # argument. btrim(x) with no second argument trims U+0020 and nothing else --
 # not a tab, not a newline, not the U+00A0 a copied web page leaves behind, not
@@ -139,8 +198,10 @@ def _answered(new_value, existing_col):
     Not a rule for every column, and deliberately not applied as one. It fits
     only where a blank cannot be an assertion; where Audible could mean "none"
     by sending nothing, swallowing the blank would pin a stale value in place
-    forever. Which columns qualify, and which one pointedly does not, is set
-    out at the merge itself.
+    forever. Which columns qualify is set out at the merge itself, together
+    with the argument for plans — the one column there that pointedly does
+    not, because an empty plans array is Audible asserting a book has left
+    the Plus catalogue rather than declining to answer.
     """
     return case(
         (func.btrim(new_value, _BLANK_CHARS) != "", new_value),
@@ -260,6 +321,84 @@ def _chaptered_wins(new_value, existing_col):
         (_chapter_count(new_value) > 0, new_value),
         (_chapter_count(existing_col) > 0, existing_col),
         else_=new_value,
+    )
+
+
+def _extras_union(new_value, existing_col):
+    """
+    Merges two extras blobs key by key, so a thin response adds to a rich
+    stored blob and can never replace it.
+
+    None of the four merges already in this file is right for this column,
+    and which one it is not is the argument for what it is.
+
+    Not _answered, which is settled by type rather than by argument: it
+    measures emptiness with btrim, and btrim(jsonb, unknown) does not resolve
+    at all -- postgresql has no implicit cast from jsonb to text. It is the
+    merge for the text columns this same statement uses it on, and it cannot
+    reach this one.
+
+    Not _coalesce. The blob is not all-or-nothing from Audible's side: the
+    same ASIN returns 49 top-level keys while it is purchasable and 32 once
+    it reads NOT_AVAILABLE_FOR_PURCHASE, losing product_images, plans,
+    publisher_summary, isbn and runtime_length_min among them. Taking the
+    incoming blob whole would be the shrinkage rule failing inside the merge
+    written to enforce it.
+
+    Not _longer_wins. Byte length is not a measure of information here -- one
+    long editorial review outweighs ten dropped keys on the scale that
+    function measures, and the ten keys are the data.
+
+    Not _chaptered_wins, and this is the instructive one. That merge refuses
+    to combine its two payloads because chapters are an ordered whole rather
+    than a set of independently sourced fields. This blob is the exact
+    opposite: different response groups populate different top-level keys, so
+    the keys genuinely are independently sourced and combining them is the
+    only merge that keeps what each response actually contributed.
+
+    Both NULL arms are load-bearing. The obvious shorthand --
+    coalesce(stored, '{}') || coalesce(incoming, '{}') -- turns a column that
+    has never been written into an empty object, and that is not cosmetic:
+    NULL here means "no response has written this row yet", which is what an
+    operator reads to see how much of the corpus has been rewritten since the
+    column landed. Nothing selects on it automatically, and the migration
+    turns down an index for it on exactly that ground. A NULL incoming blob
+    means the extras were dropped whole at normalization (size cap, depth
+    cap, unserializable) rather than that Audible sent nothing, so it must
+    leave the stored value exactly as it found it.
+
+    The containment arm is a write guard, not a tidiness one, and it is worth
+    26x. Measured per row: an unguarded || wrote 9,463 bytes of WAL, and the
+    same merge short-circuited to the stored datum wrote 368. Postgres does
+    not update a toasted value in place, so returning the stored datum
+    unchanged reuses its toast pointer and writes nothing out of line, while
+    returning a rebuilt object rewrites every chunk of it. It does nothing for
+    the one-off backfill, where every row is NULL and takes the second arm --
+    it is every seeder walk after that which it protects, at roughly 0.66GB
+    per full pass instead of 17GB.
+
+    Two limits of || that a reader should not have to discover. It is shallow:
+    if a key's value is an object and the incoming one has fewer sub-keys, the
+    whole sub-object is replaced and the shrinkage rule is defeated one level
+    down. Postgres has no deep jsonb merge built in, and writing one is
+    complexity this has not earned -- but it is a real hole rather than an
+    accepted invariant. And the result is a union over time, not a snapshot: a
+    key Audible genuinely stops sending is never removed from the blob. That
+    is the same posture as the additive pivot inserts, and a consumer reading
+    the blob as "what Audible said last" will be wrong about it.
+
+    extras_withheld is merged by this same function, and the argument above
+    transfers whole rather than by analogy: it is a record whose top-level
+    keys are independently sourced too, describing this same blob, and
+    merging the two columns differently gave them different spans of time
+    while presenting them to a caller as one picture. Its merge site says
+    what that leaves the column meaning.
+    """
+    return case(
+        (new_value.is_(None), existing_col),
+        (existing_col.is_(None), new_value),
+        (existing_col.contains(new_value), existing_col),
+        else_=existing_col.op("||", return_type=JSONB)(new_value),
     )
 
 
@@ -716,19 +855,43 @@ def _build_book_upsert():
         # Pre-existing bug, not introduced by this rewrite: cast(None, JSONB)
         # binds JSON null the same way. This fixes the None case.
         plans=cast(bindparam("plans", type_=JSONB(none_as_null=True)), JSONB),
+        num_ratings=bindparam("num_ratings"),
+        num_reviews=bindparam("num_reviews"),
+        publication_name=bindparam("publication_name"),
+        publication_datetime=bindparam("publication_datetime"),
+        extended_product_description=bindparam("extended_product_description"),
+        product_state=bindparam("product_state"),
+        # none_as_null is not optional on either of these, for the reason
+        # spelled out at plans above and with the same consequence: without
+        # it a Python None serializes to the JSON value null, which is a
+        # value rather than SQL NULL, and the merge would prefer it to the
+        # stored blob and empty the column on every response whose extras
+        # were dropped whole.
+        #
+        # It is also what makes the three-state column work rather than
+        # merely what keeps it safe. A genuinely empty extras dict is {} in
+        # Python, which is not None, so it serializes to a real written
+        # empty object and records that Audible was asked and had nothing to
+        # add -- distinct from the NULL of a row no response has touched
+        # since the column was added.
+        audible_extras=cast(bindparam("audible_extras", type_=JSONB(none_as_null=True)), JSONB),
+        extras_withheld=cast(bindparam("extras_withheld", type_=JSONB(none_as_null=True)), JSONB),
         created_at=bindparam("created_at"),
         updated_at=bindparam("updated_at"),
     )
     return stmt.on_conflict_do_update(
         index_elements=["asin"],
         set_={
-            # Fourteen text columns merge on answered-versus-blank rather
+            # Sixteen text columns merge on answered-versus-blank rather
             # than on NULL alone. Audible has no vocabulary for retracting
             # any of them — no response means "this book no longer has a
             # publisher" — so an empty string is Audible declining to answer,
             # never Audible asserting none, and _answered keeps what is
             # already stored. Each was decided on its own grounds, not by
-            # applying one rule across the row:
+            # applying one rule across the row. Fourteen are argued here;
+            # publication_name and product_state are the other two, argued
+            # in the scalar block further down beside the columns they
+            # arrived with:
             #
             #   title                   The edition's own name. A reissue
             #                           renames a book; nothing un-names one.
@@ -838,6 +1001,111 @@ def _build_book_upsert():
             # left open is narrower than it looks: only whether Libex should
             # keep believing Audible when Audible says, clearly, none.
             "plans": _coalesce(stmt.excluded.plans, Book.plans),
+            # The six scalar columns beside the blob each get the merge its
+            # own field argues for, not the one its type suggests.
+            #
+            #   num_ratings,            Plain NULL merges. Both normalize to
+            #   num_reviews             None rather than 0 when Audible does
+            #                           not answer, which is what keeps this
+            #                           coalesce honest -- a bound 0 is a
+            #                           value, and would overwrite a stored
+            #                           thirty thousand with nothing.
+            #   publication_datetime    Plain NULL merge. A publication
+            #                           instant is fixed at publication; a
+            #                           later response either restates it or
+            #                           omits it.
+            #   publication_name        _answered rather than coalesce: this
+            #                           is one of the fields a thin response
+            #                           group returns as '' rather than
+            #                           omitting, and coalesce('', stored)
+            #                           is '' -- SQL sees a value and takes
+            #                           it.
+            #   extended_product_       Same family as description and
+            #   description             summary, and merged the same way. It
+            #                           is the long-form text of the row, it
+            #                           grows as response groups fill in, and
+            #                           a plain coalesce would let a shorter
+            #                           later response win.
+            #   product_state           _answered, which is the only one of
+            #                           the three that clears both hazards
+            #                           this column has. A thin response
+            #                           group sends it as '' rather than
+            #                           omitting it, and coalesce('', stored)
+            #                           is '' -- a blank would blank a state
+            #                           the row already knew. And a length
+            #                           measure is wrong for a different
+            #                           reason worth keeping in view: this is
+            #                           a state that legitimately changes, a
+            #                           book moving between AVAILABLE,
+            #                           AVAILABLE_FOR_PREORDER and
+            #                           NOT_AVAILABLE_FOR_PURCHASE over its
+            #                           life, so _longer_wins would pin
+            #                           NOT_AVAILABLE_FOR_PURCHASE (26
+            #                           characters) permanently over
+            #                           AVAILABLE (9) and leave the row
+            #                           asserting a book is unbuyable forever.
+            "num_ratings": _coalesce(stmt.excluded.num_ratings, Book.num_ratings),
+            "num_reviews": _coalesce(stmt.excluded.num_reviews, Book.num_reviews),
+            "publication_name": _answered(
+                stmt.excluded.publication_name, Book.publication_name
+            ),
+            "publication_datetime": _coalesce(
+                stmt.excluded.publication_datetime, Book.publication_datetime
+            ),
+            "extended_product_description": _longer_wins(
+                bindparam("extended_product_description"), Book.extended_product_description
+            ),
+            "product_state": _answered(stmt.excluded.product_state, Book.product_state),
+            # Read through excluded rather than the bindparam deliberately:
+            # excluded carries the insert side's cast to JSONB, and @> and ||
+            # both need the operand to be typed jsonb to resolve at all.
+            "audible_extras": _extras_union(stmt.excluded.audible_extras, Book.audible_extras),
+            # The record of what was left out of the blob, merged the way the
+            # blob itself is, because the two are read as one picture and a
+            # pair covering different spans of time cannot be read that way.
+            #
+            # This was a plain coalesce, which made the column "whatever the
+            # most recent fetch that withheld anything happened to withhold"
+            # while audible_extras beside it accumulated key by key. A podcast
+            # fetch records relationships {episode: 4412}; a later fetch that
+            # strips one NUL character replaces the whole record, and the
+            # episode count is gone while the relationships key it described
+            # is still sitting in the blob. That is the shrinkage rule failing
+            # inside a merge, for the identical reason _extras_union exists:
+            # the top-level keys are independently sourced. relationships
+            # comes from the podcast strip, sanitized from the jsonb
+            # sanitizer, audibleExtras from the depth, encode and size checks
+            # -- three producers that fire independently, so one of them
+            # firing must not erase another's finding.
+            #
+            # What the column means now: per kind of withholding, the record
+            # left by the most recent fetch that withheld that kind -- unless
+            # that fetch's account was already contained in the stored one,
+            # which the containment arm below leaves standing rather than
+            # rewriting, so the fuller entry survives a thinner later one. A
+            # union over time, never cleared, exactly as the blob is -- so
+            # "this key is in the blob" and "this was withheld from it" are
+            # claims about the same span, and the caller can hold them
+            # together.
+            #
+            # It is deliberately not a snapshot of what is missing from the
+            # row as it stands, because no merge available here can make it
+            # one: a key withheld once and supplied by a later fetch leaves a
+            # note that outlives what it describes. Keeping that stale note is
+            # the accepted side of the trade, unchanged from before -- the
+            # alternative is a fetch that said nothing erasing the only record
+            # that anything was ever dropped.
+            #
+            # Clearing on a clean fetch is not available either, and that is a
+            # property of the input rather than a choice made here. The
+            # normalizer omits extrasWithheld when nothing was withheld, so
+            # "nothing withheld this time" and "this write has no opinion"
+            # both arrive as NULL and are indistinguishable at this point.
+            # Reading NULL as "clear it" would clear the record on every
+            # ordinary write that never looked.
+            "extras_withheld": _extras_union(
+                stmt.excluded.extras_withheld, Book.extras_withheld
+            ),
             "updated_at": stmt.excluded.updated_at,
         },
     )
@@ -934,6 +1202,19 @@ def _book_params(data: dict, now: datetime) -> dict:
         "is_buyable": _asserted_bool(data.get("isBuyable")),
         "is_vvab": _asserted_bool(data.get("isVvab")),
         "plans": data.get("plans"),
+        "num_ratings": data.get("numRatings"),
+        "num_reviews": data.get("numReviews"),
+        "publication_name": data.get("publicationName"),
+        "publication_datetime": _parse_publication_datetime(
+            data.get("publicationDatetime"), data.get("asin")
+        ),
+        "extended_product_description": data.get("extendedProductDescription"),
+        "product_state": data.get("productState"),
+        "audible_extras": data.get("audibleExtras"),
+        # Absent from the normalized dict altogether when nothing was
+        # withheld, rather than present and empty, so None is the ordinary
+        # case here rather than a sign anything went wrong.
+        "extras_withheld": data.get("extrasWithheld"),
         "created_at": now,
         "updated_at": now,
     }

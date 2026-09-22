@@ -182,7 +182,7 @@ from the public instance and each fetch writes the same line as any other
 request — the fields in the table above, no address. It is worth naming on its
 own because the person whose browser makes those requests opened a page rather
 than called an API, and may not have counted that as touching Libex at all.
-Until this release it didn't: what changed, and what it changed *from*, is
+It didn't always: what changed, and what it changed *from*, is
 under [Who else sees your requests](#who-else-sees-your-requests).
 
 ### What happens to a search you type
@@ -238,11 +238,11 @@ down calls a defect is the opposite case: a name that arrived because *someone
 searched for it*. That is caller input, it has been removed where it was found,
 and it is not what these lines carry.
 
-Two of them do record what a request asked for, and they're worth naming
-rather than leaving to be discovered. Both belong to the bulk lookup
-`/books?asins=`, which is the one place the request line deliberately withholds
-what was asked for: `asins` isn't on the value allowlist, so there it reads
-`asins=REDACTED`.
+Two of them record the whole list of what a request asked for, and they're
+worth naming rather than leaving to be discovered. Both belong to the bulk
+lookup `/books?asins=`, which is the one place the request line deliberately
+withholds what was asked for: `asins` isn't on the value allowlist, so there
+it reads `asins=REDACTED`.
 
 The first is the fallback itself. When Audible is unreachable and Libex falls
 back to its own database, the warning recording that fallback lists the ASINs
@@ -266,16 +266,16 @@ that one request asked for, each still answers "which books did that outage
 affect" and nothing else, and there is nothing on either line or anywhere else
 to attach it to a person.
 
-Both of them became fields in this release, in two separate changes; until it,
-both wrote their ASINs into their message text. That moved a list Libex was
+Both of them became fields in two separate changes; before that, both wrote
+their ASINs into their message text. That moved a list Libex was
 already writing down out of prose and into something that can be searched and
 counted by name. It did not add a value, and it did not widen who receives
-one. The same release also took the database driver's own error text off the
+one. The same work also took the database driver's own error text off the
 read line, which is the larger half of the change and is covered under
 [Who else sees your requests](#who-else-sees-your-requests).
 
 Where the thing being looked up is part of the path instead, database warnings
-name it too, and since this release they name it the same way — as a field of
+name it too, and they now name it the same way — as a field of
 its own, called `asin`, `author_asin`, `series_asin`, `plan_name` or
 `sku_group` depending on what was being read. That discloses nothing further:
 the request line already records the path in its `url` field, as the table
@@ -288,6 +288,18 @@ that the whole path was already recorded, so a warning naming one segment of
 it tells you nothing the request line had not already written down. Giving
 those segments field names changed how they can be queried, not which of them
 reach a log.
+
+Those two lines carry a whole list. A handful of others name a single book —
+the one product that went wrong — while Libex is working through what Audible
+sent back: a field that arrived in a shape Libex couldn't read, a date that
+wouldn't parse, a blob too large or too strange to store, a write that failed.
+Each one carries that book's ASIN and what kind of problem it was, some of
+them the region as well, and none of them carries the value that caused it.
+On a lookup by path, that ASIN is already in the request line's `url`. On a
+bulk lookup or a search it is one title out of what that request touched, and
+it is written down because a book Libex is quietly failing on is otherwise
+invisible until someone notices the gap. Like the two above, these say which
+book, never who asked.
 
 One further exception worth naming: if a request causes an unexpected error, the
 error line and its stack trace can include whatever triggered it — and if
@@ -446,8 +458,8 @@ Postgres writes the offending row into its own error text; elsewhere the
 error's own text is carried. None of that is a new piece of information about
 you, but the shape of it is newer than it looks and the honest version says
 so: the cache lines and the background write lines have been built this way
-since earlier releases, while the database read lines, and the warning that
-records a fallback to them, were sentences until this one. What changed there
+for longer, while the database read lines, and the warning that records a
+fallback to them, were sentences until more recently. What changed there
 is that the read lines stopped carrying the driver's own error text — the one
 part of them that could have quoted a stored row back — and that what those
 lines had been saying in prose was given names instead. It is spelled out here
@@ -488,7 +500,7 @@ logo fetched from the documentation tool's own vendor as it renders. The pages
 do contain ordinary links out — an attribution link, specification URLs — and
 those reach nobody unless you choose to click one.
 
-**shields.io, for the README's counters — until this release.** The count
+**shields.io, for the README's counters — not any more.** The count
 badges in Libex's README used to be images drawn by
 [shields.io](https://shields.io): the picture came from their servers, and
 their servers then called `libexdb.com` for the number. Rendering the page

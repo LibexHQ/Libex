@@ -13,6 +13,61 @@ into its own distribution. Entries below that predate publication are
 historical record for whoever embeds this package later, not evidence that
 anyone consumed a given version at the time it was cut.
 
+## [0.3.0]
+
+### Added
+- **`BookResponse` gains eight optional fields: `numRatings`, `numReviews`,
+  `publicationName`, `publicationDatetime`, `extendedProductDescription`,
+  `productState`, `audibleExtras` and `extrasWithheld`.** Every one defaults
+  to `None`, so existing construction sites keep working untouched. What
+  does move for every embedder is the serialized shape: pydantic emits all
+  eight by default, so a dump of `BookResponse` — and of
+  `BulkBookResponse`, which contains it — now carries eight more keys,
+  `null` unless something supplied them. A golden file or snapshot compared
+  against a dump will differ on upgrade, which is the whole reason this is
+  a MINOR rather than a PATCH.
+
+- **Nothing in this package fills them.** `libex_core` defines the response
+  shape; it does not fetch an Audible product or normalize one into this
+  model. An embedder constructing a `BookResponse` decides what goes in
+  these fields, so the contracts below are what the shape *means*, not
+  behaviour the package performs. `numRatings` and `numReviews` are the
+  counts behind the `rating` average, which on its own cannot distinguish
+  4.8 from three ratings from 4.8 from two hundred thousand.
+  `publicationName` and `publicationDatetime` place a periodical or podcast
+  episode in its publication; the datetime is a full instant with a literal
+  trailing `Z`, distinct from `releaseDate`, which is a bare calendar date.
+  `extendedProductDescription` is the long-form description with its markup
+  intact — `description` and `summary` are the flattened ones — and is
+  upstream HTML, neither validated nor rewritten here, so encode it on
+  output. `productState` is Audible's own state string; match it as an
+  opaque string rather than modelling it as an enum, because the vocabulary
+  is Audible's and can grow without notice.
+
+- **`audibleExtras` is defined as a verbatim catch-all, and three details of
+  that definition bind anyone who populates or reads it.** It holds every
+  top-level key of Audible's product response that the named fields do not
+  already reproduce, so a key Audible invents later surfaces on its own
+  rather than disappearing between the fetch and the response. Verbatim
+  means value for value, not byte for byte: the content is parsed JSON, so
+  key order is not preserved, duplicate keys are already collapsed, and
+  numeric spelling is normalized (`1e3` arrives as `1000.0`). Nothing in it
+  is ever hoisted to the top level — no splat, no key set at runtime —
+  which is what makes an upstream key named `asin` structurally unable to
+  collide with the first-class field of that name; it stays nested and is
+  read there. And it is tri-state: `null` means nothing was captured, `{}`
+  means the product carried nothing beyond the named fields, and an object
+  is content. Treat every value in it as untrusted input, including the
+  URLs it will contain.
+
+- **`extrasWithheld` is the record of what was left out of `audibleExtras`
+  and why, so an omission is stated rather than inferred.** It sits beside
+  the blob rather than inside it deliberately: the blob is documented as
+  Audible's keys only, and a key invented here would collide with a real
+  upstream one the day Audible ships a field by that name. Unlike
+  `audibleExtras` it is not tri-state — `None` means nothing was withheld,
+  and draws no distinction between an intact blob and no blob at all.
+
 ## [0.2.0]
 
 ### Security

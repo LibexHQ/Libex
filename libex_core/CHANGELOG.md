@@ -13,6 +13,57 @@ into its own distribution. Entries below that predate publication are
 historical record for whoever embeds this package later, not evidence that
 anyone consumed a given version at the time it was cut.
 
+## [0.2.0]
+
+### Security
+- **`get_audible_url()` now rejects a `.` or `..` path segment anywhere
+  between the path's slashes, not only a dot segment at the very front.** The
+  existing guard only inspected the path's leading character, so a path like
+  `/1.0/catalog/products/../../internal` passed it untouched; httpx then
+  applies ordinary RFC 3986 dot-segment removal while parsing the URL this
+  function builds, silently collapsing that path to `/1.0/internal` — an
+  endpoint this function never intended to address. The guard that checks the
+  finished URL's host, scheme and port could not catch it either, because
+  none of those three change when only the path collapses. A segment that is
+  `.` or `..`, one whose percent-encoding (`%2e`/`%2E`) decodes to either of
+  those, or one containing an encoded separator — `%2f`/`%2F` for `/`, and
+  now `%5c`/`%5C` for the backslash the guard already rejected in its literal
+  form — raises `ValueError`. This is a breaking change for a caller of
+  `LibexClient.get()` that was constructing a path containing one of these;
+  no call site in this codebase ever has, every one interpolating a single
+  bare id. The encoded spellings rest on weaker ground than the literal one
+  and are refused anyway: httpx never turns an encoded separator or an
+  encoded dot into a live one before the request leaves this process, so
+  those forms are rejected for what a server might do with them after
+  decoding, which is not something this library can see or verify.
+- **A path containing `?` or `#` is now rejected outright, whether or not a
+  dot segment is visible in it.** This is the change most likely to reach an
+  existing caller: code that inlined a query string into the `path` argument,
+  rather than passing `get()`'s own `params`, now raises `ValueError` where it
+  previously made a request. The reasoning is not the one above. Neither
+  character belongs to the path component — each one ends it — so whatever
+  sits immediately in front of one is the path's real final segment, which is
+  somewhere a check that splits on `/` never looks. When that segment was `.`
+  or `..`, the collapse had already happened in the bytes leaving this
+  process: `/1.0/catalog/products/..?x` was transmitted with a path of
+  `/1.0/catalog?x`, a level above the prefix the caller asked for, and
+  `/1.0/catalog/products/.#x` as `/1.0/catalog/products`, the fragment never
+  reaching a server at all. That is measured behaviour of this library, not an
+  assumption about anybody else's. Refusing the two characters removes the
+  whole shape rather than the individual spellings of it, and costs nothing
+  legitimate: query parameters belong in `get()`'s `params` argument, which
+  httpx appends to the URL this function returns, and a fragment is never sent
+  to a server in the first place.
+- **What this guard does not cover, deliberately.** It compares segments
+  against fixed spellings rather than decoding them, so double- and
+  nested-encoded forms (`%252e%252e`), unicode normalization, and overlong
+  encodings such as `%c0%af` are still accepted, and no claim is made that
+  they are caught. None of them decode into a separator in httpx before a
+  request leaves this process, nothing in this package produces one, and
+  matching every possible spelling of a dot is an arms race with no end. Read
+  the guard as closing the shapes named above, not as general input
+  sanitisation.
+
 ## [0.1.0]
 
 First tracked version of `libex_core`, and the first entry in this file.

@@ -10,4 +10,4 @@ the hosted app that embeds it, and an embedder needs a version to pin against
 that isn't tied to the hosted app's own release line.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

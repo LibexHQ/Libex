@@ -10,6 +10,32 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.22.7]
+
+### Security
+- **The Audible request-path guard closes a gap: a `.` or `..` segment is now
+  rejected wherever it falls between the path's slashes, not only at the very
+  front, and so are several encoded spellings of one.** The previous guard
+  looked only at the path's first character, and the underlying HTTP library
+  silently collapses a dot segment when it parses the built URL — so a path
+  built with one further along could resolve to a different Audible endpoint
+  than the one intended, with nothing recording that it had happened. The
+  guard now also refuses any path containing `?` or `#`, because those two
+  characters end the path component rather than belonging to it: a dot
+  segment sitting immediately before either was invisible to a check that
+  splits on `/`, while still being collapsed away in the bytes actually sent.
+  This is unreachable through the hosted API: every route that builds an
+  Audible path interpolates an ASIN already validated against a strict
+  ten-character pattern, which admits no dot, slash, percent, `?` or `#`, and
+  the remaining paths are fixed strings. It matters for Libex's own
+  background jobs, which build the same kind of path from ids read out of the
+  database or out of Audible's own responses rather than from a validated
+  request parameter — one of those carrying a dot segment or either of those
+  two characters now fails the job outright with a clear error instead of
+  quietly fetching from, or writing, the wrong endpoint. The guard is not
+  exhaustive, and the full detail of what it does and does not cover is in
+  `libex_core`'s own changelog, since the guard itself lives there.
+
 ## [1.22.6]
 
 ### Changed

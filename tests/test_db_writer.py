@@ -1294,6 +1294,7 @@ BLANK_GUARDED_COLUMNS = [
     "title", "subtitle", "publisher", "copyright", "isbn", "language",
     "image", "book_format", "content_type", "content_delivery_type",
     "episode_number", "episode_type", "sku", "sku_group",
+    "publication_name", "product_state",
 ]
 
 
@@ -1367,7 +1368,7 @@ def test_plans_is_left_on_the_null_only_merge():
 # no failure to observe. That is strictly worse than the silent overwrite
 # being fixed, which at least leaves evidence in the data.
 
-_LENGTH_MERGED_COLUMNS = ["description", "summary"]
+_LENGTH_MERGED_COLUMNS = ["description", "summary", "extended_product_description"]
 
 _UNGUARDED_TEXT_COLUMNS = {
     "asin": (

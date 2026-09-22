@@ -40,6 +40,29 @@ def _audible_link(asin: str, region: str) -> str:
     return f"https://audible{tld}/pd/{asin}"
 
 
+def _utc_z(value: datetime | None) -> str | None:
+    """
+    Renders a stored timestamp the way Audible sent it: UTC, ISO 8601, with a
+    literal trailing Z.
+
+    isoformat() on its own writes the offset as +00:00. That is the same
+    instant and a different string, and the difference matters for this one
+    field: on the live path publicationDatetime is passed through from
+    Audible untouched, so a caller comparing the two surfaces is comparing
+    bytes. Every value observed carries seconds resolution and no sub-second
+    component, so this reproduces exactly what Audible sent.
+
+    A value out of a timestamptz column always carries a zone. One built by
+    hand does not, and is read as UTC rather than as the host's local zone,
+    which is what astimezone would otherwise assume.
+    """
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 async def _get_series_positions(session: AsyncSession, book_asin: str) -> dict[str, str | None]:
     """Returns {series_asin: position} for a book."""
     result = await session.execute(
@@ -137,7 +160,7 @@ def _book_to_dict(book: Book, series_positions: dict[str, str | None]) -> dict[s
     content_type = book.content_type
     is_podcast = content_type and content_type.lower() == "podcast"
 
-    return {
+    result: dict[str, Any] = {
         "asin": book.asin,
         "title": book.title,
         "subtitle": book.subtitle,
@@ -172,12 +195,48 @@ def _book_to_dict(book: Book, series_positions: dict[str, str | None]) -> dict[s
         # has been. A stored NULL reaching the model raises ResponseValidationError,
         # which surfaces as a dropped connection rather than a 5xx.
         "plans": book.plans or [],
+        "numRatings": book.num_ratings,
+        "numReviews": book.num_reviews,
+        "publicationName": book.publication_name,
+        "publicationDatetime": _utc_z(book.publication_datetime),
+        "extendedProductDescription": book.extended_product_description,
+        "productState": book.product_state,
+        # Emitted as stored, NULL included, and unlike plans above it is not
+        # coalesced to an empty container. The two columns look alike and the
+        # contracts are opposite. plans is a list on the wire with no null
+        # variant, so a stored NULL has to become []. audibleExtras is
+        # tri-state on the wire as well as in the column: the live path emits
+        # null when the blob was dropped whole and {} when Audible genuinely
+        # sent nothing extra, so null is a value this field is already
+        # defined to carry. Substituting {} here would assert that Audible
+        # was asked and answered empty for every row no response has written
+        # since the column was added.
+        "audibleExtras": book.audible_extras,
         "updatedAt": book.updated_at.isoformat() if book.updated_at else None,
         "authors": authors,
         "narrators": narrators,
         "genres": genres,
         "series": series,
     }
+
+    # Present only when the stored record holds something, matching the live
+    # path, which omits the key rather than sending an empty record. Omitted
+    # from this dict, not from the response -- BookResponse declares the
+    # field and supplies it as null when it is absent here, so the wire
+    # carries it either way. Silence here is the absence of any withholding
+    # ever recorded against the row, so a row written before the column
+    # existed reads the same as one whose every fetch came through complete.
+    #
+    # What it carries when present is an accumulation rather than a snapshot:
+    # per kind of withholding, the record left by the most recent fetch that
+    # withheld that kind, over the same span of fetches audibleExtras above
+    # it covers. That is what lets the two be read together, and it is also
+    # why neither of them answers "what is missing from the blob right now".
+    # The extras_withheld merge in writer.py sets out why the column has that
+    # shape.
+    if book.extras_withheld:
+        result["extrasWithheld"] = book.extras_withheld
+    return result
 
 
 # ============================================================

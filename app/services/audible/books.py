@@ -37,6 +37,8 @@ touch the same row.
 
 # Standard library
 import asyncio
+import json
+import math
 import time
 from contextlib import nullcontext
 from datetime import datetime, timezone
@@ -59,7 +61,7 @@ from libex_core.audible.client import (
 )
 from libex_core.exceptions import NotFoundException
 from libex_core.text import strip_html, strip_image_size_suffix
-from app.core.logging import get_logger
+from app.core.logging import get_logger, is_safe_log_value
 from app.core.response_headers import (
     REASON_HYDRATION_DEADLINE,
     REASON_HYDRATION_FAILED,
@@ -99,26 +101,165 @@ BOOK_RESPONSE_GROUPS = (
 
 IMAGE_SIZES = "500,1000,2400,3200"
 
-# Sentinel this repo has never seen Audible actually send -- see
-# _filter_products for what was measured and why the clause stays anyway.
+# The publication_datetime Audible puts on a placeholder catalogue record --
+# an entry that stands in for a title rather than being one, which Audible
+# does send. See _filter_products for the two records measured carrying it,
+# and for why one is dropped rather than served.
 UNRELEASED_PLACEHOLDER = "2200-01-01T00:00:00Z"
 
 # Below this many products, normalization runs inline on the event loop; at
 # or above it, the whole batch is handed to a single asyncio.to_thread call.
-# Measured (scratchpad benchmark, not part of this repo): a lone product
-# normalizes in ~0.2ms and a 50-ASIN chunk -- the largest a single Audible
-# catalog request ever returns, see the chunking below -- in ~4-5ms, while
-# the to_thread hop itself costs ~0.3-0.5ms of fixed overhead regardless of
-# batch size. Every book/series/search caller (single ASIN up to one chunk)
-# stays under this threshold and keeps its current inline timing exactly.
-# It's only get_author_books' hydration, which accumulates products across
-# many chunks before normalizing once, that can cross it -- the flagged
-# ~1530-product case blocks the loop for ~150ms inline with nothing else
-# able to run in that window, against ~180ms threaded but with the loop free
-# to service other requests throughout. The thread hop is a net wall-clock
-# loss at every size tested; the point is solely to stop a single request
-# from stalling every other connection the process is holding.
+#
+# What one product costs is governed by how big that product is, so a single
+# figure does not characterise it and the sizes are named alongside every
+# number here. _build_extras walks every node of the product and then renders
+# the whole blob to JSON, and that walk and dump is 50-80% of the total cost
+# of normalizing a product -- work that scales with the product rather than
+# with the count of fields the DTO names.
+#
+# Measured (scratchpad benchmark, not part of this repo; 300 iterations per
+# size, median of seven runs, on a development machine): a 3.5 KB product
+# normalizes in ~0.4ms, 6.5 KB in ~0.55ms, 17 KB in ~1.2ms and 45 KB in ~3ms,
+# while the to_thread hop itself costs ~0.2ms of fixed overhead regardless of
+# batch size. Read the ratios and the size dependence rather than the absolute
+# numbers, which a production worker's hardware will move.
+#
+# A 50-ASIN chunk -- the largest a single Audible catalog request ever
+# returns, see the chunking below -- is therefore ~30ms of uninterruptible
+# loop time for ordinary books and ~150ms for a page of large multipart
+# titles, and that is what a caller under this threshold pays inline.
+#
+# What decides the side is the whole fetch list, not the chunk: every chunk's
+# products are accumulated and handed to _normalize_products in one call, so
+# anything whose ASIN list runs past this count offloads. A single ASIN, a
+# search page and a short series stay inline; a bulk /books request (the route
+# admits 1000 ASINs), a long series, and above all get_author_books' hydration
+# cross it. The flagged ~1530-product case blocks the loop for ~1s inline at
+# 6.5 KB a product, with nothing else able to run in that window, against the
+# same ~1s threaded but with the loop free to service other requests
+# throughout. The thread hop is a net wall-clock loss at every size tested;
+# the point is solely to stop a single request from stalling every other
+# connection the process is holding.
 NORMALIZE_THREAD_THRESHOLD = 100
+
+# The upstream product keys _normalize_product already reproduces as
+# first-class response fields. Every other top-level key Audible sends goes
+# into audibleExtras verbatim, so this set is the whole of what decides
+# which side of that line a key falls on.
+#
+# Membership is checked in both directions, because the two directions fail
+# differently and only one of them is cheap. Each first-class field that
+# reproduces an upstream key reads it through _reproduce, which refuses a key
+# not named here, so adding a field without adding its key raises on the
+# first product normalized -- in every test and every request alike -- and
+# costs a duplicated value until it does. The reverse, a key named here that
+# no field reads, is a silent drop rather than a duplicate: withheld from the
+# blob by this set and reproduced nowhere. _verify_reproduced_keys_read
+# establishes at import that every key below is genuinely read, so neither
+# direction can drift unnoticed.
+#
+# merchandising_summary and publisher_summary are members even though
+# strip_html runs over them. HTML-stripping is not a transformation of the
+# content, only of its markup, and the two copies were measured at 26% of the
+# raw product as pure duplication.
+#
+# Deliberately NOT members, and therefore passed through whole alongside the
+# field parsed out of them: rating, product_images, plans, category_ladders,
+# relationships, release_date, episode_number, episode_type,
+# publication_datetime, authors, narrators. Each is transformed or only
+# partly consumed -- imageUrl is one URL out of a dict of sizes, genres
+# flattens category_ladders, series reads the series entries out of
+# relationships and leaves the rest, publicationDatetime surfaces
+# publication_datetime unchanged while _filter_products reads it for its own
+# purposes -- so the upstream key still goes into the blob as sent, whole
+# object or bare scalar alike. That
+# list is documentation and nothing reads it as a constant; a second
+# frozenset the code never consults would drift from the normalizer within a
+# release. A field read with a plain product.get rather than _reproduce is
+# duplicated into the blob, never dropped, which is the direction a mistake
+# here has to fail in.
+_REPRODUCED_KEYS: frozenset[str] = frozenset({
+    "asin",
+    "title",
+    "subtitle",
+    "publisher_name",
+    "copyright",
+    "isbn",
+    "language",
+    "format_type",
+    "is_adult_product",
+    "is_pdf_url_available",
+    "read_along_support",
+    "runtime_length_min",
+    "content_type",
+    "content_delivery_type",
+    "sku",
+    "sku_lite",
+    "is_listenable",
+    "is_buyable",
+    "is_vvab",
+    "merchandising_summary",
+    "publisher_summary",
+    "publication_name",
+    "product_state",
+    "extended_product_description",
+})
+
+# relationship_type values stripped out of the blob's relationships array.
+# A podcast show carries one child entry per episode, which is the whole of
+# why this exists: measured live in us, B08JJND27B is a 448 KB product of
+# which 440 KB is 4,412 episode entries and a single season entry. All eight
+# podcasts in that sample carried both types and ran from 60 KB to 448 KB on
+# the same shape. Stripped, that 448 KB product leaves a 5 KB blob, and the
+# largest blob anywhere in the nineteen-product sample is 8 KB.
+#
+# The strip is unconditional rather than podcast-gated. Nothing else in the
+# catalogue was observed carrying either type -- ordinary books relate to
+# series and components -- so gating it on content_type would add a branch
+# that changes no outcome while leaving a second, easily-missed way for
+# these entries to arrive.
+_STRIPPED_RELATIONSHIP_TYPES = frozenset({"episode", "season"})
+
+# Caps on the blob, both deliberately far above anything observed so they
+# can only fire on something pathological. 64 KB is eight times the largest
+# blob in the sample above, measured the same way this cap measures; 32
+# levels of nesting is more than five times the deepest product in it, which
+# reached six.
+#
+# Exceeding either drops the blob whole. Pruning the largest keys instead
+# would hand back something that looks complete and is not, which is the
+# silent loss this whole mechanism exists to stop -- a caller can see an
+# absent blob and an extrasWithheld entry saying why, and cannot see a key
+# that was quietly removed from a blob that still arrived.
+_EXTRAS_MAX_BYTES = 64 * 1024
+_EXTRAS_MAX_DEPTH = 32
+
+# The widest int that survives the whole path from this module to a jsonb
+# column, in bits.
+#
+# There are two ceilings and Python's is by far the lower. Postgres jsonb
+# stores every number as numeric, which holds 131,072 digits; CPython
+# refuses outright to render an int wider than sys.get_int_max_str_digits(),
+# 4,300 by default since 3.11, and json.dumps renders every int it is given.
+# So an int of 5,000 digits is perfectly storable and still unprintable, and
+# the bound that matters is Python's.
+#
+# Counted in bits rather than digits because counting digits means calling
+# str(), which is the exact call that raises on the values this exists to
+# catch -- the precise check would blow up on precisely its own subject
+# matter, out of the normalizer and down the caller's DB ladder. 2**14283 is
+# below 10**4300, so anything at or under this bit length always renders.
+# An operator who lowers the limit below the default is still covered: the
+# dump below is wrapped, and a raise there is recorded rather than thrown.
+_INT_BITS_ALWAYS_RENDERABLE = 14283
+
+# Why a blob, or part of one, did not survive. These are the values that
+# reach the caller in extrasWithheld, so they are part of the response and
+# not just log vocabulary.
+_WITHHELD_SANITIZED = "sanitized"
+_WITHHELD_DEPTH = "depth"
+_WITHHELD_SIZE = "size"
+_WITHHELD_UNSERIALIZABLE = "unserializable"
 
 
 # ============================================================
@@ -139,6 +280,36 @@ def _has_uncovered(asins: list[str], covered: set[str]) -> bool:
     each other entirely.
     """
     return any(asin not in covered for asin in asins)
+
+
+def _window_elapsed(last_logged: float | None, now: float, interval: float) -> bool:
+    """
+    True when a windowed incident report is due: nothing reported yet, or the
+    last report is at least `interval` seconds old.
+
+    Shared by the two repeat-incident warnings below -- unreadable plans, and
+    anything withheld from an extras blob -- which cap themselves the way
+    persist_queue.py's incident logs cap theirs, and for the same reason:
+    either can fire on every product in a page at once when what changed is
+    upstream and systematic rather than one product being odd, and a line per
+    product buries the only thing worth reading, which is that it happened
+    and how often. The two keep their own state and their own fields, since
+    one windows per reason and the other globally, and only this predicate is
+    genuinely the same rule twice.
+
+    None rather than 0.0 for "never reported", and the distinction is not
+    cosmetic: time.monotonic() counts from boot, so against a 0.0 sentinel
+    this arithmetic reads "never reported" as "reported at boot" and stays
+    false for the first interval of a process's life -- swallowing the very
+    first report. That is the worst window in which to lose either warning:
+    the plans one exists to catch an upstream rename before the plans column
+    quietly empties across the corpus, and six worker processes all start
+    fresh on every deploy. persist_queue's own _window_elapsed carries the
+    same guard for the same reason.
+    """
+    if last_logged is None:
+        return True
+    return now - last_logged >= interval
 
 
 def _best_image(product_images: dict | None) -> str | None:
@@ -288,30 +459,19 @@ _unreadable_plans_last_logged: float | None = None
 def _log_unreadable_plans(asin: str) -> None:
     """
     Reports "Audible sent plans entries this parser can't read" at most once
-    per _UNREADABLE_PLANS_LOG_INTERVAL_SECONDS, the same windowing
-    persist_queue.py's _record_shed applies to its own repeat-incident
-    warning and for the same reason: this can fire on every product at once
-    if plan_name itself is what changed shape, and an uncapped line per
-    product would flood out the report of the one incident causing all of
-    them. asin is the most recently affected product in the window, not
-    every one of them -- enough to start looking without paying for a line
-    per occurrence.
+    per _UNREADABLE_PLANS_LOG_INTERVAL_SECONDS, through the shared
+    _window_elapsed gate above -- this can fire on every product at once if
+    plan_name itself is what changed shape, and an uncapped line per product
+    would flood out the report of the one incident causing all of them. asin
+    is the most recently affected product in the window, not every one of
+    them -- enough to start looking without paying for a line per
+    occurrence.
     """
     global _unreadable_plans_count, _unreadable_plans_last_logged
     _unreadable_plans_count += 1
     now = time.monotonic()
-    # None rather than 0.0, and the distinction is not cosmetic:
-    # time.monotonic() counts from boot, so against a 0.0 sentinel this
-    # comparison reads "never reported" as "reported at boot" and stays true
-    # for the first minute of a process's life -- swallowing the very first
-    # report. That is the worst minute to lose this particular warning: it
-    # exists to catch an upstream rename before the plans column quietly
-    # empties across the corpus, and six worker processes all start fresh on
-    # every deploy. persist_queue's _window_elapsed carries the same guard
-    # for the same reason.
-    if (
-        _unreadable_plans_last_logged is not None
-        and now - _unreadable_plans_last_logged < _UNREADABLE_PLANS_LOG_INTERVAL_SECONDS
+    if not _window_elapsed(
+        _unreadable_plans_last_logged, now, _UNREADABLE_PLANS_LOG_INTERVAL_SECONDS
     ):
         return
     logger.warning("Audible plans entries present but unreadable", extra={
@@ -374,31 +534,353 @@ def _parse_series(product: dict, region: str) -> list[dict]:
     return series_list
 
 
+# How often the extras-withheld warning below actually logs for any one
+# reason, once that reason starts firing repeatedly. The same windowing
+# _log_unreadable_plans applies, for the same reason: every one of these can
+# fire on every product in a page at once if what changed is upstream and
+# systematic -- a shape Audible started sending, not one product being odd --
+# and a line per product would bury the only thing worth reading, which is
+# that it happened at all and how much.
+_EXTRAS_LOG_INTERVAL_SECONDS = 60
+
+_extras_incident_counts: dict[str, int] = {}
+_extras_incident_last_logged: dict[str, float] = {}
+
+
+def _safe_asin_for_log(asin: str) -> str:
+    """
+    Returns an ASIN as-is for logging if it is safe, else the sentinel.
+
+    Reuses is_safe_log_value rather than growing a second rule, the same way
+    the cache layer's own _safe_key_for_log does. An ASIN reaching here came
+    off an Audible product rather than out of a validated route argument, and
+    Audible's identifier fields are not reliably identifiers (see
+    _parse_authors for values measured in that position), so the one place
+    the value-safety judgment is made covers this too.
+    """
+    return asin if is_safe_log_value(asin) else "REDACTED"
+
+
+def _log_extras_incident(asin: str, region: str, reason: str, blob_bytes: int | None = None) -> None:
+    """
+    Reports that something was withheld from a product's extras blob, at most
+    once per _EXTRAS_LOG_INTERVAL_SECONDS per reason.
+
+    Windowed per reason rather than globally, so a flood of one kind cannot
+    silence the first occurrence of another -- which is why the state here is
+    a dict keyed by reason where _log_unreadable_plans needs only a pair of
+    scalars, and why the two share the _window_elapsed predicate rather than
+    one recording function. asin names the one product that reopened the
+    window, not every product the line speaks for; occurrences is how many
+    the window that just closed covered, which is the number worth reading
+    when this starts repeating.
+
+    Nothing from the blob reaches this line. No upstream key name is used as
+    a field name here either -- that would let Audible's response shape
+    define Libex's log schema, so a change upstream would silently rewrite
+    what every downstream query has to match on. reason is one of the
+    _WITHHELD_* constants above, all of them Libex's own vocabulary.
+    """
+    count = _extras_incident_counts.get(reason, 0) + 1
+    _extras_incident_counts[reason] = count
+    now = time.monotonic()
+    last = _extras_incident_last_logged.get(reason)
+    if not _window_elapsed(last, now, _EXTRAS_LOG_INTERVAL_SECONDS):
+        return
+    logger.warning("Audible extras withheld", extra={
+        "asin": _safe_asin_for_log(asin),
+        "region": region,
+        "withheld_reason": reason,
+        "occurrences": count,
+        "blob_bytes": blob_bytes,
+    })
+    _extras_incident_counts[reason] = 0
+    _extras_incident_last_logged[reason] = now
+
+
+# The keys _reproduce has been asked for, while _verify_reproduced_keys_read
+# is normalizing its one probe product, and None at every other moment --
+# including the whole of normal service, where the check below costs a single
+# is-None comparison per read.
+#
+# Recorded here rather than by watching product.get, because the two do not
+# mean the same thing. A key read with a plain product.get is transformed or
+# only partly consumed and therefore must stay OUT of _REPRODUCED_KEYS, so a
+# probe that counted those reads as coverage would wave through exactly the
+# mistake it exists to catch: relationships added to the set, its series
+# entries parsed out, and every other entry in it gone from the blob with
+# nothing raising.
+_reproduced_keys_read: set[str] | None = None
+
+
+def _reproduce(product: dict, key: str) -> Any:
+    """
+    Reads an upstream key that _normalize_product reproduces as a first-class
+    response field, refusing any key that is not in _REPRODUCED_KEYS.
+
+    This is what turns that set from a convention into a requirement. A
+    first-class field added to the normalizer without its upstream key added
+    to the set raises here on the first product normalized -- every test and
+    every request hits this path -- so the pair cannot fall out of step
+    quietly and leave the same value appearing twice in the response.
+
+    That is the cheap direction. The expensive one -- a key the set names
+    that no field reads, which is excluded from the blob and reproduced
+    nowhere -- is caught by _verify_reproduced_keys_read, which watches this
+    function to establish it.
+
+    Not used for a field that is transformed or only partly consumed; those
+    are read with a plain product.get and appear in the blob as well, which
+    is why reaching for the wrong one of the two costs a duplicated value
+    rather than a lost one.
+    """
+    if key not in _REPRODUCED_KEYS:
+        raise RuntimeError(
+            f"{key} is read as a first-class response field but is missing from _REPRODUCED_KEYS"
+        )
+    if _reproduced_keys_read is not None:
+        _reproduced_keys_read.add(key)
+    return product.get(key)
+
+
+def _strip_podcast_relationships(relationships: list) -> tuple[list, dict[str, int]]:
+    """
+    Removes the relationship entries named in _STRIPPED_RELATIONSHIP_TYPES,
+    returning what is kept and a count per type of what was not.
+
+    The counts are the whole point of returning them: they go into
+    extrasWithheld, so the caller is told an episode list existed and how
+    long it was. Without that the strip would be exactly the silent drop this
+    blob was built to end, hidden inside the mechanism meant to prevent it.
+    """
+    kept = []
+    stripped: dict[str, int] = {}
+    for entry in relationships:
+        relationship_type = entry.get("relationship_type") if isinstance(entry, dict) else None
+        if relationship_type in _STRIPPED_RELATIONSHIP_TYPES:
+            stripped[relationship_type] = stripped.get(relationship_type, 0) + 1
+        else:
+            kept.append(entry)
+    return kept, stripped
+
+
+def _is_unstorable_int(value: int) -> bool:
+    """
+    True when an int is too wide to render and store -- see
+    _INT_BITS_ALWAYS_RENDERABLE for the two ceilings and why this is measured
+    in bits.
+
+    Conservative by design. A value just past the bound may well have been
+    storable, and is withheld anyway rather than resolved exactly; that band
+    begins at a 4,300-digit number, and a withholding that gets recorded is
+    the better error than a write the database or the encoder refuses.
+    """
+    return value.bit_length() > _INT_BITS_ALWAYS_RENDERABLE
+
+
+def _sanitize_for_jsonb(extras: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, int]]:
+    """
+    Returns a copy of the blob that Postgres jsonb will actually accept, plus
+    a count of each thing that had to be changed. Returns None for the copy
+    when the blob is nested deeper than _EXTRAS_MAX_DEPTH.
+
+    Three values Python's json parses and re-emits happily that jsonb
+    refuses, all of which would otherwise turn one odd product into a failed
+    write: U+0000 anywhere in a key or a value, a non-finite float (1e999
+    parses to inf, and json.dumps writes it back as the bare token Infinity,
+    which is not valid JSON at all), and an int too wide to store or even to
+    render (see _is_unstorable_int). A NUL is stripped out of the string
+    rather than costing the key or the product -- losing a whole book
+    permanently over one invisible byte is the worse of the two outcomes --
+    and a number that cannot be stored becomes null. Every one of those is
+    counted, and the counts reach the caller in extrasWithheld, because a
+    sanitization nothing records is itself a silent drop.
+
+    This lives here rather than in the writer because the writer does not
+    cover every surface the normalized dict reaches: cache.manager stores
+    this same dict into a jsonb column of its own, so a writer-side check
+    would leave the cache holding a value the database had already rejected
+    and the two surfaces answering differently for the same book.
+
+    Pure, and iterative on an explicit stack. Pure because _normalize_products
+    hands whole batches to a worker thread past NORMALIZE_THREAD_THRESHOLD;
+    iterative because a recursive walk over deeply nested input is itself the
+    stack overflow the depth cap exists to prevent, so a recursive
+    implementation of this check would be the bug it is checking for.
+    """
+    counts = {"nulCharacters": 0, "nonFiniteNumbers": 0, "oversizedNumbers": 0}
+    root: dict[str, Any] = {}
+    # (source container, the copy being built from it, that copy's depth,
+    #  counting the blob itself as 1)
+    stack: list[tuple[Any, Any, int]] = [(extras, root, 1)]
+
+    while stack:
+        source, target, depth = stack.pop()
+        pairs = source.items() if isinstance(source, dict) else enumerate(source)
+        for key, value in pairs:
+            if isinstance(key, str) and "\x00" in key:
+                counts["nulCharacters"] += key.count("\x00")
+                key = key.replace("\x00", "")
+
+            if isinstance(value, (dict, list)):
+                if depth + 1 > _EXTRAS_MAX_DEPTH:
+                    return None, counts
+                child: Any = {} if isinstance(value, dict) else []
+                stack.append((value, child, depth + 1))
+            elif isinstance(value, str) and "\x00" in value:
+                counts["nulCharacters"] += value.count("\x00")
+                child = value.replace("\x00", "")
+            elif isinstance(value, float) and not math.isfinite(value):
+                counts["nonFiniteNumbers"] += 1
+                child = None
+            elif isinstance(value, int) and not isinstance(value, bool) and _is_unstorable_int(value):
+                # The bool exclusion is not decorative: bool subclasses int,
+                # so without it True is measured as a number.
+                counts["oversizedNumbers"] += 1
+                child = None
+            else:
+                child = value
+
+            # A list is rebuilt by appending, which holds its order because
+            # the whole source container is walked in one pass here and only
+            # its children are deferred to the stack.
+            if isinstance(target, list):
+                target.append(child)
+            else:
+                target[key] = child
+
+    return root, counts
+
+
+def _build_extras(product: dict, asin: str, region: str) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """
+    Builds a product's audibleExtras blob and the record of anything withheld
+    from it.
+
+    Everything Audible sent at the top level that _REPRODUCED_KEYS does not
+    name goes in verbatim. That is the point: the key Audible invents next
+    month surfaces on its own, rather than vanishing between the fetch and
+    the response with nobody in a position to notice it was ever there. Two
+    of the keys that ride along today, social_media_images and
+    relationships[].url, are URLs; they are data, and nothing anywhere
+    fetches them.
+
+    Returns (None, record) when the blob is dropped whole -- None rather than
+    an empty dict, so the writer's merge can tell "Libex has nothing to say"
+    from "Audible sent nothing extra", the same tri-state _parse_plans keeps
+    for its own field. An empty record means nothing was withheld, and the
+    caller omits extrasWithheld entirely in that case.
+    """
+    extras = {k: v for k, v in product.items() if k not in _REPRODUCED_KEYS}
+    withheld: dict[str, Any] = {}
+
+    relationships = extras.get("relationships")
+    if isinstance(relationships, list):
+        kept, stripped = _strip_podcast_relationships(relationships)
+        if stripped:
+            extras["relationships"] = kept
+            withheld["relationships"] = stripped
+
+    sanitized, counts = _sanitize_for_jsonb(extras)
+    hits = {name: total for name, total in counts.items() if total}
+    if hits:
+        withheld[_WITHHELD_SANITIZED] = hits
+        _log_extras_incident(asin, region, _WITHHELD_SANITIZED)
+
+    if sanitized is None:
+        withheld["audibleExtras"] = _WITHHELD_DEPTH
+        _log_extras_incident(asin, region, _WITHHELD_DEPTH)
+        return None, withheld
+
+    try:
+        # allow_nan=False so anything non-finite that somehow survived above
+        # raises here and is recorded, instead of being written out as the
+        # Infinity token and becoming invalid JSON nothing would catch until
+        # a reader choked on it.
+        encoded = json.dumps(sanitized, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError):
+        withheld["audibleExtras"] = _WITHHELD_UNSERIALIZABLE
+        _log_extras_incident(asin, region, _WITHHELD_UNSERIALIZABLE)
+        return None, withheld
+
+    blob_bytes = len(encoded.encode("utf-8"))
+    if blob_bytes > _EXTRAS_MAX_BYTES:
+        withheld["audibleExtras"] = _WITHHELD_SIZE
+        _log_extras_incident(asin, region, _WITHHELD_SIZE, blob_bytes=blob_bytes)
+        return None, withheld
+
+    return sanitized, withheld
+
+
 def _normalize_product(product: dict, region: str) -> dict[str, Any]:
     """
     Normalizes a raw Audible product into Libex response format.
-    Field names match AudiMeta's BookDto exactly for drop-in compatibility.
+    Field names match AudiMeta's BookDto exactly for drop-in compatibility,
+    and everything past that DTO is additive.
+
+    audibleExtras carries every top-level key Audible sent that the fields
+    above it do not already reproduce, verbatim (see _REPRODUCED_KEYS and
+    _build_extras). Two things about it never relax. Nothing out of it is
+    ever hoisted into this dict -- no splat, no key added at runtime -- which
+    is what makes an upstream key called "asin" or "__proto__" structurally
+    unable to collide with a first-class field: it stays nested, and the
+    caller reads it there. And nothing in it is ever fetched, not to validate
+    it, not to check an image is still there, not from a script; it carries
+    product_images, social_media_images and relationships[].url, and those
+    are data, not inputs to a request.
+
+    extrasWithheld is a top-level key here, deliberately not one inside
+    audibleExtras, and is absent altogether from THIS dict when nothing was
+    withheld -- the response model carries it to the wire as null either way,
+    so a book object always has the key. Inside the blob it would be Libex's
+    own invention sitting in a namespace documented as verbatim Audible, and
+    it would collide with a real upstream key of that name the day Audible
+    ships one.
+
+    audibleExtras is None rather than {} when the blob was dropped whole: {}
+    would assert Audible sent nothing extra, where None says Libex has
+    nothing to offer and lets the writer's merge leave a stored blob alone.
+    Same tri-state and same reasoning as plans (see _parse_plans), though
+    the two are not merged the same way at the other end.
     """
-    asin = product.get("asin", "")
+    asin = _reproduce(product, "asin") or ""
     series_list = _parse_series(product, region)
 
-    content_type = product.get("content_type")
+    content_type = _reproduce(product, "content_type")
     is_podcast = content_type and content_type.lower() == "podcast"
 
-    return {
+    extras, withheld = _build_extras(product, asin, region)
+
+    book: dict[str, Any] = {
         "asin": asin,
-        "title": product.get("title"),
-        "subtitle": product.get("subtitle"),
-        "description": strip_html(product.get("merchandising_summary")),
-        "summary": strip_html(product.get("publisher_summary")),
+        "title": _reproduce(product, "title"),
+        "subtitle": _reproduce(product, "subtitle"),
+        "description": strip_html(_reproduce(product, "merchandising_summary")),
+        "summary": strip_html(_reproduce(product, "publisher_summary")),
         "region": region,
         "regions": [region],
-        "publisher": product.get("publisher_name"),
-        "copyright": product.get("copyright"),
-        "isbn": product.get("isbn"),
-        "language": product.get("language"),
+        "publisher": _reproduce(product, "publisher_name"),
+        "copyright": _reproduce(product, "copyright"),
+        "isbn": _reproduce(product, "isbn"),
+        "language": _reproduce(product, "language"),
+        # All three rating reads walk the same unguarded chain, and the two
+        # halves of it are at different depths: num_ratings sits inside
+        # overall_distribution beside average_rating, num_reviews sits
+        # directly on rating. Both confirmed against live products rather
+        # than taken from the fixtures, which carry neither -- us B08G9PRS1K
+        # returns rating.overall_distribution.num_ratings 312,915 and
+        # rating.num_reviews 48,002.
+        #
+        # A rating key present and explicitly null raises AttributeError out
+        # of this chain, and that raise is the less-data guard doing its job:
+        # it falls into the caller's broad except and down to the DB ladder,
+        # which still holds the numbers. A defensive .get on each step would
+        # turn a shrinkage signal into three silent Nones written over real
+        # stored values.
         "rating": product.get("rating", {}).get("overall_distribution", {}).get("average_rating"),
-        "bookFormat": product.get("format_type"),
+        "numRatings": product.get("rating", {}).get("overall_distribution", {}).get("num_ratings"),
+        "numReviews": product.get("rating", {}).get("num_reviews"),
+        "bookFormat": _reproduce(product, "format_type"),
         "releaseDate": _parse_release_date(product.get("release_date")),
         # Tri-state like isListenable/isBuyable/isVvab below -- see the
         # comment there for the full contract; a hard False here on a
@@ -416,18 +898,18 @@ def _normalize_product(product: dict, region: str) -> dict[str, Any]:
         # identical either way: a response that omits the key is not a
         # negative assertion, which is why the flag is tri-state rather
         # than defaulted at normalization time.
-        "explicit": product.get("is_adult_product"),
-        "hasPdf": product.get("is_pdf_url_available"),
-        "whisperSync": product.get("read_along_support"),
+        "explicit": _reproduce(product, "is_adult_product"),
+        "hasPdf": _reproduce(product, "is_pdf_url_available"),
+        "whisperSync": _reproduce(product, "read_along_support"),
         "imageUrl": _best_image(product.get("product_images", {})),
-        "lengthMinutes": product.get("runtime_length_min"),
+        "lengthMinutes": _reproduce(product, "runtime_length_min"),
         "link": _audible_link(asin, region),
         "contentType": content_type,
-        "contentDeliveryType": product.get("content_delivery_type"),
+        "contentDeliveryType": _reproduce(product, "content_delivery_type"),
         "episodeNumber": str(product.get("episode_number")) if is_podcast and product.get("episode_number") else None,
         "episodeType": product.get("episode_type") if is_podcast else None,
-        "sku": product.get("sku"),
-        "skuGroup": product.get("sku_lite"),
+        "sku": _reproduce(product, "sku"),
+        "skuGroup": _reproduce(product, "sku_lite"),
         # No default: True/False here would be Libex asserting an answer
         # Audible never gave. None means "Audible said nothing" and is what
         # lets the writer's tri-state merge (see _asserted_bool in writer.py)
@@ -435,17 +917,105 @@ def _normalize_product(product: dict, region: str) -> dict[str, Any]:
         # alone. isAvailable and isBuyable are both is_buyable -- AudiMeta's
         # own DTO derives them the same way (see _settle_flags below for
         # where None stops being a valid outward value).
-        "isListenable": product.get("is_listenable"),
-        "isAvailable": product.get("is_buyable"),
-        "isBuyable": product.get("is_buyable"),
-        "isVvab": product.get("is_vvab"),
+        "isListenable": _reproduce(product, "is_listenable"),
+        "isAvailable": _reproduce(product, "is_buyable"),
+        "isBuyable": _reproduce(product, "is_buyable"),
+        "isVvab": _reproduce(product, "is_vvab"),
         "plans": _parse_plans(product),
         "updatedAt": None,
         "authors": _parse_authors(product, region),
         "narrators": _parse_narrators(product),
         "genres": _parse_genres(product),
         "series": series_list,
+        "publicationName": _reproduce(product, "publication_name"),
+        # Read straight through rather than parsed. Audible already sends an
+        # ISO-8601 instant here ("2026-03-02T00:00:00Z"), unlike release_date,
+        # which is a bare date _parse_release_date has to give a timezone to.
+        #
+        # This one is both a field and a blob key on purpose: _filter_products
+        # reads publication_datetime for its own decision, which makes it
+        # partly consumed rather than reproduced, so it is not in
+        # _REPRODUCED_KEYS and appears in audibleExtras as well.
+        "publicationDatetime": product.get("publication_datetime"),
+        # Stored exactly as Audible sent it, markup and all. strip_html
+        # replaces a tag with nothing, so a paragraph break becomes no break
+        # at all and "...end.</p><p>Next..." reads as "...end.Next..." --
+        # paragraph structure destroyed in the one field whose whole job is
+        # the long description. This field is excluded from the blob, so this
+        # is the only copy of it there is.
+        "extendedProductDescription": _reproduce(product, "extended_product_description"),
+        "productState": _reproduce(product, "product_state"),
+        "audibleExtras": extras,
     }
+    if withheld:
+        book["extrasWithheld"] = withheld
+    return book
+
+
+# The region the probe below normalizes under. Deliberately not one of the
+# eleven: the probe's output is discarded, region never decides which keys
+# _normalize_product reads, and a real region sitting here would read as a
+# default that some later caller could inherit.
+_PROBE_REGION = "probe"
+
+
+def _verify_reproduced_keys_read() -> None:
+    """
+    Raises unless every key in _REPRODUCED_KEYS is actually read as a
+    first-class response field, established by normalizing one probe product
+    and recording which keys _normalize_product asked _reproduce for.
+
+    _reproduce guards the other direction, and that is the cheap mistake: a
+    field reading a key the set does not name leaves the value in the
+    response twice. This is the expensive one. A key the set names that
+    nothing reads is excluded from audibleExtras precisely because the set
+    names it, and reproduced in no field because nothing asks for it, so it
+    is dropped with nothing raising -- the silent loss the blob exists to end,
+    happening inside the mechanism built to prevent it. It is one forgotten
+    line away at all times: remove or rename a first-class field, leave its
+    key in the set, and the field and its blob entry disappear together.
+
+    Proved by running the real normalizer rather than by scanning this file
+    for _reproduce calls. A source scan is only ever as good as the spellings
+    it anticipates: the call shape it fails to recognise reads as an unused
+    key and raises against a normalizer that is in fact correct, and a key
+    genuinely read through a shape the scan does not model reads as covered
+    when it is not. Running the thing removes the question -- nothing about
+    how a call is written can fool it.
+
+    Two limits, stated rather than papered over. It establishes that a key is
+    read, not that the value reaches the response, so a read whose result was
+    then discarded would still pass. And the probe product is empty, so a key
+    reproduced only inside a branch an empty product does not take is
+    reported as unread -- deliberately, because a conditionally reproduced
+    key is dropped for every product that misses that branch, which is the
+    same defect in a narrower window. An empty product is also the weakest
+    input this normalizer will ever be handed, Audible omitting keys being
+    ordinary; if normalizing one raises, that raise is a defect in its own
+    right and is left to propagate rather than caught here.
+
+    Runs at import, so the mismatch stops a process instead of waiting for a
+    request: this module cannot be imported, in a test run or a worker start
+    alike, while a key in the set is reproduced by nothing.
+    """
+    global _reproduced_keys_read
+    _reproduced_keys_read = set()
+    try:
+        _normalize_product({}, _PROBE_REGION)
+        read = _reproduced_keys_read
+    finally:
+        _reproduced_keys_read = None
+
+    unread = sorted(_REPRODUCED_KEYS - read)
+    if unread:
+        raise RuntimeError(
+            "_REPRODUCED_KEYS names upstream keys that no first-class response "
+            "field reads, so each is withheld from audibleExtras and reproduced "
+            f"nowhere: {', '.join(unread)}"
+        )
+
+
+_verify_reproduced_keys_read()
 
 
 # Settled values for the seven tri-state flags above, matched to the
@@ -531,14 +1101,24 @@ async def _normalize_products(products: list[dict], region: str) -> list[dict[st
     Normalizes a batch of raw Audible products, offloading the whole batch
     to a worker thread when it's large enough to be worth the hop (see
     NORMALIZE_THREAD_THRESHOLD). One thread hop for the entire batch, never
-    one per product -- per-product hops would each pay the hop's own fixed
-    cost on top of the ~0.2ms of work being moved, which loses badly at the
-    hundreds-to-low-thousands sizes this exists for.
+    one per product -- a hop costs ~0.2ms whatever it carries, against
+    ~0.4-3ms of work per product depending on that product's size, so paying
+    it per product would add hundreds of milliseconds of pure overhead across
+    the hundreds-to-low-thousands batches this exists for.
 
     _normalize_product touches only its own arguments and pure helpers
-    (strip_html, strip_image_size_suffix, datetime parsing) -- no DB session,
-    no cache, no shared mutable state, and no read of any ContextVar, so
-    running it on another thread carries no correctness risk. In particular
+    (strip_html, strip_image_size_suffix, datetime parsing, the extras walk in
+    _sanitize_for_jsonb) -- no DB session, no cache, and no read of any
+    ContextVar, so running it on another thread carries no correctness risk.
+    Two pieces of shared mutable state are in reach and neither changes that.
+    The counters behind the windowed warnings (_log_unreadable_plans,
+    _log_extras_incident) decide only how often a warning prints, never what
+    any product normalizes to, so a lost increment across concurrent batches
+    costs an off-by-a-few occurrence count and nothing else. The
+    _reproduced_keys_read recorder every _reproduce call checks is written
+    only by _verify_reproduced_keys_read, at import, long before any batch
+    exists: every read from a worker thread sees the None it is left at, and
+    no batch ever writes it. In particular
     it never reads the author_books_concurrency ContextVar in client.py,
     which wouldn't propagate into a to_thread worker the way a normal await
     does -- moot here since nothing in this path looks at it.
@@ -626,14 +1206,25 @@ def _filter_products(products: list[dict]) -> list[dict]:
     The constant and this clause appear in 74a79a3, the project's earliest
     substantive commit -- the two commits before it are a bare license/
     readme and empty scaffolding -- whose own README carries the AudiMeta
-    drop-in-replacement language, so the clause is more likely inherited
-    from that source than derived from an observed Audible response, though
-    the AudiMeta service that could confirm it is gone. 1,600 products is a
-    sample, not the catalogue: strong enough that this is no longer an
-    unexamined, possibly-wrong inheritance, not strong enough to delete an
-    original guard on the strength of its absence. The clause stays. What
-    would justify removing it is an actual product observed carrying the
-    sentinel -- so far there has never been one.
+    drop-in-replacement language, so where the clause came from is not
+    recorded and the AudiMeta service that could confirm it is gone.
+
+    What the clause catches is real, and asking Audible for one directly is
+    what shows it. us B0182NWM9I and us B009CFOEGK each answer 200 carrying
+    publication_datetime exactly 2200-01-01T00:00:00Z, a title borrowed from
+    a real franchise ("Harry Potter", "The Lord of the Rings"), publisher_name
+    "ZZZ - Series Advisor Placeholder", product_state
+    NOT_AVAILABLE_FOR_PURCHASE, is_buyable and is_listenable both false, a
+    zero runtime and no ISBN -- placeholder catalogue entries standing in for
+    a series, not titles anyone can listen to. Dropping them is the right
+    answer, so the clause stays and the records it removes stay removed.
+
+    The 1,600-product sample above is not in tension with that. Every call in
+    it went through a sort or a keyword search, and what those surface is the
+    sellable catalogue; a zero count there says a placeholder does not show up
+    in ordinary browse results, not that Audible has none to send. Both
+    confirmations above came from asking for one ASIN by name, which is
+    exactly the path a caller takes and the sample never did.
     """
     return [
         p for p in products

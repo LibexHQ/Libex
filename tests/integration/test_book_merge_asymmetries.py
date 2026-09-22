@@ -34,6 +34,7 @@ later comes back null.
 
 # Standard library
 import time
+from datetime import datetime, timezone
 
 # Third party
 import pytest
@@ -42,7 +43,7 @@ from sqlalchemy import select
 # Local
 from app.db.models import Book
 from app.services.audible.books import _normalize_product
-from app.services.db.writer import upsert_book, write_books
+from app.services.db.writer import _BOOK_UPSERT, _book_params, upsert_book, write_books
 
 
 REGION = "us"
@@ -478,6 +479,165 @@ async def test_a_response_with_an_empty_plans_array_replaces_the_stored_one(db_s
 
 
 # ============================================================
+# audible_extras AND extras_withheld — MERGED KEY BY KEY
+# ============================================================
+# The only two columns on the row whose merge combines its two inputs
+# instead of choosing between them, and the only ones whose rule cannot be
+# checked by a sweep that proves a thin response empties nothing. A merge
+# that took the incoming blob whole passes every such sweep: a NULL incoming
+# blob is not a thin blob, so the arm the sweeps exercise is the one arm
+# that was never in question.
+#
+# Each of the three remaining arms is exercised here on the value it
+# produces, because they are only distinguishable by what comes back.
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_later_blob_adds_its_keys_to_the_stored_one(db_session):
+    """Two responses carrying different keys leave a row holding both.
+
+    This is what the column is for. Audible answers a different set of
+    top-level keys per response group -- the same ASIN returns a wide blob
+    while it is purchasable and a much narrower one once it is not -- so a
+    merge that chose between the two blobs would discard whichever set the
+    latest fetch did not happen to carry, and no later fetch would bring it
+    back.
+    """
+    await upsert_book(db_session, _book("B0BLOB00001", audibleExtras={"first_key": "first"}))
+
+    await upsert_book(db_session, _book("B0BLOB00001", audibleExtras={"second_key": "second"}))
+
+    db_session.expire_all()
+    assert (await _stored(db_session, "B0BLOB00001")).audible_extras == {
+        "first_key": "first",
+        "second_key": "second",
+    }
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_blob_the_stored_one_already_holds_changes_nothing(db_session):
+    """An incoming blob the stored one already contains leaves it exactly as
+    it was, down a level as well as at the top.
+
+    Containment in jsonb is not key-level equality: a stored array contains
+    an incoming array that holds a subset of its entries. So the repeat
+    fetch below is contained by what is stored even though its
+    relationships array is one entry long, and the whole three-entry array
+    stands. Concatenation alone would have replaced it with the one entry,
+    because the top-level keys are merged and whatever hangs under a key is
+    not -- the shrinkage would happen one level down, where nothing else on
+    the row is watching.
+
+    Every ordinary refresh of an unchanged book takes this path, which is
+    the other half of why it is worth a test: it is the common case, not
+    the edge one.
+    """
+    series_entry = {"asin": "B0SERIES01", "relationship_type": "series", "sort": "1"}
+    component_entries = [
+        {"asin": "B0PART0001", "relationship_type": "component", "sort": "1"},
+        {"asin": "B0PART0002", "relationship_type": "component", "sort": "2"},
+    ]
+    stored = {
+        "relationships": [series_entry, *component_entries],
+        "platinum_keywords": ["fantasy", "epic"],
+    }
+    await upsert_book(db_session, _book("B0BLOB00002", audibleExtras=stored))
+
+    await upsert_book(
+        db_session, _book("B0BLOB00002", audibleExtras={"relationships": [series_entry]})
+    )
+
+    db_session.expire_all()
+    assert (await _stored(db_session, "B0BLOB00002")).audible_extras == stored
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_changed_value_under_a_key_replaces_what_was_under_it(db_session):
+    """The accepted limit of the merge, pinned so it is a known cost rather
+    than a surprise.
+
+    The combination is one level deep. A key whose incoming value is
+    neither absent nor already contained replaces what was stored under it
+    whole, so an object one level down can lose entries even though no
+    top-level key can. Postgres has no deep merge of its own and writing
+    one would be a substantial piece of machinery, so this is the shape the
+    column has -- and a consumer reading a nested object out of the blob
+    has to know it is one response's version of it rather than the union
+    every top-level key enjoys.
+
+    Asserted rather than left implicit because the day someone builds the
+    deep merge, this test failing is how they learn it worked.
+    """
+    await upsert_book(
+        db_session,
+        _book("B0BLOB00003", audibleExtras={"product_images": {"500": "a", "1000": "b"}}),
+    )
+
+    await upsert_book(
+        db_session,
+        _book("B0BLOB00003", audibleExtras={"product_images": {"500": "c"}}),
+    )
+
+    db_session.expire_all()
+    assert (await _stored(db_session, "B0BLOB00003")).audible_extras == {
+        "product_images": {"500": "c"}
+    }
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_second_withholding_does_not_erase_the_first(db_session):
+    """Two responses that each withheld something different leave a row
+    recording both.
+
+    extras_withheld has several independent producers -- the podcast strip
+    writes relationships, the jsonb sanitizer writes sanitized, the size,
+    depth and encoding checks write audibleExtras -- and a given response
+    fires whichever of them its own content triggers. Choosing between two
+    records would therefore make the column mean "whatever the most recent
+    fetch that withheld anything happened to withhold", so the podcast
+    episode count below would be gone the moment a later fetch stripped a
+    single stray character, while the relationships key it describes is
+    still sitting in the blob beside it. The two columns are read as one
+    picture and cannot be unless they span the same responses.
+
+    Built through the real normalizer, so what is being merged is what the
+    producers actually emit rather than a hand-written guess at their
+    shape -- a change to either record's spelling has to fail here.
+    """
+    podcast = _normalize_product(
+        {
+            "asin": "B0BLOB00004",
+            "title": "A Podcast",
+            "content_type": "Podcast",
+            "relationships": [
+                {"asin": "B0EPISODE1", "relationship_type": "episode"},
+                {"asin": "B0SEASON01", "relationship_type": "season"},
+            ],
+        },
+        REGION,
+    )
+    with_a_nul = _normalize_product(
+        {"asin": "B0BLOB00004", "title": "A Podcast", "odd_field": "before\x00after"},
+        REGION,
+    )
+    assert podcast["extrasWithheld"] == {"relationships": {"episode": 1, "season": 1}}
+    assert with_a_nul["extrasWithheld"] == {"sanitized": {"nulCharacters": 1}}
+
+    await upsert_book(db_session, podcast)
+    await upsert_book(db_session, with_a_nul)
+
+    db_session.expire_all()
+    assert (await _stored(db_session, "B0BLOB00004")).extras_withheld == {
+        "relationships": {"episode": 1, "season": 1},
+        "sanitized": {"nulCharacters": 1},
+    }
+
+
+# ============================================================
 # EVERY COLUMN AT ONCE — THE BOUND-NULL TRAP
 # ============================================================
 
@@ -492,6 +652,16 @@ _RICH_BOOK = {
     "episodeNumber": "3", "episodeType": "full", "sku": "SKU123", "skuGroup": "SG123",
     "isListenable": False, "isBuyable": False, "isVvab": True,
     "plans": ["US Minerva"],
+    "numRatings": 1234, "numReviews": 56,
+    "publicationName": "A Publication",
+    "publicationDatetime": "2020-01-02T03:04:05Z",
+    "extendedProductDescription": "A much longer extended product description",
+    "productState": "AVAILABLE",
+    "audibleExtras": {"relationships": [{"relationship_type": "series"}], "isbn_extra": "z"},
+    # The counts the podcast strip recorded for the sampled show B08JJND27B,
+    # where the season is counted separately from the episodes rather than
+    # being one of them.
+    "extrasWithheld": {"relationships": {"episode": 4412, "season": 1}},
 }
 
 _MERGED_COLUMNS = [
@@ -500,7 +670,90 @@ _MERGED_COLUMNS = [
     "book_format", "content_type", "content_delivery_type", "episode_number",
     "episode_type", "sku", "sku_group", "is_listenable", "is_buyable", "is_vvab",
     "explicit", "whisper_sync", "has_pdf", "plans",
+    "num_ratings", "num_reviews", "publication_name", "publication_datetime",
+    "extended_product_description", "product_state", "audible_extras",
+    "extras_withheld",
 ]
+
+# The one column the upsert merges that the sweeps deliberately leave out.
+# It is the column that has to move on a second write, so including it in a
+# "nothing was emptied" comparison would assert the opposite of what
+# test_updated_at_does_move_on_a_later_write holds.
+_MERGED_BUT_NOT_SWEPT = {"updated_at"}
+
+
+def _assert_every_merged_column_is_swept():
+    """
+    _MERGED_COLUMNS names every column the upsert actually merges.
+
+    The two guards below check the fixture and the stored row against this
+    list. Nothing checked the list itself, and that is the gap a widening
+    walks into from the other side: columns were added to the statement and
+    not to the list, and neither guard can see a column it was never asked
+    about. Both sweeps stayed green over a shrinking fraction of the row.
+
+    Read from the compiled ON CONFLICT DO UPDATE clause rather than from a
+    second hand-written list, so what is compared against is the statement
+    that runs. tests/test_book_shape_parity.py reads the same attribute and
+    records why depending on it is acceptable.
+    """
+    merged = {
+        name for name, _ in _BOOK_UPSERT._post_values_clause.update_values_to_set
+    }
+    unswept = sorted(merged - set(_MERGED_COLUMNS) - _MERGED_BUT_NOT_SWEPT)
+    assert unswept == [], (
+        f"The upsert merges {unswept}, which the sweeps below never look at. "
+        "Add them to _MERGED_COLUMNS with a value in _RICH_BOOK, or to "
+        "_MERGED_BUT_NOT_SWEPT with the reason."
+    )
+
+    unmerged = sorted(set(_MERGED_COLUMNS) - merged)
+    assert unmerged == [], (
+        f"_MERGED_COLUMNS names {unmerged}, which the upsert does not merge "
+        "at all, so sweeping them proves nothing about the merge rules."
+    )
+
+
+def _assert_the_fixture_supplies_every_merged_column():
+    """
+    _RICH_BOOK actually answers every column the two sweeps below compare.
+
+    Without this the sweeps have a silent hole, and it is the one a widening
+    of the row walks straight into: `rich` is produced by the same upsert
+    path as `thin`, so a column added to _MERGED_COLUMNS but never added to
+    _RICH_BOOK is NULL on both sides and compares equal. The sweep goes
+    green while covering nothing at all for that column.
+
+    Checked through _book_params rather than against a second hand-written
+    field-name list, so this reads the writer's own response-key-to-column
+    mapping. A column whose bind is None is one the fixture never answered,
+    whatever it is spelled in the response.
+    """
+    bound = _book_params(_book("B0FIXTURE01", **_RICH_BOOK), datetime.now(timezone.utc))
+    unanswered = sorted(c for c in _MERGED_COLUMNS if bound.get(c) is None)
+    assert unanswered == [], (
+        f"_RICH_BOOK supplies nothing for {unanswered}, so the sweeps below "
+        "would compare NULL against NULL and pass without testing them."
+    )
+
+
+async def _assert_every_merged_column_is_populated(session, asin):
+    """
+    The stored row answers every merged column before anything is compared
+    against it.
+
+    The other half of the same hole: a column bound by the fixture but never
+    bound in the upsert statement stores NULL, reads NULL on both the rich
+    and the thin side, and compares equal. Only a positive check on the rich
+    row tells "survived the thin response" from "was never written".
+    """
+    stored = await _stored(session, asin)
+    empty = sorted(c for c in _MERGED_COLUMNS if getattr(stored, c) is None)
+    assert empty == [], (
+        f"{empty} are NULL on the rich row, so comparing it against the thin "
+        "row proves nothing about them. Either the upsert never binds them or "
+        "_RICH_BOOK never answers them."
+    )
 
 
 @pytest.mark.integration
@@ -518,9 +771,19 @@ async def test_no_column_is_emptied_by_a_response_that_omits_everything(db_sessi
     stored array, and empties the column on every thin response. It was found
     by a test like this one and would not have been found by reading, so the
     check is kept over all columns rather than the one that failed.
+
+    The three guards run first because thin == rich is satisfied by two
+    columns that are both NULL just as readily as by two that both hold the
+    rich value, and by a column this sweep never names at all -- see each
+    guard for the way a widened row reaches those states without anything
+    failing.
     """
+    _assert_every_merged_column_is_swept()
+    _assert_the_fixture_supplies_every_merged_column()
+
     await upsert_book(db_session, _book("B0EVERY0001", **_RICH_BOOK))
     db_session.expire_all()
+    await _assert_every_merged_column_is_populated(db_session, "B0EVERY0001")
     rich = {c: getattr(await _stored(db_session, "B0EVERY0001"), c) for c in _MERGED_COLUMNS}
 
     await upsert_book(db_session, {"asin": "B0EVERY0001", "region": REGION})
@@ -540,9 +803,15 @@ async def test_no_column_is_emptied_by_a_response_that_sends_explicit_nulls(db_s
     alike — but the boolean merge deliberately does not use dict.get's default,
     and this is the shape that used to make it disagree with itself. A field
     Audible sends as null is Audible declining to answer, not answering false.
+
+    Same three guards as the sweep above, for the same reason.
     """
+    _assert_every_merged_column_is_swept()
+    _assert_the_fixture_supplies_every_merged_column()
+
     await upsert_book(db_session, _book("B0EVERY0002", **_RICH_BOOK))
     db_session.expire_all()
+    await _assert_every_merged_column_is_populated(db_session, "B0EVERY0002")
     rich = {c: getattr(await _stored(db_session, "B0EVERY0002"), c) for c in _MERGED_COLUMNS}
 
     await upsert_book(

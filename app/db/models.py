@@ -110,6 +110,69 @@ class Book(Base):
     is_buyable: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_vvab: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     plans: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    num_ratings: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    num_reviews: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    publication_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    publication_datetime: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    extended_product_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Text rather than a Postgres ENUM or a varchar(n), and the difference is
+    # what happens on a value nobody anticipated. An enum needs ALTER TYPE ADD
+    # VALUE before it will accept one, so until that migration ships the whole
+    # book write fails; varchar(n) raises 22001 and fails the row the same way.
+    # Text and varchar(n) store identically here, so a cap would buy nothing
+    # but the failure mode. Three values seen so far -- AVAILABLE,
+    # AVAILABLE_FOR_PREORDER, NOT_AVAILABLE_FOR_PURCHASE -- and Audible is
+    # free to invent a fourth without telling anyone.
+    product_state: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Three states, and all three are meaningful. NULL means no response has
+    # written this column since the migration added it, '{}' means every
+    # response that has written it sent nothing beyond the fields reproduced
+    # above it, and a populated object holds Audible's own keys verbatim,
+    # under Audible's own names. The first of those doubles as the progress
+    # signal an operator reads as the corpus fills in over a refresh pass --
+    # nothing selects on it automatically -- which is why the column has no
+    # default: any default at all, DEFAULT '{}'::jsonb included, would stamp
+    # every existing row as "asked and answered empty" before anything had
+    # asked.
+    #
+    # A populated blob is an accumulation rather than one response's
+    # remainder. Each write unions its keys in, so the blob spans every
+    # response that has written the row -- and because the row keys on asin
+    # alone, while region records whichever marketplace wrote it first, that
+    # span crosses marketplaces whenever more than one returns the same ASIN.
+    # Keys are never removed either. So a key sitting here was not
+    # necessarily sent by the most recent response, or by the marketplace
+    # named in region, and the blob is not a snapshot of what Audible would
+    # say now. _extras_union in the writer carries why it is merged that way,
+    # and the limits of that merge.
+    #
+    # The blob is large enough to be toasted, so reading it is a detoast per
+    # row -- about 61 microseconds, which is the intrinsic cost of carrying
+    # the field rather than anything a query can avoid. It is invisible on a
+    # single book and decisive across the table: an aggregate over this
+    # column at 1.8M rows measures around 110 seconds, well past the 30s
+    # statement_timeout every request connection carries. Anything that has
+    # to walk this column walks it in cursor-sized chunks.
+    audible_extras: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # What has been left out of audible_extras, in Libex's own vocabulary
+    # rather than Audible's. Kept out of the blob itself so it cannot collide
+    # with an upstream key of the same name.
+    #
+    # One entry per kind of withholding, each holding what the most recent
+    # response to hit that kind left behind -- unless that response's account
+    # was already contained in the stored one, which stands instead, so a
+    # fuller entry is not traded for a thinner later one. Unioned across every
+    # response that has withheld anything from this row. Never one response's
+    # account, and never cleared by a response that withheld nothing. It also merges
+    # on its own terms rather than in step with the blob beside it: a
+    # response whose extras were dropped whole records the drop here while
+    # the stored blob stands untouched, so a record does not imply the blob
+    # changed on the same write. Nor is it an inventory of what is missing
+    # from the blob as it stands -- an entry outlives a later response
+    # supplying the key it names. Read it as evidence that something was
+    # dropped at some point. The extras_withheld merge in the writer sets out
+    # why the column has that shape.
+    extras_withheld: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     chapters_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

@@ -10,6 +10,20 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.23.1]
+
+### Security
+- **The author-books page-walk no longer sends a constant `page_load_id`
+  value inside the continuation token it mints for jumping straight to an
+  arbitrary page.** The field is part of the token Audible's own client
+  sends, but a real captured value, a fabricated one, and omitting the
+  field entirely all returned byte-identical pages, so it carried no
+  information the endpoint used — only a fixed string, identical on every
+  request from every exit, sitting inside a base64 blob where nothing else
+  distinguishes one caller's traffic from another's. It is now omitted
+  outright rather than filled with a constant. Nothing about which pages
+  are returned, how many, or in what order changes.
+
 ## [1.23.0]
 
 ### Added

@@ -73,13 +73,6 @@ _SCREENS_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9+/=_-]+")
 # walking page N first.
 SCREENS_PAGE_SIZE = 20
 
-# The page_load_id field inside a minted continuation token (see
-# _mint_screen_token). Verified live: a real captured value, a fabricated
-# one, and omitting the field entirely all returned byte-identical pages --
-# there is nothing to harvest from a real response, so this is a fixed
-# constant rather than anything scraped off page 1.
-_SCREENS_TOKEN_PAGE_LOAD_ID = "libex-direct-page"
-
 # Bounded concurrency for the screens walk's page 2..N fan-out (see
 # _fanout_screen_pages). Too low reintroduces the exact problem the fan-out
 # exists to fix: the author's underlying list drifts (a live probe of the
@@ -446,19 +439,20 @@ def _mint_screen_token(page_num: int) -> str:
     real captured token, base64-decoded, is just
     {"scheduling_info": {"page_load_id": "...", "slot": "center-10",
     "version": "1"}, "pagination_info": {"page_num": "<N>"}}.
-    page_load_id is completely ignored by the endpoint -- a real captured
-    value, a fabricated one, and omitting the field entirely all returned
-    byte-identical pages -- so a fixed constant is used here rather than
-    anything harvested from a response. slot must be present and must be
-    the literal string "center-10": omitting it 400s, a garbage value
-    404s. version is optional and omitted here (confirmed live to change
-    nothing). page_num is a STRING in the real payloads, matched here
-    rather than an int, and the JSON carries no whitespace, matching what
-    Audible's own client sends.
+    page_load_id is omitted here and must stay omitted. It is ignored by
+    the endpoint -- a real captured value, a fabricated one, and omitting
+    the field entirely all returned byte-identical pages -- so any value
+    put there buys nothing, while costing the one thing base64 does not
+    hide: a constant string in outbound traffic, identical on every
+    request from every exit, which is what a fingerprint is. slot must be
+    present and must be the literal string "center-10": omitting it 400s,
+    a garbage value 404s. version is optional and omitted here (confirmed
+    live to change nothing). page_num is a STRING in the real payloads,
+    matched here rather than an int, and the JSON carries no whitespace,
+    matching what Audible's own client sends.
     """
     payload = {
         "scheduling_info": {
-            "page_load_id": _SCREENS_TOKEN_PAGE_LOAD_ID,
             "slot": "center-10",
         },
         "pagination_info": {"page_num": str(page_num)},

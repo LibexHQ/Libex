@@ -1713,8 +1713,10 @@ def test_mint_screen_token_exact_shape():
     with page_num as a STRING and slot as the literal "center-10" -- an
     omitted slot 400s, a wrong value 404s, and neither is derivable from
     the code without the referenced live investigation, so this is pinned
-    as a literal rather than inferred from behavior."""
-    from app.services.audible.authors.screens import _mint_screen_token, _SCREENS_TOKEN_PAGE_LOAD_ID
+    as a literal rather than inferred from behavior. The equality check
+    also pins page_load_id's absence: the endpoint ignores it, so anything
+    sent there would be a constant outbound string and nothing else."""
+    from app.services.audible.authors.screens import _mint_screen_token
 
     token = _mint_screen_token(5)
     raw = base64.b64decode(token)
@@ -1723,12 +1725,12 @@ def test_mint_screen_token_exact_shape():
     payload = json.loads(raw)
     assert payload == {
         "scheduling_info": {
-            "page_load_id": _SCREENS_TOKEN_PAGE_LOAD_ID,
             "slot": "center-10",
         },
         "pagination_info": {"page_num": "5"},
     }
     assert isinstance(payload["pagination_info"]["page_num"], str)
+    assert b"page_load_id" not in raw
 
 
 def test_mint_screen_token_page_num_stringified_not_left_as_int():

@@ -177,7 +177,7 @@ def get_region_headers(region: str) -> dict[str, str]:
 # largest figure measured clean.
 #
 # THE CAVEAT THAT LIMITS WHAT THAT BUYS: the ladder ran on the DIRECT path.
-# Production reaches Audible through the AirVPN proxy, whose exit IP is
+# Production reaches Audible through a VPN proxy, whose exit IP is
 # shared with strangers and whose own headroom is unmeasured. 250 is a real
 # number on a real path -- just not the path that runs.
 #

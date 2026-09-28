@@ -11,16 +11,25 @@ decision -- there is no separate flag.
 RUN IT (its own container, its own dedicated exit -- AUDIBLE_PROXY_URL must
 name it explicitly; the run refuses to start unless its hostname contains
 "seeder", see _verify_dedicated_proxy). docker-compose.seeder.yml is the
-canonical way to run this: its own Portainer stack, its own VPN exit, and
-its own DATABASE_URL, which reaches Postgres at libex-postgres:5432 over
-libex-db, the network the API stack creates and this stack joins as external.
+canonical way to run this: its own Portainer stack, its own bundled VPN
+sidecar (libex-seeder-vpn, replaceable), and its own DATABASE_URL, which
+reaches Postgres at libex-postgres:5432 over libex-db, the network the API
+stack creates and this stack joins as external. The stack sets
+SEEDER_PROXY_URL, and the compose file maps that onto this container's
+AUDIBLE_PROXY_URL -- the two names differ because SEEDER_PROXY_URL is what
+an operator configures per stack, while AUDIBLE_PROXY_URL is the name this
+script and app.services.audible actually read.
 
     docker compose -f docker-compose.seeder.yml run --rm libex-seeder \\
       python -m scripts.seed --once
 
 --once runs a single supervised cycle of each worker then exits, instead of
-looping forever -- use it for a supervised, watch-it invocation; the compose
-file's own `command:` runs the forever loop.
+looping forever -- use it for a supervised, watch-it invocation. The compose
+file's own `command:` runs the forever loop instead, deliberately: the stack
+also sets `restart: unless-stopped`, and a crashed or restarted --once run
+would exit cleanly and be relaunched immediately with none of the pacing a
+full interval sleep provides between cycles -- the forever loop keeps that
+pacing intact across restarts, --once does not.
 
 Stop the long-running form with `docker stop libex-seeder` (or
 `docker compose -f docker-compose.seeder.yml stop`) -- SIGTERM cancels both

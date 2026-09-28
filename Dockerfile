@@ -82,7 +82,7 @@ RUN sh scripts/fetch_docs_assets.sh
 
 # /app/logs and /backup-spool are the two paths the image expects to be
 # writable. /backup-spool is created here, owned by the runtime user, so the
-# named volume docker-compose.yml mounts over it inherits that ownership:
+# named volume docker-compose.backup.yml mounts over it inherits that ownership:
 # Docker seeds a fresh named volume from whatever is at the mount point in the
 # image, permissions included (measured -- an image directory owned by uid 1000
 # produces a volume owned by uid 1000). Without the directory here the volume

@@ -1,36 +1,19 @@
-# The seeder, as a Portainer stack of its own -- a separate Compose project,
-# never combined with docker-compose.yml by `-f`. Deploy it after the API
-# stack: both run `alembic upgrade head` on start, nothing orders them across
-# stacks, and the API stack is what creates the libex-db network below.
-#
-# Required in this stack's environment, no defaults: DB_PASSWORD, SEEDER_PROXY_URL.
-
-# pinned so this file gets its own project, not `libex` shared with docker-compose.yml.
+# Seeder stack. Deploy after docker-compose.yml.
 name: libex-seeder
 
 services:
   libex-seeder:
-    # the API's image: scripts/seed.py imports app/services/seeder.py.
     image: ghcr.io/libexhq/libex:latest
     container_name: libex-seeder
-    # the forever loop, not --once: unless-stopped would restart --once's clean
-    # exit immediately, running cycles with none of SEEDER_INTERVAL_HOURS' pacing.
+    # the forever loop, not --once.
     command: ["python", "-m", "scripts.seed"]
     restart: unless-stopped
     environment:
-      # `postgres` does resolve across projects on libex-db, but it is generic: a
-      # postgres service in this stack would answer to it too, and dns round-robins
-      # the two. libex-postgres is a container_name, which docker keeps unique.
       - DATABASE_URL=postgresql+asyncpg://${DB_USER:-libex}:${DB_PASSWORD:?set DB_PASSWORD in this stack's environment -- the same value the API stack uses}@libex-postgres:5432/${DB_NAME:-libex}
-      # AUDIBLE_PROXY_URL is the name the client reads; the host-side name is
-      # SEEDER_PROXY_URL so a pasted API stack environment cannot send seeder
-      # traffic out by the exit the public API answers on.
-      - AUDIBLE_PROXY_URL=${SEEDER_PROXY_URL:?set SEEDER_PROXY_URL to this stack's own VPN exit -- its hostname must contain "seeder" or scripts/seed.py refuses to start}
-      # one cache table, shared with the API, so one TTL. match the API stack.
+      # required: this stack's own VPN exit.
+      - AUDIBLE_PROXY_URL=${SEEDER_PROXY_URL:?set SEEDER_PROXY_URL to this stack's VPN proxy, e.g. http://libex-seeder-vpn:8888 -- its hostname must contain "seeder"}
+      # one cache table: match the API stack.
       - CACHE_TTL=${CACHE_TTL:-86400}
-      # the defaults below repeat app/core/config.py: unset interpolates to an
-      # empty string that overrides the compiled default rather than falling
-      # back to it, and a blank SEEDER_REGIONS walks no regions at all.
       - SEEDER_INTERVAL_HOURS=${SEEDER_INTERVAL_HOURS:-24}
       - SEEDER_REQUEST_DELAY=${SEEDER_REQUEST_DELAY:-1.0}
       - SEEDER_REGIONS=${SEEDER_REGIONS:-us}
@@ -40,31 +23,53 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - AXIOM_TOKEN=${AXIOM_TOKEN:-}
       - AXIOM_DATASET=${AXIOM_DATASET:-libex}
-      # no WEB_CONCURRENCY, SEED_SECRET, MIGRATION_* or PORT: this serves nothing.
-    # ten seconds above scripts/seed.py's 300s DRAIN_TIMEOUT_SECONDS, which it
-    # spends letting queued writes land; the default 10s grace SIGKILLs mid-drain.
+    volumes:
+      - ${LOGS_PATH:-./logs}:/app/logs
+    # above the 300s write drain.
     stop_grace_period: 310s
-    # unmeasured guard, interpolated so an OOM loop is fixable without a rebuild.
     mem_limit: ${SEEDER_MEM_LIMIT:-1g}
-    # json-file keeps everything by default, and of the three containers this is
-    # the one that never stops talking -- an unattended catalogue walk logging
-    # per request, on a loop, with no traffic pattern to go quiet with. Same
-    # 10m x 5 as the API stack's two services; one log policy across both stacks.
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "5"
-    # default listed explicitly: naming any network drops the implicit one, and
-    # this stack's own VPN sidecar lives there.
     networks:
-      - default
+      - libex-seeder-egress
       - libex-db
 
+  # example exit; replace or remove.
+  libex-seeder-vpn:
+    image: qmcgaw/gluetun:v3
+    container_name: libex-seeder-vpn
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - VPN_SERVICE_PROVIDER=custom
+      - VPN_TYPE=wireguard
+      - WIREGUARD_PRIVATE_KEY=${SEEDER_WG_PRIVATE_KEY:-}
+      - WIREGUARD_ADDRESSES=${SEEDER_WG_ADDRESS:-}
+      - WIREGUARD_ENDPOINT_IP=${SEEDER_WG_ENDPOINT_IP:-}
+      - WIREGUARD_ENDPOINT_PORT=${SEEDER_WG_ENDPOINT_PORT:-}
+      - WIREGUARD_PUBLIC_KEY=${SEEDER_WG_PUBLIC_KEY:-}
+      - WIREGUARD_PRESHARED_KEY=${SEEDER_WG_PRESHARED_KEY:-}
+      - HTTPPROXY=on
+      - HTTPPROXY_LOG=on
+    # egress only. never publish 8888.
+    networks:
+      - libex-seeder-egress
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
 networks:
-  # created by the API stack; this one joins it and never creates or removes it.
-  # created by hand it comes out unlabelled, and the API stack then rejects it
-  # ("incorrect label com.docker.compose.network"): `docker network rm libex-db`.
+  # created by docker-compose.yml.
   libex-db:
     name: libex-db
     external: true
+  # pinned: a separate VPN stack joins it by name.
+  libex-seeder-egress:
+    name: libex-seeder-egress
+    driver: bridge

@@ -37,55 +37,75 @@ therefore reason about BOTH files -- docker-compose.yml's libex service and
 docker-compose.seeder.yml's libex-seeder service -- not one file alone, since
 a setting or a knob can legitimately live in either.
 
-libex-backup is the third service running Libex's own image, and unlike the
-seeder it lives in docker-compose.yml beside libex rather than in a stack of
-its own -- it runs `python -m scripts.backup` against the same database the
-API serves, so it comes up and goes down with that stack. Every direction
-below that already reasoned about two services now reasons about three. The
-count matters more than it looks: each of the three additions below was a
-line that read as complete while silently covering two of three services,
-which is the same union-blindness this file's directions were written to
-name. A service added to this repo is not covered by anything here until it
-is named here.
+libex-backup is the third service running Libex's own image. It used to live
+in docker-compose.yml beside libex; the public-stacks split moved it out into
+`docker-compose.backup.yml`, its own standalone Portainer stack deployed
+after docker-compose.yml, the same shape the seeder already had -- it runs
+`python -m scripts.backup` against the same database the API serves, reached
+over the external `libex-db` network rather than a shared stack, and it has
+no VPN of its own since it never talks to Audible. Every direction below that
+already reasoned about two services now reasons about three, each in its own
+file. The count matters more than it looks: each of the three additions below
+was a line that read as complete while silently covering two of three
+services, which is the same union-blindness this file's directions were
+written to name. A service added to this repo is not covered by anything
+here until it is named here.
+
+chapter-backfill (docker-compose.backfill.yml) and libex-refresh-corpus
+(docker-compose.refresh.yml) are a fourth and fifth service running the same
+image, added in the same change as the backup split. Neither is named in the
+per-service dicts and scoping tests below -- see
+test_every_libex_image_service_is_covered_by_this_file's own note on this.
+Direction 2 does reason about both: their new interpolation tokens
+(BACKFILL_PROXY_URL, REFRESH_PROXY_URL, REFRESH_RESUME_FROM, the *_WG_* names)
+have to be found somewhere or an operator following .env.example would set a
+variable neither file reads.
 
 Three directions:
 
 1. `test_settings_configurable_via_compose` (config.py -> compose): every
    Settings field an operator is meant to be able to set has a matching name
-   in the `environment:` block of libex or libex-backup (docker-compose.yml)
-   OR libex-seeder (docker-compose.seeder.yml) -- the union of all three,
-   since any of them is a valid place for a setting to be configurable.
-   Would have caught the MIGRATION_* gap. A union alone cannot tell "on the
-   right service" from "on the wrong one, or on all three", which is why
-   `test_seeder_only_settings_are_scoped_to_seeder_service` and
-   `test_backup_only_settings_are_scoped_to_backup_service` exist alongside
-   it: every name in SEEDER_ONLY_SETTINGS must be present on libex-seeder and
-   every name in BACKUP_ONLY_SETTINGS present on libex-backup, each absent
-   from the other two services, restoring the per-service catch the union
-   gives up. The backup half is where that matters most: BACKUP_ONLY_SETTINGS
-   carries the FTPS credentials, and the union is satisfied identically
-   whether they sit on the backup container or on the public API one.
+   in the `environment:` block of libex (docker-compose.yml), libex-backup
+   (docker-compose.backup.yml) OR libex-seeder (docker-compose.seeder.yml) --
+   the union of all three, since any of them is a valid place for a setting
+   to be configurable. Would have caught the MIGRATION_* gap. A union alone
+   cannot tell "on the right service" from "on the wrong one, or on all
+   three", which is why `test_seeder_only_settings_are_scoped_to_seeder_service`
+   and `test_backup_only_settings_are_scoped_to_backup_service` exist
+   alongside it: every name in SEEDER_ONLY_SETTINGS must be present on
+   libex-seeder and every name in BACKUP_ONLY_SETTINGS present on
+   libex-backup, each absent from the other two services, restoring the
+   per-service catch the union gives up. The backup half is where that
+   matters most: BACKUP_ONLY_SETTINGS carries the FTPS credentials, and the
+   union is satisfied identically whether they sit on the backup container or
+   on the public API one.
 2. `test_env_example_names_are_reachable_in_compose` (.env.example ->
    compose): every name in .env.example is either an environment key or an
-   interpolation token (`${NAME...}`) somewhere in docker-compose.yml OR
-   docker-compose.seeder.yml. Would have caught the 9e76b02 deletions.
-   Changed by the seeder move, unlike the other two directions: the SEEDER_*
-   names' `${NAME:-default}`-style references no longer appear anywhere in
-   docker-compose.yml's text at all, so this direction now has to scan both
-   files' text, not one.
+   interpolation token (`${NAME...}`) somewhere in docker-compose.yml,
+   docker-compose.seeder.yml, docker-compose.backup.yml,
+   docker-compose.backfill.yml or docker-compose.refresh.yml. Would have
+   caught the 9e76b02 deletions. Changed by the seeder move and the backup
+   split, unlike the other two directions: the SEEDER_* and BACKUP_* names'
+   `${NAME:-default}`-style references no longer appear anywhere in
+   docker-compose.yml's text at all, so this direction now has to scan all
+   five files' text, not one -- and picks up the backfill and refresh stacks'
+   own new names (BACKFILL_PROXY_URL, REFRESH_PROXY_URL, REFRESH_RESUME_FROM,
+   every *_WG_* name) along the way, even though neither stack is a Settings
+   field source directions 1 or 3 reason about.
 3. `test_compose_environment_has_no_dead_knobs` (compose -> config.py): every
-   name in the `environment:` block of libex or libex-backup
-   (docker-compose.yml) OR libex-seeder (docker-compose.seeder.yml) is either
-   a Settings field or an explicitly documented non-Settings knob, checked
-   per service so a dead knob is attributed to the service that actually
-   carries it. Would have caught PORT being passed for months while uvicorn
-   reads only WEB_CONCURRENCY and FORWARDED_ALLOW_IPS, and the Dockerfile CMD
-   hardcodes `--port 3333`. Extended to libex-seeder and libex-backup on the
-   same reasoning as direction 1: an unused knob on either of those
-   containers is the same defect as one on the API container, regardless of
-   which file carries it. The per-service dict this direction builds is a
-   literal, not a union, which is the property that makes it strict -- and
-   the reason it has to be edited by hand for every new service, since a
+   name in the `environment:` block of libex (docker-compose.yml), libex-backup
+   (docker-compose.backup.yml) OR libex-seeder (docker-compose.seeder.yml) is
+   either a Settings field or an explicitly documented non-Settings knob,
+   checked per service so a dead knob is attributed to the service that
+   actually carries it. Would have caught PORT being passed for months while
+   uvicorn reads only WEB_CONCURRENCY and FORWARDED_ALLOW_IPS, and the
+   Dockerfile CMD hardcodes `--port 3333`. Extended to libex-seeder and
+   libex-backup on the same reasoning as direction 1: an unused knob on either
+   of those containers is the same defect as one on the API container,
+   regardless of which file carries it. The per-service dict this direction
+   builds is a literal, not a union, which is the property that makes it
+   strict -- and the reason it has to be edited by hand for every new
+   service, since a
    service missing from that dict is not partially checked, it is not
    checked at all.
 
@@ -124,7 +144,7 @@ directions at once; if one appears, the incident above is the shape to
 watch for: a docstring naming an exception with nothing mechanical tying
 that name to its continued existence.
 
-Five deliberate, narrow exceptions that check a value, or a service, rather
+Six deliberate, narrow exceptions that check a value, or a service, rather
 than just a name:
 
 - `test_web_concurrency_is_a_hardened_literal` below, because for
@@ -148,11 +168,20 @@ than just a name:
   name is present somewhere; none of them would notice the two files
   quietly drifting to different default values for the same name.
 - `test_backup_shared_values_match_the_api_service` below, the same value
-  comparison for libex vs libex-backup, which are two services in one file
-  rather than two files. Its set is not SHARED_DEFAULTS: CACHE_TTL is in
+  comparison for libex vs libex-backup, now two services in two separate
+  files rather than one. Its set is not SHARED_DEFAULTS: CACHE_TTL is in
   that one and deliberately not in this one (the backup runner never touches
-  the cache), and DATABASE_URL is in this one and cannot be in that one (the
-  seeder reaches postgres under a different hostname, on purpose).
+  the cache). DATABASE_URL used to be the load-bearing member of this set
+  and no longer is -- see the next exception.
+- `test_cross_stack_database_urls_match_and_carry_the_api_defaults` below.
+  DATABASE_URL moved out of the set above when libex-backup moved into its
+  own file: it now reaches Postgres the same cross-stack way the seeder,
+  backfill and refresh already do (by the container name libex-postgres,
+  with DB_PASSWORD required rather than defaulted), which means it can never
+  again be byte-identical to libex's own DATABASE_URL and a test asserting
+  that would fail forever. What still has to hold -- the four cross-stack
+  URLs agreeing with each other, and their DB_USER/DB_NAME defaults agreeing
+  with libex's -- is what this test checks instead.
 """
 
 # Standard library
@@ -172,6 +201,19 @@ COMPOSE_PATH = REPO_ROOT / "docker-compose.yml"
 # header. Every direction below that used to read a single file now reads
 # this one too wherever the seeder's own service or environment matters.
 SEEDER_COMPOSE_PATH = REPO_ROOT / "docker-compose.seeder.yml"
+# The backup stack's own standalone Compose project -- libex-backup moved out
+# of docker-compose.yml into this file in the public-stacks split, the same
+# shape the seeder already had. Every direction below that reasons about the
+# backup service reads this file rather than docker-compose.yml.
+BACKUP_COMPOSE_PATH = REPO_ROOT / "docker-compose.backup.yml"
+# The chapter-backfill and corpus-refresh stacks, added in the same split.
+# Neither carries a service this file's per-service dicts or scoping tests
+# reason about by name (see the module docstring and
+# test_every_libex_image_service_is_covered_by_this_file's own note) -- these
+# two paths exist only so direction 2 can scan their text for the new
+# interpolation tokens they introduce.
+BACKFILL_COMPOSE_PATH = REPO_ROOT / "docker-compose.backfill.yml"
+REFRESH_COMPOSE_PATH = REPO_ROOT / "docker-compose.refresh.yml"
 ENV_EXAMPLE_PATH = REPO_ROOT / ".env.example"
 
 # Settings fields deliberately NOT operator-configurable through
@@ -240,11 +282,11 @@ SEEDER_ONLY_SETTINGS: set[str] = {
 }
 
 # Settings fields that are operator-configurable only through the
-# libex-backup service's `environment:` block in docker-compose.yml, never
-# libex's and never libex-seeder's. The backup runner -- whatever
-# `python -m scripts.backup`, docker-compose.yml's command for this service,
-# resolves to -- is the only reader of any of them, and only libex-backup
-# runs it. Same job as
+# libex-backup service's `environment:` block in docker-compose.backup.yml,
+# never libex's and never libex-seeder's. The backup runner -- whatever
+# `python -m scripts.backup`, docker-compose.backup.yml's command for this
+# service, resolves to -- is the only reader of any of them, and only
+# libex-backup runs it. Same job as
 # SEEDER_ONLY_SETTINGS above, with higher stakes: seven of these seventeen
 # are the FTPS destination, including BACKUP_FTPS_PASSWORD, and direction 1's
 # union is satisfied identically whether a credential is passed to the backup
@@ -252,13 +294,14 @@ SEEDER_ONLY_SETTINGS: set[str] = {
 # name here must be present on libex-backup AND absent from both other
 # services -- see test_backup_only_settings_are_scoped_to_backup_service.
 #
-# Three BACKUP_* names in docker-compose.yml are deliberately NOT here and
-# must not be added: BACKUP_SPOOL_PATH (the host side of the spool mount),
-# BACKUP_FTPS_CA_PATH (the host directory holding the trust anchor) and
-# BACKUP_MEM_LIMIT (`mem_limit:`). None of the three is a Settings field --
-# they are compose-side interpolation tokens read by Compose itself, never by
-# anything in app/ or scripts/ -- so they are reached by direction 2 alone,
-# and test_exclusion_lists_name_real_fields would reject them here anyway.
+# Three BACKUP_* names in docker-compose.backup.yml are deliberately NOT here
+# and must not be added: BACKUP_SPOOL_PATH (the host side of the spool
+# mount), BACKUP_FTPS_CA_PATH (the host directory holding the trust anchor)
+# and BACKUP_MEM_LIMIT (`mem_limit:`). None of the three is a Settings field
+# -- they are compose-side interpolation tokens read by Compose itself,
+# never by anything in app/ or scripts/ -- so they are reached by direction 2
+# alone, and test_exclusion_lists_name_real_fields would reject them here
+# anyway.
 # The near-miss to watch for is BACKUP_SPOOL_PATH against the real field
 # BACKUP_SPOOL_DIR: the container side is the fixed literal /backup-spool,
 # the host side is what an operator relocates, and only the first is a
@@ -302,36 +345,56 @@ SHARED_DEFAULTS: set[str] = {
 }
 
 # Names that must render to the identical raw value in docker-compose.yml's
-# libex and libex-backup `environment:` blocks. Deliberately a separate set
-# from SHARED_DEFAULTS above rather than a subset of it, because the two
-# comparisons do not have the same membership and folding them together would
-# force one of two wrong answers:
+# libex `environment:` block and docker-compose.backup.yml's libex-backup
+# one. Deliberately a separate set from SHARED_DEFAULTS above rather than a
+# subset of it, because the two comparisons do not have the same membership:
+# CACHE_TTL is in SHARED_DEFAULTS and must stay out of this one -- libex and
+# libex-seeder share the cache table; the backup runner never reads or
+# writes it, and docker-compose.backup.yml deliberately passes no CACHE_TTL
+# to libex-backup at all.
 #
-#   - CACHE_TTL is in SHARED_DEFAULTS and must stay out of this one. libex
-#     and libex-seeder share the cache table; the backup runner never reads
-#     or writes it, and docker-compose.yml deliberately passes no CACHE_TTL
-#     to libex-backup at all.
-#   - DATABASE_URL is in this one and cannot be in SHARED_DEFAULTS. libex and
-#     libex-backup are in one stack reaching `postgres` by service name;
-#     docker-compose.seeder.yml is a separate stack reaching the same
-#     database as `libex-postgres` with a `:?` required DB_PASSWORD, so those
-#     two strings differ on purpose and always will.
+# DATABASE_URL is deliberately NOT in this set, and must not be added back:
+# it used to be the load-bearing member here, when libex-backup lived beside
+# libex in one file and reached `postgres` by the same in-stack service name
+# libex does. The public-stacks split moved libex-backup into its own file,
+# where -- like the seeder, the chapter backfill and the corpus refresh --
+# it reaches Postgres cross-stack as `libex-postgres` over the external
+# libex-db network, with DB_PASSWORD required (`:?`) rather than defaulted.
+# Both differences are permanent, so libex's and libex-backup's DATABASE_URLs
+# can never be byte-identical again and a membership check here would fail
+# on every run rather than only when something is actually wrong. See
+# test_cross_stack_database_urls_match_and_carry_the_api_defaults below for
+# what replaced it.
 #
-# DATABASE_URL is the load-bearing member here. A libex-backup URL that
-# drifts from libex's -- a different DB_NAME default, a different host --
-# does not fail: it produces an artefact, on schedule, of a database nobody
-# asked to back up, and the mistake surfaces during a restore. The four
-# logging names carry the lower-stakes version of the SHARED_DEFAULTS
-# reasoning: one logging pipeline, one retention policy, one Axiom
-# destination. A backup that stops is silent by nature, so libex-backup
+# The four logging names carry the lower-stakes version of the
+# SHARED_DEFAULTS reasoning: one logging pipeline, one retention policy, one
+# Axiom destination. A backup that stops is silent by nature, so libex-backup
 # logging somewhere other than where the operator watches is most of the way
 # to no backups at all.
 BACKUP_SHARED_VALUES: set[str] = {
-    "DATABASE_URL",
     "LOG_RETENTION_DAYS",
     "LOG_LEVEL",
     "AXIOM_TOKEN",
     "AXIOM_DATASET",
+}
+
+# Every stack besides docker-compose.yml itself is a "cross-stack" client of
+# the same Postgres instance: it reaches it over the external libex-db
+# network by the container name libex-postgres, rather than the in-stack
+# service name "postgres" libex itself uses, and it makes DB_PASSWORD
+# required (`:?`) rather than defaulted, since none of these files has a
+# sensible default for a credential that has to match another stack's. Both
+# differences are deliberate and permanent, which is why their DATABASE_URLs
+# can never be compared against libex's own byte-for-byte -- see
+# BACKUP_SHARED_VALUES above and test_cross_stack_database_urls_match_and
+# _carry_the_api_defaults below, which checks what actually has to hold
+# instead: the four cross-stack URLs agreeing with each other, and the
+# DB_USER/DB_NAME defaults embedded in them agreeing with libex's.
+CROSS_STACK_DATABASE_URL_SOURCES: dict[Path, str] = {
+    SEEDER_COMPOSE_PATH: "libex-seeder",
+    BACKUP_COMPOSE_PATH: "libex-backup",
+    BACKFILL_COMPOSE_PATH: "chapter-backfill",
+    REFRESH_COMPOSE_PATH: "libex-refresh-corpus",
 }
 
 COMPOSE_KNOBS_WITHOUT_SETTINGS: dict[str, str] = {
@@ -374,6 +437,14 @@ def _load_seeder_compose_text() -> str:
 
 def _load_seeder_compose_yaml() -> dict:
     return _load_yaml(SEEDER_COMPOSE_PATH)
+
+
+def _load_backup_compose_text() -> str:
+    return _load_text(BACKUP_COMPOSE_PATH)
+
+
+def _load_backup_compose_yaml() -> dict:
+    return _load_yaml(BACKUP_COMPOSE_PATH)
 
 
 def _service_environment_names(compose: dict, service: str) -> set[str]:
@@ -419,32 +490,33 @@ def _seeder_environment_names() -> set[str]:
     return _service_environment_names(_load_seeder_compose_yaml(), "libex-seeder")
 
 
-def _backup_environment_names(compose: dict) -> set[str]:
+def _backup_environment_names() -> set[str]:
     """
-    Names set in the libex-backup service's `environment:` list, from the
-    docker-compose.yml dict handed in. Unlike the seeder, the backup service
-    lives in docker-compose.yml beside libex -- it runs against the same
-    database in the same stack -- so this takes the same dict the libex
-    helper above does rather than loading a file of its own.
+    Names set in the libex-backup service's `environment:` list, read from
+    docker-compose.backup.yml -- its own separate Compose file and Portainer
+    stack now, the same as the seeder, since the public-stacks split moved it
+    out from beside libex in docker-compose.yml. Takes no `compose` argument
+    for that reason, matching `_seeder_environment_names` rather than the
+    shape this used to have.
     """
-    return _service_environment_names(compose, "libex-backup")
+    return _service_environment_names(_load_backup_compose_yaml(), "libex-backup")
 
 
 def _libex_image_environment_names(compose: dict) -> set[str]:
     """
     Union of names set across every service running Libex's own image --
-    currently docker-compose.yml's libex and libex-backup, and
+    docker-compose.yml's libex, docker-compose.backup.yml's libex-backup, and
     docker-compose.seeder.yml's libex-seeder. This answers "can an operator
     set this in this deployment at all", which is what direction 1 below
-    needs now that the seeder is a wholly separate stack rather than a code
-    path inside the libex container: a setting can be legitimately
-    configurable while living only in docker-compose.seeder.yml's or
-    libex-backup's `environment:` block. A union is strictly weaker than
-    checking any one service alone -- it does not know or care which service
-    a name is on -- which is exactly why SEEDER_ONLY_SETTINGS,
-    BACKUP_ONLY_SETTINGS and their two scoping tests exist below: they are
-    the per-service check that keeps this union from being the only thing
-    standing guard.
+    needs now that the seeder and the backup runner are each a wholly
+    separate stack rather than a code path or a sibling service inside
+    docker-compose.yml: a setting can be legitimately configurable while
+    living only in docker-compose.seeder.yml's or docker-compose.backup.yml's
+    `environment:` block. A union is strictly weaker than checking any one
+    service alone -- it does not know or care which service a name is on --
+    which is exactly why SEEDER_ONLY_SETTINGS, BACKUP_ONLY_SETTINGS and their
+    two scoping tests exist below: they are the per-service check that keeps
+    this union from being the only thing standing guard.
 
     A service missing from this union announces itself: every setting only
     that service carries reads as unreachable and direction 1 goes red
@@ -453,7 +525,7 @@ def _libex_image_environment_names(compose: dict) -> set[str]:
     """
     return (
         _libex_environment_names(compose)
-        | _backup_environment_names(compose)
+        | _backup_environment_names()
         | _seeder_environment_names()
     )
 
@@ -495,11 +567,12 @@ def test_exclusion_lists_name_real_fields():
 
     The backup half has a specific near-miss to catch, not a hypothetical
     one: BACKUP_SPOOL_PATH and BACKUP_FTPS_CA_PATH are real names in
-    docker-compose.yml that are not Settings fields, and BACKUP_SPOOL_DIR --
-    which is one -- differs from the first by a word. Either compose-side
-    name typed into BACKUP_ONLY_SETTINGS would assert that the backup
-    service must carry a variable it never receives, and dropping
-    BACKUP_SPOOL_DIR while doing it would leave the real setting unscoped.
+    docker-compose.backup.yml that are not Settings fields, and
+    BACKUP_SPOOL_DIR -- which is one -- differs from the first by a word.
+    Either compose-side name typed into BACKUP_ONLY_SETTINGS would assert
+    that the backup service must carry a variable it never receives, and
+    dropping BACKUP_SPOOL_DIR while doing it would leave the real setting
+    unscoped.
     """
     settings_names = _settings_field_names()
     bad_exclusions = {
@@ -619,7 +692,7 @@ def test_seeder_only_settings_are_scoped_to_seeder_service():
     """
     compose = _load_compose_yaml()
     libex_names = _libex_environment_names(compose)
-    backup_names = _backup_environment_names(compose)
+    backup_names = _backup_environment_names()
     seeder_names = _seeder_environment_names()
 
     missing_from_seeder = sorted(SEEDER_ONLY_SETTINGS - seeder_names)
@@ -646,7 +719,7 @@ def test_seeder_only_settings_are_scoped_to_seeder_service():
     leaked_into_backup = sorted(SEEDER_ONLY_SETTINGS & backup_names)
     assert not leaked_into_backup, (
         f"Settings field(s) {leaked_into_backup} are in SEEDER_ONLY_SETTINGS "
-        "but also appear in docker-compose.yml's libex-backup "
+        "but also appear in docker-compose.backup.yml's libex-backup "
         "`environment:` block. libex-backup runs `python -m scripts.backup`, "
         "which reads none of them -- a seeder knob there does nothing and "
         "suggests the backup container has seeding behaviour to tune. "
@@ -658,10 +731,9 @@ def test_backup_only_settings_are_scoped_to_backup_service():
     """
     The per-service check for BACKUP_ONLY_SETTINGS, exactly as
     test_seeder_only_settings_are_scoped_to_seeder_service is for the
-    seeder's five: every name must appear in docker-compose.yml's
+    seeder's five: every name must appear in docker-compose.backup.yml's
     libex-backup `environment:` block, where the backup runner it starts can
-    read it,
-    AND be absent from both docker-compose.yml's libex block and
+    read it, AND be absent from both docker-compose.yml's libex block and
     docker-compose.seeder.yml's libex-seeder block, where nothing reads it.
 
     This is the strongest reason the union in direction 1 cannot stand
@@ -684,13 +756,13 @@ def test_backup_only_settings_are_scoped_to_backup_service():
     """
     compose = _load_compose_yaml()
     libex_names = _libex_environment_names(compose)
-    backup_names = _backup_environment_names(compose)
+    backup_names = _backup_environment_names()
     seeder_names = _seeder_environment_names()
 
     missing_from_backup = sorted(BACKUP_ONLY_SETTINGS - backup_names)
     assert not missing_from_backup, (
         f"Settings field(s) {missing_from_backup} are listed in "
-        "BACKUP_ONLY_SETTINGS but are missing from docker-compose.yml's "
+        "BACKUP_ONLY_SETTINGS but are missing from docker-compose.backup.yml's "
         "libex-backup `environment:` block, so the backup runner -- the only "
         "reader of any of these -- can never see anything but the "
         "compiled-in default. For the FTPS names that default is empty, "
@@ -717,26 +789,33 @@ def test_backup_only_settings_are_scoped_to_backup_service():
 def test_env_example_names_are_reachable_in_compose():
     """
     Direction 2: every name in .env.example is either an environment key or
-    an interpolation token somewhere in docker-compose.yml OR
-    docker-compose.seeder.yml. This is the check that would have caught
-    9e76b02 -- AXIOM_*, SEEDER_*, AUDIBLE_PROXY_URL and SEED_SECRET were
-    deleted from compose while staying in .env.example, and the
-    inconsistency sat there, machine-checkable, for two months.
+    an interpolation token somewhere in docker-compose.yml,
+    docker-compose.seeder.yml, docker-compose.backup.yml,
+    docker-compose.backfill.yml or docker-compose.refresh.yml. This is the
+    check that would have caught 9e76b02 -- AXIOM_*, SEEDER_*,
+    AUDIBLE_PROXY_URL and SEED_SECRET were deleted from compose while staying
+    in .env.example, and the inconsistency sat there, machine-checkable, for
+    two months.
 
-    Scans both files now, not one: the SEEDER_* names' interpolation
-    references (`${SEEDER_PROXY_URL:?...}`, `${SEEDER_MEM_LIMIT:-1g}` on
-    `mem_limit:`, and the rest) no longer appear anywhere in
-    docker-compose.yml's text at all -- they moved entirely into
-    docker-compose.seeder.yml when the seeder became its own stack. A scan
-    of docker-compose.yml alone would now read every one of them as a
-    genuine gap.
+    Scans all five files now, not one or two: the SEEDER_* names'
+    interpolation references (`${SEEDER_PROXY_URL:?...}`,
+    `${SEEDER_MEM_LIMIT:-1g}` on `mem_limit:`, and the rest) do not appear
+    anywhere in docker-compose.yml's text at all -- they live only in
+    docker-compose.seeder.yml, since the seeder is its own stack. The public
+    stacks split repeated the same shape three more times: the BACKUP_*
+    names moved entirely into docker-compose.backup.yml when libex-backup
+    left docker-compose.yml, and BACKFILL_PROXY_URL, REFRESH_PROXY_URL,
+    REFRESH_RESUME_FROM and every *_WG_* name (API_, SEEDER_, BACKFILL_ and
+    REFRESH_) exist only in the text of the file for the stack they belong
+    to. A scan of any proper subset of the five files would read every name
+    that lives only in the missing file as a genuine gap.
 
     DB_HOST is no longer an exception this direction has to reason about:
     the seeder used to require it (docker-compose.seeder.yml's DATABASE_URL),
     and .env.example deliberately never documented it, so it sat outside
     env_example_names entirely -- but the seeder now reaches postgres by
     container name over a shared network instead of a published host port,
-    and DB_HOST does not appear in either compose file any more. DB_BIND
+    and DB_HOST does not appear in any compose file any more. DB_BIND
     (the postgres `ports:` bind address in docker-compose.yml) needs no
     carve-out either: it is assigned in .env.example, referenced as
     `${DB_BIND:-127.0.0.1}` in docker-compose.yml, and this direction checks
@@ -746,12 +825,19 @@ def test_env_example_names_are_reachable_in_compose():
     """
     compose_text = _load_compose_text()
     seeder_compose_text = _load_seeder_compose_text()
+    backup_compose_text = _load_backup_compose_text()
+    backfill_compose_text = _load_text(BACKFILL_COMPOSE_PATH)
+    refresh_compose_text = _load_text(REFRESH_COMPOSE_PATH)
     compose = yaml.safe_load(compose_text)
     referenced = (
         _libex_environment_names(compose)
         | _seeder_environment_names()
+        | _backup_environment_names()
         | _interpolated_names(compose_text)
         | _interpolated_names(seeder_compose_text)
+        | _interpolated_names(backup_compose_text)
+        | _interpolated_names(backfill_compose_text)
+        | _interpolated_names(refresh_compose_text)
     )
 
     env_example_names = _env_example_names()
@@ -767,29 +853,32 @@ def test_env_example_names_are_reachable_in_compose():
 
     assert not unexpected, (
         f"Name(s) {unexpected} are set in .env.example but never appear in "
-        "docker-compose.yml or docker-compose.seeder.yml -- neither as an "
-        "`environment:` key nor as a `${NAME...}` interpolation reference. "
-        "An operator following .env.example would set a variable neither "
-        "compose file silently ever passes through."
+        "docker-compose.yml, docker-compose.seeder.yml, "
+        "docker-compose.backup.yml, docker-compose.backfill.yml or "
+        "docker-compose.refresh.yml -- neither as an `environment:` key nor "
+        "as a `${NAME...}` interpolation reference. An operator following "
+        ".env.example would set a variable none of the five compose files "
+        "silently ever passes through."
     )
 
 
 def test_compose_environment_has_no_dead_knobs():
     """
     Direction 3: every name in the `environment:` block of libex
-    (docker-compose.yml) OR libex-seeder (docker-compose.seeder.yml) is
-    either a Settings field or a documented non-Settings knob. This is the
-    check that would have caught PORT being passed for months while nothing
-    in app/ reads settings.port and the Dockerfile CMD hardcodes --port
-    3333.
+    (docker-compose.yml), libex-backup (docker-compose.backup.yml) OR
+    libex-seeder (docker-compose.seeder.yml) is either a Settings field or a
+    documented non-Settings knob. This is the check that would have caught
+    PORT being passed for months while nothing in app/ reads settings.port
+    and the Dockerfile CMD hardcodes --port 3333.
 
     Checked per service, not as a union, so a dead knob is attributed to
     the service that actually carries it -- an unused name on libex-seeder
     or libex-backup is the same defect as one on libex and gets caught the
     same way, rather than being let through because some other service's
-    block happens to also set it. Two of the three services live in
-    docker-compose.yml and one in docker-compose.seeder.yml, so each is read
-    from the file that actually defines it.
+    block happens to also set it. Each of the three services now lives in
+    its own file -- libex in docker-compose.yml, libex-backup in
+    docker-compose.backup.yml, libex-seeder in docker-compose.seeder.yml --
+    so each is read from the file that actually defines it.
 
     The dict below is a literal on purpose and has a cost that has to be
     paid by hand: a service left out of it is not partially checked, it is
@@ -797,8 +886,8 @@ def test_compose_environment_has_no_dead_knobs():
     with seventeen new names and this dict listed two services; a dead knob
     in that block would have passed silently, which is the same
     union-blindness the directions above are written to name, in the one
-    place in this file that had escaped it. Adding a service to either
-    compose file means adding a key here in the same change.
+    place in this file that had escaped it. Adding a service to any compose
+    file means adding a key here in the same change.
     """
     settings_names = _settings_field_names()
     known = settings_names | set(COMPOSE_KNOBS_WITHOUT_SETTINGS)
@@ -806,7 +895,9 @@ def test_compose_environment_has_no_dead_knobs():
     compose = _load_compose_yaml()
     service_environments = {
         "libex": _service_environment_names(compose, "libex"),
-        "libex-backup": _service_environment_names(compose, "libex-backup"),
+        "libex-backup": _service_environment_names(
+            _load_backup_compose_yaml(), "libex-backup"
+        ),
         "libex-seeder": _service_environment_names(
             _load_seeder_compose_yaml(), "libex-seeder"
         ),
@@ -822,11 +913,10 @@ def test_compose_environment_has_no_dead_knobs():
         "COMPOSE_KNOBS_WITHOUT_SETTINGS in this file, per service: "
         f"{dead_by_service} -- nothing in the app actually reads them. "
         "Either remove the dead knob from that service (docker-compose.yml "
-        "for libex and libex-backup, docker-compose.seeder.yml for "
-        "libex-seeder), or if "
-        "something outside Settings genuinely consumes it (like uvicorn "
-        "reading WEB_CONCURRENCY), document it in "
-        "COMPOSE_KNOBS_WITHOUT_SETTINGS."
+        "for libex, docker-compose.backup.yml for libex-backup, "
+        "docker-compose.seeder.yml for libex-seeder), or if something "
+        "outside Settings genuinely consumes it (like uvicorn reading "
+        "WEB_CONCURRENCY), document it in COMPOSE_KNOBS_WITHOUT_SETTINGS."
     )
 
 
@@ -909,7 +999,7 @@ def test_web_concurrency_is_a_hardened_literal():
 
     non_uvicorn_services = {
         "libex-seeder": _seeder_environment_names(),
-        "libex-backup": _backup_environment_names(compose),
+        "libex-backup": _backup_environment_names(),
     }
     carrying_it = sorted(
         service for service, names in non_uvicorn_services.items() if "WEB_CONCURRENCY" in names
@@ -1018,39 +1108,36 @@ def test_shared_defaults_match_across_compose_files():
 def test_backup_shared_values_match_the_api_service():
     """
     Every name in BACKUP_SHARED_VALUES must be present in BOTH
-    docker-compose.yml's libex and libex-backup `environment:` blocks and
-    render to the identical raw value in each. Same idea as
-    test_shared_defaults_match_across_compose_files above, applied to two
-    services in one file rather than one service in each of two files, and
-    with presence asserted separately rather than folded into the equality:
-    two `.get()` calls that both return None compare equal, so a name that
-    has fallen out of both blocks -- or was typed wrong here -- would
-    otherwise read as agreement.
+    docker-compose.yml's libex and docker-compose.backup.yml's libex-backup
+    `environment:` blocks and render to the identical raw value in each.
+    Same idea as test_shared_defaults_match_across_compose_files above,
+    applied to two services in two separate files rather than one service in
+    each of two files, and with presence asserted separately rather than
+    folded into the equality: two `.get()` calls that both return None
+    compare equal, so a name that has fallen out of both blocks -- or was
+    typed wrong here -- would otherwise read as agreement.
 
-    DATABASE_URL is the reason this test exists rather than being left to
-    the name-parity directions. Both services point at the same database in
-    the same stack, and the value is assembled from DB_USER, DB_PASSWORD and
-    DB_NAME by Compose's own interpolation, so it is a long string that is
-    easy to edit on one line and not the other. Nothing fails when they
-    diverge: libex-backup dumps whatever database its URL names, on
-    schedule, successfully, and the artefact is of the wrong database. That
-    is discovered during a restore, which is the worst moment available.
+    DATABASE_URL used to be the load-bearing member of this set and no
+    longer is: see BACKUP_SHARED_VALUES' own comment and
+    test_cross_stack_database_urls_match_and_carry_the_api_defaults below
+    for what replaced it, and why a byte-identical comparison against
+    libex's own DATABASE_URL cannot pass since the public-stacks split moved
+    libex-backup into its own file.
 
-    The four logging names are the lower-stakes half, and the same reasoning
-    SHARED_DEFAULTS gives for them: one retention policy, one log level, one
-    Axiom destination. A backup that stops is silent by nature -- nobody
+    The four remaining names are the lower-stakes reasoning SHARED_DEFAULTS
+    gives for its own logging names: one retention policy, one log level,
+    one Axiom destination. A backup that stops is silent by nature -- nobody
     notices an artefact that never appeared -- so a libex-backup that logs
     somewhere other than where the operator watches is unobservable in a way
     the API never is.
 
     CACHE_TTL is deliberately not in this set even though it is in
     SHARED_DEFAULTS: the backup runner never reads or writes the cache
-    table, and docker-compose.yml passes it no CACHE_TTL at all. Adding it
-    here would demand a value the service has no use for.
+    table, and docker-compose.backup.yml passes it no CACHE_TTL at all.
+    Adding it here would demand a value the service has no use for.
     """
-    compose = _load_compose_yaml()
-    libex_values = _service_environment_values(compose, "libex")
-    backup_values = _service_environment_values(compose, "libex-backup")
+    libex_values = _service_environment_values(_load_compose_yaml(), "libex")
+    backup_values = _service_environment_values(_load_backup_compose_yaml(), "libex-backup")
 
     absent = {
         name: sorted(
@@ -1077,27 +1164,85 @@ def test_backup_shared_values_match_the_api_service():
     }
     assert not mismatches, (
         f"BACKUP_SHARED_VALUES name(s) render to different values in "
-        f"docker-compose.yml's libex service vs. its libex-backup service: "
-        f"{mismatches} (libex value, libex-backup value). For DATABASE_URL "
-        "this is the serious one -- the two services are meant to address "
-        "the same database, and a backup container pointed somewhere else "
-        "produces a successful-looking artefact of the wrong data, which "
-        "nobody finds out until a restore. For the logging names it is one "
-        "policy silently applied twice over. Bring the two blocks back into "
-        "agreement, or if they now genuinely need different values, remove "
-        "the name from BACKUP_SHARED_VALUES and record why."
+        f"docker-compose.yml's libex service vs. docker-compose.backup.yml's "
+        f"libex-backup service: {mismatches} (libex value, libex-backup "
+        "value). One policy is meant to be silently applied twice over. "
+        "Bring the two blocks back into agreement, or if they now genuinely "
+        "need different values, remove the name from BACKUP_SHARED_VALUES "
+        "and record why."
+    )
+
+
+def test_cross_stack_database_urls_match_and_carry_the_api_defaults():
+    """
+    Replaces the old BACKUP_SHARED_VALUES membership for DATABASE_URL, which
+    stopped meaning anything the moment libex-backup moved into its own
+    Compose file: libex-backup, like the seeder, the chapter backfill and the
+    corpus refresh, now reaches Postgres over the external libex-db network
+    by the container name libex-postgres rather than the in-stack service
+    name postgres, and requires DB_PASSWORD (`:?`) rather than defaulting it.
+    Both differences are permanent and by design, so comparing DATABASE_URL
+    against libex's own value can never pass again and was never checking
+    anything real once the split landed -- it would have failed on the very
+    commit that made the split, for a reason that has nothing to do with a
+    regression.
+
+    What is still worth checking, and what a plain byte-identical comparison
+    against libex would miss entirely: the four cross-stack DATABASE_URLs
+    (seeder, backup, backfill, refresh) must agree with EACH OTHER -- a typo
+    in one stack's DB_NAME default, host, or DB_PASSWORD error message would
+    point that one stack at the wrong database, or give its operator a wrong
+    error, without the others catching it -- and the DB_USER/DB_NAME
+    defaults embedded in them must still match libex's own defaults, since
+    all five services are meant to address one database by default.
+    """
+    urls = {
+        path.name: _service_environment_values(_load_yaml(path), service)["DATABASE_URL"]
+        for path, service in CROSS_STACK_DATABASE_URL_SOURCES.items()
+    }
+
+    distinct = set(urls.values())
+    assert len(distinct) == 1, (
+        f"The cross-stack DATABASE_URLs disagree: {urls}. "
+        "docker-compose.seeder.yml, docker-compose.backup.yml, "
+        "docker-compose.backfill.yml and docker-compose.refresh.yml are all "
+        "meant to reach the same Postgres instance the same way -- bring "
+        "the DATABASE_URL line in the odd one out back into agreement with "
+        "the rest."
+    )
+
+    cross_stack_url = next(iter(distinct))
+    api_url = _service_environment_values(_load_compose_yaml(), "libex")["DATABASE_URL"]
+
+    default_pattern = re.compile(r"\$\{(DB_USER|DB_NAME):-([^}]*)\}")
+    api_defaults = dict(default_pattern.findall(api_url))
+    cross_stack_defaults = dict(default_pattern.findall(cross_stack_url))
+
+    assert api_defaults, (
+        "Found no ${DB_USER:-...} / ${DB_NAME:-...} defaults in libex's own "
+        "DATABASE_URL (docker-compose.yml) to compare against -- its "
+        "DATABASE_URL line has changed shape and this test's regex no "
+        "longer matches it."
+    )
+    assert api_defaults == cross_stack_defaults, (
+        f"The DB_USER/DB_NAME defaults embedded in the cross-stack "
+        f"DATABASE_URLs {cross_stack_defaults} do not match libex's own "
+        f"{api_defaults} in docker-compose.yml. The host and the "
+        "DB_PASSWORD handling are meant to differ between libex and the "
+        "cross-stack services (see CROSS_STACK_DATABASE_URL_SOURCES' own "
+        "comment) -- the database name and user defaults are not."
     )
 
 
 def test_every_libex_image_service_is_covered_by_this_file():
     """
     The mechanical tie this file's own docstring asks for elsewhere: the set
-    of services running Libex's image, across both compose files, must be
-    exactly the set this file names. Every per-service check here --
-    direction 3's dict, the two scoping tests, the union helper, the
-    WEB_CONCURRENCY absence check -- is a hand-written list of service
-    names, and a service missing from any of them is not partially checked,
-    it is invisible.
+    of services running Libex's image across docker-compose.yml,
+    docker-compose.seeder.yml and docker-compose.backup.yml must be exactly
+    the set this file names. Every per-service check here -- direction 3's
+    dict, the two scoping tests, the union helper, the WEB_CONCURRENCY
+    absence check -- is a hand-written list of service names, and a service
+    missing from any of them is not partially checked, it is invisible.
 
     That is not hypothetical. libex-backup arrived with seventeen settings
     and two of those hand-written lists went untouched. One of them,
@@ -1106,18 +1251,45 @@ def test_every_libex_image_service_is_covered_by_this_file():
     new service's twenty-two environment names -- a dead knob there would
     have passed. A file written specifically to catch names that exist in
     one place and not another had grown its own version of the same gap,
-    and only the loud half announced it.
+    and only the loud half announced it. libex-backup then moved out of
+    docker-compose.yml entirely into docker-compose.backup.yml in the same
+    public-stacks split that added the two services below -- this test caught that move
+    the same way: it went from finding libex-backup in the first two files
+    to not finding it anywhere, since nothing here yet pointed it at the
+    file libex-backup had moved into.
 
-    So this test fails the moment a fourth service running this image
-    appears, before anyone has to notice which lists it belongs in. It
-    compares against a literal because that is the point: the literal is the
-    thing being kept honest, and a derived set would agree with itself.
+    Deliberately scoped to three files, not all five that ship: it names
+    every service this file's Settings-field-shaped checks (directions 1 and
+    3, the two scoping tests, SHARED_DEFAULTS/BACKUP_SHARED_VALUES,
+    WEB_CONCURRENCY) reason about, which is what makes "a service missing
+    from this set is invisible to this file" a true statement to test
+    mechanically. chapter-backfill (docker-compose.backfill.yml) and
+    libex-refresh-corpus (docker-compose.refresh.yml) run the same image and
+    are deliberately NOT in that scope: they are one-shot/scheduled job
+    stacks whose environment names (DATABASE_URL, AUDIBLE_PROXY_URL,
+    LOG_LEVEL, LOG_RETENTION_DAYS, AXIOM_TOKEN, AXIOM_DATASET, and
+    REFRESH_RESUME_FROM on the refresh stack) are either already covered via
+    libex's own block or, for REFRESH_RESUME_FROM, read straight from
+    os.environ by scripts/refresh_corpus.py rather than through Settings --
+    which direction 3 would need a new COMPOSE_KNOBS_WITHOUT_SETTINGS entry
+    to accept if this test's scope grew to include it. Direction 2 already
+    reasons about both stacks' text (see its own docstring), which is the
+    coverage that actually matters for an operator following .env.example;
+    widening this test and the Settings-shaped checks to fully wire in two
+    job stacks that carry no scoped-settings of their own was judged a
+    separate change, not a silent gap.
+
+    So this test fails the moment a fourth service in that narrower sense
+    (a Settings-configurable service, not merely an image user) appears,
+    before anyone has to notice which lists it belongs in. It compares
+    against a literal because that is the point: the literal is the thing
+    being kept honest, and a derived set would agree with itself.
     """
     covered_services = {"libex", "libex-backup", "libex-seeder"}
     libex_image = "ghcr.io/libexhq/libex"
 
     found: set[str] = set()
-    for path in (COMPOSE_PATH, SEEDER_COMPOSE_PATH):
+    for path in (COMPOSE_PATH, SEEDER_COMPOSE_PATH, BACKUP_COMPOSE_PATH):
         compose = _load_yaml(path)
         for name, definition in compose["services"].items():
             # Split the tag or digest off the reference so a pin -- :1.2.3 or
@@ -1127,15 +1299,16 @@ def test_every_libex_image_service_is_covered_by_this_file():
                 found.add(name)
 
     assert found == covered_services, (
-        f"Services running {libex_image} across docker-compose.yml and "
-        f"docker-compose.seeder.yml are {sorted(found)}, but this file's "
-        f"per-service checks are written for {sorted(covered_services)}. "
-        "Every per-service check in this file names its services by hand, "
-        "and most of them stay green while silently ignoring one they were "
-        "never told about -- direction 3's service_environments dict above "
-        "is the clearest case. Add the new service to that dict, to the "
-        "union in _libex_image_environment_names, to the scoping tests' "
-        "absence checks and to test_web_concurrency_is_a_hardened_literal "
-        "if it does not run uvicorn, then add it here. If a service was "
-        "removed, remove it from all of those in the same change."
+        f"Services running {libex_image} across docker-compose.yml, "
+        f"docker-compose.seeder.yml and docker-compose.backup.yml are "
+        f"{sorted(found)}, but this file's per-service checks are written "
+        f"for {sorted(covered_services)}. Every per-service check in this "
+        "file names its services by hand, and most of them stay green while "
+        "silently ignoring one they were never told about -- direction 3's "
+        "service_environments dict above is the clearest case. Add the new "
+        "service to that dict, to the union in "
+        "_libex_image_environment_names, to the scoping tests' absence "
+        "checks and to test_web_concurrency_is_a_hardened_literal if it "
+        "does not run uvicorn, then add it here. If a service was removed, "
+        "remove it from all of those in the same change."
     )

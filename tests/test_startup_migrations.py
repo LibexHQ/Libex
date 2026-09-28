@@ -13,13 +13,16 @@ startup, in either of the shapes an import can take.
 """
 
 # Standard library
+import logging
 from unittest.mock import patch
 
 # Third party
 from fastapi.testclient import TestClient
 
 # Local
+import app.services.audible as audible_service
 from app.main import app
+from libex_core.audible.client import TransportSummary
 
 
 # ============================================================
@@ -95,3 +98,97 @@ def _origin_module(value) -> str:
     __name__ for a module object, which has no __module__."""
     origin = getattr(value, "__module__", None) or getattr(value, "__name__", "")
     return origin if isinstance(origin, str) else ""
+
+
+# ============================================================
+# STARTUP LOGS WHICH AUDIBLE TRANSPORT IS IN USE
+#
+# _hosted_client is built once, at app.services.audible's own import, from
+# whatever AUDIBLE_PROXY_URL happened to be set the first time this test
+# process imported it -- well before this file's own collection. Swapping in
+# a fake here rather than an env var is the only way to exercise both the
+# proxy and the direct shape in one process; app.main reads the attribute
+# through the module object on every call (see its own lifespan comment),
+# so replacing it on app.services.audible is exactly what a real transport
+# change would look like from app.main's side.
+# ============================================================
+
+class _FakeTransportClient:
+    """Stands in for LibexClient: only transport_summary() is exercised by
+    the lifespan. proxy_url is never read by app.main -- it exists here so a
+    test can prove that, by asserting the secret embedded in it never
+    reaches a log record even though the fake client "holds" it."""
+
+    def __init__(self, summary: TransportSummary, proxy_url: str = ""):
+        self._summary = summary
+        self.proxy_url = proxy_url
+
+    def transport_summary(self) -> TransportSummary:
+        return self._summary
+
+
+def _audible_transport_records(caplog):
+    return [
+        r for r in caplog.records
+        if r.name == "libex" and hasattr(r, "audible_transport_mode")
+    ]
+
+
+def test_lifespan_logs_audible_transport_mode_and_host_for_a_proxy(monkeypatch, caplog):
+    monkeypatch.setattr(
+        audible_service,
+        "_hosted_client",
+        _FakeTransportClient(
+            TransportSummary(mode="proxy", host="libex-vpn"),
+            proxy_url="http://libexuser:hunter2@libex-vpn:8888",
+        ),
+    )
+
+    with caplog.at_level(logging.INFO):
+        with TestClient(app):
+            pass
+
+    records = _audible_transport_records(caplog)
+    assert records, "no Audible transport log record was emitted -- the line is inert"
+    record = records[0]
+    assert record.audible_transport_mode == "proxy"
+    assert record.audible_transport_host == "libex-vpn"
+    assert "hunter2" not in caplog.text
+    assert "libexuser" not in caplog.text
+    assert "8888" not in caplog.text
+
+
+def test_lifespan_logs_audible_transport_mode_and_host_for_direct_egress(monkeypatch, caplog):
+    monkeypatch.setattr(
+        audible_service,
+        "_hosted_client",
+        _FakeTransportClient(TransportSummary(mode="direct", host=None)),
+    )
+
+    with caplog.at_level(logging.INFO):
+        with TestClient(app):
+            pass
+
+    records = _audible_transport_records(caplog)
+    assert records, "no Audible transport log record was emitted -- the line is inert"
+    record = records[0]
+    assert record.audible_transport_mode == "direct"
+    assert record.audible_transport_host is None
+
+
+def test_lifespan_runs_once_per_worker_process_so_the_line_logs_once_here(monkeypatch, caplog):
+    """One TestClient start is one lifespan entry, which is one worker in the
+    real process model (see app.main's own lifespan comment on why migrations
+    are not run there) -- so exactly one record is expected per start, not
+    zero and not several."""
+    monkeypatch.setattr(
+        audible_service,
+        "_hosted_client",
+        _FakeTransportClient(TransportSummary(mode="direct", host=None)),
+    )
+
+    with caplog.at_level(logging.INFO):
+        with TestClient(app):
+            pass
+
+    assert len(_audible_transport_records(caplog)) == 1

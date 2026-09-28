@@ -190,9 +190,9 @@ async def test_a_halved_archive_still_verifies_which_is_the_limit_of_this_check(
 
 async def test_the_autovacuum_reloptions_survive_a_real_restore(artifact):
     """
-    The question db-reviewer raised, settled by measurement rather than by
-    reading the archive format. books and tracks carry 0.02 vacuum
-    thresholds because the defaults caused an outage; a restore that
+    Whether a restore preserves per-table autovacuum tuning, settled by
+    measurement rather than by reading the archive format. books and tracks
+    carry 0.02 vacuum thresholds because the defaults caused an outage; a restore that
     silently dropped them would put the restored database back into the
     configuration that caused it, with nothing anywhere reporting the
     change.

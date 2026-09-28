@@ -10,6 +10,111 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.24.0]
+
+No endpoint, parameter, response shape, field or status code moved — every
+change here is to how the published stacks reach Audible and reach each
+other.
+
+### Added
+- **Chapter backfill and corpus refresh now ship as published stacks,
+  `docker-compose.backfill.yml` and `docker-compose.refresh.yml`, instead of
+  a `docker run` recipe copied out of a docstring.** Neither script's own
+  behavior changed — `scripts/backfill_chapters.py` and
+  `scripts/refresh_corpus.py` do exactly what they did before — but starting
+  either meant hand-assembling the network, environment and stop-grace
+  arguments yourself. Each new file wires that up: its own required proxy
+  variable (`BACKFILL_PROXY_URL`, `REFRESH_PROXY_URL`), its own egress
+  network, and the stop-grace period and fixed `LOG_LEVEL=INFO` each script
+  already depended on (610s for refresh, above two of its 300s write drains
+  landing back to back; 300s for backfill, above one book's 290s worst case
+  across Audible retries, a fresh connection and its four statements). The
+  refresh stack ships with `--dry-run` active; the real command is the line
+  commented out directly below it in the same file.
+
+- **Backups move out of `docker-compose.yml` into their own stack,
+  `docker-compose.backup.yml`.** The capability itself is unchanged from
+  [1.21.0] — the schedule, retention, FTPS destination and the two timeouts
+  all work the same way — only where it is declared moves. It keeps its own
+  two volumes, the spool and the FTPS certificate mount, and stays off any
+  VPN, because it never talks to Audible — only Postgres and whatever
+  destination it is configured to reach.
+
+- **Every stack that talks to Audible now bundles an example VPN sidecar** —
+  `libex-vpn`, `libex-seeder-vpn`, `libex-backfill-vpn` and
+  `libex-refresh-vpn`, one `gluetun:v3` container per stack, on that stack's
+  own egress network, configured from a WireGuard config's six values
+  (`API_WG_*`, `SEEDER_WG_*`, `BACKFILL_WG_*`, `REFRESH_WG_*` in
+  `.env.example`, all blank by default). None of it is published, has a
+  port, or runs privileged. It is a working example, not a requirement:
+  remove the sidecar service from a stack and that stack's own proxy
+  variable still accepts any `http://` or `https://` proxy reachable on its
+  egress network, bundled or brought your own.
+
+- **Libex logs which way its own Audible traffic is leaving, once per
+  worker, at startup.** One INFO line names the transport mode (`proxy` or
+  `direct`) and, for a proxy, its host — never the URL itself, since that
+  can carry embedded credentials. This changes nothing about what leaves,
+  only whether it is stated: a deployment that runs outside the published
+  stacks and leaves `AUDIBLE_PROXY_URL` blank still goes direct exactly as
+  before, and now says so on every startup.
+
+### Changed
+- **`docker-compose.yml` now refuses to deploy with a blank
+  `AUDIBLE_PROXY_URL`.** Every other published stack that reaches Audible
+  already required its own proxy variable; this one alone defaulted to
+  blank and went direct. It now fails at `docker compose up` (or `config`)
+  with a message naming the variable, before any container starts, the same
+  way the seeder, backfill and refresh stacks already do. **This is a
+  breaking change for an existing deployment that has never set the
+  variable** — redeploying the published file unmodified now stops rather
+  than running. Nothing changes in code: direct egress is still reachable
+  with an explicit opt-in, so a deployment that departs from the published
+  files and wants to run unproxied still can.
+
+- **The seeder stack no longer shares the API stack's `default` network.**
+  It moves to its own `libex-seeder-egress` network, alongside its bundled
+  `libex-seeder-vpn` sidecar, and off `default` entirely — it never needed
+  the API's own network, only `libex-db` to reach Postgres and an exit for
+  Audible.
+
+- **A relative `LOGS_PATH` now resolves next to whichever stack's own
+  compose file sets it, not next to `docker-compose.yml` specifically.**
+  With backup, backfill and refresh now their own stacks, the previous
+  default behavior — the API and backup writing into the same `./logs`
+  directory because both were declared in one file — no longer holds.
+  Sharing one `libex.log` across stacks is still safe and still supported;
+  it now takes setting the same absolute `LOGS_PATH` in each stack's
+  environment, which `.env.example` spells out. The seeder stack gains a
+  `LOGS_PATH` mount for the first time — it previously wrote its log file
+  inside the container only, gone the next time the container was
+  recreated. It now persists to the host the same way every other stack's
+  does.
+
+### Upgrade
+An existing deployment needs the following, once each:
+
+1. **Set `AUDIBLE_PROXY_URL`** to a working proxy, or fill in the six
+   `API_WG_*` values to use the bundled `libex-vpn` example sidecar.
+   `docker compose up` refuses to start `docker-compose.yml` until one of
+   these is done.
+2. **Redeploy the seeder** with `SEEDER_PROXY_URL` pointing at its bundled
+   sidecar, `http://libex-seeder-vpn:8888`, or at your own exit as before.
+3. **Remove the orphaned old backup container before deploying the new
+   stack.** `docker rm -f libex-backup`, or redeploy `docker-compose.yml`
+   with `--remove-orphans`, then deploy `docker-compose.backup.yml`
+   separately. Both declare a container named `libex-backup`, and Docker
+   refuses to start the new one while the old one still exists.
+4. **The old `libex-backup-spool` and `libex-backup-ca` volumes are scratch
+   and safe to remove** once the new backup stack is up, unless a
+   certificate was placed directly in the CA volume rather than mounted
+   through `BACKUP_FTPS_CA_PATH`.
+5. **A relative `LOGS_PATH` now resolves per stack rather than being shared
+   automatically.** If you rely on the API and backup writing to one shared
+   log file, set the same absolute `LOGS_PATH` in both stacks' environments
+   — a relative default no longer lands them in the same directory now that
+   they are declared in separate files.
+
 ## [1.23.1]
 
 ### Security

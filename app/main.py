@@ -25,6 +25,7 @@ from app.core.response_headers import HEADER_REQUEST_ID, EXPOSED_HEADER_NAMES
 from app.db.session import engine, AsyncSessionFactory
 
 # Services
+import app.services.audible as audible_service
 from app.services.cache.manager import purge_expired
 from app.services.db.stats_refresh import stats_refresh_loop
 
@@ -90,6 +91,29 @@ async def lifespan(app: FastAPI):
 
     # Warn about any retired env vars still set (never crashes)
     check_retired_env_vars()
+
+    # One line, naming whether Audible traffic leaves through a proxy and
+    # which host, so a self-hoster who never set AUDIBLE_PROXY_URL sees that
+    # choice confirmed rather than discovering it later from Audible's side.
+    # Proxy use is deliberately not enforced in code, for the hosted deployment
+    # and the published compose stacks alike, so this line is the one place a
+    # deployment's actual egress is visible at a glance. transport_summary()
+    # is read through the module object, not a name bound here at import, for
+    # the same reason scripts/seed.py does: a test fixture that swaps the
+    # hosted client for a fresh one replaces the attribute on
+    # app.services.audible, and a name captured here at import time would
+    # keep pointing at whichever instance existed when this module was first
+    # imported. Never the proxy URL itself
+    # -- it can carry embedded credentials, and transport_summary() exists
+    # precisely so nothing here can leak it. Lifespan runs once per uvicorn
+    # worker (see the migration comment above), so WEB_CONCURRENCY workers
+    # each log this line once; that duplication is expected, not a bug, since
+    # nothing here tries to elect a single worker to speak for the rest.
+    transport = audible_service._hosted_client.transport_summary()
+    logger.info(
+        f"Audible transport: {transport.mode}",
+        extra={"audible_transport_mode": transport.mode, "audible_transport_host": transport.host},
+    )
 
     # The seeder is deliberately not started here. run_seeder and
     # run_new_releases_seeder used to be launched from this lifespan, which

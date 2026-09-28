@@ -1,852 +1,443 @@
-# Privacy
+# Privacy Notice
 
-This is the privacy policy for the **public Libex instance** at
-[libexdb.com](https://libexdb.com), and for the old address
-`libex.lostcartographer.xyz` for as long as it keeps serving (until
-4 November 2026).
+This notice covers the public Libex API at [libexdb.com](https://libexdb.com)
+and its former address, `libex.lostcartographer.xyz`, which serves the same
+instance until 4 November 2026. It sets out what the service records about the
+requests it receives, why, who else handles that data, how long it is kept, and
+what you can ask me to do about it.
 
-If you run your own copy of Libex, most of this does not apply to you — see
-[Self-hosting](#self-hosting) at the end. And if what you're looking at is
-`libex_core` — the part of Libex that runs *inside* another application rather
-than answering it over the network — almost none of this applies, and the
-differences are the whole point: see
-[Embedding Libex in another application](#embedding-libex-in-another-application).
+If you run Libex yourself, or build the `libex_core` library into an
+application, you decide what is recorded, not me. See
+[Self-hosted instances](#self-hosted-instances) and
+[The embeddable library](#the-embeddable-library).
 
-Libex has no accounts, no logins, no API keys and no cookies. Nothing here
-describes a profile of you, because there isn't one to describe. What this
-document does describe is the request logging the public instance keeps, who
-else can see it, and what I can and can't do if you ask me to remove it.
+Libex is open source, so what the software records can be checked against its
+source, mainly `app/core/middleware.py`, `app/core/logging.py` and the error
+handler in `app/main.py`. Anything that depends on a setting in a vendor's
+console rather than on code is marked as such. This notice describes how the
+service behaves. It is not legal advice.
 
-I've written this to be accurate rather than reassuring. Where the honest
-answer is "I can't do that," it says so.
+## Summary
 
-> **A note on what this is.** I'm not a lawyer, and this is a description of
-> how the software actually behaves, not legal advice and not a set of
-> borrowed clauses. Everything in the "What gets recorded" section can be
-> checked against the source — it's all in `app/core/middleware.py`,
-> `app/core/logging.py`, and the error handler at the foot of `app/main.py`.
-> Where something is a setting in a third party's console rather than a line
-> of code, I've said so instead of pretending otherwise.
+- **No accounts, API keys, cookies or tracking.** Libex has no concept of a
+  user.
+- **No IP addresses are logged**, in full or in any shortened or hashed form.
+- **What you type is not logged.** Search text is replaced with `REDACTED`. The
+  one exception is an unexpected error whose message happens to quote your
+  input ([Errors](#errors)).
+- **Each request produces one request log line.** It describes the request
+  (endpoint, status, timing, client software) and contains nothing that links
+  it to your other requests.
+- **Named third parties.** Cloudflare sits in front of the service and sees
+  every request, including your IP address. Axiom stores the logs. Audible
+  receives the lookups and searches needed to answer you, sent through a VPN
+  and carrying nothing about you. Details are in
+  [Who receives data](#who-receives-data).
+- **Retention.** Axiom deletes records after 30 days. The log file on the
+  server keeps 7 days by default. Container output on the server is covered,
+  with the other details, in [Retention](#retention).
+- **No selling or sharing** beyond the parties named in this notice.
+- **The database holds no data about callers**, only Audible catalogue
+  metadata.
 
----
+## Who operates the service
 
-## Who runs this
+The maintainer of Libex ([@SunBroLynk](https://github.com/SunBroLynk)) runs the
+public instance as a free service. "I" in this notice means that person. The
+instance runs on infrastructure operated within LibexHQ, which is the project's
+own organisation, not an outside company. Libex has other contributors. They do
+not operate the public instance and have no access to its logs.
 
-The public instance is run by the maintainer of Libex
-(GitHub: [@SunBroLynk](https://github.com/SunBroLynk)) as a free service. "I"
-throughout this document means that person. Libex is open source and has other
-contributors, but they don't run the public instance and they don't have
-access to its logs.
+**Contact:** open a [GitHub issue](https://github.com/LibexHQ/Libex/issues). For
+anything you would rather not raise in public, use the email address in
+[`SECURITY.md`](SECURITY.md).
 
-Libex is hosted on infrastructure operated within LibexHQ. That is not a
-separate company processing your data on my behalf — it is part of the same
-project, run by the same people, under the same rules as everything else in
-this document.
+## What is recorded
 
-**Contact.** The fastest route is a
-[GitHub issue](https://github.com/LibexHQ/Libex/issues). For anything you'd
-rather not raise in public, the email published in
-[`SECURITY.md`](SECURITY.md) reaches me.
+### The request log
 
----
+Each request produces one log line with the fields below. The exceptions are
+`/health`, browser preflights, and requests that end in an unexpected error,
+all described further down.
 
-## The short version
-
-On every request that isn't `/health`, the public instance writes one log line
-containing: the method, the path, the response status, how long it took, your
-user agent, the host header you used, the number of the server process that
-handled it, the *names* of the query parameters you sent, and three fields
-describing the response that went back — where Libex found the data, whether
-it was complete, and if not, why. Parameter values are allowlisted —
-structural options like `region` and `limit` keep their values, anything you
-typed is replaced with `REDACTED`, and a parameter name Libex doesn't
-recognise is thrown away rather than written down.
-
-`/health` writes nothing at all, unless the check itself took more than a
-second — then it writes one warning holding a duration, a status and the word
-`/health`, and nothing else.
-
-**No IP address. Nothing you searched for. No cookie, and nothing that links
-one of your requests to another.** Each response does carry an `X-Request-Id`
-header, so you can quote a specific request back to me — it is generated fresh
-for that one request, ignored if you send one of your own, and connects to
-nothing beyond that single request.
-
-Those lines go to the container's stdout — warnings and errors to stderr — to
-a rotating file on the server, and to **Axiom**, a third-party log service.
-**Cloudflare** sits in front of the public instance, terminates TLS, and keeps
-its own logs — including your real address — which I don't control and can't
-reach.
-
-The point of logging at all is to see which endpoints are failing and how
-slow they are, so a bad release doesn't break things quietly. None of that
-needs to know who you are.
-
----
-
-## What gets recorded on every request
-
-One log line per request, built in `LoggingMiddleware.dispatch`:
-
-| Field | What it actually contains | Why it's there |
+| Field | Contents | Purpose |
 |---|---|---|
-| `userAgent` | Your `User-Agent` header verbatim, e.g. `Audiobookshelf/2.x` or `python-httpx/0.27`. | Tells me which client software is calling. This is how I know who a change will break, and it's what I used to check that real consumers still worked when the public instance moved to a new hostname. |
-| `method` | `GET`. | Completeness. |
-| `url` | The path, and nothing after it — e.g. `/author/books`, or `/book/B01234567` where the book's identifier is part of the path itself. A path matching no route at all is still recorded as you sent it. | Which endpoints are used and which are failing. |
-| `query` | The names of the query parameters you sent, with **values allowlisted** — structural params keep their values, anything you typed is replaced with `REDACTED`, and a name Libex doesn't recognise is dropped and counted rather than written down. See [below](#what-you-type-is-not-recorded-either). | The path alone can't tell me which parameters consumers actually use, which is what I need in order to know what I can safely change. |
-| `status` | The HTTP status returned. | Finding what's broken. |
-| `took` | How long the request took, in milliseconds. | Performance. |
-| `host` | The `Host` header — which of the two hostnames you used. | The only way to tell old-host traffic from new-host traffic while both addresses serve the same container during the move to `libexdb.com`. |
-| `source` | Where the catalogue data in the response came from: `cache`, `db` or `audible`, or `mixed` with a count per source when one response drew on more than one. Empty when the response carried no catalogue entity to attribute. It is the same value that response's `X-Libex-Source` header carries, so you were handed it too. | How much traffic the cache is actually absorbing, and when Libex is falling back to its own database because Audible is unreachable. It sits on the one line every request produces, so those two questions can be answered per endpoint without piecing it together from the cache and database lines described further down. |
-| `complete` | `true` or `false` — whether Libex believes it returned everything that was asked for. Empty on responses that don't report completeness at all. The same value as that response's `X-Libex-Complete` header. | Lets me count incomplete responses instead of waiting for someone to report one. |
-| `incompleteReason` | When `complete` is `false`, why: one or more of `discovery-incomplete`, `hydration-deadline`, `hydration-failed` and `hydration-not-found`, and nothing else. Empty otherwise. The same value as that response's `X-Libex-Incomplete-Reason` header. | Separates "Audible was too slow" from "Audible doesn't have it" — different problems with different fixes, and indistinguishable without this. |
-| `request_id` | A random UUID generated for that one request, and sent back to you in that response's `X-Request-Id` header. | Gives a log entry something to be referred to by, and gives you the same reference to quote in a bug report. It is generated on the server and never echoed from a header you sent, isn't derived from anything about you, isn't reused, and isn't attached to any other line — every request gets a fresh, unrelated value. It identifies one log entry, not a person and not a session. There's more on it just below the table. |
-| `pid` | The number the operating system gave the worker process that handled the request, e.g. `pid=14`. | The API runs as several worker processes. When one of them gets into trouble, this is the only thing that tells me whether it's one process failing over and over or several failing occasionally — once the lines are pooled together the two look identical. It's a number belonging to my server: the same on every request that worker handles, changed only when the process restarts, and which worker takes a request is the kernel's choice, not yours. |
+| `method` | The HTTP method, e.g. `GET`. | Completeness. |
+| `url` | The path only, e.g. `/book/B01234567`, exactly as sent, including a path that matches no route. Some path segments, such as the one in `/book/sku/{sku}`, are not format-checked, so a path can contain arbitrary text. | Which endpoints are used and which are failing. |
+| `query` | Query parameter names, with values filtered as described in [Query parameters and search text](#query-parameters-and-search-text). | Which options clients use, so changes can be made safely. |
+| `status` | The HTTP status returned. | Detecting failures. |
+| `took` | Duration in milliseconds. | Performance. |
+| `userAgent` | Your `User-Agent` header, verbatim (e.g. `python-httpx/0.27`). | Identifies the client software, so I know which clients a change will affect. |
+| `host` | The `Host` header, i.e. which hostname you used. | Tells old-address traffic from new while both hostnames serve the same instance. |
+| `source` | Where the response data came from: `cache`, `db`, `audible`, or `mixed` with a count per source. | Shows how much the cache absorbs, and when Libex falls back to its database because Audible is unavailable. |
+| `complete` | `true` or `false`: whether the response contains everything requested. | Counting incomplete responses. |
+| `incompleteReason` | When `complete` is `false`, one or more of `discovery-incomplete`, `hydration-deadline`, `hydration-failed` and `hydration-not-found`. | Separates "Audible was too slow" from "Audible doesn't have it". |
+| `request_id` | A random identifier for this request, also returned to you. See [Request IDs](#request-ids). | Lets you and me refer to one specific request. |
+| `pid` | The process number of the server worker that handled the request. | Tells one failing worker apart from several. |
 
-`pid` is the one field in that table that isn't added by the middleware. It's
-stamped on by the logging setup in `app/core/logging.py`, which means it's on
-**every** line Libex writes — the request lines, the background-job lines, the
-startup messages, all of them — and on every record shipped to Axiom. It is
-listed here rather than left to be discovered because a field that turns up in
-the logs and appears in no disclosure is exactly the thing this page exists to
-prevent, whether or not it says anything about a person. This one doesn't.
+About these fields:
 
-**`source`, `complete` and `incompleteReason` describe the answer, not the
-asker.** Unlike the user agent and the host header, these three are not read
-from anything you sent. They are read back off the response Libex has just
-finished building, and they are the same three `X-Libex-*` headers that
-response carries — so nothing is written down about your request that your
-request didn't already get told. Their values come from a fixed vocabulary
-written into the source: `cache`, `db`, `audible`, `mixed`, `true`, `false`,
-the four incomplete reasons above, and counts. A value outside that list is
-rejected where it is recorded rather than written to a log, so there is no
-route by which text you typed reaches one of these fields.
+- **`source`, `complete` and `incompleteReason` describe the response, not
+  you.** They carry the same values as that response's `X-Libex-Source`,
+  `X-Libex-Complete` and `X-Libex-Incomplete-Reason` headers, so the log holds
+  nothing you weren't also sent. They are empty when a response doesn't report
+  them, and the code limits them to the fixed values above, so they cannot
+  carry anything you typed. A `cache` value does show that someone requested
+  the same item recently. That says something about how popular a title is,
+  not about who asked for it.
+- **`pid` belongs to the server.** It is the same for every request a worker
+  handles, changes only when the worker restarts, and the operating system
+  decides which worker takes a request. Two lines with the same `pid` are
+  therefore no evidence of the same caller. It appears on every line Libex
+  writes, not only on request lines.
+- **Only two of your request headers are read for logging:** `User-Agent` and
+  `Host`.
+- **`/health` is not logged.** The one exception is a health check that takes
+  longer than a second. That writes a single warning containing the path
+  `/health`, the status and the duration, and nothing else, not even a query
+  string.
+- **Browser preflight (`OPTIONS`) requests** are answered before logging runs
+  and are not recorded.
+- **Documentation pages and README badges are logged like any other request.**
+  This covers `/docs`, `/redoc`, `/openapi.json`, the files under `/static`,
+  and the statistics badges at `/db/stats/badge/`. The Libex README displays
+  those badges, so viewing the README produces request lines here even though
+  the viewer never knowingly called the API.
 
-The one thing `source` does imply beyond my own server: `cache` means the
-same catalogue item had been fetched recently enough to still be stored. That
-says something about how busy a title is, not about who asked for it — there
-is nothing in the line, or anywhere else, to tie it to a person, and the
-value was on the header of the response you received, so it is not something
-the log knows and you don't.
+### Query parameters and search text
 
-**`X-Request-Id`, and its honest limits.** Every response carries this header,
-so when something misbehaves you can quote the id and I can search for that
-one request instead of guessing at it from a rough time and a rough path.
-Two things it deliberately is not. It is never read *off* an incoming
-request — send an `X-Request-Id` of your own and it is ignored, a fresh one is
-generated — so neither you nor anyone else can use it to tie your requests to
-each other. And it is stored against nothing: handing yesterday's id back to
-me tomorrow would not associate the two, because there is nothing for it to be
-associated with.
+Query parameters pass through an allowlist that decides which names are kept as
+well as which values:
 
-What the id points at depends on how the request ended. Ordinarily it names
-the request line described in the table above. When a request fails with an
-error nobody anticipated, no request line is written for it at all: the line
-carrying that id is the error line instead, holding the exception's message
-and its stack trace and none of the fields in that table — no path, no query,
-no user agent, no host header. That is also the one line that can carry text
-you sent, in the incidental way described
-[below](#what-you-type-is-not-recorded-either). The id on the response is read
-back from the request rather than minted a second time, so the header and the
-line always carry the same value, and quoting it gets me to the error itself.
+- **Name and value kept:** structural parameters such as `region`, `limit`,
+  `page`, `sort`, `order`, the catalogue filters, and switches that set the
+  shape of a response, such as `flat` and `label`. Even here, a value is
+  replaced with `REDACTED` if it is longer than 64 characters or contains `;`
+  or `=`, since those are how a second parameter could be hidden inside one
+  value.
+- **Name kept, value replaced with `REDACTED`:** parameters whose value is text
+  you choose, such as `name`, `keywords`, `title`, `author` and `narrator`, and
+  also `asins`, the list of identifiers in a bulk lookup.
+- **Dropped:** any parameter name Libex doesn't recognise. Such a name is
+  usually a fragment of typed text, for example when an unencoded `&` splits a
+  search in two, or a query string with no `=` arrives as one long name. It is
+  discarded and replaced by a count, e.g. `_unrecognised=2`.
 
-Two edges where there is no id at all. A request that fails before one has
-been generated gets none, and nothing is invented afterwards to fill the gap —
-the response goes out without the header and no line claims an id it doesn't
-have. And a browser's automatic `OPTIONS` preflight is answered before any of
-this runs: no id on it, and nothing written down for it either.
+Because this is an allowlist, a parameter nobody has classified yet is withheld
+by default rather than logged.
 
-**`/health` is almost never logged.** It returns before any of the above
-happens, so an uptime monitor hitting it every minute produces nothing at all.
-The response still carries an `X-Request-Id`, but on a healthy `/health`
-nothing is written under it.
+The search endpoints (`/search`, `/quick-search`, `/author/books?name=` and
+similar) also write lines of their own. These record which fields were searched,
+how long the query text was, how a compound query was split into segments, how
+long Audible took, and how many results came back. They never record the text
+itself.
 
-The one exception is slowness. If the check takes longer than a second, one
-warning is written recording the path (`/health`), the status it returned, and
-how long it took — and nothing else. No user agent, no host header, no query
-string. `/health` takes no input in the first place, and if you tack a query
-string onto it anyway, the bare path is still all that gets written down.
-The line exists because that endpoint does no work of its own, so when it is
-slow the number is measuring my server being in trouble rather than anything
-about the request that found it. A healthy day still produces none of these.
+Audible does receive your search terms, because a search cannot be answered
+without asking it. See [Who receives data](#who-receives-data).
 
-**The API documentation pages are logged like anything else.** `/docs`,
-`/redoc`, `/openapi.json`, and the files under `/static` that those pages
-load, are ordinary requests and produce ordinary log lines. What they don't do
-is reach anyone else — see
-[Who else sees your requests](#who-else-sees-your-requests).
+### Request IDs
 
-**So are the README's counter badges.** The numbers in Libex's README are
-images served from `/db/stats/badge/`, so rendering that page fetches them
-from the public instance and each fetch writes the same line as any other
-request — the fields in the table above, no address. It is worth naming on its
-own because the person whose browser makes those requests opened a page rather
-than called an API, and may not have counted that as touching Libex at all.
-It didn't always: what changed, and what it changed *from*, is
-under [Who else sees your requests](#who-else-sees-your-requests).
+Responses carry an `X-Request-Id` header, including `/health` and error
+responses, with the two exceptions noted below.
 
-### What happens to a search you type
+- The server generates it for that one request. If you send an `X-Request-Id`,
+  it is ignored.
+- It is not derived from anything about you, is never reused, and is not
+  stored against anything else, so it cannot link your requests to each other.
+- If you quote it to me, I can find the matching log line. Normally that is the
+  request line above. If the request failed with an unexpected error, it is the
+  error line instead ([Errors](#errors)).
+- Two kinds of request carry no ID: one that fails before an ID is assigned,
+  and a browser preflight. No ID is made up after the fact.
 
-This is the part people most reasonably assume the worst about, so it gets its
-own heading.
+### Errors
 
-On a lookup like `/book/B01234567?region=us`, the query string is an
-identifier for a book. Nothing personal.
+When a request fails in a way the code does not anticipate, no request line is
+written. Instead Libex logs an error line with the error message and stack
+trace, so the failure can be diagnosed. That line carries the request ID but
+none of the request-line fields: no path, query, user agent or host.
 
-On a search it is different. `/author/books?name=`, `/search?title=`,
-`/search?author=` and `/quick-search?keywords=` all carry **free text that you
-typed**. None of that text is written to a log.
+If the error message quotes something you sent, as some library errors do with
+the input they were given, that text is in the error line. This is the only way
+text you typed can reach the logs, and it is incidental rather than deliberate
+collection. A log line that records caller input on purpose is treated as a
+defect and removed. Earlier lines that named a searched-for author, narrator or
+series were removed on that basis. Error lines are deleted on the same schedule
+as all other logs.
 
-The request line keeps the parameter's name and replaces its value with
-`REDACTED`. If something you typed contained an `&`, the part after it arrives
-looking like a parameter name of its own rather than a value — so anything
-Libex doesn't recognise as one of its own parameter names is discarded along
-with its text and replaced by a bare count, `_unrecognised=1`.
+### Operational logs
 
-The search code writes a line of its own, and it follows the same rule. That
-line records which fields were searched on, how many characters long a
-quick-search query was, how a compound query split into segments, how long
-Audible took and how many results came back. The text itself is in none of
-them. A length is kept because a slow or empty search is worth correlating
-with the size of the query that produced it — it doesn't tell me, or anyone
-reading the logs later, what was typed.
+Libex also logs its own work, whether or not anyone is calling it: cache
+activity, database reads and writes, calls to Audible and how long they took,
+background catalogue jobs, and startup and shutdown. These lines identify
+catalogue items, never callers. An item is identified by its ASIN and region,
+or by an author's or narrator's name read from Libex's own database when a
+background job refreshes that entry. They carry no IP address, no user agent,
+and nothing tied to your request. In Axiom their details are separate fields
+that can be searched by name. Some are worth describing individually:
 
-Audible does receive what you typed, because there is no way to answer a
-search without asking it. That is a different thing from Libex recording it,
-and it's covered under
-[Who else sees your requests](#who-else-sees-your-requests).
+- **Bulk lookups during an outage.** If Audible is unreachable and
+  `/books?asins=` falls back to Libex's database, the warning that records the
+  fallback lists the ASINs that request asked for, in a field named `asins`.
+  If the database read also fails, it lists them too. The same applies when the
+  database fills in after a partial Audible failure. This is the one place the
+  logs hold what a bulk request asked for, which the request line itself
+  redacts. It is there so it is possible to tell which titles an outage
+  affected. ASINs are checked to be ten-character catalogue identifiers before
+  this point, so they cannot carry free text, and the line holds nothing about
+  who asked.
+- **Problems with individual titles.** If data from Audible can't be parsed or
+  stored, a warning names that title's ASIN, sometimes its region, and the kind
+  of problem. It does not include the value that caused the problem.
+- **Database failures.** These name the item being read in its own field
+  (`asin`, `author_asin`, `series_asin`, `plan_name` or `sku_group`), which
+  repeats part of a path the request line already records. They include the
+  database error code and the schema, table, column and constraint names. Most
+  of them leave out the database's own error text, which can quote stored
+  catalogue rows. One, a failed author read, still includes it. Database errors
+  never include the values of a query's parameters, so search text passed to
+  a database query cannot appear in them. Failure lines outside the database
+  include the error's text.
+- **How Libex reaches Audible.** At startup, the API and each background job
+  that calls Audible log whether they connect to Audible directly or through a
+  proxy. The API, the seeder and the chapter backfill also log the proxy's
+  hostname, in the fields `audible_transport_host` (API) and `proxy_host`
+  (seeder and backfill). The corpus refresh logs only whether a proxy is in
+  use, unless it refuses to start because the proxy isn't the one set aside
+  for it, in which case it logs the hostname it was given. The proxy's full
+  address is never logged, because it can contain a password.
 
-### The other log lines
+### IP addresses
 
-Libex writes plenty of other log lines that have nothing to do with you:
-cache hits and misses keyed by ASIN and region, database writes naming the
-book, author or series just fetched, how long an Audible call took, how many
-books a background job found, startup and shutdown messages. Those describe
-Libex's own work on Audible's catalogue. The names in them came back from
-Audible; they are catalogue data, not anything a caller typed. None of those
-lines carry your IP, your user agent or any identifier tied to your request.
+Libex does not read your IP address from any header or from the connection, and
+does not record it in any form. Versions before 1.13.0 (August 2026) logged the
+full address, which fed a map of where requests came from. The map was
+deliberately removed along with the logging. Records written by those versions
+were not altered afterwards. They expire on the same schedules as every other
+record ([Retention](#retention)).
 
-Some of those lines name an author or a narrator outright, and it is worth
-being exact about where that name came from, because further down this page a
-line naming an author or narrator is described as a defect. The two are not the
-same thing. The background jobs work through Libex's own catalogue tables,
-picking up whichever authors and narrators are due to be refreshed and asking
-Audible what else they have. The name on such a line is a row read out of that
-table — chosen by how long it has been since Libex last looked at it, with no
-request in flight and nothing to correlate it to. What the sentence further
-down calls a defect is the opposite case: a name that arrived because *someone
-searched for it*. That is caller input, it has been removed where it was found,
-and it is not what these lines carry.
-
-Two of them record the whole list of what a request asked for, and they're
-worth naming rather than leaving to be discovered. Both belong to the bulk
-lookup `/books?asins=`, which is the one place the request line deliberately
-withholds what was asked for: `asins` isn't on the value allowlist, so there
-it reads `asins=REDACTED`.
-
-The first is the fallback itself. When Audible is unreachable and Libex falls
-back to its own database, the warning recording that fallback lists the ASINs
-that request asked for. The second is the database read behind it: if that read
-fails as well, it writes a warning of its own naming the same ASINs — and it
-does the same on the other path into that read, the one that fills in from the
-database when only part of an Audible call failed. Keeping them is what makes
-"which books did that outage affect" answerable at all, and the second line is
-what keeps it answerable when the fallback is what broke.
-
-An ASIN is a catalogue identifier — ten characters, letters and digits only,
-checked against exactly that format before it ever reaches this code, so it
-can't carry text you typed. Neither line carries anything about who asked.
-
-Both lines write those ASINs as a field with a name of its own — `asins` —
-rather than leaving them inside the sentence of a message. In the log service
-that is the difference between something you would have to read and something
-that can be searched and counted on directly, so it is worth saying plainly
-rather than leaving it to be found: each line is still only the list of titles
-that one request asked for, each still answers "which books did that outage
-affect" and nothing else, and there is nothing on either line or anywhere else
-to attach it to a person.
-
-Both of them became fields in two separate changes; before that, both wrote
-their ASINs into their message text. That moved a list Libex was
-already writing down out of prose and into something that can be searched and
-counted by name. It did not add a value, and it did not widen who receives
-one. The same work also took the database driver's own error text off the
-read line, which is the larger half of the change and is covered under
-[Who else sees your requests](#who-else-sees-your-requests).
-
-Where the thing being looked up is part of the path instead, database warnings
-name it too, and they now name it the same way — as a field of
-its own, called `asin`, `author_asin`, `series_asin`, `plan_name` or
-`sku_group` depending on what was being read. That discloses nothing further:
-the request line already records the path in its `url` field, as the table
-above says — verbatim, and even when the path matches no route at all. That
-covers more than ASINs. `/book/B01234567` is one shape of it;
-`/db/plans/{plan_name}` and `/book/sku/{sku}` are another, and their segments
-are ordinary text with no format check applied to them, unlike an ASIN. The
-reason they disclose nothing further is not that they are constrained — it is
-that the whole path was already recorded, so a warning naming one segment of
-it tells you nothing the request line had not already written down. Giving
-those segments field names changed how they can be queried, not which of them
-reach a log.
-
-Those two lines carry a whole list. A handful of others name a single book —
-the one product that went wrong — while Libex is working through what Audible
-sent back: a field that arrived in a shape Libex couldn't read, a date that
-wouldn't parse, a blob too large or too strange to store, a write that failed.
-Each one carries that book's ASIN and what kind of problem it was, some of
-them the region as well, and none of them carries the value that caused it.
-On a lookup by path, that ASIN is already in the request line's `url`. On a
-bulk lookup or a search it is one title out of what that request touched, and
-it is written down because a book Libex is quietly failing on is otherwise
-invisible until someone notices the gap. Like the two above, these say which
-book, never who asked.
-
-One further exception worth naming: if a request causes an unexpected error, the
-error line and its stack trace can include whatever triggered it — and if
-what triggered it was text you sent, that text can end up in the error line
-too. That's not deliberate collection, but it's a real path by which your
-input reaches the logs, so it belongs on this page rather than in a footnote.
-
-### Your IP address is not recorded
-
-Libex does not log your IP address. Not in full, not truncated, not hashed,
-not in any derived form.
-
-Earlier versions logged it, and a version that never shipped truncated it to a
-`/24`. Both are gone. The address arrives in a header, because it has to for
-the request to reach the server at all, and it is simply never read.
-
-This is a deliberate step back from something that was working: a map of where
-requests came from, built from those addresses. It was interesting and it is
-not worth what it costs, so it was removed and the map with it.
-
-**It isn't retroactive, and that matters more than the sentence above.** The
-version running before the release that removed this did log the full address.
-Records it already wrote still contain the address they captured, because
-nothing goes back and rewrites a log. They expire on the schedules under
-[How long it's kept](#how-long-its-kept) — up to 30 days in Axiom, and the
-rotating file's own shorter window on the server — and until they do, they are
-the only thing in Libex's logs that could be matched to a caller. From the
-release onward, no new line has an address in it.
-
-**Cloudflare still sees your real address**, because it terminates TLS for the
-public instance. That is outside Libex's control and I'm not going to pretend
-otherwise — see [Who else sees your requests](#who-else-sees-your-requests).
-
----
-
-### What you type is not recorded either
-
-Query parameters are logged so I can see which options consumers actually use.
-What survives is decided by an allowlist, and it decides the names as well as
-the values:
-
-- **Kept with its value** — structural parameters: `region`, `limit`, `page`,
-  `sort`, `order`, the catalogue filters, and the switches that pick the shape
-  of a response, like `flat` and `label`. These describe *how* a request
-  was made. The value still has to look like the short token those parameters
-  take — if it runs past 64 characters, or contains a `;` or an `=`, which is
-  how a second query would be smuggled inside one value, it's redacted like
-  anything else.
-- **Kept as a bare name, value replaced with `REDACTED`** — the parameters
-  Libex knows about but whose values it doesn't keep: `name`, `keywords`,
-  `title`, `author`, `narrator` and the rest of what a person types, and
-  `asins`, whose value is a list of catalogue identifiers that the request
-  line doesn't hold on to either.
-- **Dropped entirely** — everything else. A name Libex doesn't recognise
-  isn't one of its parameter names, which means it is your text sitting where
-  a name should be. That happens with no ill intent at all: an `&` inside
-  something you typed splits it in two, and a query string with no `=` in it
-  arrives as one long name and no value. Those are discarded outright and
-  replaced by a count — `_unrecognised=2` — which tells me unexpected
-  parameters turned up without keeping a character of them.
-
-So a log line records that a search happened and which field it searched on.
-What was searched for does not survive.
-
-It is an allowlist rather than a blocklist on purpose. A blocklist leaks every
-parameter added after it was written, silently, and nobody notices until
-someone reads the logs. An allowlist withholds anything unclassified by
-default, so the failure mode is a missing value rather than a leaked one — and
-the same holds for the names, so a parameter added to a route but forgotten
-here disappears from the logs instead of leaking into them.
-
-**One honest exception, and its limit.** When something breaks in a way nobody
-anticipated, the error is logged with its message so it can be diagnosed. If
-that message happens to have been built from something you sent, that text is
-in that one line. Removing it would mean not knowing why a release broke,
-which is the thing this logging exists for.
-
-The limit is the important half. This covers an error message that
-*incidentally* carries your text — a library exception that quotes back the
-URL it was handed, say. It is not cover for writing your text into a log line
-on purpose and calling the result an error. Lines that did that, naming a
-searched-for author, narrator or series, have been found and removed; that is
-treated as a defect to fix, not an exception to claim. The genuine case is an
-exceptional path rather than routine collection, and those lines age out with
-everything else.
-
----
+Cloudflare still sees your address; see [Who receives data](#who-receives-data).
 
 ## What is not collected
 
-Stated plainly, because the absences matter as much as the list above:
-
-- **No cookies.** Libex never sets a cookie, never reads one, and never sends
-  a `Set-Cookie` header. Nothing in a response stores state in your client.
-- **No accounts, no logins, no API keys, no sessions.** There is no user
-  record because there is no concept of a user.
-- **No analytics or tracking beyond the request logging described here.** No
-  Google Analytics, no Plausible, no Matomo, no Sentry, no tracking pixels,
-  no fingerprinting. Axiom is the only third party Libex ships log records to.
-- **No cross-request identifier.** Nothing persists between your requests and
-  nothing links two of them together. There is no address, no cookie, no
-  session, no fingerprint. The `X-Request-Id` you get back is not one either —
-  it is minted per request, never read off an incoming one, and stored against
-  nothing. The one value that does repeat across lines is the
-  worker `pid` described above, and it can't do that job: it's shared by every
-  request that worker handled, from everyone, so two lines carrying the same
-  one is not evidence they came from the same person. It says which of my
-  processes was on duty, not who was calling.
-- **No request bodies.** Every public endpoint is a `GET` and none of them
-  accept a body.
-- **No `Authorization` header, no `Referer`, no `Cookie` header.** Of the
-  headers you send, only the two named in the table above — your user agent
-  and the host header — are ever read for logging. The `source`, `complete`
-  and `incompleteReason` fields are headers too, but they are ones Libex put
-  on its own response, not ones you sent.
-- **No caller data in the database at all.** Libex's Postgres database holds
-  Audible metadata — books, authors, narrators, series, genres, chapters — and
-  a cache of Audible responses. What a cache entry is keyed by describes what
-  was asked for, never who asked: a region and an ASIN or list of ASINs for the
-  lookup endpoints, and for the date-window endpoints a day count and the
-  catalogue category the scan was scoped to. There is no table that holds
-  anything about the people making requests. Purging caller data means purging
-  logs; the database has nothing to purge.
-
----
-
-## Who else sees your requests
-
-Naming these is the point. "I don't sell your data" and "nobody else has it"
-are different statements, and only the first is true.
-
-**Cloudflare** fronts the public instance. Every request to `libexdb.com`
-passes through Cloudflare's network before it reaches my server — Cloudflare
-terminates TLS, which means it sees the full request, including your full,
-untruncated IP address, before Libex sees anything. Cloudflare keeps its own
-logs under its own policies and retention. I do not control them, I cannot
-delete them, and nothing in Libex's code affects them. If Cloudflare's
-handling of that data matters to you, Cloudflare's own privacy documentation
-is the authority, not this page.
-
-**Axiom** receives the log records described above. An event there carries the
-fields in that table, plus the things every log line has anyway: a timestamp,
-the level, which part of Libex wrote it, the message text — which on an error
-line includes the stack trace that came with it — and the worker `pid`.
-
-A line that isn't a request line carries named fields of its own instead of
-that table's, and each one arrives in Axiom as a field that can be searched and
-grouped on rather than as words inside a message. What they hold is the
-background work itself: which region a job was running in and which catalogue
-entity it was working on — by ASIN, or by an author's or narrator's name read
-out of Libex's own database — how far through it had got and how much it had
-found, the key and lifetime of a cache entry, and, where something failed, what
-kind of failure it was. A database failure adds the SQLSTATE and the schema,
-table, column and constraint names, deliberately and only those, because
-Postgres writes the offending row into its own error text; elsewhere the
-error's own text is carried. None of that is a new piece of information about
-you, but the shape of it is newer than it looks and the honest version says
-so: the cache lines and the background write lines have been built this way
-for longer, while the database read lines, and the warning that records a
-fallback to them, were sentences until more recently. What changed there
-is that the read lines stopped carrying the driver's own error text — the one
-part of them that could have quoted a stored row back — and that what those
-lines had been saying in prose was given names instead. It is spelled out here
-for the same reason `pid` is: a field you can query by name deserves to be
-described by name, whether or not it says anything about a person. These
-don't.
-
-Nothing outside that list is sent. What it holds describes requests,
-not requesters: no address, and nothing you typed — subject to the two limits
-this page has already named and does not quietly widen here: the ASINs a bulk
-lookup asked for, and an error line that incidentally quotes back something you
-sent.
-Axiom is a hosted log service; it stores and indexes those records so I can
-query them. I'm the only person I've given access to that dataset — but Axiom
-is the company storing it, on its own infrastructure, under its own policies.
-A vendor providing a service is still a third party holding your data, and
-saying "only I can see the logs" would quietly skip over that.
-
-**The operator of the server** can read the rotating log file written on the
-machine, which contains the same fields. See the note under
-[Who runs this](#who-runs-this).
-
-**Audible** receives your search terms, because Libex is a proxy for Audible's
-own API and there is no way to answer a search without asking Audible. What
-Audible does *not* receive is anything about you: the outbound request carries
-Libex's own fixed headers and comes from the server's IP address. Your IP,
-your user agent and your host header are never forwarded.
-
-**Nobody, for the documentation pages.** The interactive API documentation at
-`/docs` and `/redoc` is rendered from files Libex serves itself, from
-`/static`. Some of them are Libex's own — the stylesheet, the logo, the
-favicon — and are committed to the repository, where anyone who clones it can
-see exactly what they are. The rest are the Swagger UI and ReDoc bundles,
-which the image build downloads once at pinned versions and checks against a
-recorded checksum that has to match or the build fails. Opening those pages
-contacts no third party: no CDN, no font service, no external favicon, and no
-logo fetched from the documentation tool's own vendor as it renders. The pages
-do contain ordinary links out — an attribution link, specification URLs — and
-those reach nobody unless you choose to click one.
-
-**shields.io, for the README's counters — not any more.** The count
-badges in Libex's README used to be images drawn by
-[shields.io](https://shields.io): the picture came from their servers, and
-their servers then called `libexdb.com` for the number. Rendering the page
-fetched from shields.io, and Libex saw their servers rather than you. Those
-badges are now drawn by Libex itself, from `/db/stats/badge/`, so the fetch
-comes here instead.
-
-That takes one company out of one path, and the honest version of it says what
-it puts in. The fetch is now an ordinary request to the public instance and is
-logged like one — the fields in the table above, no address — and it crosses
-Cloudflare, which sees the address it came from, exactly as it does for every
-other request. Where a renderer fetches images through an image proxy of its
-own rather than from your browser, Libex and Cloudflare see that proxy and not
-you; GitHub says it does this, but that is GitHub's behaviour, not something I
-can check from this repository, so I'm not going to state it as a fact about
-your render. GitHub is serving you the page either way, and none of this
-changes that. The fixed badges — the licence and the two container-registry
-links — are still shields.io images.
-
-**Nobody else.** I don't sell log data, share it, trade it, or hand it to
-advertisers, data brokers or anyone else. The parties above have it because
-they are how the service physically works, not because I gave it to them for
-anything else.
-
----
-
-## How long it's kept
-
-**The rotating file on the server** is controlled by Libex's own code and by
-the `LOG_RETENTION_DAYS` setting. It rotates at midnight and keeps that many
-days of previous files — the default is 7. That much is verifiable in the
-source.
-
-**Container stdout** is retained according to the container runtime's log
-configuration on the host, not by Libex.
-
-**Axiom** expires records according to the retention configured on the dataset
-in Axiom's own console, and **that is set to 30 days** — after 30 days Axiom
-deletes the records.
-
-I'm stating that as the person who set it, which is a different kind of claim
-from everything above it and worth flagging as such. It is not a line of code
-and it is not in this repository: nothing in the source enforces it, no test
-checks it, and it could be changed in a browser tab without a single commit
-appearing in the history. So it isn't something you can verify the way you can
-verify the fields in the table above. What I can commit to is that if that
-setting changes, this page changes with it.
-
-**Cloudflare's retention** is Cloudflare's, and I have no visibility into it.
-
----
-
-## Your rights, and what I can actually do
-
-This is the section most likely to turn into a lie, so it's the one I've
-written most carefully. If you're in the EU or the UK, data protection law
-gives you rights over personal data about you. Here is what those rights run
-into in a service with no accounts.
-
-**The problem, stated once.** Nothing recorded in Libex's logs points back to
-you. No address is recorded, nothing you typed is recorded on any routine
-path, and nothing links one of your requests to another. There is no login you
-could use to prove which lines were yours, and nothing in a line that says
-whose it is. The one thing that names a request of yours is the
-`X-Request-Id` you were handed, and it only works in one direction: you can
-hand it to me and I can find that line, but nothing lets me go the other way,
-from a person to their requests. The other way your text can land in a log —
-an error message that carried it without meaning to — is covered under
-deletion below.
-
-That isn't an evasion. It's the direct consequence of collecting nothing, and
-it cuts both ways: it is also the reason I could not build a profile of you if
-I wanted to.
-
-**Access — what I can do:** almost nothing, and for a good reason. Nothing in
-a log line identifies you, so there is no way to find your lines from anything
-you could tell me about yourself. Telling me your IP address wouldn't help,
-because no line written since addresses were removed has one in it.
-
-The one exception is an id you kept. Quote an `X-Request-Id` back to me and,
-for as long as that line survives the retention above, I can find the one line
-it belongs to and tell you exactly what is in it. That is worth less than it
-sounds — what is in it is the table above and nothing else, no address and
-nothing you typed — and it proves nothing about whose request it was, since an
-id is just a value and whoever holds it can quote it. It is still a real thing
-I can do, and claiming I can do nothing at all would be tidier than it is
-true. What a log line about your request looks like is described exactly by
-that table either way. For records written before addresses were removed, see
-the note under deletion.
-
-**Deletion — what I can do:** there is nothing identifying to delete. No
-record in the logs identifies you, so there is no set of rows that constitutes
-"your data" to remove. An id you kept names one line, but what that line holds
-is the table above — a method, a path, a status, a duration, a user agent, a
-host header — so there is nothing about you in it to take out. Records age out
-on the retention schedule regardless.
-
-One limit on that, in time rather than in kind: records written *before* the
-release that stopped logging addresses still carry the address they captured,
-so for as long as they survive there is something in the logs that could be
-matched to a caller. I'm not going to promise selective removal from a hosted
-log store whose internals aren't mine — what I can tell you is that nothing new
-is being written that way, and the old records expire on the schedule above.
-
-If you believe something identifying about you has ended up in a log anyway —
-an unhandled error that captured text you sent, most plausibly — tell me, and
-quote the `X-Request-Id` from that response if you still have it, because that
-is what tells me which line to look at. What I can then do depends on where
-the copies of that line are. The ones on my own server — the rotating file and
-the container's own output — are mine to delete, and I will delete them.
-
-The copy in Axiom is a different answer, and the honest one is no. It sits in
-a store I query rather than administer, and whether one event can be taken
-back out of it is not something I've established — so I'm not going to tell
-you in advance that it will be. What I can tell you is what the schedule above
-says: that copy expires with everything else. If it turns out a single event
-can be removed after all, then you get more than this page promised rather
-than less, which is the direction I'd rather be wrong in. That is the one
-realistic case, and it is worth saying out loud rather than hiding behind "we
-hold nothing about you."
-
-**Objection, portability, rectification:** these all need data about you to
-act on, and there isn't any. Cloudflare is a separate matter and holds your
-real address under its own policy — that one is not mine to answer.
-
----
-
-## Self-hosting
-
-If you run your own Libex, **you** are the one collecting this data, not me.
-Nothing from your instance reaches me or the public instance, and I have no
-visibility into it whatsoever.
-
-What carries over to your instance:
-
-- The same request logging happens, with the same fields, to your stdout and
-  your rotating log file at `./logs/libex.log`. The same rule applies
-  there too — it's in the code, not in the public instance's configuration.
-- **Nothing is sent to Axiom unless you set `AXIOM_TOKEN`.** Leave it empty
-  (the default) and no log record leaves your server.
-- There is no switch that turns the stdout or file logging off. If you don't
-  want request lines recorded at all, raise `LOG_LEVEL` to `WARNING` or
-  `ERROR` — the per-request line is logged at `INFO`, so a higher level drops
-  it everywhere, including Axiom. Warnings and errors still get written: the
-  slow-`/health` line survives a raised level, and so does the error case
-  above, which is the one that can carry text a caller sent. Raising the level
-  is not a way to guarantee that never lands in your logs.
-  `LOG_RETENTION_DAYS` controls how many days
-  of rotated files are kept, and `0` means keep them forever rather than
-  keep none.
-- **There is no Cloudflare unless you put one there.** The public instance's
-  edge is my deployment choice, not part of Libex.
-- Your instance still calls Audible's API to answer requests, from your
-  server's IP address. Search terms go to Audible; nothing about your users
-  does.
-- **The README's counter badges point at my instance, not yours.** They are
-  images from `libexdb.com/db/stats/badge/`, so if you keep them in a fork,
-  someone reading your README fetches them from my server, across Cloudflare,
-  and that fetch is logged here under the terms above rather than on your
-  instance. Your copy serves the same routes — repoint them at your own host,
-  or take them out.
-- The `/docs` and `/redoc` pages are served from your own copy of the assets
-  as well, so nobody who opens them on your instance contacts a third party
-  either. That depends on `scripts/fetch_docs_assets.sh` having run, which the
-  Docker build does for you; without it the downloaded bundles are missing
-  and both pages come up blank rather than quietly falling back to a CDN.
-
-If you expose your instance to other people, this document isn't yours to
-point them at — you're the one who decides what you log and who you ship it
-to, and the answers will be different from mine.
-
----
-
-## Embedding Libex in another application
-
-Everything above this point describes a request that travels over a network to
-a Libex server — mine, or one somebody else runs. There is a second shape.
-`libex_core` is the part of Libex that carries no database, no cache, no web
-framework and no configuration of its own, so it can be embedded directly
-inside another application and fetch from Audible in that application's own
-process, with no Libex server in the picture at all.
-
-**Two different people might be reading this.** One is a developer deciding
-whether to put this library inside something they ship. The other has installed
-an application that uses it and wants to know what that means for them. If
-you're the second: the application you installed decides most of what follows,
-and its privacy policy, not this one, is the one that binds. What's below is
-the part of the answer that belongs to Libex, and the questions worth putting
-to whoever wrote the rest.
-
-**Nothing is published yet, and that wording is deliberate.** `libex_core`
-exists in this repository and is not on PyPI or any other package index, so
-there is no released version for an application to depend on. This section
-describes the library as the source stands today, ahead of a release rather
-than after one, because the alternative is a privacy page that catches up with
-the behaviour afterwards. Everything in it is in
-`libex_core/audible/client.py`.
-
-### Why this is a different question from the hosted instance
-
-The public instance is one server with one operator. Whatever it asks Audible,
-it asks from its own address, and Audible sees that address and nothing about
-the person who prompted the lookup. Traffic from everyone who calls it leaves
-through one door.
-
-An embedded copy inverts that. It runs on each user's own machine, so when it
-fetches, **that machine's own address reaches Audible**, together with the
-ASINs it looks up. A list of the titles someone looks up is their library,
-which says something about what they read, and it arrives at Audible attached
-to their home connection. Nobody asked Audible for that, and in the hosted
-shape nobody could have handed it over even by accident.
-
-That is the reason the library behaves the way it does below, and it belongs
-before the mechanics rather than after them.
-
-### It will not fetch until someone has decided how
-
-`libex_core` cannot reach Audible at all until the embedding application says,
-in so many words, how the traffic leaves. The client is constructed as
-`LibexClient(proxy_url=..., allow_direct_egress=...)`:
-
-- `proxy_url` has **no default**. Leaving it out isn't "no proxy" — it's a
-  `TypeError` from Python itself, before anything runs.
-- A blank or missing `proxy_url` on its own is refused. Going out directly, on
-  the machine's own address, requires `allow_direct_egress=True` as a separate,
-  explicit second answer.
-- Anything else is parsed as a proxy URL there and then, and a malformed one
-  fails at that point rather than quietly resolving to direct egress.
-
-So "nobody ever decided" isn't a state this library can be in. The reason for
-the second flag is narrow and worth being plain about: an empty proxy setting
-looks exactly like a forgotten one, and the two are indistinguishable at the
-wire. One operator configuring one server can fairly be taken at their word
-when they leave it blank. Ten thousand copies on ten thousand machines can't
-be, because there is no operator standing behind any of them to have meant it.
-
-**Supplying a proxy is the application's job, not the library's.**
-`libex_core` does not go looking for one, does not read a setting anywhere to
-find one, and never falls back to one. If the application doesn't hand it a
-proxy, there isn't one.
-
-**And the refusal is not privacy by itself.** It forces a decision; it does not
-make it. An application that passes `allow_direct_egress=True` egresses on its
-user's own address, and for some applications that is a perfectly reasonable
-thing to have chosen. What the refusal buys is that it can never happen by
-accident, out of a configuration value that came through empty.
-
-### The environment can't redirect it
-
-The HTTP client is built with `trust_env=False`. `HTTPS_PROXY`, `ALL_PROXY`,
-`SSL_CERT_FILE` and `SSL_CERT_DIR` in the process environment are ignored
-outright: the only proxy the traffic can go through is the one the application
-passed in, and the only trust store is the default one. That matters more on
-somebody's own computer than it ever did in a container, because those
-variables are routinely set there — by an employer's device management, by a
-local intercepting proxy, by a tool someone ran once and forgot. Without that
-flag, any of them could quietly take over where Audible traffic went.
-
-### Proxy credentials stay out of the logs
-
-A proxy URL can carry a username and password. The library parses and checks
-the URL when the client is built, and if it's malformed the error it raises
-contains none of the supplied value — because the underlying HTTP library's own
-parser puts the whole credentialed URL into *its* error text, and an exception
-shaped like that has reached a log field before. The read-only view of a
-client's transport reports only whether it is direct or proxied and, when
-proxied, the proxy's hostname. Never the URL, never what it might have embedded
-in it.
-
-### Where the requests go, and what's in them
-
-Requests go to Audible's API for the region asked for, and nowhere else. The
-path is checked before any URL is built from it, and the finished URL is
-checked again — host, scheme and port — against what it was meant to be, so a
-crafted path can't move the request to some other host.
-
-What leaves with it is a fixed set of headers: an Audible app user agent, the
-locale for the region, and a random number in the header Audible's own app puts
-one in, generated fresh for every request rather than being a stable identifier
-for the machine. The one constant that looks like a device id is a device
-*type* id — identical in every copy of Libex, so it says what the software
-claims to be and nothing about who is running it. Nothing about the user, the
-machine or the surrounding application is added to any of this.
-
-**There is no telemetry.** No analytics, no usage reporting, no version check,
-no crash reporting, no call home of any kind. Audible is the only host this
-library contacts. Axiom, which the sections above describe receiving the hosted
-instance's logs, belongs to the server application and is not part of this
-library — `libex_core` can't even import it, and a test fails if that ever
-stops being true.
-
-### It stores nothing, and it logs into your application
-
-`libex_core` writes no files, opens no database, keeps no cache of its own, and
-reads no environment variables. Nothing about a lookup survives the call that
-made it.
-
-It does write log records, and where those end up is the embedding
-application's decision rather than Libex's: they go to the ordinary Python
-logger named `libex`, so they land wherever that application's logging is
-configured to send them — including a hosted log service, if it uses one.
-There are two. One is a debug line written when closing a connection that has
-gone stale fails, carrying that failure's own traceback. The other is a warning
-when Audible throttles or degrades a request, recording the status, the region,
-the API path the application asked for, which attempt it was, and how long
-Audible asked it to wait. For a single-title lookup that path contains the
-ASIN. Query parameters — which is where a search someone typed would be — are
-not on that line.
-
-### What the application around it still has to answer
-
-The library's guarantees stop at its own edge, and the questions on the other
-side of that edge are the ones that decide how any of this actually feels to a
-user:
-
-- **Direct or proxied, and if proxied, who runs the proxy?** Routing through a
-  proxy doesn't make a lookup private — it changes who sees it. Audible stops
-  seeing the user's address and the proxy's operator starts seeing every
-  request instead. That can be a real improvement, and it is not the same thing
-  as nobody seeing it.
-- **Does the application keep what was looked up?** Libex doesn't. Whether the
-  application does is its own answer to give.
-- **Does it ship its logs anywhere?** If it does, the warning described above
-  goes with them.
-
-If you embed this library in something you give to other people, this page is
-not yours to point them at. You're the one deciding how their traffic leaves
-and what your application keeps, and the answers will be yours rather than
-mine.
-
-### One thing that doesn't exist yet
-
-There is no storage in `libex_core` today — the section above is the whole of
-it, and what it says is that nothing is kept. An optional store on the user's
-own machine, recording which titles have been seen, has been sketched out and
-**not built**: no code, no schema, no setting to turn on, nothing shipped or
-shippable. It's named here only so that its absence is on the record rather
-than assumed from silence. If it is ever built, this section changes in the
-same commit, the same way the note below says the rest of this page does.
-
----
+- **Cookies.** Libex never sets or reads a cookie and sends no `Set-Cookie`
+  header.
+- **Accounts, logins, API keys and sessions.** There is no user record, because
+  there are no users.
+- **Analytics and tracking.** Libex uses no analytics service, tracking pixel,
+  fingerprinting or error-reporting service. Axiom is the only service it sends
+  log records to.
+- **Anything that links your requests to each other.** Request IDs are
+  per-request, and the worker `pid` is shared by every caller.
+- **Request bodies.** Every endpoint open to the public is a `GET` and accepts
+  no body. One undocumented maintenance endpoint accepts uploads from the
+  operator's own tools and rejects everyone else.
+- **`Authorization`, `Cookie` and `Referer` headers.** None of these is logged.
+- **Caller data in the database.** The PostgreSQL database, and any backup of
+  it, holds Audible catalogue metadata (books, authors, narrators, series,
+  genres, chapters) and a cache of Audible responses. Cache entries are keyed by
+  what was asked for, never by who asked: a region with an ASIN or list of
+  ASINs, or a date window and category. Deleting caller data therefore means
+  deleting logs. The database has none to delete.
+
+## Who receives data
+
+"I don't sell your data" and "nobody else has it" are different statements.
+Only the first is true. These parties handle request data because they are part
+of how the service runs:
+
+| Recipient | What it receives | Why | Whose rules apply |
+|---|---|---|---|
+| **Cloudflare** | Every request in full, including your full IP address, before it reaches Libex. | Sits in front of the service and terminates TLS. | Cloudflare's. I cannot see, change or delete its logs. |
+| **Axiom** | The log records described above. Each event also has a timestamp, level, logger name and message. Error messages include their stack trace. | Stores and indexes the logs so problems can be investigated. | Axiom's, as a hosted service. I am the only person with access to the dataset, but Axiom stores it on its own infrastructure. |
+| **The server operator** (me) | The same log lines, in a rotating file and in the container output on the server. | Diagnosis. | Mine. See [Retention](#retention). |
+| **Audible** | The lookups and search terms needed to answer your request. Nothing about you: not your IP address, user agent or host header. Libex sends its own fixed headers and connects through a VPN, so Audible sees the VPN's exit address, not mine and not yours. | Libex answers from Audible's API. | Audible's. |
+| **The VPN provider** | Encrypted connections from Libex's server to Audible's regional API hosts. It can see which host, when, and how much data, but not the path, the title, the search terms, or anything about you. The connections start at my server, not at your device. | Carries Libex's outbound traffic to Audible. | The provider's. |
+
+**The VPN client.** An open-source VPN client container runs alongside Libex
+and carries this traffic. Based on how that software documents its behaviour
+(not something Libex's source can confirm), it does two things worth knowing:
+
+- It writes one line per connection it carries: the internal address of the
+  Libex container and the Audible host. There is no path, title or caller
+  address, because it can't see them. The line stays in Docker's log on the
+  server and is never sent to Axiom.
+- It makes a few connections of its own through the VPN: a lookup of its public
+  address, encrypted DNS lookups through Cloudflare to find Audible's hosts, a
+  periodic connectivity check, and a check on GitHub for newer releases of
+  itself. None of these carries anything from your request.
+
+**Documentation pages.** `/docs` and `/redoc` are built from files Libex serves
+itself. Libex's own stylesheet, logo and favicon are committed to the
+repository. The Swagger UI and ReDoc bundles are downloaded once, at pinned
+versions, when the image is built, and each is checked against a recorded
+checksum. Opening these pages contacts no third party: no CDN, font service or
+externally hosted icon. The pages do contain ordinary outbound links, such as
+an attribution link and specification URLs. These contact nobody unless you
+click them.
+
+**README badges.** The counters in the Libex README are images served by Libex
+from `/db/stats/badge/`. Until recently, shields.io drew them and fetched the
+numbers from Libex itself. Now the viewer's fetch comes here: it crosses
+Cloudflare and is logged like any other request. GitHub says it fetches README
+images through its own proxy, in which case Libex and Cloudflare see that proxy
+rather than the viewer. That is GitHub's behaviour and cannot be confirmed
+from this repository. The README's fixed badges, the licence and the two
+container registries, are still served by shields.io.
+
+**Nobody else.** I don't sell, rent, trade or share log data with advertisers,
+data brokers or anyone else.
+
+## Retention
+
+| Where | How long | Where this is set |
+|---|---|---|
+| Log file on the server | Rotated daily at midnight. The previous `LOG_RETENTION_DAYS` days are kept, 7 by default. | Libex's code and configuration. |
+| Container output (Docker's log), including the VPN client's connection log | The published compose files cap this at five 10 MB files per container, discarding the oldest first. The limit is on size, not age. The public instance does not yet run with these caps. Until it does, how long its container output is kept depends on the server's own Docker configuration. | The published compose files for deployments that use them. The server's Docker configuration for the public instance. |
+| Axiom | 30 days, then deleted. | A setting I configured in Axiom's console. It is not in the code, so it can't be checked from this repository. If it changes, this notice will change with it. |
+| Cloudflare | Set by Cloudflare. | Cloudflare. I have no visibility into it. |
+
+## Your rights
+
+Data protection laws such as the GDPR and UK GDPR give you rights over personal
+data about you, including access, deletion, objection and correction. These
+rights normally work by finding the records about you. Libex records nothing
+that identifies you, so nothing you could tell me about yourself, including
+your IP address, would let me find your requests. The exception is a request ID
+you kept. This is what I can do:
+
+- **Access.** If you give me an `X-Request-Id`, I can find that line while it
+  is still kept and tell you exactly what it contains, which will be the fields
+  described above. A request ID does not prove who made the request, since
+  anyone who holds it can quote it.
+- **Deletion.** Ordinary log lines contain nothing identifying to delete, and
+  they expire on the schedule above. If you think an error line captured
+  something identifying that you sent, tell me, and include the
+  `X-Request-Id` if you have it. I will delete the copies on my own server (the
+  log file and the container output). I cannot promise to remove a single
+  record from Axiom: I use Axiom as a hosted service and have not established
+  that it allows this, so that copy is deleted on its 30-day schedule. The same
+  applies to records written before 1.13.0 that contain an IP address.
+- **Objection, portability and correction.** Each of these needs data about you
+  to act on, and Libex holds none.
+- **Cloudflare** holds your IP address under its own policy. Requests about
+  that data need to go to Cloudflare.
+
+If you are in the EU or UK, you can also raise a concern with your local data
+protection authority.
+
+## Self-hosted instances
+
+If you run your own instance, you are the operator. You decide what is logged
+and where it goes, nothing from your instance reaches me, and this notice does
+not describe your instance. If you offer your instance to other people, write
+your own notice for them.
+
+What the software does as shipped:
+
+- **The same request logging**, using the same code, to stdout (warnings and
+  errors to stderr) and to a rotating file at `./logs/libex.log`.
+- **Nothing is sent to Axiom unless you set `AXIOM_TOKEN`.** Without it, no log
+  record leaves your server.
+- **No switch turns off the file or stdout logging.** To stop request lines,
+  set `LOG_LEVEL` to `WARNING` or `ERROR`. The request line is written at
+  `INFO`, so this removes it from every destination. Warnings and errors are
+  still written, including the slow-`/health` line and error lines that can
+  carry caller input, so a raised level does not guarantee that caller text
+  never lands in your logs.
+- **`LOG_RETENTION_DAYS`** sets how many days of rotated files are kept. `0`
+  keeps them forever, not zero days. The compose files limit Docker's own log
+  to five 10 MB files per container.
+- **No Cloudflare**, unless you put it in front yourself.
+- **How your instance reaches Audible depends on how you deploy it.** The
+  published compose files will not start without a proxy for Audible traffic,
+  and each includes an example VPN client container to provide one. Deployed
+  that way, Audible sees your VPN's exit address, and your VPN provider sees
+  which Audible host you connect to and when, but not the content. The example
+  container logs and makes outbound connections as described under
+  [Who receives data](#who-receives-data). It is only an example: any HTTP or
+  HTTPS proxy will do, and choosing a VPN provider, and what that provider
+  logs, is up to you. Libex itself does not require a proxy. Run it some other
+  way with `AUDIBLE_PROXY_URL` blank and it connects to Audible directly from
+  your server's address. The startup log line shows which mode is in use.
+  Either way, search terms go to Audible and nothing about your users does.
+- **Documentation pages** are served from your own copy of the assets, which
+  `scripts/fetch_docs_assets.sh` downloads and verifies during the Docker
+  build. If that step hasn't run, the pages come up blank rather than loading
+  from a CDN.
+- **README badges point at the public instance.** In a fork, anyone viewing
+  your README fetches them from `libexdb.com`, and the fetch is logged there
+  under this notice. Your instance serves the same routes, so point the badges
+  at your own host or remove them.
+
+## The embeddable library
+
+`libex_core` is the part of Libex that runs inside another application. It
+fetches from Audible in that application's own process, with no Libex server
+involved. **It has not been published** to PyPI or any other package index, so
+this section describes the source as it stands, ahead of any release. The
+behaviour described is in `libex_core/audible/client.py`.
+
+If you are using an application that contains this library, that
+application's privacy policy is the one that applies to you. This section
+covers only the part that belongs to Libex.
+
+**Why it differs from the hosted service.** The public instance reaches Audible
+from one address, shared by everyone who calls it. An embedded copy runs on
+each user's own device. Without a proxy, Audible sees that device's address
+together with the titles it looks up, which amounts to part of someone's
+reading history tied to their home connection. The library is built around
+preventing that from happening by accident:
+
+- **It won't connect until someone decides how.** The client is created as
+  `LibexClient(proxy_url=..., allow_direct_egress=...)`. `proxy_url` has no
+  default, so leaving it out is an error. A blank proxy is refused unless
+  `allow_direct_egress=True` is also passed. A malformed proxy URL raises an
+  error rather than falling back to a direct connection. The library never
+  looks for a proxy or supplies one of its own. This forces a decision but
+  does not make one: an application that opts into direct connections sends
+  its users' own addresses to Audible.
+- **The environment can't redirect it.** It ignores `HTTPS_PROXY`,
+  `ALL_PROXY`, `SSL_CERT_FILE` and `SSL_CERT_DIR`, so a setting left on a
+  device by an employer, a local intercepting proxy or a forgotten tool cannot
+  reroute its traffic or replace its trusted certificates.
+- **Proxy credentials stay out of errors and logs.** An error about an invalid
+  proxy URL contains none of the value supplied. The only view of the
+  connection settings it exposes is the mode and, for a proxy, its hostname.
+- **It talks only to Audible.** Requests go only to Audible's API host for the
+  requested region. The path and the finished URL (host, scheme and port) are
+  checked so that a crafted path cannot redirect the request elsewhere.
+- **It adds nothing about the user.** Each request carries fixed headers: an
+  Audible app user agent, the region's locale, and a random number in
+  `X-ADP-SW` that is regenerated for every request. The one constant that
+  looks like a device ID is a device *type* ID, identical in every copy of
+  Libex.
+- **No telemetry.** It has no analytics, usage reporting, version check, crash
+  reporting or any other call home. It cannot import the Axiom client, and a
+  test fails if that ever changes.
+- **No storage.** It writes no files, opens no database, keeps no cache and
+  reads no environment variables. Nothing about a lookup outlasts the call
+  that made it. An optional local record of titles already seen has been
+  considered but not built. If it is ever added, this section will change with
+  it.
+- **Its logs go where the application sends them.** It writes to the standard
+  Python logger named `libex`, so its records end up wherever the host
+  application's logging is configured to send them. There are two: a debug
+  record with a traceback when closing a stale connection fails, and a warning
+  when Audible throttles or degrades a request. The warning records the status,
+  region, the API path (which includes the ASIN for a single-title lookup), the
+  concurrency pool, the attempt count and the wait Audible asked for. Query
+  parameters, where search text would appear, are not included.
+
+An application that includes the library still has to answer three questions
+for its own users. Does it connect directly or through a proxy, and if through
+a proxy, who runs it? A proxy changes who sees the lookups rather than hiding
+them. Does it keep what was looked up? Does it send its logs anywhere? If you
+ship the library in something other people use, those answers, and the privacy
+notice that states them, are yours.
 
 ## Changes
 
-This file lives in the repository, so every change to it is in the git
-history and anyone can see exactly what changed and when. If something
-material changes about what's collected or who receives it, it changes here
-in the same commit as the code that changed it — a privacy document that
-lags the code is worse than none, because people rely on it.
+This notice is kept in the Libex repository, so every revision is in its public
+history. When what is collected, or who receives it, changes, this notice is
+updated in the same change as the code.

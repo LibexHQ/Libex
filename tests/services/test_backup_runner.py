@@ -872,11 +872,11 @@ async def test_a_sleep_wakes_on_a_stop_rather_than_running_out_the_clock(tmp_pat
 @pytest.mark.asyncio
 async def test_an_idle_runner_keeps_saying_why_rather_than_exiting(tmp_path, caplog):
     """
-    docker-compose.yml sets restart: unless-stopped, so a clean exit is a
-    restart loop that logs the same complaint at whatever rate Docker's
-    backoff allows. And the one line at startup scrolls out of a log window
-    within a day, while the symptom of the thing it warns about -- no
-    backups -- is by nature invisible.
+    docker-compose.backup.yml sets restart: unless-stopped for libex-backup,
+    so a clean exit is a restart loop that logs the same complaint at
+    whatever rate Docker's backoff allows. And the one line at startup
+    scrolls out of a log window within a day, while the symptom of the
+    thing it warns about -- no backups -- is by nature invisible.
     """
     runner = _runner(tmp_path, [])
     runner._stop = asyncio.Event()

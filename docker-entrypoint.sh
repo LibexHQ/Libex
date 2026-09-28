@@ -31,7 +31,7 @@ fi
 #
 # Nothing derives from this number -- the Audible and database pools are
 # per-process constants it multiplies -- so a drifted count changes the totals
-# silently. The arithmetic is in docker-compose.yml. Unset means a single worker.
+# silently. The arithmetic is in app/db/session.py. Unset means a single worker.
 case "$1" in
     uvicorn | */uvicorn)
         echo "Starting uvicorn with WEB_CONCURRENCY=${WEB_CONCURRENCY:-1}"

@@ -1,0 +1,73 @@
+# Corpus refresh stack, a one-off. Deploy after docker-compose.yml.
+name: libex-refresh
+
+services:
+  libex-refresh-corpus:
+    image: ghcr.io/libexhq/libex:latest
+    container_name: libex-refresh-corpus
+    # "no", quoted: a finished walk must not restart.
+    restart: "no"
+    # dry run ships active; swap the two lines for the real pass.
+    command: ["python", "-m", "scripts.refresh_corpus", "--dry-run"]
+    # command: ["python", "-m", "scripts.refresh_corpus"]
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${DB_USER:-libex}:${DB_PASSWORD:?set DB_PASSWORD in this stack's environment -- the same value the API stack uses}@libex-postgres:5432/${DB_NAME:-libex}
+      # required: this stack's own VPN exit.
+      - AUDIBLE_PROXY_URL=${REFRESH_PROXY_URL:?set REFRESH_PROXY_URL to this stack's VPN proxy, e.g. http://libex-refresh-vpn:8888 -- its hostname must contain "refresh"}
+      - REFRESH_RESUME_FROM=${REFRESH_RESUME_FROM:-}
+      # one cache table: match the API stack.
+      - CACHE_TTL=${CACHE_TTL:-86400}
+      # fixed: the resume cursor and the aborts need INFO.
+      - LOG_LEVEL=INFO
+      - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}
+      - AXIOM_TOKEN=${AXIOM_TOKEN:-}
+      - AXIOM_DATASET=${AXIOM_DATASET:-libex}
+    volumes:
+      - ${LOGS_PATH:-./logs}:/app/logs
+    # above two back-to-back 300s drains.
+    stop_grace_period: 610s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    networks:
+      - libex-refresh-egress
+      - libex-db
+
+  # example exit; replace or remove.
+  libex-refresh-vpn:
+    image: qmcgaw/gluetun:v3
+    container_name: libex-refresh-vpn
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - VPN_SERVICE_PROVIDER=custom
+      - VPN_TYPE=wireguard
+      - WIREGUARD_PRIVATE_KEY=${REFRESH_WG_PRIVATE_KEY:-}
+      - WIREGUARD_ADDRESSES=${REFRESH_WG_ADDRESS:-}
+      - WIREGUARD_ENDPOINT_IP=${REFRESH_WG_ENDPOINT_IP:-}
+      - WIREGUARD_ENDPOINT_PORT=${REFRESH_WG_ENDPOINT_PORT:-}
+      - WIREGUARD_PUBLIC_KEY=${REFRESH_WG_PUBLIC_KEY:-}
+      - WIREGUARD_PRESHARED_KEY=${REFRESH_WG_PRESHARED_KEY:-}
+      - HTTPPROXY=on
+      - HTTPPROXY_LOG=on
+    # egress only. never publish 8888.
+    networks:
+      - libex-refresh-egress
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+networks:
+  # created by docker-compose.yml.
+  libex-db:
+    name: libex-db
+    external: true
+  # pinned: a separate VPN stack joins it by name.
+  libex-refresh-egress:
+    name: libex-refresh-egress
+    driver: bridge

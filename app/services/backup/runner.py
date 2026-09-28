@@ -145,7 +145,7 @@ class BackupRunner:
 
         In the scheduled form this does not return until it is asked to
         stop, INCLUDING when there is nothing it can usefully do. Exiting
-        cleanly would be worse than idling: docker-compose.yml sets
+        cleanly would be worse than idling: docker-compose.backup.yml sets
         restart: unless-stopped, which turns a clean exit into a restart
         loop that logs the same complaint at whatever rate Docker's backoff
         allows. Idling leaves one container, up, saying exactly what is

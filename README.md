@@ -110,7 +110,10 @@ curl -O https://raw.githubusercontent.com/LibexHQ/Libex/main/docker-compose.yml
 
 # 3. Create your environment file
 cp .env.example .env
-# Edit .env — DB_PASSWORD is required, all other values have sensible defaults
+# Edit .env — DB_PASSWORD and AUDIBLE_PROXY_URL are both required. For
+# AUDIBLE_PROXY_URL, either fill in the six API_WG_* values to use the
+# bundled example VPN sidecar, or point it at a proxy of your own — see
+# VPN / Egress below. Everything else has a sensible default.
 
 # 4. Start Libex
 docker compose up -d
@@ -118,6 +121,17 @@ docker compose up -d
 # 5. Verify
 curl http://localhost:3333/health
 ```
+
+This deploys the API stack — the only one you need to serve requests, and the
+one to deploy first: it creates the `libex-db` and `libex-egress` Docker
+networks the other four stacks below join by name. Each of the other four is
+its own compose file, deployed separately with `docker compose -f <file> up
+-d`: `docker-compose.seeder.yml` (expands the local library in the
+background), `docker-compose.backfill.yml` (fills in chapters for stored
+books that have none yet, then exits), `docker-compose.refresh.yml`
+(re-fetches every stored book, then exits), and `docker-compose.backup.yml`
+(scheduled Postgres backups). See Configuration and VPN / Egress below for
+what each one needs.
 
 Or copy the compose file directly:
 
@@ -127,34 +141,89 @@ services:
     image: ghcr.io/libexhq/libex:latest
     container_name: libex
     restart: unless-stopped
+    # host side only; the container always listens on 3333.
     ports:
       - "${PORT:-3333}:3333"
+    # an allowlist: a name missing here never reaches the app.
     environment:
       - DATABASE_URL=postgresql+asyncpg://${DB_USER:-libex}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-libex}
+      - CACHE_ENABLED=${CACHE_ENABLED:-true}
       - CACHE_TTL=${CACHE_TTL:-86400}
-      - PORT=${PORT:-3333}
+      - DEFAULT_REGION=${DEFAULT_REGION:-us}
+      # required: this stack's own VPN exit.
+      - AUDIBLE_PROXY_URL=${AUDIBLE_PROXY_URL:?set AUDIBLE_PROXY_URL to this stack's VPN proxy, e.g. http://libex-vpn:8888}
+      # a literal, not a knob: per-process budgets are sized to it.
       - WEB_CONCURRENCY=6
       - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - AXIOM_TOKEN=${AXIOM_TOKEN:-}
+      - AXIOM_DATASET=${AXIOM_DATASET:-libex}
+      - SEED_SECRET=${SEED_SECRET:-}
+      - MIGRATION_NOTICE_ENABLED=${MIGRATION_NOTICE_ENABLED:-false}
+      - MIGRATION_NEW_HOST=${MIGRATION_NEW_HOST:-}
+      - MIGRATION_ANNOUNCED=${MIGRATION_ANNOUNCED:-}
+      - MIGRATION_SUNSET=${MIGRATION_SUNSET:-}
+      - MIGRATION_INFO_URL=${MIGRATION_INFO_URL:-}
     volumes:
-      - ./logs:/app/logs
+      - ${LOGS_PATH:-./logs}:/app/logs
     depends_on:
       postgres:
         condition: service_healthy
+    # unhealthy is reported, never acted on.
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3333/health"]
+      test: ["CMD", "curl", "-f", "http://${HEALTHCHECK_HOST:-localhost}:3333/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
+    # json-file keeps everything unless capped.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    # default reaches postgres; libex-egress reaches the exit.
+    # naming any network drops the implicit default -- keep it listed.
+    networks:
+      - default
+      - libex-egress
+
+  # example exit; replace or remove.
+  libex-vpn:
+    image: qmcgaw/gluetun:v3
+    container_name: libex-vpn
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - VPN_SERVICE_PROVIDER=custom
+      - VPN_TYPE=wireguard
+      - WIREGUARD_PRIVATE_KEY=${API_WG_PRIVATE_KEY:-}
+      - WIREGUARD_ADDRESSES=${API_WG_ADDRESS:-}
+      - WIREGUARD_ENDPOINT_IP=${API_WG_ENDPOINT_IP:-}
+      - WIREGUARD_ENDPOINT_PORT=${API_WG_ENDPOINT_PORT:-}
+      - WIREGUARD_PUBLIC_KEY=${API_WG_PUBLIC_KEY:-}
+      - WIREGUARD_PRESHARED_KEY=${API_WG_PRESHARED_KEY:-}
+      - HTTPPROXY=on
+      - HTTPPROXY_LOG=on
+    # egress only. never publish 8888.
+    networks:
+      - libex-egress
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 
   postgres:
     image: postgres:16-alpine
     container_name: libex-postgres
     restart: unless-stopped
+    # six workers x 20, plus every job stack.
     command: ["postgres", "-c", "max_connections=200"]
-    # loopback by default — connect from the same machine, or over an SSH
-    # tunnel, or set DB_BIND=0.0.0.0 to reach it from elsewhere.
+    # parallel queries outgrow Docker's 64MB default.
+    shm_size: ${DB_SHM_SIZE:-1gb}
+    # loopback: the other stacks use libex-db, not this port.
     ports:
       - "${DB_BIND:-127.0.0.1}:5432:5432"
     environment:
@@ -163,6 +232,7 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD}
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
+    # default is libex's route here. never on egress.
     networks:
       - default
       - libex-db
@@ -171,10 +241,22 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    # STOPSIGNAL is SIGINT: fast shutdown, then a checkpoint; a kill mid-checkpoint
+    # forces crash recovery. A max wait, not a delay.
+    stop_grace_period: 120s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 
 networks:
+  # pinned: the other stacks join these by name.
   libex-db:
     name: libex-db
+    driver: bridge
+  libex-egress:
+    name: libex-egress
     driver: bridge
 ```
 
@@ -236,11 +318,14 @@ requires knowing who you are.
 The instance maintainer is the only one with query access to the Axiom
 dataset, but Axiom itself holds it too — a vendor storing your data on its own
 infrastructure is a third party with access to it, not just the maintainer.
-Logs are retained for 30 days and then automatically deleted by Axiom. The
-public instance also sits behind Cloudflare, which sees every request in
-order to terminate TLS — including your real IP, which is outside Libex's
-control. Axiom and Cloudflare receive this data only to provide those
-services; we don't sell your data or hand it to anyone else.
+On the public instance, logs are retained for 30 days and then automatically
+deleted by Axiom — a setting on that Axiom dataset, not a property of Libex
+itself. The public instance also sits behind Cloudflare, which sees every
+request in order to terminate TLS — including your real IP, which is outside
+Libex's control. Axiom and Cloudflare receive this data only to provide those
+services. They're not the only recipients of request data — see [Who receives
+data](PRIVACY.md#who-receives-data) in the privacy notice for the complete
+list, including Audible and the VPN provider, and what each can see.
 
 **The API docs are served locally.** The interactive docs at `/docs` and
 `/redoc` are rendered from assets Libex ships — not from a CDN. Opening them
@@ -431,10 +516,12 @@ Copy `.env.example` to `.env` and configure:
 | `LOG_RETENTION_DAYS` | `7` | Days of rotated logs to keep. `0` = infinite, no rotation |
 | `AXIOM_TOKEN` | — | Axiom API token (optional — leave blank for stdout only) |
 | `AXIOM_DATASET` | `libex` | Axiom dataset name |
-| `AUDIBLE_PROXY_URL` | — | Proxy URL for outbound Audible requests only. Supports `http://` and `https://` only — a value using any other scheme, or one that doesn't parse as a proxy URL at all, makes the process refuse to start rather than fall back to unproxied egress. API serving is unaffected |
+| `AUDIBLE_PROXY_URL` | — | **Required.** Proxy URL for outbound Audible requests only — the stack refuses to deploy with this blank, naming the missing variable. Only `http://` and `https://` are supported; any other scheme, or a value that doesn't parse as a proxy URL, also refuses to start rather than send traffic out unproxied. API serving, the database, and logging are unaffected either way. See VPN / Egress below for how to supply one |
 | `SEED_SECRET` | — | PBKDF2 hash for the internal seed endpoint. Empty = endpoint disabled. Generate with `python -m app.api.routes.internal.router` |
 
 `DATABASE_URL` is constructed automatically by docker-compose from `DB_NAME`, `DB_USER`, and `DB_PASSWORD`. Only set it manually if running outside of Docker — and whatever it points at must be PostgreSQL 14 or newer, see Self-Hosting Notes below.
+
+This stack also creates two Docker networks, `libex-db` and `libex-egress`, which the seeder, backfill, refresh, and backup stacks below join by name — deploy this one first.
 
 ### Seeder stack (`docker-compose.seeder.yml`)
 
@@ -443,7 +530,7 @@ The seeder is not part of the API stack — it deploys as its own stack, with it
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DB_PASSWORD` | — | **Required.** The same password the API stack's `DB_PASSWORD` carries |
-| `SEEDER_PROXY_URL` | — | **Required.** The seeder's own outbound proxy, separate from the API stack's `AUDIBLE_PROXY_URL` so it never shares the API's exit IP. Its hostname must contain `seeder` or the seeder refuses to start |
+| `SEEDER_PROXY_URL` | — | **Required.** The seeder's own outbound proxy, separate from the API stack's `AUDIBLE_PROXY_URL` so it never shares the API's exit IP. Its hostname must contain `seeder` or the seeder refuses to start. See VPN / Egress below |
 | `DB_USER` | `libex` | PostgreSQL username |
 | `DB_NAME` | `libex` | PostgreSQL database name |
 | `CACHE_TTL` | `86400` | Shared with the API stack — both write into the same cache table |
@@ -459,6 +546,100 @@ The seeder is not part of the API stack — it deploys as its own stack, with it
 | `AXIOM_DATASET` | `libex` | Axiom dataset name |
 
 `DB_PASSWORD` and `SEEDER_PROXY_URL` have no default in `docker-compose.seeder.yml` — a missing one fails the stack deploy naming the variable, rather than starting a container that can't connect.
+
+### Chapter backfill stack (`docker-compose.backfill.yml`)
+
+A one-off job, not a long-running service: it fills in chapters for stored books that have none checked yet, then exits (`restart: "no"` — a finished run stays finished). Deploy after the API stack. See **Chapter backfill** under Self-Hosting Notes below.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DB_PASSWORD` | — | **Required.** The same password the API stack's `DB_PASSWORD` carries |
+| `BACKFILL_PROXY_URL` | — | **Required.** This stack's own outbound proxy, separate from the other stacks'. Its hostname must contain `backfill` or the job refuses to start. See VPN / Egress below |
+| `DB_USER` | `libex` | PostgreSQL username |
+| `DB_NAME` | `libex` | PostgreSQL database name |
+| `LOG_RETENTION_DAYS` | `7` | Days of rotated logs to keep. `0` = infinite, no rotation |
+| `AXIOM_TOKEN` | — | Axiom API token (optional — leave blank for stdout only) |
+| `AXIOM_DATASET` | `libex` | Axiom dataset name |
+
+Log level is fixed at `INFO` in this stack, not operator-configurable — the mechanism that backs off when Audible starts rate-limiting reads its own `WARNING` lines.
+
+### Corpus refresh stack (`docker-compose.refresh.yml`)
+
+Another one-off job: re-fetches every stored book so a fix reaches existing rows, then exits. It ships running `--dry-run` (prints the plan and still reads the database, but never calls Audible) — edit the file to swap in the real command when you're ready to run it. Deploy after the API stack. See **Corpus refresh** under Self-Hosting Notes below.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DB_PASSWORD` | — | **Required.** The same password the API stack's `DB_PASSWORD` carries |
+| `REFRESH_PROXY_URL` | — | **Required.** This stack's own outbound proxy, separate from the other stacks'. Its hostname must contain `refresh` or the job refuses to start. See VPN / Egress below |
+| `REFRESH_RESUME_FROM` | — | ASIN to resume from after a stop. A clean stop prints `RESUME CURSOR: <asin>` as its last log line — put that here and redeploy to pick up after it. Blank starts from the beginning |
+| `DB_USER` | `libex` | PostgreSQL username |
+| `DB_NAME` | `libex` | PostgreSQL database name |
+| `CACHE_TTL` | `86400` | Shared with the API stack — both write into the same cache table |
+| `LOG_RETENTION_DAYS` | `7` | Days of rotated logs to keep. `0` = infinite, no rotation |
+| `AXIOM_TOKEN` | — | Axiom API token (optional — leave blank for stdout only) |
+| `AXIOM_DATASET` | `libex` | Axiom dataset name |
+
+Log level is fixed at `INFO` in this stack — the resume cursor is an `INFO` line, and the aborts on sustained rate-limiting or server errors only fire on lines that level lets through. Stop it with `docker stop -t 610 libex-refresh-corpus` (or stop the stack; its `stop_grace_period` is already `610s`) — a stop can spend up to two 300-second write drains, and cutting it short rewinds the resume cursor by a whole page.
+
+### Backup stack (`docker-compose.backup.yml`)
+
+Its own stack, with no VPN — it talks only to Postgres and to your backup destination, never to Audible. Deploy after the API stack. See **Backup** under Self-Hosting Notes below for what it does when no destination is configured.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DB_PASSWORD` | — | **Required.** The same password the API stack's `DB_PASSWORD` carries |
+| `DB_USER` | `libex` | PostgreSQL username |
+| `DB_NAME` | `libex` | PostgreSQL database name |
+| `BACKUP_TIMEZONE` | `UTC` | IANA timezone name (e.g. `Europe/London`) that `BACKUP_TIME` is local to |
+| `BACKUP_PERIOD` | `daily` | `daily`, `weekly`, or `monthly` |
+| `BACKUP_TIME` | `03:00` | Time of day to run, `HH:MM`, local to `BACKUP_TIMEZONE` |
+| `BACKUP_DAY_OF_WEEK` | `sunday` | Used only when `BACKUP_PERIOD=weekly` |
+| `BACKUP_DAY_OF_MONTH` | `1` | Used only when `BACKUP_PERIOD=monthly` |
+| `BACKUP_RETENTION_RECENT` | `6` | How many of the most recent dumps to keep |
+| `BACKUP_RETENTION_AGED_DAYS` | `30` | Also keeps the newest dump at least this many days old, plus the oldest one not yet this old — so a problem noticed late still has an old-enough copy to recover from. `0` disables both aged tiers |
+| `BACKUP_DUMP_TIMEOUT_SECONDS` | `3600` | Ceiling on how long `pg_dump` is allowed to run |
+| `BACKUP_DESTINATION_TIMEOUT_SECONDS` | `3600` | Ceiling on how long the upload to the destination is allowed to take |
+| `BACKUP_FTPS_HOST` | — | FTPS server. Blank = no destination configured — the container comes up, says so in its log, and waits rather than exiting |
+| `BACKUP_FTPS_PORT` | `21` | Explicit FTPS (upgraded with `AUTH TLS`), not implicit FTPS on port 990 — the two are not interchangeable |
+| `BACKUP_FTPS_USER` | — | FTPS username |
+| `BACKUP_FTPS_PASSWORD` | — | FTPS password |
+| `BACKUP_FTPS_PATH` | — | Directory on the server to write dumps into. Required once a host is set — there's no way to mean "the login's default directory" other than setting this to `.` |
+| `BACKUP_FTPS_CA_PATH` | `libex-backup-ca` (named volume) | Host directory holding the server's certificate, mounted read-only into the container. Set to a real path (e.g. `./ftps-ca`) if your destination presents a self-signed certificate, which is the common case for a NAS — there is no setting to skip verification |
+| `BACKUP_FTPS_CA_BUNDLE` | — | Path to the certificate file inside the container, under the `BACKUP_FTPS_CA_PATH` mount |
+| `BACKUP_FTPS_SERVER_HOSTNAME` | — | Set only if the certificate's name doesn't match the address you connect to (e.g. a NAS certificate for `nas.local` reached at its LAN IP) |
+| `BACKUP_SPOOL_PATH` | `libex-backup-spool` (named volume) | Working area for one dump on its way to the destination. Change to a host path only if you need it on a particular disk — Docker owns the default volume's permissions for you, a bind-mounted path does not |
+| `BACKUP_MEM_LIMIT` | `512m` | Memory ceiling for the backup container. Guards against a large dump being read into memory rather than streamed — raise it if the container is OOM-killed |
+| `LOG_RETENTION_DAYS` | `7` | Days of rotated logs to keep. `0` = infinite, no rotation |
+| `LOG_LEVEL` | `INFO` | Log verbosity — `DEBUG`, `INFO`, `WARNING`, or `ERROR` |
+| `AXIOM_TOKEN` | — | Axiom API token (optional — leave blank for stdout only) |
+| `AXIOM_DATASET` | `libex` | Axiom dataset name |
+
+There is no `BACKUP_ENABLED` — what turns backups on is configuration. Leave the FTPS settings blank and the stack runs with nothing to do; fill in a host, user, password, and path and it starts backing up to schedule. A misspelled `BACKUP_*` name sets nothing and raises no error — the container's startup log line names the destination it actually resolved, so check that after a change.
+
+---
+
+## VPN / Egress
+
+Every stack that talks to Audible — the API, seeder, backfill, and refresh — requires an outbound proxy: `AUDIBLE_PROXY_URL`, `SEEDER_PROXY_URL`, `BACKFILL_PROXY_URL`, and `REFRESH_PROXY_URL` each fail that stack's deploy if left blank, naming the missing variable rather than starting a container that would send Audible traffic out unproxied. Only Audible requests are routed through it — serving, the database, and logging are unaffected. The backup stack has no such requirement; it never talks to Audible.
+
+Any `http://` or `https://` CONNECT-capable proxy works. Each of the four stacks ships an example VPN sidecar (`qmcgaw/gluetun`, WireGuard, pinned to its `v3` release line) as a working default, not as the only option. Three ways to satisfy the requirement:
+
+- **Use the bundled example sidecar** — fill in that stack's six `*_WG_*` values in `.env` (endpoint, keys) from your provider's WireGuard config.
+- **Run your own VPN container in the same stack** and point the proxy variable at it, in place of the bundled sidecar.
+- **Run a separate VPN stack** and join its container to that stack's egress network (`libex-egress`, `libex-seeder-egress`, `libex-backfill-egress`, or `libex-refresh-egress`) as `external: true`, deployed after the stack that creates that network.
+
+Each egress network is created only by its own stack's compose file, which is why the **API stack deploys first** — it creates `libex-db` and `libex-egress`. A hand-made network with the same name is rejected ("incorrect label com.docker.compose.network"); remove it with `docker network rm <name>` and redeploy the stack that's supposed to own it.
+
+**Bringing your own VPN instead of a bundled sidecar?**
+
+1. It must be an HTTP(S) CONNECT proxy. SOCKS, and anything else, make the stack refuse to start rather than send traffic unproxied.
+2. It needs its own kill switch. A plain tinyproxy/privoxy/squid container falls back to the open internet the moment its VPN connection drops, unless it shares the VPN container's network stack (`network_mode: service:<vpn>`). Verify the exit IP once it's up.
+3. Percent-encode any `user:pass@` credentials in the proxy URL — and never paste `docker inspect` or `compose config` output anywhere public; both print the URL, credentials included, in plain text.
+4. Never publish the proxy's port, and never attach the VPN container to `libex-db` or to the stack's `default` network — egress only.
+5. Use a separate exit per stack. The hostname checks (`seeder`, `backfill`, `refresh`) only look at the proxy URL's name, not where it actually connects, so nothing technically stops two stacks sharing an exit — but sharing one defeats the point of separating them.
+6. Only trusted containers belong on an egress network. If you run gluetun yourself, stay on `v3.40` or later and never set `HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE` to `{"auth":"none"}`.
+7. No TLS-intercepting proxy — Libex validates Audible's certificate itself, and a proxy that intercepts TLS breaks that.
+8. Whatever VPN you use, its operator can see which regional Audible host each stack calls, when, and how much data crosses each connection. The path, ASIN, and search terms travel over that same link, but encrypted — the operator can't read them.
 
 ---
 
@@ -481,7 +662,7 @@ Libex is API-compatible with AudiMeta. To migrate:
 - Cache TTL varies by what is cached, defaulting to `CACHE_TTL` seconds (default 24 hours) unless an endpoint sets its own; expired entries are purged automatically
 - Logs directory: `./logs` (relative to your compose file) — Libex writes a rotating log file to `./logs/libex.log` on the host
 - Log rotation is daily. `LOG_RETENTION_DAYS=7` keeps 7 days of backups. Set to `0` for infinite retention with no rotation
-- **Database seeder:** Off by default, and not part of `docker-compose.yml` at all. It's a separate stack, `docker-compose.seeder.yml`, running its own container (`libex-seeder`) with its own VPN exit — deploy it as its own Portainer stack, after the API stack is up. (Both stacks run the same startup migration, and there's no ordering between separate stacks to prevent two migrations racing each other.) It expands the local DB so the `/db/*` endpoints have more to return, and runs two independent workers in that one container:
+- **Database seeder:** Off by default, and not part of `docker-compose.yml` at all. It's a separate stack, `docker-compose.seeder.yml`, running its own container (`libex-seeder`) with its own VPN exit — deploy it as its own stack (`docker compose`, Portainer, or similar), after the API stack is up. (Both stacks run the same startup migration, and there's no ordering between separate stacks to prevent two migrations racing each other.) It expands the local DB so the `/db/*` endpoints have more to return, and runs two independent workers in that one container:
   - **Expansion** walks author, series, and narrator relationships to discover books you haven't requested yet. Each cycle compounds — a single book fetch can seed hundreds of related books over time. Runs every `SEEDER_INTERVAL_HOURS` (default 24).
   - **New releases** scans Audible's recent catalog by release date so fresh titles get picked up automatically. It runs on its own worker and its own interval (`SEEDER_NEW_RELEASES_INTERVAL_HOURS`, default 24), so you can have it run more often than the heavier expansion work without waiting behind it. It walks every category in Audible's taxonomy by release date, going as deep as the catalog allows per category.
   - **Release-window refresh** (optional, `SEEDER_REFRESH_ENABLED`, default off) re-fetches a book's details as its release date nears, since things like the date, cover, narrator, and runtime firm up over time — and keeps checking for 30 days after release, on a tapering cadence, since a title's data is still settling in the weeks just after it comes out. It refreshes more often the closer a book is to its release date on either side — roughly yearly when far out, down to daily right around release — before leaving it alone once the 30 days are up. Runs as a second phase of the new-releases worker.
@@ -491,7 +672,23 @@ Libex is API-compatible with AudiMeta. To migrate:
   Requires `SEEDER_PROXY_URL` — its hostname must contain `seeder`, or the seeder refuses to start rather than risk sending sustained, unattended traffic out through the API's own exit IP.
 
   To turn it off, stop or remove the `docker-compose.seeder.yml` stack. It's a separate stack, so this has no effect on the API.
-- **VPN proxy:** Set `AUDIBLE_PROXY_URL` (API stack) or `SEEDER_PROXY_URL` (seeder stack) to route that stack's outbound Audible requests through a proxy. Only Audible requests are affected — API serving, database connections, and logging are unaffected either way, and the two variables are independent so the stacks never share an exit IP; neither picks up an ambient proxy or certificate setting from the host or container environment; only the variable itself decides where Audible traffic goes. Only HTTP and HTTPS proxies are supported — anything else (including a SOCKS proxy) makes the stack refuse to start rather than send traffic out unproxied. Add your VPN proxy container as a service in the same compose file as the stack that needs it — it's reachable there by service name over that stack's own default network, no extra network to create. Leave the variable blank to disable
+- **Chapter backfill:** a one-off, not a service — `docker-compose.backfill.yml` fills in chapters for stored books that have none checked yet, then exits. Its restart policy is `"no"` on purpose: a finished run should stay finished rather than restart in a loop. Requires its own `BACKFILL_PROXY_URL`, hostname containing `backfill`. Re-run it by redeploying the stack (`docker compose -f docker-compose.backfill.yml up`).
+- **Corpus refresh:** another one-off — `docker-compose.refresh.yml` re-fetches every stored book, for when a fix needs to reach rows Libex already has. It ships running `--dry-run`: it reads the database and prints what it would do, but never calls Audible, until you edit the file to swap in the real command. Requires its own `REFRESH_PROXY_URL`, hostname containing `refresh`. A clean stop can take up to two 300-second write drains, hence its `610s` grace period — cutting a stop short rewinds its resume cursor by a whole page; use `REFRESH_RESUME_FROM` to pick back up after a clean stop.
+- **Backup:** its own stack, `docker-compose.backup.yml`, with no VPN exit — it never talks to Audible, only to Postgres and to whatever destination you configure. With no destination configured it comes up, logs that it has nothing to do, and waits, rather than exiting into a restart loop. Configure an FTPS host, user, password, and path and it starts dumping to schedule (daily at 03:00 UTC by default), keeping a recent tier of dumps plus an older one so a problem noticed late still has something to recover from. FTPS here means explicit FTPS on port 21 (upgraded with `AUTH TLS`), not implicit FTPS on port 990, and the server's certificate has to be supplied and is always verified — there's no setting to skip that.
+- **VPN proxy:** every stack that calls Audible — API, seeder, backfill, refresh — needs its own outbound proxy, and none of them will start without one. See **VPN / Egress** above for what satisfies that and the warnings that apply if you bring your own.
+- **Connection budget:** Postgres is started with `max_connections=200`. The API's 6 workers account for up to 120 of those; the seeder and corpus refresh each add up to 20 more while running, chapter backfill up to 16, and backup none at all (it only shells out to `pg_dump`). Running every stack at once still leaves headroom under 200 — raise `max_connections` in `docker-compose.yml`'s postgres command if you add more Libex stacks against the same database than that.
+
+---
+
+## Upgrading a Self-Hosted Instance
+
+If you deployed Libex before the VPN requirement and the backup/backfill/refresh stacks existed — a single `docker-compose.yml` with an optional blank `AUDIBLE_PROXY_URL` and a bundled `libex-backup` service:
+
+1. Set `AUDIBLE_PROXY_URL` in the API stack's `.env` — either the six `API_WG_*` values for the bundled example sidecar, or your own proxy. The stack now refuses to deploy without it.
+2. Redeploy the seeder stack with `SEEDER_PROXY_URL` set the same way (`http://libex-seeder-vpn:8888` with the bundled example sidecar).
+3. Backup moved out of `docker-compose.yml` into its own stack. Remove the old `libex-backup` container — `docker rm -f libex-backup`, or redeploy the API stack with `--remove-orphans` — then deploy `docker-compose.backup.yml` on its own.
+4. The old deployment's `libex-backup-spool` and `libex-backup-ca` volumes are safe to remove once the new backup stack is running, unless you'd put a certificate directly into the CA volume rather than mounting it from a host path.
+5. Relative paths (like `LOGS_PATH`) now resolve against each stack's own compose file rather than a shared project directory — if you relied on several stacks sharing one relative logs path, set the same absolute `LOGS_PATH` in each stack's `.env` instead.
 
 ---
 

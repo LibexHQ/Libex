@@ -15,18 +15,23 @@ settings = get_settings()
 # this pool is the only consumer of Postgres connections for the API, the
 # seeder loop, and every background writer task.
 #
-# The budget it is sized against: Postgres runs with max_connections=200
-# (docker-compose.yml sets it explicitly on the postgres command) and
-# PostgreSQL 16 holds back superuser_reserved_connections (3) plus
-# reserved_connections (0), leaving 197 for the libex role. pool_size +
-# max_overflow caps each process at 20, so six workers hold 120 at full
-# stretch, 77 clear of the role's share. The aggregate is the invariant and
-# the per-process figure moves with WEB_CONCURRENCY (docker-compose.yml), the
-# one place the worker count is set; raising that without lowering these
-# spends another 20 connections per added process. What sets that count is
-# CPU, not Postgres — one event loop per process against 12 cores on the host,
-# with the measurements behind it recorded in docker-compose.yml. This pool is
-# a constraint the count has to fit, never the reason it is what it is.
+# The budget it is sized against: Postgres runs with max_connections=200, set
+# on the postgres command in docker-compose.yml, and PostgreSQL 16 holds back
+# superuser_reserved_connections (3) plus reserved_connections (0), leaving
+# 197 for the libex role. pool_size + max_overflow caps each process at 20,
+# so the API's six workers (WEB_CONCURRENCY=6, also docker-compose.yml) hold
+# 120 at full stretch, 77 clear of the role's share; raising that count
+# without lowering these spends another 20 connections per added process.
+# What sets the worker count is CPU, not Postgres, and this pool is a
+# constraint that count has to fit, never the reason it is what it is.
+#
+# Every job stack (docker-compose.seeder.yml, .backfill.yml, .refresh.yml)
+# runs as its own single process and draws against the same 197. The seeder
+# and corpus-refresh stacks reuse this exact engine, so each adds another 20
+# while running; scripts/backfill_chapters.py builds its own smaller engine
+# (pool_size 12 + max_overflow 4 = 16); the backup stack never touches this
+# pool at all, since it reads Postgres through pg_dump. None of it is
+# enforced against the 197 anywhere.
 #
 # What consumes a slot is an open transaction, not a request and not a
 # session. get_session is a request-scoped FastAPI dependency, but an

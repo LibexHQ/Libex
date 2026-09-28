@@ -14,26 +14,49 @@ write path, so stored data matches an on-demand fetch.
 
 RUN IT (its own container, its own dedicated VPN exit -- AUDIBLE_PROXY_URL
 must name it explicitly; the run refuses to start unless its hostname
-contains "backfill", see _verify_dedicated_proxy):
+contains "backfill", see _verify_dedicated_proxy). docker-compose.backfill.yml
+is the canonical way to run this: its own Portainer stack, its own bundled
+VPN sidecar (libex-backfill-vpn, replaceable), and its own DATABASE_URL,
+which reaches Postgres at libex-postgres:5432 over libex-db, the network the
+API stack creates and this stack joins as external. The stack's other
+network, libex-backfill-egress, is this run's own and carries nothing but
+this container and its sidecar -- a separate VPN, in-stack or joined as an
+external network of its own, satisfies the hostname check the same way,
+through either its container name or a network alias, so long as one of
+them contains "backfill".
 
-    docker network create libex-backfill-net              # once; the sidecar joins it too
-    docker run -d --name libex-chapter-backfill \\
-      --network libex-backfill-net \\
-      --network libex-db \\
-      -e AUDIBLE_PROXY_URL=http://libex-backfill-vpn:8888 \\
-      -e DATABASE_URL=<same as the app, host libex-postgres> \\
-      ghcr.io/libexhq/libex:latest \\
-      python -m scripts.backfill_chapters --limit 5     # dry run; drop --limit for the real run
+    docker compose -f docker-compose.backfill.yml up -d
 
-Both networks are still needed, for different things: libex-db (external,
-created by the API stack) is where libex-postgres resolves -- no discovery
-step required. The other is this run's own; attach libex-backfill-vpn to it
-too. Repeating --network on `docker run` needs Engine 25.0+; on older ones
-use docker create, docker network connect, then docker start.
+That starts the real corpus walk (no --limit) as a long-running,
+restart: "no" container: a finished run stays finished rather than
+restarting. For a supervised trial instead:
+
+    docker compose -f docker-compose.backfill.yml run --rm chapter-backfill \\
+      python -m scripts.backfill_chapters --limit 5
 
 Stop with `docker stop libex-chapter-backfill` -- it finishes in-flight
 books, commits them, and exits cleanly (exit 0; exit 1 means the ratchet or
-the NONE-rate guard aborted the run).
+the NONE-rate guard aborted the run). A plain `docker stop` reads the
+stack's own stop_grace_period (300s). The stop waits on every in-flight book
+with no deadline of its own, so that grace has to exceed the slowest one
+book can take; the books run side by side, since neither the Audible
+semaphore nor the database pool is narrower than CONCURRENCY_CEILING, so the
+slowest single book is the whole wait:
+
+    Audible   3 attempts x 30s request timeout              90s
+              2 retry waits x 10s Retry-After cap            20s
+    Database  1 new connection, asyncpg's default timeout    60s
+              4 statements x 30s statement_timeout
+              (upsert, commit, stamp, commit)               120s
+                                                           ----
+                                                            290s
+
+300s clears that by 10s. A timeout is never retried, so a third attempt
+only happens after two that came back 429 or 5xx. The 30s request timeout is httpx's
+per-phase limit, not a wall clock, so a response trickling in slower than
+that can still outlast this; nothing short of a deadline in the script
+bounds it. A shorter grace can SIGKILL a book mid-write; it stays
+unstamped and is fetched again on the next run.
 
 ENVIRONMENT.
 

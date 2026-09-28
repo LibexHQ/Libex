@@ -12,32 +12,34 @@ REFRESH_CONCURRENCY_MAX, and steps back down on degradation. Any 429, or a
 sustained run of 5xx, aborts outright -- this is a one-off with no deadline,
 and a fresh VPN exit is a minute of work.
 
-RUN IT (its own container, its own AirVPN endpoint -- AUDIBLE_PROXY_URL must
-name it explicitly; the run refuses to start unless its hostname contains
-"refresh", see _verify_dedicated_proxy):
+RUN IT (its own container, its own dedicated VPN exit -- AUDIBLE_PROXY_URL
+must name it explicitly; the run refuses to start unless its hostname
+contains "refresh", see _verify_dedicated_proxy). docker-compose.refresh.yml
+is the canonical way to run this: its own Portainer stack, its own bundled
+VPN sidecar (libex-refresh-vpn, replaceable), and its own DATABASE_URL,
+which reaches Postgres at libex-postgres:5432 over libex-db, the network the
+API stack creates and this stack joins as external. The stack's other
+network, libex-refresh-egress, is this run's own and carries nothing but
+this container and its sidecar -- a separate VPN, in-stack or joined as an
+external network of its own, satisfies the hostname check the same way,
+through either its container name or a network alias, so long as one of
+them contains "refresh".
 
-    docker network create libex-refresh-net              # once; the sidecar joins it too
-    docker run -d --name libex-refresh-corpus \\
-      --network libex-refresh-net \\
-      --network libex-db \\
-      -e DATABASE_URL=<same as the app, host libex-postgres> \\
-      -e AUDIBLE_PROXY_URL=http://libex-refresh-vpn:8888 \\
-      ghcr.io/libexhq/libex:latest \\
-      python -m scripts.refresh_corpus --dry-run     # prints the plan, calls nothing
+    docker compose -f docker-compose.refresh.yml up -d
 
-Both networks are still needed, for different things: libex-db (external,
-created by the API stack) is where libex-postgres resolves -- no discovery
-step required. The other is this run's own; attach libex-refresh-vpn to it
-too. Repeating --network on `docker run` needs Engine 25.0+; on older ones
-use docker create, docker network connect, then docker start.
+The stack ships with --dry-run active (prints the plan, calls nothing); the
+real command is the commented-out line right below it in the compose file --
+swap the two before a real pass.
 
-Drop --dry-run for the real run. `docker stop -t 600 libex-refresh-corpus`
-finishes chunks in flight, prints the resume cursor, and exits. -t must be
-STRICTLY GREATER than DRAIN_TIMEOUT_SECONDS -- a SIGTERM landing mid-drain
-can run one page's drain and then the exit drain back to back, up to
-DRAIN_TIMEOUT_SECONDS x 2 (~600s worst case). Docker's default 10s grace
-ends in SIGKILL before a drain finishes, which rewinds the resume cursor a
-page.
+Drop --dry-run for the real run. `docker compose -f docker-compose.refresh.yml
+stop` reads the stack's own stop_grace_period (610s) rather than needing one
+passed by hand; it finishes chunks in flight, prints the resume cursor, and
+exits. That grace period must be STRICTLY GREATER than DRAIN_TIMEOUT_SECONDS
+-- a SIGTERM landing mid-drain can run one page's drain and then the exit
+drain back to back, up to DRAIN_TIMEOUT_SECONDS x 2 (600s worst case), and
+610s is chosen to clear that worst case with margin. Docker's default 10s
+grace ends in SIGKILL before a drain finishes, which rewinds the resume
+cursor a page.
 
 Restart with `--resume-from <asin>` (or REFRESH_RESUME_FROM), using the ASIN
 from the last `RESUME CURSOR:` log line.
@@ -73,8 +75,8 @@ ENVIRONMENT.
                                                 as that rises -- the run refuses to start
                                                 if the derivation leaves no headroom at all.
     REFRESH_DRAIN_TIMEOUT_SECONDS      300.0   bound on waiting for the persist queue,
-                                                between pages and at exit. `docker stop -t`
-                                                must exceed this.
+                                                between pages and at exit. The stack's
+                                                stop_grace_period must exceed this.
     REFRESH_PROGRESS_EVERY             100     chunks between progress lines.
 
 Exit codes: 0 clean, 1 aborted (429, sustained 5xx, or chunk-failure rate), 2

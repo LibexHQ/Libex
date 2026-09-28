@@ -1,0 +1,68 @@
+# Chapter backfill stack. Deploy after docker-compose.yml.
+name: libex-backfill
+
+services:
+  chapter-backfill:
+    image: ghcr.io/libexhq/libex:latest
+    container_name: libex-chapter-backfill
+    # "no", quoted: a finished run stays finished.
+    restart: "no"
+    command: ["python", "-m", "scripts.backfill_chapters"]
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${DB_USER:-libex}:${DB_PASSWORD:?set DB_PASSWORD in this stack's environment -- the same value the API stack uses}@libex-postgres:5432/${DB_NAME:-libex}
+      # required: this stack's own VPN exit.
+      - AUDIBLE_PROXY_URL=${BACKFILL_PROXY_URL:?set BACKFILL_PROXY_URL to this stack's VPN proxy, e.g. http://libex-backfill-vpn:8888 -- its hostname must contain "backfill"}
+      # fixed: the 429 ratchet reads WARNING lines.
+      - LOG_LEVEL=INFO
+      - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}
+      - AXIOM_TOKEN=${AXIOM_TOKEN:-}
+      - AXIOM_DATASET=${AXIOM_DATASET:-libex}
+    volumes:
+      - ${LOGS_PATH:-./logs}:/app/logs
+    # above one book's 290s worst case.
+    stop_grace_period: 300s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    networks:
+      - libex-backfill-egress
+      - libex-db
+
+  # example exit; replace or remove.
+  libex-backfill-vpn:
+    image: qmcgaw/gluetun:v3
+    container_name: libex-backfill-vpn
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - VPN_SERVICE_PROVIDER=custom
+      - VPN_TYPE=wireguard
+      - WIREGUARD_PRIVATE_KEY=${BACKFILL_WG_PRIVATE_KEY:-}
+      - WIREGUARD_ADDRESSES=${BACKFILL_WG_ADDRESS:-}
+      - WIREGUARD_ENDPOINT_IP=${BACKFILL_WG_ENDPOINT_IP:-}
+      - WIREGUARD_ENDPOINT_PORT=${BACKFILL_WG_ENDPOINT_PORT:-}
+      - WIREGUARD_PUBLIC_KEY=${BACKFILL_WG_PUBLIC_KEY:-}
+      - WIREGUARD_PRESHARED_KEY=${BACKFILL_WG_PRESHARED_KEY:-}
+      - HTTPPROXY=on
+      - HTTPPROXY_LOG=on
+    # egress only. never publish 8888.
+    networks:
+      - libex-backfill-egress
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+networks:
+  # created by docker-compose.yml.
+  libex-db:
+    name: libex-db
+    external: true
+  # pinned: a separate VPN stack joins it by name.
+  libex-backfill-egress:
+    name: libex-backfill-egress
+    driver: bridge

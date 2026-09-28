@@ -1,6 +1,18 @@
 """
 Core configuration for Libex.
 Settings are loaded from environment variables with sensible defaults.
+
+A field added here is only half-wired: pydantic-settings reads whatever
+environment variables happen to be present, but each docker-compose*.yml
+`environment:` block is a fixed allowlist, not a passthrough, so a new
+setting reaches its container only once that file names it too. Where a
+compose file's own entry repeats a default already set here (e.g.
+CACHE_TTL:-86400 matching cache_ttl below), that repetition is deliberate:
+an `environment:` entry is emitted even when the shell variable behind it is
+unset, so one written without its own `:-default` fallback would still hand
+the container an empty string for that name — present in the environment,
+not absent from it — and pydantic would read that empty string rather than
+ever falling through to the default compiled here.
 """
 
 # Standard library
@@ -21,7 +33,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "Libex"
-    app_version: str = "1.23.1"
+    app_version: str = "1.24.0"
     debug: bool = False
     host: str = "0.0.0.0"
     port: int = 3333
@@ -59,13 +71,14 @@ class Settings(BaseSettings):
 
     # Backup — scheduling
     #
-    # Read by the backup runner (the libex-backup service) and by nothing
-    # else. None of the BACKUP_* names is in docker-compose.yml's libex
-    # `environment:` allowlist, so the API container never receives a value
-    # for any of them and always takes the default here — a mistyped backup
-    # knob can stop backups, but it cannot touch the API. The exception is a
-    # deployment run outside Docker off a shared .env file, which this class
-    # reads directly and where that separation does not exist.
+    # Read by the backup runner (the libex-backup service, its own stack in
+    # docker-compose.backup.yml) and by nothing else. None of the BACKUP_*
+    # names is in docker-compose.yml's libex `environment:` allowlist, so the
+    # API container never receives a value for any of them and always takes
+    # the default here — a mistyped backup knob can stop backups, but it
+    # cannot touch the API. The exception is a deployment run outside Docker
+    # off a shared .env file, which this class reads directly and where that
+    # separation does not exist.
     #
     # period, time, day-of-week and timezone are plain strings rather than
     # enums or parsed times on purpose: their valid sets are not Python
@@ -100,9 +113,11 @@ class Settings(BaseSettings):
     # Backup — operational
     #
     # The spool path inside the container is fixed, the same way the listening
-    # port is: docker-compose.yml mounts the spool at this exact path and sets
-    # this exact value, and what an operator relocates is the host side
-    # (BACKUP_SPOOL_PATH), never the container side.
+    # port is, and the literal /backup-spool has to stay in step across four
+    # places: docker-compose.backup.yml's own BACKUP_SPOOL_DIR= line, the
+    # volume mount target beside it in that same file, this default, and the
+    # value scripts/backup.py's own docstring names. What an operator
+    # relocates is the host side (BACKUP_SPOOL_PATH), never the container side.
     #
     # The dump timeout is not fitted to a measurement. A clean pg_dump of the
     # live database measured 8m39s for a 2.38 GB archive; this is roughly
@@ -111,6 +126,11 @@ class Settings(BaseSettings):
     # enormous because pg_dump holds one transaction snapshot open for its
     # whole run, which holds autovacuum back from reclaiming anything newer —
     # a dump wedged for a day costs more than a backup missed for a day.
+    # docker-compose.backup.yml's stop_grace_period sits 300s above this
+    # value on purpose, as headroom for a dump already inside its own timeout
+    # to wind up before Docker's kill signal arrives — the two move
+    # together, and raising this without raising that shortens the fuse it
+    # was set against.
     backup_spool_dir: str = "/backup-spool"
     backup_dump_timeout_seconds: int = 3600
     backup_destination_timeout_seconds: int = 3600

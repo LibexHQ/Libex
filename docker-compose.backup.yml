@@ -1,0 +1,63 @@
+# Backup stack. No VPN: it never talks to Audible. Deploy after docker-compose.yml.
+name: libex-backup
+
+services:
+  libex-backup:
+    image: ghcr.io/libexhq/libex:latest
+    container_name: libex-backup
+    # both lines or neither: skips the migration and the image CMD.
+    entrypoint: []
+    command: ["python", "-m", "scripts.backup"]
+    # it idles without a destination rather than exiting.
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${DB_USER:-libex}:${DB_PASSWORD:?set DB_PASSWORD in this stack's environment -- the same value the API stack uses}@libex-postgres:5432/${DB_NAME:-libex}
+      - BACKUP_TIMEZONE=${BACKUP_TIMEZONE:-UTC}
+      - BACKUP_PERIOD=${BACKUP_PERIOD:-daily}
+      - BACKUP_TIME=${BACKUP_TIME:-03:00}
+      - BACKUP_DAY_OF_WEEK=${BACKUP_DAY_OF_WEEK:-sunday}
+      - BACKUP_DAY_OF_MONTH=${BACKUP_DAY_OF_MONTH:-1}
+      - BACKUP_RETENTION_RECENT=${BACKUP_RETENTION_RECENT:-6}
+      - BACKUP_RETENTION_AGED_DAYS=${BACKUP_RETENTION_AGED_DAYS:-30}
+      # fixed: must match the spool mount below.
+      - BACKUP_SPOOL_DIR=/backup-spool
+      # raise stop_grace_period with it.
+      - BACKUP_DUMP_TIMEOUT_SECONDS=${BACKUP_DUMP_TIMEOUT_SECONDS:-3600}
+      - BACKUP_DESTINATION_TIMEOUT_SECONDS=${BACKUP_DESTINATION_TIMEOUT_SECONDS:-3600}
+      - BACKUP_FTPS_HOST=${BACKUP_FTPS_HOST:-}
+      - BACKUP_FTPS_PORT=${BACKUP_FTPS_PORT:-21}
+      - BACKUP_FTPS_USER=${BACKUP_FTPS_USER:-}
+      - BACKUP_FTPS_PASSWORD=${BACKUP_FTPS_PASSWORD:-}
+      - BACKUP_FTPS_PATH=${BACKUP_FTPS_PATH:-}
+      - BACKUP_FTPS_CA_BUNDLE=${BACKUP_FTPS_CA_BUNDLE:-}
+      - BACKUP_FTPS_SERVER_HOSTNAME=${BACKUP_FTPS_SERVER_HOSTNAME:-}
+      - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - AXIOM_TOKEN=${AXIOM_TOKEN:-}
+      - AXIOM_DATASET=${AXIOM_DATASET:-libex}
+    volumes:
+      - ${BACKUP_SPOOL_PATH:-libex-backup-spool}:/backup-spool
+      - ${BACKUP_FTPS_CA_PATH:-libex-backup-ca}:/etc/libex/ftps-ca:ro
+      - ${LOGS_PATH:-./logs}:/app/logs
+    mem_limit: ${BACKUP_MEM_LIMIT:-512m}
+    # above the 3600s dump timeout; they move together.
+    stop_grace_period: 3900s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    # never on an egress network.
+    networks:
+      - default
+      - libex-db
+
+volumes:
+  libex-backup-spool:
+  libex-backup-ca:
+
+networks:
+  # created by docker-compose.yml.
+  libex-db:
+    name: libex-db
+    external: true

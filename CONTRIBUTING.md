@@ -32,16 +32,27 @@ refactor: Extract book normalization into helper
 
 ---
 
+## Setup
+
+Install dependencies before running anything below — this is the same lock CI installs from, and it's what pulls in the test runners:
+
+```bash
+pip install --require-hashes -r requirements-dev.lock
+```
+
+---
+
 ## Before Opening a PR
 
-Every PR must pass both of these locally before pushing:
+Every PR must pass all of these locally before pushing:
 
 ```bash
 ruff check app/ libex_core/ migrations/ scripts/ tests/ --ignore E501
-pytest tests/ -v
+pytest tests/ -v -m "not integration" --ignore=tests/integration  # matches the `backend` job's unit tests
+pytest tests/ -v -m integration  # matches the `integration` job (needs Docker and `requirements-dev.lock` installed; all skipped is not a pass)
 ```
 
-No ruff warnings. No test failures. CI runs both automatically and will block merge on failure.
+No ruff warnings. No test failures. New code needs new tests, and the full suite must stay green with no regressions to existing tests. CI runs all three automatically and will block merge on failure.
 
 ---
 
@@ -91,7 +102,8 @@ The book, chapter and series response models (`BookResponse`, `BulkBookResponse`
 git checkout -b feat/my-feature
 # make changes
 ruff check app/ libex_core/ migrations/ scripts/ tests/ --ignore E501
-pytest tests/ -v
+pytest tests/ -v -m "not integration" --ignore=tests/integration  # matches the `backend` job's unit tests
+pytest tests/ -v -m integration  # matches the `integration` job; requires Docker
 git add <files>
 git commit -m "feat: description"
 git push origin feat/my-feature

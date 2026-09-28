@@ -8,18 +8,24 @@ what is deleted lives in app/services/backup/, and the only call made into
 that package is run_backup(). app/main.py and the routes import it zero
 times; the API never runs a backup and never needs to know one exists.
 
-RUN IT. docker-compose.yml's libex-backup service starts this and keeps it
-up, with `entrypoint: []` and `command: ["python", "-m", "scripts.backup"]`
--- both together, never one without the other. docker-entrypoint.sh runs
-`alembic upgrade head` before whatever it is handed, which is right for the
-API and wrong here: this container reads the database with pg_dump's own
-libpq connection, needs no schema of its own, and has no business migrating
-anyone else's while the API container is racing it to the same lock.
+RUN IT. docker-compose.backup.yml's libex-backup service starts this and
+keeps it up, with `entrypoint: []` and `command: ["python", "-m",
+"scripts.backup"]` -- both together, never one without the other.
+docker-entrypoint.sh runs `alembic upgrade head` before whatever it is
+handed, which is right for the API and wrong here: this container reads the
+database with pg_dump's own libpq connection, needs no schema of its own,
+and has no business migrating anyone else's while the API container is
+racing it to the same lock. `entrypoint: []` with no `command:` at all is a
+different, worse mistake, not merely a no-op: Compose then execs the
+image's own CMD directly (measured on Compose 2.40.3) -- the API's uvicorn
+invocation -- so the backup container comes up running a second, pointless
+uvicorn server instead of this script, with no route to it and no dump
+ever taken.
 
 For a supervised run against a live stack:
 
-    docker compose run --rm --entrypoint "" libex-backup \\
-      python -m scripts.backup --once
+    docker compose -f docker-compose.backup.yml run --rm --entrypoint "" \\
+      libex-backup python -m scripts.backup --once
 
 --once MEANS DUMP NOW. It bypasses both the schedule and the catch-up
 predicate and takes a backup immediately, then exits with what happened in
@@ -63,9 +69,17 @@ stop_grace_period of 3900s is headroom for a dump already inside its 3600s
 timeout to wind up -- it is a ceiling on how long Docker will wait, not a
 delay anything spends.
 
-WHAT THIS FILE DOES NOT DO. Four things the compose file states in comments
-and cannot enforce are enforced inside the runner, not here, and this entry
-point's contribution to each is to stay out of the way:
+The 3600/3900 relationship is written down in four places, not enforced by
+any of them, so raising one without the others reintroduces the gap this
+number closes: docker-compose.backup.yml's own BACKUP_DUMP_TIMEOUT_SECONDS
+and stop_grace_period lines, .env.example beside that same knob,
+app/core/config.py's backup_dump_timeout_seconds default, and this file --
+both this paragraph and the ENVIRONMENT table below. Change one number,
+grep for the other three before you stop.
+
+WHAT THIS FILE DOES NOT DO. Four things a terse compose `environment:` line
+cannot state or enforce on its own are enforced inside the runner instead,
+and this entry point's contribution to each is to stay out of the way:
 
   - No destination resolved means idle, and take no dump. The runner logs
     the reason and stays up on a reminder loop instead of exiting, because
@@ -118,7 +132,7 @@ Removing the prot_p() call is the wrong fix and produces an unencrypted
 transfer that appears to work.
 
 ENVIRONMENT. app/services/backup reads all of it through app.core.config;
-docker-compose.yml sets every name below with these defaults.
+docker-compose.backup.yml sets every name below with these defaults.
 
     DATABASE_URL                        required. SQLAlchemy form -- the
                                         runner drops the +asyncpg suffix

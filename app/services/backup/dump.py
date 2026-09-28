@@ -4,9 +4,10 @@ Taking the dump: free-space precheck, pg_dump, the spool file, verification.
 pg_dump is a subprocess with its own libpq connection, which is the reason
 this whole package never touches app.db.session. Importing that module
 builds a SQLAlchemy engine with pool_size=10 and max_overflow=10 against a
-max_connections=200 budget that is already fully allocated to six API
-workers and the seeder -- twenty connections reserved, permanently, by a
-process that would never open one of them.
+max_connections=200 budget that every other Libex process already leans on
+hard (see app/db/session.py for the current accounting) -- twenty
+connections reserved, permanently, by a process that would never open one
+of them.
 
 CREDENTIALS NEVER APPEAR IN ARGV. The connection details are passed as
 -h/-p/-U/-d flags and the password only as PGPASSWORD in the child's

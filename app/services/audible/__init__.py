@@ -41,23 +41,24 @@ process models; only its outward shape differs.
 allow_direct_egress=True is passed unconditionally, not only when
 audible_proxy_url is blank. LibexClient's constructor ignores it whenever a
 proxy URL is actually supplied (see its own docstring), so this changes
-nothing about the proxied case; it exists to cover the blank one. Leaving
-AUDIBLE_PROXY_URL unset is a documented way to run hosted Libex
-(README.md's self-hosting instructions) and was already ruled a deliberate
-deployment choice, not an oversight libex_core should second-guess -- so
-this seam is where that ruling gets encoded as the one explicit opt-in
-libex_core now requires before it will egress unproxied. libex_core cannot
-make that call itself: an embedder distributed across many separately
-operated machines has no single operator to make it on their behalf, and a
-blank proxy setting there is exactly as likely to be a forgotten one as a
-deliberate one. Hosted Libex is the opposite -- one operator, one setting,
-already read and already validated by the checks above -- so the decision
-already exists by the time this line runs; passing the flag only tells
-libex_core the decision was actually made rather than defaulted into.
-Because the flag is always on, nothing about this line makes LibexClient's
-blank-proxy refusal reachable from a hosted deployment: a hosted process
-still either gets a valid proxy, a validated direct choice, or the
-malformed-URL raise that already existed above.
+nothing about the proxied case; it exists to cover the blank one. Every
+published compose stack now requires a proxy URL -- each Libex-image
+service's compose file gates its own proxy variable behind Compose's `:?`,
+so a deployment that runs one of those files as shipped can never leave
+the value blank. A deployment that departs from the published files and
+still leaves it blank goes direct, and libex_core lets it: that stays a
+runtime choice this code does not enforce, because whoever diverges from
+the published files owns that choice, not libex_core. libex_core cannot
+make that call itself in the general case either: an embedder distributed
+across many separately operated machines has no single operator to make
+it on their behalf, and a blank proxy setting there is exactly as likely
+to be a forgotten one as a deliberate one; passing the flag is how a
+deployment tells libex_core that its own blank case, if one occurs, is the
+deliberate kind rather than a forgotten setting. Because the flag is
+always on, nothing about this line makes LibexClient's blank-proxy refusal
+reachable from a hosted deployment: a hosted process still either gets a
+valid proxy, a validated direct choice, or the malformed-URL raise that
+already existed above.
 
 _hosted_client below is this package's one hosted LibexClient instance --
 there is exactly one, for the lifetime of the process, and nothing in this
@@ -67,7 +68,8 @@ closing over a copy taken at import, so there is never a second binding of
 the instance itself sitting in some other module's namespace to drift from
 this one -- only the audible_get function object is handed out, and every
 call it makes still goes through this exact instance. The three operator
-scripts under scripts/ read it directly as
+scripts under scripts/ (seed.py, refresh_corpus.py, backfill_chapters.py)
+and app.main's own startup transport log all read it directly as
 app.services.audible._hosted_client, the same deliberate single-underscore
 reach-in LibexClient._proxy exists to support (see that property's own
 docstring) -- confirming, from outside this process's request path, which

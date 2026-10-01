@@ -345,6 +345,8 @@ what a task actually did.
 
 **Response headers:** Every response carries `X-Request-Id`, a fresh id for quoting a specific request in a bug report. The book, series and author endpoints also carry `X-Libex-Complete` (whether the body holds everything you asked for) and, when it doesn't, `X-Libex-Incomplete-Reason`; most of them also carry `X-Libex-Source` (where the data in the body came from — Audible, cache, DB, or a mix). All four are exposed through CORS for browser JavaScript to read. Full contract in `/docs`.
 
+**Compression:** A response of 1000 bytes or more is gzip-compressed when you send `Accept-Encoding: gzip`; smaller responses are always sent uncompressed. Either way, a response at or above that size carries `Vary: Accept-Encoding` — worth knowing if you run a cache or CDN in front of Libex, since it means the compressed and uncompressed bodies are cached separately.
+
 **Caching:** The book, series and author endpoints, plus `/quick-search`, default to serving Libex's stored copy (`cache=true`), which can be up to `CACHE_TTL` seconds old. Pass `cache=false` on any of them to force a live Audible fetch instead.
 
 **HTML content:** `description` and `summary` fields on book responses, `description` on author responses, and `description` on series responses are returned as plain text with HTML stripped.

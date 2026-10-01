@@ -10,6 +10,11 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.25.0]
+
+### Added
+- **Libex now gzip-compresses responses when a caller sends `Accept-Encoding: gzip`, for any body of 1000 bytes or more.** A smaller body is left uncompressed, since compressing it costs more than it saves. This changes nothing about what a response contains — decoding a compressed body reproduces byte-for-byte what Libex has always sent, same status code, same shape, same fields. A caller that never sends `Accept-Encoding: gzip` sees no difference except a `Vary: Accept-Encoding` header on any response at or above that size, present whether or not gzip was requested, so a cache sitting in front of Libex knows the compressed and uncompressed versions of a response are different bytes for the same URL. Hosted libexdb.com already sits behind a CDN that compresses on the way out to callers, so the practical benefit there is the CDN's own fetch from the origin; the direct win is for anyone running Libex without something like that in front of it.
+
 ## [1.24.1]
 
 No endpoint, parameter, response shape, field or status code moved.

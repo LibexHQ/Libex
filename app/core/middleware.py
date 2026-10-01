@@ -1,10 +1,12 @@
 """
 Middleware configuration for Libex.
-CORS and request validation.
+Response compression, CORS and request validation.
 """
 
 # Standard library
+import asyncio
 from collections.abc import Callable
+import gzip
 import time
 import urllib.parse
 import uuid
@@ -13,8 +15,11 @@ from typing import Annotated
 # Third party
 from fastapi import FastAPI, Path, Query
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.datastructures import Headers, MutableHeaders
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.gzip import GZipMiddleware, GZipResponder, IdentityResponder
 from starlette.requests import Request
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 # Core
 from libex_core.asin import is_valid_asin, normalise_asin
@@ -353,8 +358,102 @@ class MigrationNoticeMiddleware(BaseHTTPMiddleware):
 # SETUP
 # ============================================================
 
+# About a packet. Tiny bodies -- /health, error bodies -- stay identity and
+# keep their Content-Length.
+_GZIP_MINIMUM_SIZE = 1000
+
+# Compression runs on the event loop, so it isn't free. Level 1 gets most of
+# the ratio for a fraction of the time the higher levels cost.
+_GZIP_COMPRESS_LEVEL = 1
+
+# Above this many bytes, compression moves off the event loop instead --
+# see app/api/routes/large_response.py, which offloads the same class of
+# response one step earlier in the pipeline for the same reason. Below it,
+# a thread hop costs more than the compression it's saving.
+_GZIP_THREAD_OFFLOAD_SIZE = 64 * 1024
+
+
+class _OffloadingGZipResponder(GZipResponder):
+    """
+    GZipResponder, except the single-message, non-streaming branch -- the
+    only shape a big hydrated list response actually takes -- compresses a
+    body at or above _GZIP_THREAD_OFFLOAD_SIZE on a worker thread instead of
+    inline. Every other path (small bodies, streaming, content already
+    encoded, excluded content types) falls straight through to
+    GZipResponder's own handling, untouched.
+
+    That branch compresses with a self-contained gzip.compress() call
+    rather than this responder's own gzip_file, so a cancelled request
+    can't unwind __call__'s buffer/file cleanup out from under a worker
+    thread still writing to them -- the worker just finishes into a
+    discarded result instead.
+    """
+
+    def __init__(self, app: ASGIApp, minimum_size: int, compresslevel: int = 9) -> None:
+        super().__init__(app, minimum_size, compresslevel=compresslevel)
+        self._compresslevel = compresslevel
+
+    async def send_with_compression(self, message: Message) -> None:
+        if message["type"] == "http.response.body" and not self.started:
+            body = message.get("body", b"")
+            if (
+                not message.get("more_body", False)
+                and not (self.content_encoding_set or self.content_type_is_excluded)
+                and len(body) >= self.minimum_size
+                and len(body) >= _GZIP_THREAD_OFFLOAD_SIZE
+            ):
+                self.started = True
+                compressed = await asyncio.to_thread(gzip.compress, body, compresslevel=self._compresslevel)
+
+                headers = MutableHeaders(raw=self.initial_message["headers"])
+                headers.add_vary_header("Accept-Encoding")
+                if compressed != body:
+                    headers["Content-Encoding"] = self.content_encoding
+                    headers["Content-Length"] = str(len(compressed))
+                    message["body"] = compressed
+
+                await self.send(self.initial_message)
+                await self.send(message)
+                return
+
+        await super().send_with_compression(message)
+
+
+class OffloadingGZipMiddleware(GZipMiddleware):
+    """
+    Picks _OffloadingGZipResponder over GZipMiddleware's own GZipResponder
+    when a caller asked for gzip; the identity path is untouched. Starlette
+    builds that responder inline in __call__ with no smaller seam to hook,
+    so this repeats that one branch rather than the rest of the dispatch.
+    """
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":  # pragma: no cover
+            await self.app(scope, receive, send)
+            return
+
+        headers = Headers(scope=scope)
+        responder: ASGIApp
+        if "gzip" in headers.get("Accept-Encoding", ""):
+            responder = _OffloadingGZipResponder(self.app, self.minimum_size, compresslevel=self.compresslevel)
+        else:
+            responder = IdentityResponder(self.app, self.minimum_size)
+
+        await responder(scope, receive, send)
+
+
 def setup_middleware(app: FastAPI, migration_notice: MigrationNotice | None = None) -> None:
     """Configures all middleware for the application."""
+
+    # Must stay the first add_middleware call. Anything registered inside it
+    # re-chunks the body before GZip sees it, which pushes GZip onto its
+    # streaming branch -- the minimum-size threshold stops applying and
+    # Content-Length drops on every response, not just the small ones.
+    app.add_middleware(
+        OffloadingGZipMiddleware,
+        minimum_size=_GZIP_MINIMUM_SIZE,
+        compresslevel=_GZIP_COMPRESS_LEVEL,
+    )
 
     app.add_middleware(LoggingMiddleware)
 

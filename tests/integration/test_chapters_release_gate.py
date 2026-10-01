@@ -39,7 +39,10 @@ from app.services.audible.books import _mark_chapters_checked
 from scripts.backfill_chapters import _mark_checked, _select_work
 
 # A fixed instant both engines are pointed at, so "now" means the same thing
-# on either side of the comparison and the boundary cases are exact.
+# on either side of the comparison and the boundary cases are exact. Every case
+# that uses these supplies its own chapters_checked_at; none depends on the
+# stamp a writer takes from the real clock, which is why the instant can be
+# fixed at all.
 NOW = datetime(2026, 8, 30, 12, 0, 0, tzinfo=timezone.utc)
 OUT = NOW - timedelta(days=30)          # released a month ago
 AHEAD = NOW + timedelta(days=30)        # releases in a month
@@ -244,19 +247,26 @@ async def test_an_early_404_does_not_retire_a_title_before_release(db_session):
     is deliberately not repeated here -- an undated point-in-time figure in a
     docstring ages into a falsehood that reads as fact."""
     asin = "B00PREORDER"
-    await _seed(db_session, asin, checked=None, release_date=AHEAD)
+    # The stamp comes from the real clock, so the release date has to be
+    # placed relative to it; a fixed date eventually falls behind the wall
+    # clock and the ordering under test stops holding.
+    before = datetime.now(timezone.utc)
+    release = before + timedelta(days=30)
+    await _seed(db_session, asin, checked=None, release_date=release)
 
     with patch("app.services.audible.books.audible_get", side_effect=NotFoundException()), \
          patch.object(seeder, "SessionFactory", lambda: _Reusable(db_session)), \
-         patch.object(seeder, "_now", return_value=NOW):
+         patch.object(seeder, "_now", return_value=before):
         await seeder._gather_chapters([asin], "us", 0)
+    after = datetime.now(timezone.utc)
 
     stamped_at = await _stamp(db_session, asin)
     assert stamped_at is not None
-    assert stamped_at < AHEAD
+    assert before <= stamped_at <= after
+    assert stamped_at < release
 
-    still_upcoming = await _seeder_admits(db_session, [asin], NOW + timedelta(days=1))
+    still_upcoming = await _seeder_admits(db_session, [asin], before + timedelta(days=1))
     assert still_upcoming == []
 
-    after_release = await _seeder_admits(db_session, [asin], AHEAD + timedelta(days=1))
+    after_release = await _seeder_admits(db_session, [asin], release + timedelta(days=1))
     assert after_release == [asin]

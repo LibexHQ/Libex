@@ -15,6 +15,19 @@ capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 ### Added
 - **Libex now gzip-compresses responses when a caller sends `Accept-Encoding: gzip`, for any body of 1000 bytes or more.** A smaller body is left uncompressed, since compressing it costs more than it saves. This changes nothing about what a response contains — decoding a compressed body reproduces byte-for-byte what Libex has always sent, same status code, same shape, same fields. A caller that never sends `Accept-Encoding: gzip` sees no difference except a `Vary: Accept-Encoding` header on any response at or above that size, present whether or not gzip was requested, so a cache sitting in front of Libex knows the compressed and uncompressed versions of a response are different bytes for the same URL. Hosted libexdb.com already sits behind a CDN that compresses on the way out to callers, so the practical benefit there is the CDN's own fetch from the origin; the direct win is for anyone running Libex without something like that in front of it.
 
+## [1.24.1]
+
+No endpoint, parameter, response shape, field or status code moved.
+
+### Fixed
+- **Updated urllib3 to 2.8.0 to close three published advisories.** They
+  cover an HTTPS proxy being handed the wrong TLS configuration, a chunked
+  Deflate response that could spin forever, and a chunk-size line that was
+  buffered without a limit. Libex only reaches urllib3 through the HTTP
+  client that ships logs; Audible requests go through a different client and
+  never touch it. The image's pinned dependencies are the only thing that
+  changed.
+
 ## [1.24.0]
 
 No endpoint, parameter, response shape, field or status code moved — every

@@ -10,6 +10,19 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.24.1]
+
+No endpoint, parameter, response shape, field or status code moved.
+
+### Fixed
+- **Updated urllib3 to 2.8.0 to close three published advisories.** They
+  cover an HTTPS proxy being handed the wrong TLS configuration, a chunked
+  Deflate response that could spin forever, and a chunk-size line that was
+  buffered without a limit. Libex only reaches urllib3 through the HTTP
+  client that ships logs; Audible requests go through a different client and
+  never touch it. The image's pinned dependencies are the only thing that
+  changed.
+
 ## [1.24.0]
 
 No endpoint, parameter, response shape, field or status code moved — every

@@ -18,13 +18,13 @@ from alembic.operations import Operations
 from sqlalchemy import text
 
 # Local
+from libex_core.storage import StoreMigrationError
 from libex_core.storage import store as store_module
 from libex_core.storage.models import Author, Book, author_book
 from libex_core.storage.store import (
     LocalStore,
     StoreConfigError,
     StoreConnectionError,
-    StoreMigrationError,
 )
 from libex_core.storage.upgrade import SchemaIntegrityError, set_foreign_keys, upgrade_to_head
 

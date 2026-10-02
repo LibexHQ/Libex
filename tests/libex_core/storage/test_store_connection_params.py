@@ -6,6 +6,7 @@ database needed; the real-server proof is in test_store_postgres_environment.
 """
 
 # Standard library
+import asyncio
 import ssl
 import sys
 
@@ -219,3 +220,42 @@ def test_the_attempt_table_matches_the_documented_modes():
         "verify-ca": (True,),
         "verify-full": (True,),
     }
+
+
+@pytest.mark.integration
+async def test_asyncpg_still_words_a_refused_sslrequest_the_way_prefer_reads_it():
+    """`_may_retry` recognises a refused SSLRequest by the text asyncpg gives
+    its `ConnectionError`. A real server answering 'N' pins that text, so an
+    asyncpg release that rewords it fails here instead of silently turning off
+    the fallback that `prefer` relies on. Marked integration only to open the
+    local socket the unit-test network guard otherwise blocks; it needs no
+    database."""
+    seen = []
+
+    async def refuse(reader, writer):
+        seen.append(await reader.readexactly(8))
+        writer.write(b"N")
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(refuse, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        with pytest.raises(Exception) as caught:
+            await asyncpg.connect(
+                host="127.0.0.1",
+                port=port,
+                user="u",
+                password="pw",
+                database="d",
+                ssl=ssl.create_default_context(),
+                timeout=5,
+            )
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert seen, "the server was never sent an SSLRequest"
+    assert type(caught.value) is ConnectionError
+    assert "rejected SSL upgrade" in str(caught.value)
+    assert store_module._may_retry(True, caught.value) is True

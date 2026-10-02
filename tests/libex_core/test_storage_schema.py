@@ -12,7 +12,7 @@ before they moved, so the move is proven byte-identical rather than assumed.
 import json
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -26,10 +26,12 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.schema import CreateIndex, CreateTable
 
 # Local
+import app.db.models as app_models
 import libex_core.storage as storage
+from app.db.base import Base as app_base
 from libex_core.storage import models as core_models
 from libex_core.storage.base import Base
-from libex_core.storage.types import JSONDocument, UTCDateTime
+from libex_core.storage.types import JSONDocument, UTCDateTime, _as_utc
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 GOLDEN = Path(__file__).resolve().parent / "golden_postgres_ddl.json"
@@ -51,6 +53,10 @@ _EXPORTS = {
     "Genre": core_models.Genre,
     "Track": core_models.Track,
 }
+
+
+def _golden() -> dict:
+    return json.loads(GOLDEN.read_text())
 
 
 def _child(script: str, tmp_path) -> subprocess.CompletedProcess:
@@ -151,9 +157,6 @@ def test_an_unknown_attribute_does_not_need_the_extra():
 
 
 def test_the_hosted_app_re_exports_the_same_objects():
-    import app.db.models as app_models
-    from app.db.base import Base as app_base
-
     assert app_base is Base
     for name in ("REGION_ENUM", "Book", "Author", "Series", "Narrator", "Genre",
                  "Track", "author_book", "book_narrator", "book_series",
@@ -258,6 +261,47 @@ async def test_authors_with_a_non_null_asin_are_not_held_to_the_partial_index(en
     assert count == 3
 
 
+async def test_a_date_bound_to_a_utc_column_stores_and_reads_back(engine):
+    """A plain DateTime column lets the driver take a date; the UTC type must
+    not turn that into an AttributeError on the way in or out."""
+    async with engine.begin() as conn:
+        await conn.execute(insert(core_models.Book).values(
+            asin="B000000006", title="t", region="us", release_date=date(2024, 3, 1)))
+        row = (await conn.execute(select(core_models.Book.release_date))).scalar_one()
+
+    assert row is not None
+    assert (row.year, row.month, row.day) == (2024, 3, 1)
+
+
+# ============================================================
+# _as_utc
+# ============================================================
+
+def test_as_utc_returns_a_date_unchanged():
+    value = date(2024, 3, 1)
+
+    assert _as_utc(value) is value
+
+
+def test_as_utc_returns_none_unchanged():
+    assert _as_utc(None) is None
+
+
+def test_as_utc_attaches_utc_to_a_naive_datetime():
+    result = _as_utc(datetime(2024, 3, 1, 12, 0))
+
+    assert result == datetime(2024, 3, 1, 12, 0, tzinfo=timezone.utc)
+    assert result.utcoffset() == timedelta(0)
+
+
+def test_as_utc_converts_an_aware_datetime_to_utc():
+    result = _as_utc(datetime(2024, 3, 1, 12, 0, tzinfo=timezone(timedelta(hours=5))))
+
+    assert result == datetime(2024, 3, 1, 7, 0, tzinfo=timezone.utc)
+    assert result.utcoffset() == timedelta(0)
+    assert result.tzinfo is timezone.utc
+
+
 # ============================================================
 # POSTGRES DDL -- byte-identical to the hosted schema
 # ============================================================
@@ -272,20 +316,20 @@ def _ddl(name: str) -> str:
 
 
 def test_the_golden_covers_every_table():
-    golden = json.loads(GOLDEN.read_text())
+    golden = _golden()
 
     assert set(golden) == {*TABLES, "region_enum"}
 
 
 @pytest.mark.parametrize("name", TABLES)
 def test_the_postgres_ddl_matches_the_golden_captured_before_the_move(name):
-    golden = json.loads(GOLDEN.read_text())
+    golden = _golden()
 
     assert _ddl(name) == golden[name]
 
 
 def test_the_postgres_region_enum_matches_the_golden():
-    golden = json.loads(GOLDEN.read_text())
+    golden = _golden()
     ddl = str(CreateEnumType(core_models.REGION_ENUM).compile(dialect=postgresql.dialect()))
 
     assert ddl.strip() == golden["region_enum"]
@@ -293,6 +337,6 @@ def test_the_postgres_region_enum_matches_the_golden():
 
 def test_the_golden_holds_the_partial_index_predicate():
     """A golden that lost the WHERE clause would bless a widened rule."""
-    golden = json.loads(GOLDEN.read_text())
+    golden = _golden()
 
     assert "WHERE asin IS NULL" in golden["authors"]

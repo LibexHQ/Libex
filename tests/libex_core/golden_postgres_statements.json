@@ -1,0 +1,178 @@
+{
+ "author_book_insert": {
+  "asyncpg": "INSERT INTO author_book (author_id, book_asin) VALUES ($1::INTEGER, $2::VARCHAR) ON CONFLICT DO NOTHING",
+  "asyncpg_positions": [
+   "author_id",
+   "book_asin"
+  ],
+  "pyformat": "INSERT INTO author_book (author_id, book_asin) VALUES (%(author_id)s, %(book_asin)s) ON CONFLICT DO NOTHING"
+ },
+ "book_genre_insert": {
+  "asyncpg": "INSERT INTO book_genre (book_asin, genre_asin) VALUES ($1::VARCHAR, $2::VARCHAR) ON CONFLICT DO NOTHING",
+  "asyncpg_positions": [
+   "book_asin",
+   "genre_asin"
+  ],
+  "pyformat": "INSERT INTO book_genre (book_asin, genre_asin) VALUES (%(book_asin)s, %(genre_asin)s) ON CONFLICT DO NOTHING"
+ },
+ "book_narrator_insert": {
+  "asyncpg": "INSERT INTO book_narrator (narrator_name, book_asin) VALUES ($1::VARCHAR, $2::VARCHAR) ON CONFLICT DO NOTHING",
+  "asyncpg_positions": [
+   "narrator_name",
+   "book_asin"
+  ],
+  "pyformat": "INSERT INTO book_narrator (narrator_name, book_asin) VALUES (%(narrator_name)s, %(book_asin)s) ON CONFLICT DO NOTHING"
+ },
+ "book_series_upsert": {
+  "asyncpg": "INSERT INTO book_series (book_asin, series_asin, position) VALUES ($1::VARCHAR, $2::VARCHAR, $3::VARCHAR) ON CONFLICT (book_asin, series_asin) DO UPDATE SET position = coalesce(excluded.position, book_series.position)",
+  "asyncpg_positions": [
+   "book_asin",
+   "series_asin",
+   "position"
+  ],
+  "pyformat": "INSERT INTO book_series (book_asin, series_asin, position) VALUES (%(book_asin)s, %(series_asin)s, %(position)s) ON CONFLICT (book_asin, series_asin) DO UPDATE SET position = coalesce(excluded.position, book_series.position)"
+ },
+ "book_upsert": {
+  "asyncpg": "INSERT INTO books (asin, title, subtitle, region, description, summary, publisher, copyright, isbn, language, rating, release_date, length_minutes, explicit, whisper_sync, has_pdf, image, book_format, content_type, content_delivery_type, episode_number, episode_type, sku, sku_group, is_listenable, is_buyable, is_vvab, plans, num_ratings, num_reviews, publication_name, publication_datetime, extended_product_description, product_state, audible_extras, extras_withheld, created_at, updated_at) VALUES ($1::VARCHAR, coalesce($2, $3::VARCHAR), $4::VARCHAR, $5::region_enum, $6::VARCHAR, $7::VARCHAR, $8::VARCHAR, $9::VARCHAR, $10::VARCHAR, $11::VARCHAR, $12::FLOAT, $13::TIMESTAMP WITH TIME ZONE, $14::INTEGER, coalesce($15, $16::BOOLEAN), coalesce($17, $18::BOOLEAN), coalesce($19, $20::BOOLEAN), $21::VARCHAR, $22::VARCHAR, $23::VARCHAR, $24::VARCHAR, $25::VARCHAR, $26::VARCHAR, $27::VARCHAR, $28::VARCHAR, coalesce($29, $30::BOOLEAN), coalesce($31, $32::BOOLEAN), coalesce($33, $34::BOOLEAN), CAST($35::JSONB AS JSONB), $36::INTEGER, $37::INTEGER, $38::VARCHAR, $39::TIMESTAMP WITH TIME ZONE, $40::VARCHAR, $41::VARCHAR, CAST($42::JSONB AS JSONB), CAST($43::JSONB AS JSONB), $44::TIMESTAMP WITH TIME ZONE, $45::TIMESTAMP WITH TIME ZONE) ON CONFLICT (asin) DO UPDATE SET title = CASE WHEN (btrim($2, $46::VARCHAR) != $47::VARCHAR) THEN $2 ELSE books.title END, subtitle = CASE WHEN (btrim(excluded.subtitle, $48::VARCHAR) != $49::VARCHAR) THEN excluded.subtitle ELSE books.subtitle END, region = books.region, description = CASE WHEN (coalesce(length(nullif(btrim($6, $50::VARCHAR), $51::VARCHAR)), $52::INTEGER) > coalesce(length(books.description), $53::INTEGER)) THEN $6 ELSE books.description END, summary = CASE WHEN (coalesce(length(nullif(btrim($7, $54::VARCHAR), $55::VARCHAR)), $56::INTEGER) > coalesce(length(books.summary), $57::INTEGER)) THEN $7 ELSE books.summary END, publisher = CASE WHEN (btrim(excluded.publisher, $58::VARCHAR) != $59::VARCHAR) THEN excluded.publisher ELSE books.publisher END, copyright = CASE WHEN (btrim(excluded.copyright, $60::VARCHAR) != $61::VARCHAR) THEN excluded.copyright ELSE books.copyright END, isbn = CASE WHEN (btrim(excluded.isbn, $62::VARCHAR) != $63::VARCHAR) THEN excluded.isbn ELSE books.isbn END, language = CASE WHEN (btrim(excluded.language, $64::VARCHAR) != $65::VARCHAR) THEN excluded.language ELSE books.language END, rating = coalesce(excluded.rating, books.rating), release_date = coalesce(excluded.release_date, books.release_date), length_minutes = coalesce(excluded.length_minutes, books.length_minutes), explicit = coalesce($15, books.explicit), whisper_sync = coalesce($17, books.whisper_sync), has_pdf = coalesce($19, books.has_pdf), image = CASE WHEN (btrim(excluded.image, $66::VARCHAR) != $67::VARCHAR) THEN excluded.image ELSE books.image END, book_format = CASE WHEN (btrim(excluded.book_format, $68::VARCHAR) != $69::VARCHAR) THEN excluded.book_format ELSE books.book_format END, content_type = CASE WHEN (btrim(excluded.content_type, $70::VARCHAR) != $71::VARCHAR) THEN excluded.content_type ELSE books.content_type END, content_delivery_type = CASE WHEN (btrim(excluded.content_delivery_type, $72::VARCHAR) != $73::VARCHAR) THEN excluded.content_delivery_type ELSE books.content_delivery_type END, episode_number = CASE WHEN (btrim(excluded.episode_number, $74::VARCHAR) != $75::VARCHAR) THEN excluded.episode_number ELSE books.episode_number END, episode_type = CASE WHEN (btrim(excluded.episode_type, $76::VARCHAR) != $77::VARCHAR) THEN excluded.episode_type ELSE books.episode_type END, sku = CASE WHEN (btrim(excluded.sku, $78::VARCHAR) != $79::VARCHAR) THEN excluded.sku ELSE books.sku END, sku_group = CASE WHEN (btrim(excluded.sku_group, $80::VARCHAR) != $81::VARCHAR) THEN excluded.sku_group ELSE books.sku_group END, is_listenable = coalesce($29, books.is_listenable), is_buyable = coalesce($31, books.is_buyable), is_vvab = coalesce($33, books.is_vvab), plans = coalesce(excluded.plans, books.plans), num_ratings = coalesce(excluded.num_ratings, books.num_ratings), num_reviews = coalesce(excluded.num_reviews, books.num_reviews), publication_name = CASE WHEN (btrim(excluded.publication_name, $82::VARCHAR) != $83::VARCHAR) THEN excluded.publication_name ELSE books.publication_name END, publication_datetime = coalesce(excluded.publication_datetime, books.publication_datetime), extended_product_description = CASE WHEN (coalesce(length(nullif(btrim($40, $84::VARCHAR), $85::VARCHAR)), $86::INTEGER) > coalesce(length(books.extended_product_description), $87::INTEGER)) THEN $40 ELSE books.extended_product_description END, product_state = CASE WHEN (btrim(excluded.product_state, $88::VARCHAR) != $89::VARCHAR) THEN excluded.product_state ELSE books.product_state END, audible_extras = CASE WHEN (excluded.audible_extras IS NULL) THEN books.audible_extras WHEN (books.audible_extras IS NULL) THEN excluded.audible_extras WHEN (books.audible_extras @> excluded.audible_extras) THEN books.audible_extras ELSE books.audible_extras || excluded.audible_extras END, extras_withheld = CASE WHEN (excluded.extras_withheld IS NULL) THEN books.extras_withheld WHEN (books.extras_withheld IS NULL) THEN excluded.extras_withheld WHEN (books.extras_withheld @> excluded.extras_withheld) THEN books.extras_withheld ELSE books.extras_withheld || excluded.extras_withheld END, updated_at = excluded.updated_at",
+  "asyncpg_positions": [
+   "asin",
+   "title",
+   "coalesce_1",
+   "subtitle",
+   "region",
+   "description",
+   "summary",
+   "publisher",
+   "copyright",
+   "isbn",
+   "language",
+   "rating",
+   "release_date",
+   "length_minutes",
+   "explicit",
+   "coalesce_2",
+   "whisper_sync",
+   "coalesce_3",
+   "has_pdf",
+   "coalesce_4",
+   "image",
+   "book_format",
+   "content_type",
+   "content_delivery_type",
+   "episode_number",
+   "episode_type",
+   "sku",
+   "sku_group",
+   "is_listenable",
+   "coalesce_5",
+   "is_buyable",
+   "coalesce_6",
+   "is_vvab",
+   "coalesce_7",
+   "plans",
+   "num_ratings",
+   "num_reviews",
+   "publication_name",
+   "publication_datetime",
+   "extended_product_description",
+   "product_state",
+   "audible_extras",
+   "extras_withheld",
+   "created_at",
+   "updated_at",
+   "btrim_1",
+   "btrim_2",
+   "btrim_3",
+   "btrim_4",
+   "btrim_5",
+   "nullif_1",
+   "coalesce_8",
+   "coalesce_9",
+   "btrim_6",
+   "nullif_2",
+   "coalesce_10",
+   "coalesce_11",
+   "btrim_7",
+   "btrim_8",
+   "btrim_9",
+   "btrim_10",
+   "btrim_11",
+   "btrim_12",
+   "btrim_13",
+   "btrim_14",
+   "btrim_15",
+   "btrim_16",
+   "btrim_17",
+   "btrim_18",
+   "btrim_19",
+   "btrim_20",
+   "btrim_21",
+   "btrim_22",
+   "btrim_23",
+   "btrim_24",
+   "btrim_25",
+   "btrim_26",
+   "btrim_27",
+   "btrim_28",
+   "btrim_29",
+   "btrim_30",
+   "btrim_31",
+   "btrim_32",
+   "btrim_33",
+   "nullif_3",
+   "coalesce_12",
+   "coalesce_13",
+   "btrim_34",
+   "btrim_35"
+  ],
+  "pyformat": "INSERT INTO books (asin, title, subtitle, region, description, summary, publisher, copyright, isbn, language, rating, release_date, length_minutes, explicit, whisper_sync, has_pdf, image, book_format, content_type, content_delivery_type, episode_number, episode_type, sku, sku_group, is_listenable, is_buyable, is_vvab, plans, num_ratings, num_reviews, publication_name, publication_datetime, extended_product_description, product_state, audible_extras, extras_withheld, created_at, updated_at) VALUES (%(asin)s, coalesce(%(title)s, %(coalesce_1)s), %(subtitle)s, %(region)s, %(description)s, %(summary)s, %(publisher)s, %(copyright)s, %(isbn)s, %(language)s, %(rating)s, %(release_date)s, %(length_minutes)s, coalesce(%(explicit)s, %(coalesce_2)s), coalesce(%(whisper_sync)s, %(coalesce_3)s), coalesce(%(has_pdf)s, %(coalesce_4)s), %(image)s, %(book_format)s, %(content_type)s, %(content_delivery_type)s, %(episode_number)s, %(episode_type)s, %(sku)s, %(sku_group)s, coalesce(%(is_listenable)s, %(coalesce_5)s), coalesce(%(is_buyable)s, %(coalesce_6)s), coalesce(%(is_vvab)s, %(coalesce_7)s), CAST(%(plans)s::JSONB AS JSONB), %(num_ratings)s, %(num_reviews)s, %(publication_name)s, %(publication_datetime)s, %(extended_product_description)s, %(product_state)s, CAST(%(audible_extras)s::JSONB AS JSONB), CAST(%(extras_withheld)s::JSONB AS JSONB), %(created_at)s, %(updated_at)s) ON CONFLICT (asin) DO UPDATE SET title = CASE WHEN (btrim(%(title)s, %(btrim_1)s) != %(btrim_2)s) THEN %(title)s ELSE books.title END, subtitle = CASE WHEN (btrim(excluded.subtitle, %(btrim_3)s) != %(btrim_4)s) THEN excluded.subtitle ELSE books.subtitle END, region = books.region, description = CASE WHEN (coalesce(length(nullif(btrim(%(description)s, %(btrim_5)s), %(nullif_1)s)), %(coalesce_8)s) > coalesce(length(books.description), %(coalesce_9)s)) THEN %(description)s ELSE books.description END, summary = CASE WHEN (coalesce(length(nullif(btrim(%(summary)s, %(btrim_6)s), %(nullif_2)s)), %(coalesce_10)s) > coalesce(length(books.summary), %(coalesce_11)s)) THEN %(summary)s ELSE books.summary END, publisher = CASE WHEN (btrim(excluded.publisher, %(btrim_7)s) != %(btrim_8)s) THEN excluded.publisher ELSE books.publisher END, copyright = CASE WHEN (btrim(excluded.copyright, %(btrim_9)s) != %(btrim_10)s) THEN excluded.copyright ELSE books.copyright END, isbn = CASE WHEN (btrim(excluded.isbn, %(btrim_11)s) != %(btrim_12)s) THEN excluded.isbn ELSE books.isbn END, language = CASE WHEN (btrim(excluded.language, %(btrim_13)s) != %(btrim_14)s) THEN excluded.language ELSE books.language END, rating = coalesce(excluded.rating, books.rating), release_date = coalesce(excluded.release_date, books.release_date), length_minutes = coalesce(excluded.length_minutes, books.length_minutes), explicit = coalesce(%(explicit)s, books.explicit), whisper_sync = coalesce(%(whisper_sync)s, books.whisper_sync), has_pdf = coalesce(%(has_pdf)s, books.has_pdf), image = CASE WHEN (btrim(excluded.image, %(btrim_15)s) != %(btrim_16)s) THEN excluded.image ELSE books.image END, book_format = CASE WHEN (btrim(excluded.book_format, %(btrim_17)s) != %(btrim_18)s) THEN excluded.book_format ELSE books.book_format END, content_type = CASE WHEN (btrim(excluded.content_type, %(btrim_19)s) != %(btrim_20)s) THEN excluded.content_type ELSE books.content_type END, content_delivery_type = CASE WHEN (btrim(excluded.content_delivery_type, %(btrim_21)s) != %(btrim_22)s) THEN excluded.content_delivery_type ELSE books.content_delivery_type END, episode_number = CASE WHEN (btrim(excluded.episode_number, %(btrim_23)s) != %(btrim_24)s) THEN excluded.episode_number ELSE books.episode_number END, episode_type = CASE WHEN (btrim(excluded.episode_type, %(btrim_25)s) != %(btrim_26)s) THEN excluded.episode_type ELSE books.episode_type END, sku = CASE WHEN (btrim(excluded.sku, %(btrim_27)s) != %(btrim_28)s) THEN excluded.sku ELSE books.sku END, sku_group = CASE WHEN (btrim(excluded.sku_group, %(btrim_29)s) != %(btrim_30)s) THEN excluded.sku_group ELSE books.sku_group END, is_listenable = coalesce(%(is_listenable)s, books.is_listenable), is_buyable = coalesce(%(is_buyable)s, books.is_buyable), is_vvab = coalesce(%(is_vvab)s, books.is_vvab), plans = coalesce(excluded.plans, books.plans), num_ratings = coalesce(excluded.num_ratings, books.num_ratings), num_reviews = coalesce(excluded.num_reviews, books.num_reviews), publication_name = CASE WHEN (btrim(excluded.publication_name, %(btrim_31)s) != %(btrim_32)s) THEN excluded.publication_name ELSE books.publication_name END, publication_datetime = coalesce(excluded.publication_datetime, books.publication_datetime), extended_product_description = CASE WHEN (coalesce(length(nullif(btrim(%(extended_product_description)s, %(btrim_33)s), %(nullif_3)s)), %(coalesce_12)s) > coalesce(length(books.extended_product_description), %(coalesce_13)s)) THEN %(extended_product_description)s ELSE books.extended_product_description END, product_state = CASE WHEN (btrim(excluded.product_state, %(btrim_34)s) != %(btrim_35)s) THEN excluded.product_state ELSE books.product_state END, audible_extras = CASE WHEN (excluded.audible_extras IS NULL) THEN books.audible_extras WHEN (books.audible_extras IS NULL) THEN excluded.audible_extras WHEN (books.audible_extras @> excluded.audible_extras) THEN books.audible_extras ELSE books.audible_extras || excluded.audible_extras END, extras_withheld = CASE WHEN (excluded.extras_withheld IS NULL) THEN books.extras_withheld WHEN (books.extras_withheld IS NULL) THEN excluded.extras_withheld WHEN (books.extras_withheld @> excluded.extras_withheld) THEN books.extras_withheld ELSE books.extras_withheld || excluded.extras_withheld END, updated_at = excluded.updated_at"
+ },
+ "genre_insert": {
+  "asyncpg": "INSERT INTO genres (asin, name, type, created_at, updated_at) VALUES ($1::VARCHAR, $2::VARCHAR, $3::genre_type_enum, $4::TIMESTAMP WITH TIME ZONE, $5::TIMESTAMP WITH TIME ZONE) ON CONFLICT DO NOTHING",
+  "asyncpg_positions": [
+   "asin",
+   "name",
+   "type",
+   "created_at",
+   "updated_at"
+  ],
+  "pyformat": "INSERT INTO genres (asin, name, type, created_at, updated_at) VALUES (%(asin)s, %(name)s, %(type)s, %(created_at)s, %(updated_at)s) ON CONFLICT DO NOTHING"
+ },
+ "narrator_insert": {
+  "asyncpg": "INSERT INTO narrators (name, fetched_description, created_at, updated_at) VALUES ($1::VARCHAR, $2::BOOLEAN, $3::TIMESTAMP WITH TIME ZONE, $4::TIMESTAMP WITH TIME ZONE) ON CONFLICT DO NOTHING",
+  "asyncpg_positions": [
+   "name",
+   "fetched_description",
+   "created_at",
+   "updated_at"
+  ],
+  "pyformat": "INSERT INTO narrators (name, fetched_description, created_at, updated_at) VALUES (%(name)s, %(fetched_description)s, %(created_at)s, %(updated_at)s) ON CONFLICT DO NOTHING"
+ },
+ "series_author_insert": {
+  "asyncpg": "INSERT INTO series_author (series_asin, author_id) VALUES ($1::VARCHAR, $2::INTEGER) ON CONFLICT DO NOTHING",
+  "asyncpg_positions": [
+   "series_asin",
+   "author_id"
+  ],
+  "pyformat": "INSERT INTO series_author (series_asin, author_id) VALUES (%(series_asin)s, %(author_id)s) ON CONFLICT DO NOTHING"
+ },
+ "series_upsert": {
+  "asyncpg": "INSERT INTO series (asin, title, description, region, fetched_description, audible_extras, extras_withheld, created_at, updated_at) VALUES ($1::VARCHAR, $2::VARCHAR, $3::VARCHAR, $4::region_enum, $5::BOOLEAN, CAST($6::JSONB AS JSONB), CAST($7::JSONB AS JSONB), $8::TIMESTAMP WITH TIME ZONE, $9::TIMESTAMP WITH TIME ZONE) ON CONFLICT (asin) DO UPDATE SET title = coalesce($2, series.title), description = CASE WHEN (coalesce(length(nullif(btrim($3, $10::VARCHAR), $11::VARCHAR)), $12::INTEGER) > coalesce(length(series.description), $13::INTEGER)) THEN $3 ELSE series.description END, region = series.region, fetched_description = (series.fetched_description OR excluded.fetched_description), audible_extras = CASE WHEN (excluded.audible_extras IS NULL) THEN series.audible_extras WHEN (series.audible_extras IS NULL) THEN excluded.audible_extras WHEN (series.audible_extras @> excluded.audible_extras) THEN series.audible_extras ELSE series.audible_extras || excluded.audible_extras END, extras_withheld = CASE WHEN (excluded.extras_withheld IS NULL) THEN series.extras_withheld WHEN (series.extras_withheld IS NULL) THEN excluded.extras_withheld WHEN (series.extras_withheld @> excluded.extras_withheld) THEN series.extras_withheld ELSE series.extras_withheld || excluded.extras_withheld END, updated_at = excluded.updated_at",
+  "asyncpg_positions": [
+   "asin",
+   "title",
+   "description",
+   "region",
+   "fetched_description",
+   "audible_extras",
+   "extras_withheld",
+   "created_at",
+   "updated_at",
+   "btrim_1",
+   "nullif_1",
+   "coalesce_1",
+   "coalesce_2"
+  ],
+  "pyformat": "INSERT INTO series (asin, title, description, region, fetched_description, audible_extras, extras_withheld, created_at, updated_at) VALUES (%(asin)s, %(title)s, %(description)s, %(region)s, %(fetched_description)s, CAST(%(audible_extras)s::JSONB AS JSONB), CAST(%(extras_withheld)s::JSONB AS JSONB), %(created_at)s, %(updated_at)s) ON CONFLICT (asin) DO UPDATE SET title = coalesce(%(title)s, series.title), description = CASE WHEN (coalesce(length(nullif(btrim(%(description)s, %(btrim_1)s), %(nullif_1)s)), %(coalesce_1)s) > coalesce(length(series.description), %(coalesce_2)s)) THEN %(description)s ELSE series.description END, region = series.region, fetched_description = (series.fetched_description OR excluded.fetched_description), audible_extras = CASE WHEN (excluded.audible_extras IS NULL) THEN series.audible_extras WHEN (series.audible_extras IS NULL) THEN excluded.audible_extras WHEN (series.audible_extras @> excluded.audible_extras) THEN series.audible_extras ELSE series.audible_extras || excluded.audible_extras END, extras_withheld = CASE WHEN (excluded.extras_withheld IS NULL) THEN series.extras_withheld WHEN (series.extras_withheld IS NULL) THEN excluded.extras_withheld WHEN (series.extras_withheld @> excluded.extras_withheld) THEN series.extras_withheld ELSE series.extras_withheld || excluded.extras_withheld END, updated_at = excluded.updated_at"
+ }
+}

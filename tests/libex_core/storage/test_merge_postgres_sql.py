@@ -1,23 +1,23 @@
 """
-The Postgres SQL of every merge builder is the SQL the hosted writer emits,
-character for character. The hosted statements are the contract; these tests
-fail the moment a builder moves them.
+The Postgres SQL of every merge builder, and of every statement the writer
+builds from them, is the SQL the hosted writer emitted before the writer moved
+into the package, character for character. The golden strings here, and the
+golden file beside the schema one, were captured from that writer; these tests
+fail the moment a builder or a statement moves them.
 """
 
-import os
-
-os.environ["AXIOM_TOKEN"] = ""
-os.environ["AXIOM_DATASET"] = ""
+import json
+from pathlib import Path
 
 import pytest
 from sqlalchemy import bindparam, cast, update
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import JSONB, asyncpg, insert
 
-import app.services.db.writer as hosted
 from libex_core.storage import merge
 from libex_core.storage.models import Book, Track
 from libex_core.storage.types import JSONDocument
+from libex_core.storage.write.statements import statements_for
 
 TEXT = bindparam("v")
 DOC = bindparam("v", type_=JSONDocument)
@@ -65,33 +65,27 @@ def test_builder_compiles_to_the_golden_postgres_sql(name):
     assert str(_compiled(builder(new_value, column), postgresql.dialect())) == golden
 
 
-@pytest.mark.parametrize("name", GOLDEN)
-@pytest.mark.parametrize("dialect", [postgresql.dialect, asyncpg.dialect], ids=["pyformat", "asyncpg"])
-def test_builder_matches_the_hosted_builder(name, dialect):
-    builder, new_value, column, _ = GOLDEN[name]
-    hosted_builder = getattr(hosted, f"_{name}")
-    ours = _compiled(builder(new_value, column), dialect())
-    theirs = _compiled(hosted_builder(new_value, column), dialect())
-    assert str(ours) == str(theirs)
-    assert ours.params == theirs.params
-
-
-@pytest.mark.parametrize(
-    "build", ["_build_book_upsert", "_build_series_upsert", "_build_book_series_upsert"]
+GOLDEN_STATEMENTS = json.loads(
+    (Path(__file__).resolve().parent.parent / "golden_postgres_statements.json").read_text()
 )
-def test_whole_hosted_statements_are_unchanged_when_built_from_the_core_builders(monkeypatch, build):
-    dialect = asyncpg.dialect()
-    before = getattr(hosted, build)().compile(dialect=dialect)
-    for name in GOLDEN:
-        monkeypatch.setattr(hosted, f"_{name}", GOLDEN[name][0])
-    after = getattr(hosted, build)().compile(dialect=dialect)
-    assert str(after) == str(before)
-    assert after.params == before.params
-    assert after.positiontup == before.positiontup
 
 
-def test_blank_set_is_the_hosted_one():
-    assert merge.BLANK_CHARS == hosted._BLANK_CHARS
+@pytest.mark.parametrize("name", GOLDEN_STATEMENTS)
+def test_every_writer_statement_compiles_to_the_hosted_postgres_sql(name):
+    golden = GOLDEN_STATEMENTS[name]
+    statement = getattr(statements_for("postgresql"), name)
+    on_asyncpg = statement.compile(dialect=asyncpg.dialect())
+    assert str(on_asyncpg) == golden["asyncpg"]
+    assert list(on_asyncpg.positiontup) == golden["asyncpg_positions"]
+    assert str(statement.compile(dialect=postgresql.dialect())) == golden["pyformat"]
+
+
+def test_blank_set_is_exactly_unicode_white_space():
+    codepoints = [
+        *range(0x09, 0x0E), 0x20, 0x85, 0xA0, 0x1680, *range(0x2000, 0x200B),
+        0x2028, 0x2029, 0x202F, 0x205F, 0x3000,
+    ]
+    assert merge.BLANK_CHARS == "".join(chr(c) for c in codepoints)
 
 
 @pytest.mark.parametrize("dialect", [postgresql.dialect, asyncpg.dialect], ids=["pyformat", "asyncpg"])

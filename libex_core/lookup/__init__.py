@@ -12,7 +12,7 @@ outage is reported as one rather than answered from a stored copy.
 # Local
 from libex_core.lookup.author_books import (
     INCOMPLETE_REASONS,
-    AuthorBooks,
+    BookList,
     get_author_books,
     get_author_books_by_name,
 )
@@ -31,7 +31,7 @@ from libex_core.lookup.series import get_series, get_series_books, search_series
 __all__ = [
     "INCOMPLETE_REASONS",
     "RELEASE_WINDOWS",
-    "AuthorBooks",
+    "BookList",
     "abs_quick_search",
     "abs_search",
     "categories",

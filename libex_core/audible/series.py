@@ -91,8 +91,8 @@ async def fetch_series_book_asins(get: AudibleGet, asin: str, region: str) -> li
     }
     data = await get(region, path, params)
 
-    product = data.get("product", {})
-    relationships = product.get("relationships", [])
+    product = data.get("product") or {}
+    relationships = product.get("relationships") or []
 
     items = sorted(
         [r for r in relationships if r.get("asin") and r.get("sort")],

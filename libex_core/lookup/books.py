@@ -50,6 +50,7 @@ from libex_core.audible.client import (
     validate_region,
 )
 from libex_core.exceptions import ErrorCode, NotFoundException
+from libex_core.lookup._common import OUTAGE_MESSAGE
 from libex_core.lookup._shaping import check_shaping, shape_books
 from libex_core.models import BookResponse, BulkBookResponse, ChapterResponse
 
@@ -57,8 +58,6 @@ logger = logging.getLogger("libex")
 
 # The most ASINs one bulk lookup accepts.
 MAX_BULK_ASINS = 1000
-
-_OUTAGE_MESSAGE = "Audible unavailable"
 
 
 # ============================================================
@@ -283,7 +282,7 @@ async def hydrate_books(
         raise
     except Exception as e:
         logger.warning("Audible unavailable for book lookup", extra={"region": region})
-        raise as_audible_failure(e, _OUTAGE_MESSAGE) from e
+        raise as_audible_failure(e, OUTAGE_MESSAGE) from e
 
 
 # ============================================================
@@ -435,5 +434,5 @@ async def get_chapters(
             "error_type": type(e).__name__,
             "upstream_status": upstream_status_of(e),
         })
-        raise as_audible_failure(e, _OUTAGE_MESSAGE) from e
+        raise as_audible_failure(e, OUTAGE_MESSAGE) from e
     return ChapterResponse(**result)

@@ -3,13 +3,9 @@
 """
 
 import argparse
-import logging
-from typing import Any
 
 from libex_core.cli._args import add_command, add_group, add_region_option
-from libex_core.cli._shaping import add_shaping_options, shaping_kwargs
-
-logger = logging.getLogger("libex")
+from libex_core.cli._shaping import add_shaping_options, books_only, shaping_kwargs
 
 
 def register(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
@@ -88,19 +84,6 @@ def run_search(args: argparse.Namespace) -> int:
     return run_lookup(lambda get: search_authors(get, args.name, region=args.region))
 
 
-def _books_only(result: Any) -> Any:
-    """The hosted route's body is the list of books alone, with whether it is
-    whole carried beside it. Here that is a warning on standard error. The
-    reasons are words from a fixed list, so the notice holds no value
-    the caller or Audible supplied."""
-    if not result.complete:
-        logger.warning(
-            "the list of books may be incomplete (%s)",
-            ", ".join(result.incomplete_reasons),
-        )
-    return result.books
-
-
 def run_books(args: argparse.Namespace) -> int:
     from libex_core.cli._run import run_lookup
     from libex_core.lookup import get_author_books
@@ -109,7 +92,7 @@ def run_books(args: argparse.Namespace) -> int:
         lambda get: get_author_books(
             get, args.asin, region=args.region, **shaping_kwargs(args)
         ),
-        _books_only,
+        books_only,
     )
 
 
@@ -121,5 +104,5 @@ def run_books_by_name(args: argparse.Namespace) -> int:
         lambda get: get_author_books_by_name(
             get, args.name, region=args.region, **shaping_kwargs(args)
         ),
-        _books_only,
+        books_only,
     )

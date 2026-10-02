@@ -29,7 +29,8 @@ from libex_core.audible.client import (
     validate_region,
 )
 from libex_core.exceptions import AudibleAPIException, NotFoundException
-from libex_core.lookup.books import _OUTAGE_MESSAGE, _canonical_asin
+from libex_core.lookup._common import OUTAGE_MESSAGE
+from libex_core.lookup.books import _canonical_asin
 from libex_core.models import AuthorResponse
 
 logger = logging.getLogger("libex")
@@ -51,7 +52,7 @@ async def get_author(get: AudibleGet, asin: str, *, region: str = "us") -> Autho
         data = await fetch_author_profile(get, canonical, region)
         author_took = round((time.monotonic() - start) * 1000, 2)
 
-        if not data or data.get("contributor", {}).get("name") is None:
+        if not data or (data.get("contributor") or {}).get("name") is None:
             raise NotFoundException("Author not found")
 
         normalized = normalize_author(data, canonical, region)
@@ -69,7 +70,7 @@ async def get_author(get: AudibleGet, asin: str, *, region: str = "us") -> Autho
             "error_type": type(e).__name__,
             "upstream_status": upstream_status_of(e),
         })
-        raise as_audible_failure(e, _OUTAGE_MESSAGE) from e
+        raise as_audible_failure(e, OUTAGE_MESSAGE) from e
     return AuthorResponse(**normalized)
 
 

@@ -121,7 +121,7 @@ the Audible marketplace to ask, default us
 .SS series books
 \fBlibex\-core series books\fR \fIASIN\fR
 .PP
-Print the full books in a series as JSON, in series order unless sorted. A member that cannot be resolved is left out. The books can be filtered and sorted.
+Print the full books in a series as JSON, in series order unless sorted. A member that cannot be resolved is left out. The books can be filtered and sorted. When the list may not be whole, it is still printed, a warning naming the reasons goes to standard error, and the status is 0.
 .TP
 \fIASIN\fR
 ASIN of the series

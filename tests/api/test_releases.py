@@ -406,4 +406,3 @@ async def test_genuinely_empty_is_404_not_on_audible(async_client, path, service
 
     assert response.status_code == 404
     assert response.json()["code"] == "not_on_audible"
-

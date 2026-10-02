@@ -13,9 +13,7 @@ into its own distribution. Entries below that predate publication are
 historical record for whoever embeds this package later, not evidence that
 anyone consumed a given version at the time it was cut.
 
-## [Unreleased]
-
-Bump class: MINOR.
+## [0.5.0]
 
 ### Added
 - **New public `ErrorCode` enum, and every `LibexException` gains a `code` attribute.** `ErrorCode` is a `StrEnum` with `NOT_IN_LIBEX`, `NOT_ON_AUDIBLE`, `WITHHELD`, `UPSTREAM_UNAVAILABLE` and `INVALID_REQUEST`, its values being the lowercase names. Each exception class has a default: `NotFoundException` is `NOT_ON_AUDIBLE`, `RegionException` is `INVALID_REQUEST`, and `AudibleAPIException`, `CacheException` and the base `LibexException` are `UPSTREAM_UNAVAILABLE`. A raise site can override it with a new optional `code=` argument. Existing raises keep working untouched and keep their messages and status codes; the argument is keyword-optional and last, so no positional call changes meaning.

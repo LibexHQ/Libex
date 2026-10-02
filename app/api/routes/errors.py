@@ -32,8 +32,9 @@ class ErrorResponse(BaseModel):
     )
 
 
-# Merged into a route's `responses=`. 404 is the only error status these routes
-# raise on purpose; the `code` field is what tells the reasons apart.
+# Merged into a route's `responses=`. This documents the 404 these routes
+# return; other statuses from Libex's handlers (400, 500, 502) use the same
+# body. The `code` field is what tells the reasons apart.
 ERROR_RESPONSES: dict[int | str, dict] = {
     404: {"model": ErrorResponse, "description": "Not found, or the request was rejected; see `code`"},
 }

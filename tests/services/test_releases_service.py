@@ -736,4 +736,3 @@ async def test_ensure_genres_store_failure_with_stored_set_returns_stored():
         result = await releases._ensure_genres(AsyncMock(), "us")
 
     assert result == stored
-

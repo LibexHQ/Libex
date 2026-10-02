@@ -149,4 +149,3 @@ def test_per_raise_code_overrides_the_class_default(build):
 def test_override_does_not_leak_into_the_class_default():
     NotFoundException("x", code=ErrorCode.NOT_IN_LIBEX)
     assert NotFoundException().code is ErrorCode.NOT_ON_AUDIBLE
-

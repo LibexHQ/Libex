@@ -191,8 +191,8 @@ async def _ensure_genres(session: AsyncSession, region: str) -> list[dict[str, s
     small (below that fraction) is treated as partial and only added, never
     pruned, so a transient glitch can't wipe real branches. On a fetch failure,
     nothing is written and a non-empty stored set is served unchanged, so an
-    Audible hiccup doesn't empty the response. Either way the stored set is returned,
-    which is what the /categories discovery endpoint serves.
+    Audible hiccup doesn't empty the response. The result is what the /categories
+    discovery endpoint serves.
 
     A failed fetch with nothing stored is the one case with no answer to fall
     back on: returning the empty set would read as "Audible has no categories"
@@ -335,6 +335,10 @@ async def get_new_releases(
     un-categoried catalog — Audible caps that at a few hundred results, so the
     bare call returns a live sample, not the full catalog (use a category, or
     the DB endpoints, for completeness).
+
+    A failed Audible scan raises AudibleAPIException rather than returning an
+    empty list. Persistence and cache write failures are logged and the books
+    are still returned.
     """
     key = cache.new_releases_key(region, days, category)
     cached = await cache.get(session, key)
@@ -424,6 +428,10 @@ async def get_coming_soon(
     un-categoried catalog — Audible caps that at a few hundred results, so the
     bare call returns a live sample, not the full catalog (use a category, or
     the DB endpoints, for completeness).
+
+    A failed Audible scan raises AudibleAPIException rather than returning an
+    empty list. Persistence and cache write failures are logged and the books
+    are still returned.
     """
     key = cache.coming_soon_key(region, days, category)
     cached = await cache.get(session, key)

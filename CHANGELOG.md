@@ -10,15 +10,17 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
-## [Unreleased]
-
-Bump class: MINOR.
+## [1.27.0]
 
 ### Added
 - **Every error response now carries a `code` field saying why the request failed.** The body keeps `error` and `status_code` exactly as before and gains `code` beside them, so a client that reads only the old two fields sees no difference. Status codes are unchanged, including 404 for an invalid ASIN and 400 for an invalid region. The values are `not_in_libex` (Libex's own store has no record: the `/db` routes and `/book/sku`), `not_on_audible` (Audible has no record), `withheld` (Audible answered but Libex deliberately does not return it), `upstream_unavailable` (Libex could not find out right now; try again later) and `invalid_request` (a malformed ASIN, region or parameter).
 - **A single `GET /book/{asin}` for an ASIN Audible answered with only a placeholder record now returns `code: "withheld"`.** It is still a 404, as before. Until now it was indistinguishable from an ASIN Audible has never heard of.
 - **An Audible outage that surfaces as a 404 now returns `code: "upstream_unavailable"`.** Those 404s used to read the same as a genuine miss. The status is unchanged; the code is what tells them apart.
 - **The OpenAPI schema now documents the error body and its `code` values** on the routes that return it.
+
+### Fixed
+- **`GET /new-releases` and `GET /coming-soon` no longer turn a successful Audible scan into a 404 when Libex's own storage step fails.** If the scan found books but saving them or caching the result failed, the endpoints used to return nothing, which surfaced as "No new releases found" or "No upcoming releases found". They now log the failure and return the books that were found. A failed scan itself is still a 404, now with `code: "upstream_unavailable"`; a scan that genuinely finds nothing is still a 404 with `code: "not_on_audible"`.
+- **`GET /categories` no longer returns an empty or wrongly labelled result around a failed taxonomy fetch.** When Audible cannot be reached and nothing is stored for the region, the 404 now carries `code: "upstream_unavailable"`. When Audible answers but saving the taxonomy fails and nothing is stored, the freshly fetched categories are returned instead of a 404. Where categories are already stored, they are served as before.
 
 FastAPI's own validation (422) and unknown-route (`detail`) bodies are unchanged and carry no `code`. Neither does the body of an unhandled 500.
 

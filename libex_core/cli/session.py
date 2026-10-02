@@ -28,8 +28,8 @@ def build_client(config: Config) -> LibexClient:
     except ValueError:
         if config.proxy_url:
             raise ConfigError(
-                f"{PROXY_URL_VARIABLE} is not a valid http or https proxy URL "
-                "with a host and a port"
+                f"{PROXY_URL_VARIABLE} is not a valid proxy URL: it needs an "
+                "http or https scheme and a host (the port is optional)"
             ) from None
         raise ConfigError(
             f"no proxy is configured: set {PROXY_URL_VARIABLE}, or set "

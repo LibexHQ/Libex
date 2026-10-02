@@ -169,6 +169,55 @@ def test_a_rejected_proxy_url_exits_five_without_the_credential(run_cli, name, v
     assert_no_credential(result.stdout, result.stderr)
 
 
+_INVALID_PROXY_TEXT = (
+    f"{PROXY_URL_VARIABLE} is not a valid proxy URL: it needs an http or "
+    "https scheme and a host (the port is optional)"
+)
+
+
+@pytest.mark.parametrize("name", sorted(_BAD_PROXY_URLS))
+def test_a_rejected_proxy_url_gets_the_fixed_text_and_never_the_value(run_cli, name):
+    result = run_cli(["config"], {PROXY_URL_VARIABLE: _BAD_PROXY_URLS[name]})
+    assert result.code == 5
+    assert result.stdout == b""
+    assert result.err == f"libex-core: error: {_INVALID_PROXY_TEXT} (code: config_error)\n"
+    assert _BAD_PROXY_URLS[name] not in result.err
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["ftp://proxy.example.net:21", "socks5://proxy.example.net:1080", "http://", "http://:8080"],
+)
+def test_an_invalid_proxy_url_without_credentials_gets_the_same_text(run_cli, url):
+    result = run_cli(["config"], {PROXY_URL_VARIABLE: url})
+    assert result.code == 5
+    assert _INVALID_PROXY_TEXT in result.err
+    assert url not in result.err.replace(_INVALID_PROXY_TEXT, "")
+
+
+@pytest.mark.parametrize(
+    ("url", "host"),
+    [
+        ("http://proxy.example.net", "proxy.example.net"),
+        ("https://proxy.example.net", "proxy.example.net"),
+        (f"http://{USER}:{PASSWORD_RAW}@proxy.example.net", "proxy.example.net"),
+        ("http://proxy.example.net:3128", "proxy.example.net"),
+    ],
+    ids=["http-no-port", "https-no-port", "credentialed-no-port", "explicit-port"],
+)
+def test_a_proxy_url_without_a_port_is_accepted(run_cli, url, host):
+    result = run_cli(["-vv", "config"], {PROXY_URL_VARIABLE: url})
+    assert result.code == 0, result.err
+    assert json.loads(result.out) == {"transport": {"mode": "proxy", "host": host}}
+    assert_no_credential(result.stdout, result.stderr)
+
+
+def test_a_port_less_proxy_url_builds_a_client():
+    client = build_client(Config(proxy_url="http://proxy.example.net", allow_direct_egress=False))
+    summary = client.transport_summary()
+    assert (summary.mode, summary.host) == ("proxy", "proxy.example.net")
+
+
 @pytest.mark.parametrize("name", sorted(_BAD_PROXY_URLS))
 def test_a_rejected_proxy_url_leaves_no_credential_on_the_exception(name):
     config = Config(proxy_url=_BAD_PROXY_URLS[name], allow_direct_egress=False)

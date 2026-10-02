@@ -8,10 +8,23 @@ discipline into the MINOR slot rather than relying on SemVer's 0.x carve-out:
 while pre-1.0, MINOR carries any breaking change, and PATCH is reserved for
 fixes that have no effect on the package's public surface.
 
-`libex_core` is not published to PyPI and will not be until it is extracted
-into its own distribution. Entries below that predate publication are
-historical record for whoever embeds this package later, not evidence that
-anyone consumed a given version at the time it was cut.
+`libex_core` is not yet published to PyPI. It is packaged for it as the
+`libex-core` distribution, and the first publish will be a 0.x release.
+Entries below that predate publication are historical record for whoever
+embeds this package, not evidence that anyone consumed a given version at the
+time it was cut.
+
+## [0.7.0]
+
+### Added
+- **The package now ships a `libex-core` command line.** It is installed as the `libex-core` script and also runs as `python -m libex_core`. Two commands exist so far: `libex-core config` prints, as JSON, whether requests would go through a proxy or leave directly, and the proxy host (never the proxy URL, and no request is made); `libex-core completion bash|zsh|fish` prints a completion script. Neither fetches Audible data yet. `--help` and `--version` work everywhere, `-q` prints errors only, and `-v` / `-vv` log progress and then debug detail with tracebacks to standard error. Results go to standard output; logs and errors go to standard error.
+- **The command line's exit status says what kind of failure it was.** 0 success, 1 unexpected error, 2 bad usage or a rejected argument, 3 not found, 4 Audible unavailable, 5 bad environment configuration, 130 interrupted, 141 the reader of standard output went away. A `LibexException` maps by its `code`: `invalid_request` is 2, `not_on_audible`, `not_in_libex` and `withheld` are 3, `upstream_unavailable` is 4, and a code added later that has no mapping yet is 1. The error line on standard error ends with the code; `config_error` and `unexpected_error` are the command line's own and are never raised by the library. These numbers are a public contract and will not be reassigned.
+- **The command line reads two environment variables.** `LIBEX_CORE_PROXY_URL` is the http or https proxy every request goes through; it is an environment variable and not an option because it can carry credentials. `LIBEX_CORE_ALLOW_DIRECT_EGRESS` (`1`, `true`, `yes` or `on`; `0`, `false`, `no`, `off` or empty to refuse) lets requests leave from the machine's own address when no proxy is set. Any other value is a configuration error (exit 5), reported even when a proxy is set.
+- **A man page and shell completions install with the wheel**, under the environment prefix.
+- **The package is now buildable and publishable as `libex-core`.** It declares `httpx` (`>=0.28.1,<0.29`) and `pydantic` (`>=2.13.4,<3`) as its dependencies, requires Python 3.12 or later, and ships a `py.typed` marker so type checkers use its annotations.
+
+### Changed
+- **The library still reads no environment variable.** The command line's environment module is the only code in the package that touches the process environment, and only when a configuration is requested, never at import. An embedder's own environment cannot change what the library does. The package docstring now states this.
 
 ## [0.6.0]
 

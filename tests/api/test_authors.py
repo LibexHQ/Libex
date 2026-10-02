@@ -17,7 +17,13 @@ from httpx import AsyncClient, ASGITransport
 # Local
 from app.main import app
 from libex_core.exceptions import AudibleAPIException, NotFoundException
-from app.core.response_headers import SOURCE_DB, record_source
+from app.core.response_headers import (
+    REASON_DISCOVERY_INCOMPLETE,
+    REASON_HYDRATION_FAILED,
+    SOURCE_DB,
+    record_incomplete,
+    record_source,
+)
 from app.services.audible.authors import AuthorBooksResult
 
 MOCK_AUTHOR = {
@@ -597,20 +603,48 @@ async def test_the_legacy_route_also_carries_completeness_headers_when_large(asy
 
 @pytest.mark.asyncio
 async def test_a_large_result_from_get_books_by_author_name_is_unaffected(async_client):
-    """The name-based lookup has no injected response object to merge
-    headers from -- confirms the offload path doesn't require one."""
+    """A complete large by-name list takes the offload path with its
+    completeness label and no no-store."""
     from app.api.routes.large_response import LARGE_RESPONSE_THREAD_THRESHOLD
 
     n = LARGE_RESPONSE_THREAD_THRESHOLD
     books = _many_books(n)
     with patch("app.api.routes.authors.router.get_author_books_by_name", new_callable=AsyncMock) as mock_books, \
          patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
-        mock_books.return_value = AuthorBooksResult([b["asin"] for b in books], True)
+        mock_books.return_value = [b["asin"] for b in books]
         mock_asins.return_value = books
         response = await async_client.get("/author/books?name=Frank+Herbert")
 
     assert response.status_code == 200
     assert len(response.json()) == n
+    assert response.headers["X-Libex-Complete"] == "true"
+    assert "no-store" not in response.headers.get("Cache-Control", "")
+
+
+@pytest.mark.asyncio
+async def test_a_large_truncated_result_from_get_books_by_author_name_keeps_its_headers(async_client):
+    """The offload path returns its own Response, bypassing FastAPI's header
+    merge, so the by-name route must hand it the injected response or a
+    large truncated list loses its label and its no-store."""
+    from app.api.routes.large_response import LARGE_RESPONSE_THREAD_THRESHOLD
+
+    n = LARGE_RESPONSE_THREAD_THRESHOLD
+    books = _many_books(n)
+
+    async def _truncated(name, region, session, *, facts=None):
+        record_incomplete(facts, REASON_DISCOVERY_INCOMPLETE)
+        return [b["asin"] for b in books]
+
+    with patch("app.api.routes.authors.router.get_author_books_by_name", new=_truncated), \
+         patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
+        mock_asins.return_value = books
+        response = await async_client.get("/author/books?name=Frank+Herbert")
+
+    assert response.status_code == 200
+    assert len(response.json()) == n
+    assert response.headers["X-Libex-Complete"] == "false"
+    assert response.headers["X-Libex-Incomplete-Reason"] == REASON_DISCOVERY_INCOMPLETE
+    assert response.headers["Cache-Control"] == "no-store"
 
 
 # ============================================================
@@ -622,7 +656,7 @@ async def test_get_author_books_by_name_returns_200(async_client):
     """Author books by name endpoint returns 200."""
     with patch("app.api.routes.authors.router.get_author_books_by_name", new_callable=AsyncMock) as mock_books, \
          patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
-        mock_books.return_value = AuthorBooksResult(["B08G9PRS1K"], True)
+        mock_books.return_value = ["B08G9PRS1K"]
         mock_asins.return_value = [MOCK_BOOK]
         response = await async_client.get("/author/books?name=Frank+Herbert")
         assert response.status_code == 200
@@ -640,7 +674,7 @@ async def test_get_author_books_by_name_returns_list(async_client):
     """Author books by name endpoint returns a list of full book objects."""
     with patch("app.api.routes.authors.router.get_author_books_by_name", new_callable=AsyncMock) as mock_books, \
          patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
-        mock_books.return_value = AuthorBooksResult(["B08G9PRS1K"], True)
+        mock_books.return_value = ["B08G9PRS1K"]
         mock_asins.return_value = [MOCK_BOOK]
         response = await async_client.get("/author/books?name=Frank+Herbert")
         assert isinstance(response.json(), list)
@@ -995,3 +1029,95 @@ async def test_get_author_by_asin_genuine_absence_is_unchanged(async_client):
         "status_code": 404,
         "code": "not_on_audible",
     }
+
+
+# ============================================================
+# AUTHOR BOOKS BY NAME: COMPLETENESS HEADERS
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_by_name_truncated_walk_is_200_and_marked_discovery_incomplete(async_client):
+    """A walk that stopped short hands back its prefix with the shortfall
+    recorded on the facts; the route labels it rather than failing."""
+    async def _truncated(name, region, session, *, facts=None):
+        record_incomplete(facts, REASON_DISCOVERY_INCOMPLETE)
+        return ["B08G9PRS1K"]
+
+    with patch("app.api.routes.authors.router.get_author_books_by_name", new=_truncated), \
+         patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
+        mock_asins.return_value = [MOCK_BOOK]
+        response = await async_client.get("/author/books?name=Frank+Herbert")
+
+    assert response.status_code == 200
+    assert response.headers["X-Libex-Complete"] == "false"
+    assert response.headers["X-Libex-Incomplete-Reason"] == REASON_DISCOVERY_INCOMPLETE
+    assert isinstance(response.json(), list)
+    assert len(response.json()) == 1
+    # Exactly no-store: nothing cacheable may leak onto a truncated list.
+    assert response.headers["Cache-Control"] == "no-store"
+
+
+@pytest.mark.asyncio
+async def test_by_name_complete_walk_is_marked_complete(async_client):
+    with patch("app.api.routes.authors.router.get_author_books_by_name", new_callable=AsyncMock) as mock_books, \
+         patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
+        mock_books.return_value = ["B08G9PRS1K"]
+        mock_asins.return_value = [MOCK_BOOK]
+        response = await async_client.get("/author/books?name=Frank+Herbert")
+
+    assert response.status_code == 200
+    assert response.headers["X-Libex-Complete"] == "true"
+    assert "X-Libex-Incomplete-Reason" not in response.headers
+    assert "no-store" not in response.headers.get("Cache-Control", "")
+
+
+@pytest.mark.asyncio
+async def test_by_name_first_page_outage_is_still_404(async_client):
+    """Pins the 404 status for an outage before anything was gathered."""
+    with patch("app.api.routes.authors.router.get_author_books_by_name", new_callable=AsyncMock) as mock:
+        mock.side_effect = AudibleAPIException("Failed to fetch author books by name")
+        response = await async_client.get("/author/books?name=Frank+Herbert")
+
+    assert response.status_code == 404
+    assert response.json()["error"] == "Failed to fetch author books by name"
+
+
+@pytest.mark.asyncio
+async def test_by_name_short_hydration_of_a_complete_walk_is_marked_incomplete(async_client):
+    """Discovery confirmed the catalogue, but hydration returned fewer books
+    than it was handed: the header must carry the hydration reason and the
+    response must be refused to caches, not claim completeness."""
+    async def _short(asins, region, session, **kwargs):
+        record_incomplete(kwargs["facts"], REASON_HYDRATION_FAILED)
+        return [MOCK_BOOK]
+
+    with patch("app.api.routes.authors.router.get_author_books_by_name", new_callable=AsyncMock) as mock_books, \
+         patch("app.api.routes.authors.router.get_books_by_asins", new=_short):
+        mock_books.return_value = ["B08G9PRS1K", "B08G9PRS2K"]
+        response = await async_client.get("/author/books?name=Frank+Herbert")
+
+    assert response.status_code == 200
+    assert response.headers["X-Libex-Complete"] == "false"
+    assert response.headers["X-Libex-Incomplete-Reason"] == REASON_HYDRATION_FAILED
+    assert response.headers["Cache-Control"] == "no-store"
+
+
+@pytest.mark.asyncio
+async def test_by_name_incomplete_path_forwards_a_non_default_region(async_client):
+    """The truncated path must still reach both services with the caller's
+    region rather than the default."""
+    async def _truncated(name, region, session, *, facts=None):
+        record_incomplete(facts, REASON_DISCOVERY_INCOMPLETE)
+        return ["B08G9PRS1K"]
+
+    discovery = AsyncMock(side_effect=_truncated)
+    with patch("app.api.routes.authors.router.get_author_books_by_name", new=discovery), \
+         patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
+        mock_asins.return_value = [MOCK_BOOK]
+        response = await async_client.get("/author/books?name=Frank+Herbert&region=de")
+
+    assert response.status_code == 200
+    assert response.headers["X-Libex-Complete"] == "false"
+    assert response.headers["Cache-Control"] == "no-store"
+    assert discovery.call_args.args[1] == "de"
+    assert mock_asins.call_args.args[1] == "de"

@@ -103,13 +103,13 @@ from app.db.models import Book, Track
 
 # Core
 from libex_core.audible import client as audible_client
+from libex_core.audible.chapters import normalize_chapters
 from libex_core.exceptions import AudibleAPIException, NotFoundException
 from app.core.logging import get_logger, setup_logging
 
 # Services
 import app.services.audible as audible_service
 from app.services.audible import audible_get
-from app.services.audible.books import _normalize_chapters
 from app.services.db.writer import _chapter_count, _chaptered_wins
 
 
@@ -757,7 +757,7 @@ async def _store_chapters(session: AsyncSession, asin: str, chapters: dict) -> N
     Why this walk is the traffic that makes it matter: the fall-through in
     _process_one tests chapter_info for truthiness, not for containing
     chapters, so a chapter_info of {"brandIntroDurationMs": 2000} is not a
-    NONE outcome. It reaches _normalize_chapters, which faithfully turns it
+    NONE outcome. It reaches normalize_chapters, which faithfully turns it
     into a payload whose chapters list is empty. That is not a response to
     reject wholesale -- Audible sent those durations and they are real -- so
     the refusal belongs here, on the one value that would shrink. And the
@@ -879,7 +879,7 @@ async def _process_one(
         return _Outcome.NONE, False, False, elapsed
 
     try:
-        chapters = _normalize_chapters(data, asin)
+        chapters = normalize_chapters(data)
         await _store_chapters(session, asin, chapters)
         await _mark_checked(session, asin)
         return _Outcome.STORED, False, False, elapsed

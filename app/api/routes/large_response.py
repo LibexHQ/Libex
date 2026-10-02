@@ -8,7 +8,7 @@ this module is built around, not a call-site count, so a new route
 returning one of the two existing shapes needs no changes here at all.
 
 This is the diverged half of a fix already applied to the same data one
-step earlier: app.services.audible.books offloads normalization batches at
+step earlier: libex_core.audible.books offloads normalization batches at
 NORMALIZE_THREAD_THRESHOLD to a worker thread, for exactly this reason, on
 the same request path. Response construction and JSON encoding of that same
 hydrated list never got the equivalent treatment -- this module is that
@@ -94,7 +94,7 @@ def _build_and_serialize(model_type: Any, build: Callable[[], Any]) -> bytes:
     plain pydantic validation -- no DB session, no cache, no shared mutable
     state, and no ContextVar read, so running it on another thread carries
     no correctness risk, the same argument
-    app.services.audible.books._normalize_products already makes for
+    libex_core.audible.books.normalize_products already makes for
     offloading this same data one step earlier.
     """
     value = build()

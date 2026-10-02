@@ -13,13 +13,14 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Local
+from app.api.routes.errors import ERROR_RESPONSES
 from app.api.routes.authors.schemas import AuthorResponse
 from app.api.routes.large_response import build_large_list_response
 from app.api.routes.narrators.schemas import NarratorProfileResponse
 from app.core.middleware import valid_asin, valid_region
 from app.db.session import get_session
 from libex_core.audible.client import validate_region
-from libex_core.exceptions import NotFoundException
+from libex_core.exceptions import ErrorCode, NotFoundException
 from libex_core.models import BookResponse, ChapterResponse, SeriesResponse
 from app.api.routes.db.badge import badge_router
 from app.api.routes.db.filters import (
@@ -148,7 +149,7 @@ async def get_stats(
     return {**result.stats, "region": region}
 
 
-@router.get("/book", response_model=list[BookResponse])
+@router.get("/book", response_model=list[BookResponse], responses=ERROR_RESPONSES)
 async def search_db_books(
     filters=Depends(book_filters()),
     sort: Annotated[BookSortField | None, Query(description="Field to sort by")] = None,
@@ -159,7 +160,7 @@ async def search_db_books(
 ) -> list[dict[str, Any]]:
     filter_kwargs = filters.as_kwargs()
     if not any(v is not None for v in filter_kwargs.values()) and sort is None:
-        raise NotFoundException("No search parameters provided")
+        raise NotFoundException("No search parameters provided", code=ErrorCode.INVALID_REQUEST)
 
     books = await search_books_from_db(
         session=session,
@@ -171,23 +172,23 @@ async def search_db_books(
     )
 
     if not books:
-        raise NotFoundException("No books found matching the given parameters")
+        raise NotFoundException("No books found matching the given parameters", code=ErrorCode.NOT_IN_LIBEX)
 
     return books
 
 
-@router.get("/plans", response_model=list[str])
+@router.get("/plans", response_model=list[str], responses=ERROR_RESPONSES)
 async def get_db_plans(
     session: AsyncSession = Depends(get_session),
 ) -> list[str]:
     """Get all distinct Audible plan names from the local DB."""
     plans = await get_distinct_plans_from_db(session)
     if not plans:
-        raise NotFoundException("No plans found in local database")
+        raise NotFoundException("No plans found in local database", code=ErrorCode.NOT_IN_LIBEX)
     return plans
 
 
-@router.get("/genres", response_model=list[str])
+@router.get("/genres", response_model=list[str], responses=ERROR_RESPONSES)
 async def get_db_genres(
     search: Annotated[str | None, Query(description="Filter genre names by partial match")] = None,
     session: AsyncSession = Depends(get_session),
@@ -199,11 +200,11 @@ async def get_db_genres(
     """
     genres = await get_distinct_genres_from_db(session, search=search)
     if not genres:
-        raise NotFoundException("No genres found in local database")
+        raise NotFoundException("No genres found in local database", code=ErrorCode.NOT_IN_LIBEX)
     return genres
 
 
-@router.get("/plans/{plan_name}", response_model=list[BookResponse])
+@router.get("/plans/{plan_name}", response_model=list[BookResponse], responses=ERROR_RESPONSES)
 async def get_db_books_by_plan(
     plan_name: Annotated[str, Path(description="Audible plan name (e.g. US Minerva, AccessViaMusic)")],
     filters=Depends(book_filters(exclude={"plan_name"})),
@@ -224,11 +225,11 @@ async def get_db_books_by_plan(
         page=page,
     )
     if not books:
-        raise NotFoundException(f"No books found for plan: {plan_name}")
+        raise NotFoundException(f"No books found for plan: {plan_name}", code=ErrorCode.NOT_IN_LIBEX)
     return books
 
 
-@router.get("/vvab", response_model=list[BookResponse])
+@router.get("/vvab", response_model=list[BookResponse], responses=ERROR_RESPONSES)
 async def get_db_vvab_books(
     filters=Depends(book_filters(exclude={"is_vvab"})),
     sort: Annotated[BookSortField | None, Query(description="Field to sort by")] = None,
@@ -247,11 +248,11 @@ async def get_db_vvab_books(
         page=page,
     )
     if not books:
-        raise NotFoundException("No virtual voice audiobooks found in local database")
+        raise NotFoundException("No virtual voice audiobooks found in local database", code=ErrorCode.NOT_IN_LIBEX)
     return books
 
 
-@router.get("/new-releases", response_model=list[BookResponse])
+@router.get("/new-releases", response_model=list[BookResponse], responses=ERROR_RESPONSES)
 async def get_db_new_releases(
     days: Annotated[ReleaseWindow, Query(description="Look-back window in days")] = ReleaseWindow.days_30,
     filters=Depends(book_filters()),
@@ -277,11 +278,11 @@ async def get_db_new_releases(
         page=page,
     )
     if not books:
-        raise NotFoundException("No new releases found in local database")
+        raise NotFoundException("No new releases found in local database", code=ErrorCode.NOT_IN_LIBEX)
     return books
 
 
-@router.get("/coming-soon", response_model=list[BookResponse])
+@router.get("/coming-soon", response_model=list[BookResponse], responses=ERROR_RESPONSES)
 async def get_db_coming_soon(
     days: Annotated[ReleaseWindow, Query(description="Look-ahead window in days")] = ReleaseWindow.days_30,
     filters=Depends(book_filters()),
@@ -308,11 +309,11 @@ async def get_db_coming_soon(
         page=page,
     )
     if not books:
-        raise NotFoundException("No upcoming releases found in local database")
+        raise NotFoundException("No upcoming releases found in local database", code=ErrorCode.NOT_IN_LIBEX)
     return books
 
 
-@router.get("/book/sku/{sku}", response_model=list[BookResponse])
+@router.get("/book/sku/{sku}", response_model=list[BookResponse], responses=ERROR_RESPONSES)
 async def get_db_books_by_sku(
     sku: Annotated[str, Path(description="SKU group identifier")],
     session: AsyncSession = Depends(get_session),
@@ -320,11 +321,11 @@ async def get_db_books_by_sku(
     """Get all region variants for a SKU group from the local DB."""
     books = await get_books_by_sku_from_db(session, sku)
     if not books:
-        raise NotFoundException("No books found for SKU")
+        raise NotFoundException("No books found for SKU", code=ErrorCode.NOT_IN_LIBEX)
     return books
 
 
-@router.get("/book/{asin}/chapters", response_model=ChapterResponse)
+@router.get("/book/{asin}/chapters", response_model=ChapterResponse, responses=ERROR_RESPONSES)
 async def get_db_book_chapters(
     asin: Annotated[str, Depends(valid_asin("Book ASIN"))],
     session: AsyncSession = Depends(get_session),
@@ -332,11 +333,11 @@ async def get_db_book_chapters(
     """Get chapter data for a book from the local DB."""
     chapters = await get_track_from_db(session, asin)
     if chapters is None:
-        raise NotFoundException("No chapter data found for this book")
+        raise NotFoundException("No chapter data found for this book", code=ErrorCode.NOT_IN_LIBEX)
     return chapters
 
 
-@router.get("/book/{asin}", response_model=BookResponse)
+@router.get("/book/{asin}", response_model=BookResponse, responses=ERROR_RESPONSES)
 async def get_db_book(
     asin: Annotated[str, Depends(valid_asin("Book ASIN"))],
     session: AsyncSession = Depends(get_session),
@@ -344,11 +345,11 @@ async def get_db_book(
     """Get a single book by ASIN from the local DB."""
     book = await get_book_from_db(session, asin)
     if not book:
-        raise NotFoundException("Book not found in local database")
+        raise NotFoundException("Book not found in local database", code=ErrorCode.NOT_IN_LIBEX)
     return book
 
 
-@router.get("/author/{asin}/books", response_model=list[BookResponse])
+@router.get("/author/{asin}/books", response_model=list[BookResponse], responses=ERROR_RESPONSES)
 async def get_db_author_books(
     asin: Annotated[str, Depends(valid_asin("Author ASIN"))],
     region: str = Depends(valid_region),
@@ -369,13 +370,13 @@ async def get_db_author_books(
         order=order.value,
     )
     if not books:
-        raise NotFoundException("No books found for author")
+        raise NotFoundException("No books found for author", code=ErrorCode.NOT_IN_LIBEX)
     return await build_large_list_response(
         list[BookResponse], len(books), lambda: [BookResponse(**b) for b in books]
     )
 
 
-@router.get("/author/{asin}", response_model=AuthorResponse)
+@router.get("/author/{asin}", response_model=AuthorResponse, responses=ERROR_RESPONSES)
 async def get_db_author(
     asin: Annotated[str, Depends(valid_asin("Author ASIN"))],
     region: str = Depends(valid_region),
@@ -384,11 +385,11 @@ async def get_db_author(
     """Get an author by ASIN from the local DB."""
     author = await get_author_from_db(session, asin, region)
     if not author:
-        raise NotFoundException("Author not found in local database")
+        raise NotFoundException("Author not found in local database", code=ErrorCode.NOT_IN_LIBEX)
     return author
 
 
-@router.get("/narrator/books", response_model=list[BookResponse])
+@router.get("/narrator/books", response_model=list[BookResponse], responses=ERROR_RESPONSES)
 async def get_db_narrator_books(
     name: Annotated[str, Query(description="Narrator name (exact match)")],
     filters=Depends(book_filters()),
@@ -409,11 +410,11 @@ async def get_db_narrator_books(
         page=page,
     )
     if not books:
-        raise NotFoundException(f"No books found for narrator: {name}")
+        raise NotFoundException(f"No books found for narrator: {name}", code=ErrorCode.NOT_IN_LIBEX)
     return books
 
 
-@router.get("/narrator", response_model=list[NarratorProfileResponse])
+@router.get("/narrator", response_model=list[NarratorProfileResponse], responses=ERROR_RESPONSES)
 async def search_db_narrators(
     name: Annotated[str, Query(description="Narrator name to search for")],
     filters: NarratorFilters = Depends(),
@@ -434,11 +435,11 @@ async def search_db_narrators(
         page=page,
     )
     if not narrators:
-        raise NotFoundException(f"No narrators found matching: {name}")
+        raise NotFoundException(f"No narrators found matching: {name}", code=ErrorCode.NOT_IN_LIBEX)
     return narrators
 
 
-@router.get("/series/{asin}/books", response_model=list[BookResponse])
+@router.get("/series/{asin}/books", response_model=list[BookResponse], responses=ERROR_RESPONSES)
 async def get_db_series_books(
     asin: Annotated[str, Depends(valid_asin("Series ASIN"))],
     filters=Depends(book_filters(exclude={"series_name"})),
@@ -458,13 +459,13 @@ async def get_db_series_books(
         order=order.value,
     )
     if not books:
-        raise NotFoundException("No books found for series")
+        raise NotFoundException("No books found for series", code=ErrorCode.NOT_IN_LIBEX)
     return await build_large_list_response(
         list[BookResponse], len(books), lambda: [BookResponse(**b) for b in books]
     )
 
 
-@router.get("/series/{asin}", response_model=SeriesResponse)
+@router.get("/series/{asin}", response_model=SeriesResponse, responses=ERROR_RESPONSES)
 async def get_db_series(
     asin: Annotated[str, Depends(valid_asin("Series ASIN"))],
     session: AsyncSession = Depends(get_session),
@@ -472,5 +473,5 @@ async def get_db_series(
     """Get a series by ASIN from the local DB."""
     series = await get_series_from_db(session, asin)
     if not series:
-        raise NotFoundException("Series not found in local database")
+        raise NotFoundException("Series not found in local database", code=ErrorCode.NOT_IN_LIBEX)
     return series

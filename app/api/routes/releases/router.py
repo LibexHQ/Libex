@@ -17,6 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_session
 
 # Routes
+from app.api.routes.audible_outage import outage_as_not_found
+from app.api.routes.errors import ERROR_RESPONSES
 from app.api.routes.sort_params import BookSortField, SortOrder
 from app.api.routes.filter_params import LiveBookFilters
 from app.api.routes.release_params import ReleaseWindow
@@ -60,7 +62,7 @@ class FlatCategoryNode(BaseModel):
 # ENDPOINTS
 # ============================================================
 
-@router.get("/new-releases", response_model=list[BookResponse])
+@router.get("/new-releases", response_model=list[BookResponse], responses=ERROR_RESPONSES)
 async def new_releases(
     region: str = Depends(valid_region),
     days: Annotated[ReleaseWindow, Query(description="Look-back window in days")] = ReleaseWindow.days_30,
@@ -72,7 +74,8 @@ async def new_releases(
 ) -> list[BookResponse]:
     """
     Recently released books from the last N days, scanned live from Audible,
-    newest first. Cached until the next UTC midnight. Returns 404 if none found.
+    newest first. Cached until the next UTC midnight. Returns 404 if none found,
+    or if Audible can't be reached (code `upstream_unavailable`).
 
     Pass a `category` id (from GET /categories) to scope the scan to one category
     and get the full window for it. Without a category, the scan walks Audible's
@@ -81,7 +84,10 @@ async def new_releases(
     a category, or use the DB endpoint /db/new-releases (kept current by the
     seeder), or aggregate per-category calls client-side.
     """
-    books = await get_new_releases(region, session, days.value, category)
+    books = await outage_as_not_found(
+        get_new_releases(region, session, days.value, category),
+        "No new releases found",
+    )
     books = filter_dicts(books, filters.as_kwargs())
     if sort is not None:
         books = sort_dicts(books, sort.value, order.value, BOOK_SORT_FIELDS)
@@ -90,7 +96,7 @@ async def new_releases(
     return [BookResponse(**b) for b in books]
 
 
-@router.get("/coming-soon", response_model=list[BookResponse])
+@router.get("/coming-soon", response_model=list[BookResponse], responses=ERROR_RESPONSES)
 async def coming_soon(
     region: str = Depends(valid_region),
     days: Annotated[ReleaseWindow, Query(description="Look-ahead window in days")] = ReleaseWindow.days_30,
@@ -102,7 +108,8 @@ async def coming_soon(
 ) -> list[BookResponse]:
     """
     Upcoming books releasing in the next N days, scanned live from Audible,
-    soonest first. Cached until the next UTC midnight. Returns 404 if none found.
+    soonest first. Cached until the next UTC midnight. Returns 404 if none found,
+    or if Audible can't be reached (code `upstream_unavailable`).
 
     Pass a `category` id (from GET /categories) to scope the scan to one category
     and get the full window for it. Without a category, the scan walks Audible's
@@ -111,7 +118,10 @@ async def coming_soon(
     a category, or use the DB endpoint /db/coming-soon (kept current by the
     seeder), or aggregate per-category calls client-side.
     """
-    books = await get_coming_soon(region, session, days.value, category)
+    books = await outage_as_not_found(
+        get_coming_soon(region, session, days.value, category),
+        "No upcoming releases found",
+    )
     books = filter_dicts(books, filters.as_kwargs())
     if sort is not None:
         books = sort_dicts(books, sort.value, order.value, BOOK_SORT_FIELDS)
@@ -120,7 +130,7 @@ async def coming_soon(
     return [BookResponse(**b) for b in books]
 
 
-@router.get("/categories", response_model=list[CategoryNode] | list[FlatCategoryNode])
+@router.get("/categories", response_model=list[CategoryNode] | list[FlatCategoryNode], responses=ERROR_RESPONSES)
 async def categories(
     region: str = Depends(valid_region),
     flat: Annotated[bool, Query(description="Return a flat list instead of a nested tree. Each node carries its full ancestry (root-first) so its place in the taxonomy is still recoverable.")] = False,
@@ -153,9 +163,13 @@ async def categories(
     no longer exist are pruned — unless the fetch comes back suspiciously small,
     in which case it's treated as partial and only added to, never pruned, so a
     transient glitch can't wipe out real branches. Returns 404 if the taxonomy
-    can't be loaded.
+    can't be loaded, including when Audible can't be reached and nothing is
+    stored (code `upstream_unavailable`).
     """
-    nodes = await _ensure_genres(session, region)
+    nodes = await outage_as_not_found(
+        _ensure_genres(session, region),
+        "No categories available",
+    )
     if not nodes:
         raise NotFoundException("No categories available")
 

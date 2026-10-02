@@ -197,6 +197,7 @@ async def test_get_narrator_books_outage_returns_404_with_the_routes_own_literal
     assert response.json() == {
         "error": "No books found for narrator: Scott Brick",
         "status_code": 404,
+        "code": "upstream_unavailable",
     }
 
 
@@ -213,4 +214,5 @@ async def test_get_narrator_books_genuine_absence_is_unchanged(async_client):
     assert response.json() == {
         "error": "No books found for narrator: Nobody",
         "status_code": 404,
+        "code": "not_on_audible",
     }

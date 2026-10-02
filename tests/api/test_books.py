@@ -247,6 +247,7 @@ async def test_get_book_rejects_invalid_asin_response_body_is_pinned_exactly(asy
     assert response.json() == {
         "error": "Invalid ASIN format: not-an-asin",
         "status_code": 404,
+        "code": "invalid_request",
     }
 
 
@@ -886,6 +887,7 @@ async def test_get_book_outage_returns_404_matching_head(async_client):
     assert response.json() == {
         "error": "Audible unavailable and no cached data found",
         "status_code": 404,
+        "code": "upstream_unavailable",
     }
 
 
@@ -899,6 +901,7 @@ async def test_get_book_chapters_outage_returns_404_matching_head(async_client):
     assert response.json() == {
         "error": "Audible unavailable and no cached chapter data found",
         "status_code": 404,
+        "code": "upstream_unavailable",
     }
 
 
@@ -913,6 +916,7 @@ async def test_get_book_chapters_legacy_outage_returns_404_matching_head(async_c
     assert response.json() == {
         "error": "Audible unavailable and no cached chapter data found",
         "status_code": 404,
+        "code": "upstream_unavailable",
     }
 
 
@@ -926,6 +930,7 @@ async def test_bulk_books_outage_returns_404_matching_head(async_client):
     assert response.json() == {
         "error": "Audible unavailable and no cached data found",
         "status_code": 404,
+        "code": "upstream_unavailable",
     }
 
 
@@ -942,6 +947,7 @@ async def test_get_book_genuine_absence_is_unchanged(async_client):
     assert response.json() == {
         "error": "Book not found: B08G9PRS1K",
         "status_code": 404,
+        "code": "not_on_audible",
     }
 
 

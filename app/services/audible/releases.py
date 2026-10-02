@@ -39,6 +39,9 @@ from typing import Any
 # Third party
 from sqlalchemy.ext.asyncio import AsyncSession
 
+# Libex core
+from libex_core.audible.client import as_audible_failure
+
 # Core
 from app.core.logging import get_logger
 from app.core.utils import seconds_until_utc_midnight
@@ -74,9 +77,9 @@ _GENRE_RECONCILE_MIN_FRACTION = 0.5
 # this is a freshness floor over a store that's never emptied, not a cache TTL,
 # which is what actually makes that true rather than merely likely: Audible
 # restructures its category tree rarely, a category id that already exists keeps
-# working, and _ensure_genres returns the stored set on every path, including a
-# total fetch failure, so the worst case of a too-long window is a newly added
-# category showing up in /categories up to a day late — never a 404, never a
+# working, and _ensure_genres returns the stored set on every path that has one,
+# including a total fetch failure, so the worst case of a too-long window is a
+# newly added category showing up in /categories up to a day late — never a 404, never a
 # shrunken response. "The taxonomy barely moves" only explains why staleness is
 # rare; it's the never-empty store that explains why staleness is harmless when
 # it happens anyway, and that second half is the one that actually justifies the
@@ -187,9 +190,17 @@ async def _ensure_genres(session: AsyncSession, region: str) -> list[dict[str, s
     old placement doesn't linger as a ghost. A fetch that comes back suspiciously
     small (below that fraction) is treated as partial and only added, never
     pruned, so a transient glitch can't wipe real branches. On a fetch failure,
-    nothing is written and the stored set is served unchanged, so an Audible
-    hiccup doesn't empty the response. Either way the stored set is returned,
-    which is what the /categories discovery endpoint serves.
+    nothing is written and a non-empty stored set is served unchanged, so an
+    Audible hiccup doesn't empty the response. The result is what the /categories
+    discovery endpoint serves.
+
+    A failed fetch with nothing stored is the one case with no answer to fall
+    back on: returning the empty set would read as "Audible has no categories"
+    when the truth is that we could not ask, so it raises AudibleAPIException
+    (via as_audible_failure) for the caller to report as an outage. Only the
+    Audible fetch is converted that way: a failure writing the taxonomy to the
+    store is logged, the stored set is served, and with an empty store the
+    freshly fetched nodes are returned instead.
     """
     stored, oldest_checked = await get_stored_genres(session, region)
     age = _genre_age_seconds(oldest_checked)
@@ -207,7 +218,19 @@ async def _ensure_genres(session: AsyncSession, region: str) -> list[dict[str, s
 
     try:
         nodes = await _fetch_catalog_genres(region)
-        if nodes:
+    except Exception as e:
+        logger.warning(
+            "Genre taxonomy fetch failed",
+            extra={"region": region, "error": str(e)},
+        )
+        if not stored:
+            raise as_audible_failure(e, "Audible genre taxonomy fetch failed") from e
+        return stored
+
+    if nodes:
+        # Audible answered; a failure from here on is ours, not Audible's, so
+        # it is logged and never relabelled as an upstream outage.
+        try:
             if len(nodes) >= _GENRE_RECONCILE_MIN_FRACTION * len(stored):
                 # Plausibly complete — mirror Audible's current tree, pruning
                 # any stale placements (the ghost-root case).
@@ -217,11 +240,15 @@ async def _ensure_genres(session: AsyncSession, region: str) -> list[dict[str, s
                 await upsert_genres(session, region, nodes)
             await session.commit()
             stored, _ = await get_stored_genres(session, region)
-    except Exception as e:
-        logger.warning(
-            "Genre taxonomy fetch failed",
-            extra={"region": region, "error": str(e)},
-        )
+        except Exception as e:
+            logger.warning(
+                "Genre taxonomy store failed",
+                extra={"region": region, "error": str(e)},
+            )
+            # With nothing stored, what Audible just returned is the only
+            # honest answer; an empty list would claim there are no genres.
+            if not stored:
+                return nodes
 
     return stored
 
@@ -308,6 +335,10 @@ async def get_new_releases(
     un-categoried catalog — Audible caps that at a few hundred results, so the
     bare call returns a live sample, not the full catalog (use a category, or
     the DB endpoints, for completeness).
+
+    A failed Audible scan raises AudibleAPIException rather than returning an
+    empty list. Persistence and cache write failures are logged and the books
+    are still returned.
     """
     key = cache.new_releases_key(region, days, category)
     cached = await cache.get(session, key)
@@ -328,38 +359,57 @@ async def get_new_releases(
     try:
         start = time.monotonic()
         books = await _walk_one_catalog(region, category, collect, should_stop)
-        books.sort(
-            key=lambda b: _release_dt(b) or datetime.min.replace(tzinfo=timezone.utc),
-            reverse=True,
-        )
-        took = round((time.monotonic() - start) * 1000, 2)
-        logger.info("Requested Audible new releases", extra={
-            "region": region,
-            "days": days,
-            "category": category,
-            "results": len(books),
-            "took": took,
-        })
-
-        if books:
-            # Unsettled: the writer needs the tri-state flags None/True/False
-            # exactly as _normalize_product produced them (see _asserted_bool
-            # in writer.py), so this runs before the settle below.
-            persist_books_background(books, region)
-            # This endpoint's cache is read-through and returned as-is on a
-            # hit (see module docstring), unlike books.py's own cache, which
-            # is re-settled on every read regardless of source -- so what's
-            # cached and returned here has to already be the settled value.
-            books = _settle_flags_list(books)
-            await cache.set(session, key, books, ttl_seconds=seconds_until_utc_midnight())
-        return books
-
     except Exception as e:
         logger.error(
             "New releases scan failed",
             extra={"region": region, "category": category, "error": str(e)},
         )
-        return []
+        # An empty list here would be indistinguishable from Audible
+        # answering that nothing released in the window; the failure is
+        # raised so the route can report an outage instead. Only the walk
+        # is converted -- a persistence or cache failure below is ours, not
+        # Audible's, and never reaches this handler.
+        raise as_audible_failure(e, "Audible new releases scan failed") from e
+
+    books.sort(
+        key=lambda b: _release_dt(b) or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    took = round((time.monotonic() - start) * 1000, 2)
+    logger.info("Requested Audible new releases", extra={
+        "region": region,
+        "days": days,
+        "category": category,
+        "results": len(books),
+        "took": took,
+    })
+
+    if books:
+        # Unsettled: the writer needs the tri-state flags None/True/False
+        # exactly as _normalize_product produced them (see _asserted_bool
+        # in writer.py), so this runs before the settle below.
+        try:
+            persist_books_background(books, region)
+        except Exception as e:
+            logger.error(
+                "New releases persist failed",
+                extra={"region": region, "category": category, "error": str(e)},
+            )
+        # This endpoint's cache is read-through and returned as-is on a
+        # hit (see module docstring), unlike books.py's own cache, which
+        # is re-settled on every read regardless of source -- so what's
+        # cached and returned here has to already be the settled value.
+        books = _settle_flags_list(books)
+        try:
+            await cache.set(session, key, books, ttl_seconds=seconds_until_utc_midnight())
+        except Exception as e:
+            # The scan succeeded; a lost cache write costs a re-scan on the
+            # next request, not the answer.
+            logger.error(
+                "New releases cache write failed",
+                extra={"region": region, "category": category, "error": str(e)},
+            )
+    return books
 
 
 async def get_coming_soon(
@@ -378,6 +428,10 @@ async def get_coming_soon(
     un-categoried catalog — Audible caps that at a few hundred results, so the
     bare call returns a live sample, not the full catalog (use a category, or
     the DB endpoints, for completeness).
+
+    A failed Audible scan raises AudibleAPIException rather than returning an
+    empty list. Persistence and cache write failures are logged and the books
+    are still returned.
     """
     key = cache.coming_soon_key(region, days, category)
     cached = await cache.get(session, key)
@@ -398,32 +452,51 @@ async def get_coming_soon(
     try:
         start = time.monotonic()
         books = await _walk_one_catalog(region, category, collect, should_stop)
-        books.sort(key=lambda b: _release_dt(b) or datetime.max.replace(tzinfo=timezone.utc))
-        took = round((time.monotonic() - start) * 1000, 2)
-        logger.info("Requested Audible coming soon", extra={
-            "region": region,
-            "days": days,
-            "category": category,
-            "results": len(books),
-            "took": took,
-        })
-
-        if books:
-            # Unsettled: the writer needs the tri-state flags None/True/False
-            # exactly as _normalize_product produced them (see _asserted_bool
-            # in writer.py), so this runs before the settle below.
-            persist_books_background(books, region)
-            # This endpoint's cache is read-through and returned as-is on a
-            # hit (see module docstring), unlike books.py's own cache, which
-            # is re-settled on every read regardless of source -- so what's
-            # cached and returned here has to already be the settled value.
-            books = _settle_flags_list(books)
-            await cache.set(session, key, books, ttl_seconds=seconds_until_utc_midnight())
-        return books
-
     except Exception as e:
         logger.error(
             "Coming soon scan failed",
             extra={"region": region, "category": category, "error": str(e)},
         )
-        return []
+        # An empty list here would be indistinguishable from Audible
+        # answering that nothing released in the window; the failure is
+        # raised so the route can report an outage instead. Only the walk
+        # is converted -- a persistence or cache failure below is ours, not
+        # Audible's, and never reaches this handler.
+        raise as_audible_failure(e, "Audible coming soon scan failed") from e
+
+    books.sort(key=lambda b: _release_dt(b) or datetime.max.replace(tzinfo=timezone.utc))
+    took = round((time.monotonic() - start) * 1000, 2)
+    logger.info("Requested Audible coming soon", extra={
+        "region": region,
+        "days": days,
+        "category": category,
+        "results": len(books),
+        "took": took,
+    })
+
+    if books:
+        # Unsettled: the writer needs the tri-state flags None/True/False
+        # exactly as _normalize_product produced them (see _asserted_bool
+        # in writer.py), so this runs before the settle below.
+        try:
+            persist_books_background(books, region)
+        except Exception as e:
+            logger.error(
+                "Coming soon persist failed",
+                extra={"region": region, "category": category, "error": str(e)},
+            )
+        # This endpoint's cache is read-through and returned as-is on a
+        # hit (see module docstring), unlike books.py's own cache, which
+        # is re-settled on every read regardless of source -- so what's
+        # cached and returned here has to already be the settled value.
+        books = _settle_flags_list(books)
+        try:
+            await cache.set(session, key, books, ttl_seconds=seconds_until_utc_midnight())
+        except Exception as e:
+            # The scan succeeded; a lost cache write costs a re-scan on the
+            # next request, not the answer.
+            logger.error(
+                "Coming soon cache write failed",
+                extra={"region": region, "category": category, "error": str(e)},
+            )
+    return books

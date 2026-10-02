@@ -872,7 +872,7 @@ async def test_search_authors_outage_returns_404_matching_head(async_client):
         response = await async_client.get("/author?name=Frank+Herbert")
 
     assert response.status_code == 404
-    assert response.json() == {"error": "Author search failed", "status_code": 404}
+    assert response.json() == {"error": "Author search failed", "status_code": 404, "code": "upstream_unavailable"}
 
 
 @pytest.mark.asyncio
@@ -882,7 +882,7 @@ async def test_get_author_books_by_name_outage_on_discovery_returns_404_matching
         response = await async_client.get("/author/books?name=Frank+Herbert")
 
     assert response.status_code == 404
-    assert response.json() == {"error": "Failed to fetch author books by name", "status_code": 404}
+    assert response.json() == {"error": "Failed to fetch author books by name", "status_code": 404, "code": "upstream_unavailable"}
 
 
 @pytest.mark.asyncio
@@ -897,6 +897,7 @@ async def test_get_author_books_by_name_outage_on_hydration_returns_404_matching
     assert response.json() == {
         "error": "Audible unavailable and no cached data found",
         "status_code": 404,
+        "code": "upstream_unavailable",
     }
 
 
@@ -913,6 +914,7 @@ async def test_get_books_by_author_outage_on_walk_returns_404_matching_head(asyn
     assert response.json() == {
         "error": "Audible unavailable and no cached author books found",
         "status_code": 404,
+        "code": "upstream_unavailable",
     }
 
 
@@ -928,6 +930,7 @@ async def test_get_books_by_author_outage_on_hydration_returns_404_matching_head
     assert response.json() == {
         "error": "Audible unavailable and no cached data found",
         "status_code": 404,
+        "code": "upstream_unavailable",
     }
 
 
@@ -942,6 +945,7 @@ async def test_get_books_by_author_primary_outage_on_walk_returns_404_matching_h
     assert response.json() == {
         "error": "Audible unavailable and no cached author books found",
         "status_code": 404,
+        "code": "upstream_unavailable",
     }
 
 
@@ -958,6 +962,7 @@ async def test_get_books_by_author_primary_outage_on_hydration_returns_404_match
     assert response.json() == {
         "error": "Audible unavailable and no cached data found",
         "status_code": 404,
+        "code": "upstream_unavailable",
     }
 
 
@@ -971,6 +976,7 @@ async def test_get_author_by_asin_outage_returns_404_matching_head(async_client)
     assert response.json() == {
         "error": "Audible unavailable and no cached author data found",
         "status_code": 404,
+        "code": "upstream_unavailable",
     }
 
 
@@ -987,4 +993,5 @@ async def test_get_author_by_asin_genuine_absence_is_unchanged(async_client):
     assert response.json() == {
         "error": "Author not found: B000APF21M",
         "status_code": 404,
+        "code": "not_on_audible",
     }

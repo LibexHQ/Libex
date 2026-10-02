@@ -1,7 +1,6 @@
 """
-Building a LibexClient from the resolved configuration. Imported only by the
-commands that talk to Audible, so --help and completion never pay for httpx
-and pydantic.
+Building a LibexClient from the resolved configuration. Imported lazily inside
+command handlers, so --help and completion never import httpx and pydantic.
 """
 
 from collections.abc import AsyncIterator

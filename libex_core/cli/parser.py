@@ -41,14 +41,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     verbosity = parser.add_mutually_exclusive_group()
     verbosity.add_argument(
-        "-q", "--quiet", action="store_true", help="print errors only"
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="print only the final error line",
     )
     verbosity.add_argument(
         "-v",
         "--verbose",
         action="count",
         default=0,
-        help="log progress to standard error, repeat for debug detail and tracebacks",
+        help=(
+            "more detail on standard error "
+            "(repeat as -vv for debug output with tracebacks)"
+        ),
     )
     subparsers = parser.add_subparsers(
         dest="command", metavar="COMMAND", required=True

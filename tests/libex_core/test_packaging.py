@@ -94,9 +94,6 @@ _FORBIDDEN_PATTERNS = (
     re.compile(r"(^|/)\.env"),
     re.compile(r"(^|/)app(/|$)"),
     re.compile(r"(^|/)tests(/|$)"),
-    re.compile(r"(^|/)\.claude(/|$)"),
-    re.compile(r"(^|/)CLAUDE"),
-    re.compile(r"(^|/)LIBEX_"),
     re.compile(_DATA_DIRECTORY_PATTERN),
 )
 

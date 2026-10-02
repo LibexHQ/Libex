@@ -8,8 +8,8 @@ _libex-core() {
     _arguments -C \
         '(- *)'{-h,--help}'[show this help message and exit]' \
         '(- *)--version[show the version number and exit]' \
-        {-q,--quiet}'[print errors only]' \
-        {-v,--verbose}'[log progress to standard error, repeat for debug detail and tracebacks]' \
+        {-q,--quiet}'[print only the final error line]' \
+        {-v,--verbose}'[more detail on standard error (repeat as -vv for debug output with tracebacks)]' \
         '1: :->command' \
         '*:: :->args'
 

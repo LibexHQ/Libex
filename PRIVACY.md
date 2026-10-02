@@ -431,12 +431,13 @@ preventing that from happening by accident:
   `LIBEX_CORE_ALLOW_DIRECT_EGRESS`, so a proxy password never has to be typed
   on a command line, where other programs on the machine can read it. Nothing
   else in the library reads the environment, and a test fails if that
-  changes. The tool prints results as JSON to standard output. Errors go to
-  standard error, along with the library's log records when run with `-v`,
-  and tracebacks with `-vv`. It sends neither anywhere else. It has no lookup
-  commands yet: `libex-core config` prints only whether a proxy is in use and
-  the proxy's hostname, and makes no request. Neither its output nor its
-  error messages contain the proxy URL or the value of either variable.
+  changes. The tool prints results as JSON to standard output. Errors, and
+  the library's warnings listed below, go to standard error. `-vv` adds
+  tracebacks, and `-q` leaves only the error line. It sends none of this
+  anywhere else. It has no lookup commands yet: `libex-core config` prints
+  only whether a proxy is in use and the proxy's hostname, and makes no
+  request. Neither its output nor its error messages contain the proxy URL or
+  the value of either variable.
 - **Its logs go where the application sends them.** It writes to the standard
   Python logger named `libex`, so its records end up wherever the host
   application's logging is configured to send them. There are five:

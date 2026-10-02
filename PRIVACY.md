@@ -382,7 +382,8 @@ this section describes the source as it stands, ahead of any release. The
 behaviour described is in `libex_core/audible/client.py`, with the logging of
 individual titles in `libex_core/audible/books.py` and
 `libex_core/audible/extras.py`, searching in `libex_core/audible/search.py`,
-and the command-line tool in `libex_core/cli/`.
+author lookups in `libex_core/audible/authors/`, and the command-line tool in
+`libex_core/cli/`.
 
 If you are using an application that contains this library, that
 application's privacy policy is the one that applies to you. This section
@@ -442,19 +443,28 @@ The library is built around preventing that from happening by accident:
   the value of either variable.
 - **Its logs go where the application sends them.** It writes to the standard
   Python logger named `libex`, so its records end up wherever the host
-  application's logging is configured to send them. There are five:
+  application's logging is configured to send them. There are nine:
   - closing a stale connection fails (debug): a traceback;
-  - request throttled or degraded by Audible: status, region, API path (with the ASIN for a single-title lookup), pool, attempt count, the wait Audible asked for;
+  - request throttled or degraded by Audible: status, region, API path (with the ASIN for a lookup of a single title or author), pool, attempt count, the wait Audible asked for;
   - malformed author ASIN: title ASIN, region, the malformed value, the author's name;
   - unreadable subscription plans: title ASIN, a count;
-  - extra data cleaned up or held back: title ASIN, region, the reason, a count and, if oversized, its size; none of the data itself.
+  - extra data cleaned up or held back: title ASIN, region, the reason, a count and, if oversized, its size; none of the data itself;
+  - an author's book list from Audible's author page ended without a confirmed end: author ASIN, region, why it stopped, pages fetched, books found, Audible's own count, how much was cut off, and the error message if a page failed;
+  - a search for an author's books by name lost its first page: region, the error message. Never the name;
+  - a search for an author's books by name lost a later page: region, the page number, books found so far, the error message. Never the name;
+  - a `libex-core` command fails (debug): a traceback.
 
-  The last two log at most once a minute (extras, once a minute per reason),
-  naming only the latest title. Only the region and the looked-up ASIN come from the
-  caller: query parameters, where search text would appear, are left out, and
-  any ASIN, name or value not shaped like an ASIN or a short catalogue entry
-  is logged as `REDACTED`. A title ASIN is still a title someone looked up or
-  searched for, so these records are part of their reading history.
+  The subscription-plan and extra-data records log at most once a minute
+  (extras, once a minute per reason), naming only the latest title. Only the region and the
+  looked-up ASIN come from the caller: query parameters, where search text and
+  author names would appear, are left out, and any ASIN, name or value not
+  shaped like an ASIN or a short catalogue entry is logged as `REDACTED`. An
+  error message is whatever the request function raised. The library's own
+  client builds its messages from Audible's host and the API path, never the
+  query string. An application that passes in a request function of its own
+  decides what its messages contain. A title or author ASIN is still something
+  someone looked up or searched for, so these records are part of their reading
+  history.
 
 An application that includes the library still has to answer three questions
 for its own users. Does it connect directly or through a proxy, and if through

@@ -71,7 +71,12 @@ class _Command:
 class _Spec:
     description: str
     options: tuple[_Option, ...]
+    # What the completion scripts offer: the top-level words. A command that
+    # only holds further commands lists their names as its one positional.
     commands: tuple[_Command, ...]
+    # What the man page documents: every command that does something, a
+    # nested one under its full name.
+    documented: tuple[_Command, ...]
 
 
 def _read_parser(parser: argparse.ArgumentParser) -> tuple[
@@ -106,21 +111,52 @@ def _read_parser(parser: argparse.ArgumentParser) -> tuple[
     return tuple(options), tuple(positionals), subparsers, summaries
 
 
+def _read_command(name: str, summary: str, sub: argparse.ArgumentParser) -> _Command:
+    options, positionals, _, _ = _read_parser(sub)
+    return _Command(
+        name=name,
+        summary=summary,
+        description=sub.description or "",
+        options=options,
+        positionals=positionals,
+    )
+
+
 def _read_spec(parser: argparse.ArgumentParser) -> _Spec:
     options, _, subparsers, summaries = _read_parser(parser)
     commands = []
+    documented = []
     for name, sub in subparsers.items():
-        sub_options, sub_positionals, _, _ = _read_parser(sub)
+        _, _, nested, nested_summaries = _read_parser(sub)
+        if not nested:
+            command = _read_command(name, summaries.get(name, ""), sub)
+            commands.append(command)
+            documented.append(command)
+            continue
         commands.append(
             _Command(
                 name=name,
                 summary=summaries.get(name, ""),
                 description=sub.description or "",
-                options=sub_options,
-                positionals=sub_positionals,
+                options=(),
+                positionals=(
+                    _Positional(
+                        name="command",
+                        help="the command to run",
+                        choices=tuple(nested),
+                    ),
+                ),
             )
         )
-    return _Spec(parser.description or "", options, tuple(commands))
+        for nested_name, leaf in nested.items():
+            documented.append(
+                _read_command(
+                    f"{name} {nested_name}", nested_summaries.get(nested_name, ""), leaf
+                )
+            )
+    return _Spec(
+        parser.description or "", options, tuple(commands), tuple(documented)
+    )
 
 
 def _word(value: str) -> str:
@@ -190,7 +226,7 @@ def man_page(parser: argparse.ArgumentParser) -> str:
     for option in spec.options:
         lines += _man_option(option)
     lines.append(".SH COMMANDS")
-    for command in spec.commands:
+    for command in spec.documented:
         lines += _man_command(command)
     lines.append(".SH ENVIRONMENT")
     for name, text in VARIABLES:

@@ -21,6 +21,184 @@ print only the final error line
 \fB\-v\fR, \fB\-\-verbose\fR
 more detail on standard error, repeat as \-vv for debug output with tracebacks
 .SH COMMANDS
+.SS book get
+\fBlibex\-core book get\fR \fIASIN\fR
+.PP
+Print one book as JSON. Exits 3 when Audible has no such book.
+.TP
+\fIASIN\fR
+ASIN of the book
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-region\fR
+the Audible marketplace to ask, default us
+.SS book bulk
+\fBlibex\-core book bulk\fR \fIASIN\fR
+.PP
+Print up to 1000 books as JSON, with the ASINs that were not found, were only placeholders, or could not be fetched listed beside them. ASINs may be given as arguments, in a file, or both, separated by commas or white space. A result that is only partly complete is still printed and the status is 0.
+.TP
+\fIASIN\fR
+ASIN of a book, repeat for more
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-file\fR
+read more ASINs from this file, or from standard input when it is \-
+.TP
+\fB\-\-region\fR
+the Audible marketplace to ask, default us
+.SS book chapters
+\fBlibex\-core book chapters\fR \fIASIN\fR
+.PP
+Print a book's chapters as JSON. Exits 3 when there is no chapter list, which is true of many records.
+.TP
+\fIASIN\fR
+ASIN of the book
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-region\fR
+the Audible marketplace to ask, default us
+.SS series get
+\fBlibex\-core series get\fR \fIASIN\fR
+.PP
+Print the series record as JSON. Exits 3 when Audible has no such series.
+.TP
+\fIASIN\fR
+ASIN of the series
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-region\fR
+the Audible marketplace to ask, default us
+.SS series books
+\fBlibex\-core series books\fR \fIASIN\fR
+.PP
+Print the full books in a series as JSON, in series order. A member that cannot be resolved is left out.
+.TP
+\fIASIN\fR
+ASIN of the series
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-region\fR
+the Audible marketplace to ask, default us
+.SS search
+\fBlibex\-core search\fR
+.PP
+Print the books matching the given fields as JSON. \-\-query stands in for \-\-title when no title is given. Exits 3 when nothing matched.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-title\fR
+words in the title
+.TP
+\fB\-\-author\fR
+name of the author
+.TP
+\fB\-\-narrator\fR
+name of the narrator
+.TP
+\fB\-\-publisher\fR
+name of the publisher
+.TP
+\fB\-\-keywords\fR
+keywords to match anywhere
+.TP
+\fB\-\-query\fR
+stands in for the title when none is given
+.TP
+\fB\-\-sort\-by\fR
+the sort order, using the name Audible gives it
+.TP
+\fB\-\-limit\fR
+results per page, 1 to 50, default 10
+.TP
+\fB\-\-page\fR
+page of results to return, counting from 0 to 9, default 0
+.TP
+\fB\-\-region\fR
+the Audible marketplace to ask, default us
+.SS quick-search
+\fBlibex\-core quick-search\fR \fIKEYWORDS\fR
+.PP
+Resolve keywords through Audible's search suggestions and print the full books they name as JSON. Exits 3 when nothing matched.
+.TP
+\fIKEYWORDS\fR
+the words to search for
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-region\fR
+the Audible marketplace to ask, default us
+.SS abs search
+\fBlibex\-core abs search\fR
+.PP
+Print up to five matches as JSON. \-\-query stands in for \-\-title.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-title\fR
+words in the title
+.TP
+\fB\-\-query\fR
+stands in for the title
+.TP
+\fB\-\-author\fR
+name of the author
+.TP
+\fB\-\-keywords\fR
+keywords to match anywhere
+.TP
+\fB\-\-region\fR
+the Audible marketplace to ask, default us
+.SS abs quick-search
+\fBlibex\-core abs quick-search\fR
+.PP
+Print up to five matches as JSON. The first of \-\-keywords, \-\-query and \-\-title that is given is searched, and giving none is an error.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-keywords\fR
+the words to search for
+.TP
+\fB\-\-query\fR
+the words to search for when no keywords are given
+.TP
+\fB\-\-title\fR
+the words to search for when neither is given
+.TP
+\fB\-\-region\fR
+the Audible marketplace to ask, default us
+.SS narrator books
+\fBlibex\-core narrator books\fR \fINAME\fR
+.PP
+Print the books a narrator has read as JSON. Exits 3 when nothing matched.
+.TP
+\fINAME\fR
+name of the narrator
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-limit\fR
+results per page, 1 to 50, default 10
+.TP
+\fB\-\-page\fR
+page of results to return, counting from 0 to 9, default 0
+.TP
+\fB\-\-region\fR
+the Audible marketplace to ask, default us
 .SS completion
 \fBlibex\-core completion\fR \fIshell\fR
 .PP

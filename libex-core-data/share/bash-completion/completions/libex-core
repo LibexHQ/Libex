@@ -12,7 +12,37 @@ _libex_core() {
         esac
     done
     case "$cmd" in
-        "") candidates=(-h --help --version -q --quiet -v --verbose completion config) ;;
+        "") candidates=(-h --help --version -q --quiet -v --verbose book series search quick-search abs narrator completion config) ;;
+        book)
+            if (( COMP_CWORD == ci + 1 )); then
+                candidates=(get bulk chapters)
+            else
+                candidates=()
+            fi
+            ;;
+        series)
+            if (( COMP_CWORD == ci + 1 )); then
+                candidates=(get books)
+            else
+                candidates=()
+            fi
+            ;;
+        search) candidates=(-h --help --title --author --narrator --publisher --keywords --query --sort-by --limit --page --region) ;;
+        quick-search) candidates=(-h --help --region) ;;
+        abs)
+            if (( COMP_CWORD == ci + 1 )); then
+                candidates=(search quick-search)
+            else
+                candidates=()
+            fi
+            ;;
+        narrator)
+            if (( COMP_CWORD == ci + 1 )); then
+                candidates=(books)
+            else
+                candidates=()
+            fi
+            ;;
         completion)
             if (( COMP_CWORD == ci + 1 )); then
                 candidates=(-h --help bash zsh fish)

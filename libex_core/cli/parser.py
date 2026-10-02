@@ -8,13 +8,21 @@ import argparse
 
 from libex_core import __version__
 from libex_core.cli._args import add_help_option, parser_options
-from libex_core.cli.commands import completion, config
+from libex_core.cli.commands import (
+    abs_search,
+    book,
+    completion,
+    config,
+    narrator,
+    search,
+    series,
+)
 from libex_core.cli.environment import ALLOW_DIRECT_EGRESS_VARIABLE, PROXY_URL_VARIABLE
 
 PROG = "libex-core"
 
 # Fixed on purpose: commands are never discovered at run time.
-COMMANDS = (completion, config)
+COMMANDS = (book, series, search, abs_search, narrator, completion, config)
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -17,6 +17,12 @@ _libex-core() {
         command)
             local -a commands
             commands=(
+                'book:look up books and chapters'
+                'series:look up a series'
+                'search:search the catalog'
+                'quick-search:search by keywords through suggestions'
+                'abs:search in the Audiobookshelf provider shape'
+                'narrator:look up books by narrator'
                 'completion:print a shell completion script'
                 'config:show how requests would leave this machine'
             )
@@ -24,6 +30,42 @@ _libex-core() {
             ;;
         args)
             case ${line[1]} in
+                book)
+                    _arguments \
+                        '1:command:(get bulk chapters)'
+                    ;;
+                series)
+                    _arguments \
+                        '1:command:(get books)'
+                    ;;
+                search)
+                    _arguments \
+                        '(- *)'{-h,--help}'[show this help message and exit]' \
+                        '--title[words in the title]' \
+                        '--author[name of the author]' \
+                        '--narrator[name of the narrator]' \
+                        '--publisher[name of the publisher]' \
+                        '--keywords[keywords to match anywhere]' \
+                        '--query[stands in for the title when none is given]' \
+                        '--sort-by[the sort order, using the name Audible gives it]' \
+                        '--limit[results per page, 1 to 50, default 10]' \
+                        '--page[page of results to return, counting from 0 to 9, default 0]' \
+                        '--region[the Audible marketplace to ask, default us]'
+                    ;;
+                quick-search)
+                    _arguments \
+                        '(- *)'{-h,--help}'[show this help message and exit]' \
+                        '--region[the Audible marketplace to ask, default us]' \
+                        '1:KEYWORDS:'
+                    ;;
+                abs)
+                    _arguments \
+                        '1:command:(search quick-search)'
+                    ;;
+                narrator)
+                    _arguments \
+                        '1:command:(books)'
+                    ;;
                 completion)
                     _arguments \
                         '(- *)'{-h,--help}'[show this help message and exit]' \

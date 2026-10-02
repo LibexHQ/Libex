@@ -26,8 +26,7 @@ def _is_retryable_status(status_code: int) -> bool:
     return status_code in _RETRYABLE_STATUS_CODES or 500 <= status_code < 600
 
 
-# Kept small on purpose. AUTHOR_BOOKS_TIME_BUDGET_SECONDS in
-# app/services/audible/authors/__init__.py caps
+# Kept small on purpose. The hosted service's author-books time budget caps
 # a whole discovery walk's wall-clock time, but that deadline is checked by
 # the callers between requests -- it never reaches LibexClient.get, since
 # this method's signature (region, path, params, extra_headers) doesn't

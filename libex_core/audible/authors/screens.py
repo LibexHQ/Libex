@@ -85,7 +85,7 @@ SCREENS_PAGE_SIZE = 20
 # Tied directly to AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT rather than kept
 # as its own independent number: this walk only ever runs as part of the
 # live author-books request that pool is reserved for (see that constant's
-# own comment in libex_core/audible/_concurrency.py for the measurements behind its value and why
+# own comment for the measurements behind its value and why
 # that call path specifically gets a wider pool than the shared IP's
 # default), and every request this walk makes already draws from that same
 # pool via author_books_concurrency(), which the caller enters around the
@@ -683,14 +683,14 @@ async def fetch_author_books_by_screen(
 
     Never raises for "author not found" — the screen endpoint returns 200
     with zero rows for a bogus ASIN, so the empty result is the caller's
-    fallback signal, not an exception. A value that is not an ASIN gets the
-    same empty, clean result without anything being sent.
+    fallback signal, not an exception. A value that is not an ASIN (including a
+    non-string) gets the same empty, clean result without anything being sent.
 
     Raises RegionException for a region that is not one of the eleven --
     before anything is sent.
     """
     region = validate_region(region)
-    if not is_valid_asin(asin):
+    if not isinstance(asin, str) or not is_valid_asin(asin):
         return ScreenBooksResult(
             asins=[],
             pages_fetched=0,

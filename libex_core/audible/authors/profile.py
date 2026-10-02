@@ -28,13 +28,20 @@ AUTHOR_PROFILE_PATH = "/1.0/catalog/contributors/{asin}"
 
 
 def normalize_author(data: dict, asin: str, region: str) -> dict[str, Any]:
-    """Normalizes a raw Audible contributor response into the author response shape."""
-    contributor = data.get("contributor", {})
+    """
+    Normalizes a raw Audible contributor response into the author response shape.
+
+    A response with no contributor, or a contributor whose name is missing or
+    null, is tolerated rather than raised on: the name comes out as an empty
+    string. Deciding that such a response means "author not found" is the
+    caller's; the hosted service does so before it normalizes.
+    """
+    contributor = data.get("contributor") or {}
     bio = contributor.get("bio")
     return {
         "id": None,
         "asin": asin,
-        "name": contributor.get("name", "").replace("\t", "").strip(),
+        "name": (contributor.get("name") or "").replace("\t", "").strip(),
         "description": strip_html(bio),
         "image": contributor.get("profile_image_url"),
         "region": region,

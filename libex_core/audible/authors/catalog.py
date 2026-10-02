@@ -746,7 +746,7 @@ async def fetch_author_books_by_catalog(
             baseline_totals[window] = None
             continue
         if not isinstance(outcome, dict) or not isinstance(outcome.get("products"), list):
-            # SITE 4, reproduced live: the worst of every hole
+            # Reproduced live: the worst of every hole
             # in this function, because Phase 1 runs on EVERY author query,
             # not just a large or sliced one. A malformed-but-dict 200 --
             # `{"total_results": 100}` with no "products" at all -- used to
@@ -757,11 +757,10 @@ async def fetch_author_books_by_catalog(
             # silent no-op with zero sort_errors either way. The result:
             # asins == [], sort_errors == [], slicing_incomplete == False --
             # a walk that returned nothing looked perfectly clean, and
-            # the hosted author-books lookup gates its cache write under
-            # the full default TTL (24 hours) on nothing but sort_errors
-            # being empty, so an empty result was one malformed 200 away
-            # from being cached under that full default TTL as an
-            # exhaustive walk.
+            # a caller that treats an empty sort_errors as "the walk was
+            # exhaustive" (the hosted service does, before caching a
+            # result for its full default TTL) would have taken an empty
+            # result one malformed 200 away for a complete one.
             #
             # Fixed here, in the extraction loop, not at the fold below --
             # by the time the fold loop's `page0_data = ... else None` runs,
@@ -783,19 +782,15 @@ async def fetch_author_books_by_catalog(
             #
             # sort_errors alone is sufficient here, for the identical
             # reason it already was for the baseline rest-page site: read
-            # live, the hosted lookup's cache gate does not distinguish a
-            # SHORT clean walk from an EMPTY clean one -- both need
-            # sort_errors empty before it writes ANYTHING to the cache (not
-            # merely the full default TTL write; a non-empty sort_errors
-            # writes nothing at all and re-runs the walk in the
-            # background instead).
+            # live, a SHORT clean walk and an EMPTY clean one look the same
+            # to a caller reading sort_errors -- both need it empty to be
+            # trusted as complete, and a non-empty sort_errors tells the
+            # caller not to treat the result as complete at all.
             # Nothing stronger than the signal already used everywhere
-            # else in this function would do anything the existing gate
-            # does not already do -- in particular, the stored union at
-            # the DB layer cannot shrink regardless
-            # (persist_author_books_cache_background unions under a row
-            # lock), so the only thing this guard has to protect is the
-            # walk's own completeness CLAIM, not the data itself.
+            # else in this function is needed: what this guard has to
+            # protect is the walk's own completeness CLAIM, and a caller
+            # that persists results additively cannot lose stored data to
+            # a short walk regardless.
             # Measured live: in the single-window case
             # this loses nothing at all -- both baseline sorts enumerate
             # the same unfiltered result set, so the sibling window
@@ -855,7 +850,7 @@ async def fetch_author_books_by_catalog(
             if not isinstance(outcome, dict) or not isinstance(outcome.get("products"), list):
                 # This is one of TWO guards Phase 1 needs, not the whole
                 # of its protection alone -- the other covers this same
-                # window's own page 0 (see the SITE 4 comment in the
+                # window's own page 0 (see the page-0 guard in the
                 # extraction loop above). A malformed page 0 is the worse
                 # of the two: it also poisons baseline_totals for this
                 # whole window, which caps _pages_needed_for at a single
@@ -866,9 +861,8 @@ async def fetch_author_books_by_catalog(
                 # ever re-examines a baseline window on its own either
                 # way, so sort_errors is the only trace either kind of
                 # loss ever leaves for that window, and that is exactly
-                # what keeps the hosted lookup's cache gate from caching a
-                # short OR an empty result under the full default TTL as
-                # though the walk were complete. slicing_incomplete is
+                # what keeps a caller that trusts sort_errors from taking a
+                # short OR an empty result for a complete walk. slicing_incomplete is
                 # deliberately left untouched: that field's own contract
                 # is narrower (a harvest that surfaced zero categories to
                 # slice with, not a page that failed to fetch -- see
@@ -1122,8 +1116,9 @@ async def fetch_author_books_by_catalog(
                             sort_errors.append(f"{_window_label(window)} page 0: {type(outcome).__name__}: {outcome}")
                             continue
                         if not isinstance(outcome, dict) or not isinstance(outcome.get("products"), list):
-                            # SITE 5, reproduced live: the same
-                            # shape as SITE 4 above, one phase later -- a
+                            # Reproduced live: the same
+                            # shape as the page-0 guard in the baseline
+                            # phase above, one phase later -- a
                             # malformed-but-dict page 0 used to pass this
                             # loop's old BaseException-only check, get
                             # wrongly added to expand_ok and counted as
@@ -1135,7 +1130,7 @@ async def fetch_author_books_by_catalog(
                             # guard's own comment already notes, Phase 4 has
                             # no further recovery mechanism, so a loss here
                             # is permanent. Fixed at the same point as
-                            # SITE 4, for the same reason: this extraction
+                            # that guard, for the same reason: this extraction
                             # loop is the one place pages_fetched and
                             # expand_ok are decided, so this is where "was
                             # page 0 usable" has to be decided too, rather

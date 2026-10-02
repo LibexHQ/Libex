@@ -433,9 +433,10 @@ def run_narrators(args: argparse.Namespace) -> int:
     from libex_core.cli._run import run_stored
 
     async def read(session: Any) -> Any:
+        from libex_core.models import NarratorProfileResponse
         from libex_core.storage.read.people import search_narrators
 
-        return _found(
+        rows = _found(
             await search_narrators(
                 session,
                 args.name,
@@ -450,6 +451,7 @@ def run_narrators(args: argparse.Namespace) -> int:
             ),
             "no matching narrators in the local store",
         )
+        return [NarratorProfileResponse(**row) for row in rows]
 
     return run_stored(read)
 

@@ -186,7 +186,7 @@ _LIVE_EMPTY_SITES = [
     ("authors_books_legacy", f"/author/{ASIN}/books", "authors", "get_author_books", _EMPTY_WALK, "No books found for author"),
     ("releases_new", "/new-releases", "releases", "get_new_releases", [], "No new releases found"),
     ("releases_coming_soon", "/coming-soon", "releases", "get_coming_soon", [], "No upcoming releases found"),
-    ("releases_categories", "/categories", "releases", "_ensure_genres", [], "No categories available"),
+    ("releases_categories", "/categories", "releases", "ensure_genres", [], "No categories available"),
 ]
 
 
@@ -235,7 +235,7 @@ _OUTAGE_SITES = [
     ("author", f"/author/{ASIN}", "authors", "get_author", _SERVICE_MESSAGE),
     ("releases_new", "/new-releases", "releases", "get_new_releases", "No new releases found"),
     ("releases_coming_soon", "/coming-soon", "releases", "get_coming_soon", "No upcoming releases found"),
-    ("releases_categories", "/categories", "releases", "_ensure_genres", "No categories available"),
+    ("releases_categories", "/categories", "releases", "ensure_genres", "No categories available"),
 ]
 
 

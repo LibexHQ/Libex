@@ -382,7 +382,9 @@ this section describes the source as it stands, ahead of any release. The
 behaviour described is in `libex_core/audible/client.py`, with the logging of
 individual titles in `libex_core/audible/books.py` and
 `libex_core/audible/extras.py`, searching in `libex_core/audible/search.py`,
-the lookup functions in `libex_core/lookup/`, and the command-line tool in
+author lookups in `libex_core/audible/authors/`, browsing new releases,
+coming soon and categories in `libex_core/audible/releases.py`, the lookup
+functions in `libex_core/lookup/`, and the command-line tool in
 `libex_core/cli/`.
 
 If you are using an application that contains this library, that
@@ -392,8 +394,9 @@ covers only the part that belongs to Libex.
 **Why it differs from the hosted service.** The public instance reaches Audible
 from one address, shared by everyone who calls it. An embedded copy runs on
 each user's own device. Without a proxy, Audible sees that device's address
-together with the titles it looks up and the words searched for, which
-amounts to part of someone's reading history tied to their home connection.
+together with the titles it looks up, the words searched for and the
+categories browsed, which amounts to part of someone's reading history tied
+to their home connection.
 The library is built around preventing that from happening by accident:
 
 - **It won't connect until someone decides how.** The client is created as
@@ -449,28 +452,40 @@ The library is built around preventing that from happening by accident:
   variable.
 - **Its logs go where the application sends them.** It writes to the standard
   Python logger named `libex`, so its records end up wherever the host
-  application's logging is configured to send them. From the client:
+  application's logging is configured to send them. From fetching and
+  reading Audible's answers:
   - closing a stale connection fails (debug): a traceback;
-  - request throttled or degraded by Audible: status, region, API path (with the ASIN for a single-title lookup), pool, attempt count, the wait Audible asked for;
+  - request throttled or degraded by Audible: status, region, API path (with the ASIN for a lookup of a single title or author), pool, attempt count, the wait Audible asked for;
   - malformed author ASIN: title ASIN, region, the malformed value, the author's name;
   - unreadable subscription plans: title ASIN, a count;
-  - extra data cleaned up or held back: title ASIN, region, the reason, a count and, if oversized, its size; none of the data itself.
+  - extra data cleaned up or held back: title ASIN, region, the reason, a count and, if oversized, its size; none of the data itself;
+  - an author's book list from Audible's author page ended without a confirmed end: author ASIN, region, why it stopped, pages fetched, books found, Audible's own count, how much was cut off, and the error message if a page failed;
+  - a search for an author's books by name lost its first page: region, the error message. Never the name;
+  - a search for an author's books by name lost a later page: region, the page number, books found so far, the error message. Never the name.
 
-  The last two log at most once a minute (extras, once a minute per reason),
-  naming only the latest title.
+  The subscription-plan and extra-data records log at most once a minute
+  (extras, once a minute per reason), naming only the latest title.
 
   From the lookup functions:
-  - a completed lookup (info): region, how long Audible took, and counts of what was asked for and what came back; for a search, the names of the fields searched, and for a quick search, the length of the text and how many parts a compound query was split into;
+  - a completed lookup (info): region, how long Audible took and, except for a single chapters or series lookup, counts of what was asked for and what came back; for a search, the names of the fields searched, and for a quick search, the length of the text and how many parts a compound query was split into;
   - a lookup Audible only partly answered (warning): region, counts, and the kind of error where one occurred, including how many identifiers were skipped for not being ASINs;
-  - Audible unavailable (warning or error): region, the kind of error, Audible's status where there was one, and, for a chapters or series lookup, the ASIN asked for.
+  - Audible unavailable (warning, or error for a search): region and, except for a book lookup, the kind of error; for a chapters or series lookup, also Audible's status where there was one and the ASIN asked for.
 
-  From the caller, these records take the region, the looked-up ASIN, the
-  names of searched fields, the length of quick-search text and how many
-  items were asked for. Search text itself is never logged: query parameters,
-  where it would appear, are left out, and any ASIN, name or value not shaped
-  like an ASIN or a short catalogue entry is logged as `REDACTED`. A title
-  ASIN is still a title someone looked up or searched for, so these records
-  are part of their reading history.
+  From the command-line tool:
+  - a `libex-core` command fails (debug): a traceback.
+
+  From the caller, these records take the region, the looked-up title, series
+  or author ASIN, the names of searched fields, the length of quick-search
+  text and how many items were asked for. Search text, and the author name in
+  a search by name, are never logged: query parameters, where they would
+  appear, are left out, and any ASIN, name or value not shaped like an ASIN or
+  a short catalogue entry is logged as `REDACTED`. An error message is
+  whatever the request function raised. The library's own client builds its
+  messages from Audible's host and the API path, never the query string. An
+  application that passes in a request function of its own decides what its
+  messages contain. A title, series or author ASIN is still something someone
+  looked up or searched for, so these records are part of their reading
+  history.
 
 An application that includes the library still has to answer three questions
 for its own users. Does it connect directly or through a proxy, and if through

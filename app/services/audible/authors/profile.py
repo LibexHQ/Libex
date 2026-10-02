@@ -12,18 +12,21 @@ walk in by_name.py and the screens walk in screens.py.
 """
 
 # Standard library
-import random
 import time
-from datetime import datetime, timezone
 from typing import Any
 
 # Third party
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Core
-from libex_core.audible.client import as_audible_failure, upstream_status_of, LOCALE_MAP
+from libex_core.asin import is_valid_asin
+from libex_core.audible.authors.profile import (
+    fetch_author_profile,
+    fetch_author_suggestion_asins,
+    normalize_author,
+)
+from libex_core.audible.client import as_audible_failure, upstream_status_of
 from libex_core.exceptions import AudibleAPIException, NotFoundException
-from libex_core.text import strip_html
 from app.core.logging import get_logger
 from app.core.response_headers import (
     ResponseFacts,
@@ -44,51 +47,17 @@ logger = get_logger()
 
 
 # ============================================================
-# HELPERS
-# ============================================================
-
-def _generate_session_id() -> str:
-    """
-    Generates a random session ID matching AudiMeta's format.
-    Format: 000-XXXXXXX-XXXXXXX
-    """
-    def random_digits() -> str:
-        return str(random.randint(0, 9999999)).zfill(7)
-
-    return f"000-{random_digits()}-{random_digits()}"
-
-
-def _normalize_author(data: dict, asin: str, region: str) -> dict[str, Any]:
-    contributor = data.get("contributor", {})
-    bio = contributor.get("bio")
-    return {
-        "id": None,
-        "asin": asin,
-        "name": contributor.get("name", "").replace("\t", "").strip(),
-        "description": strip_html(bio),
-        "image": contributor.get("profile_image_url"),
-        "region": region,
-        "regions": [region],
-        "genres": [],
-        "updatedAt": datetime.now(timezone.utc).isoformat(),
-    }
-
-
-# ============================================================
 # AUDIBLE REQUESTS
 # ============================================================
 
 
 async def _fetch_author_details(asin: str, region: str) -> dict[str, Any]:
     """
-    Fetches author profile from Audible contributors endpoint.
-    Returns bio, image, and name.
+    Fetches an author's profile through the hosted client. audible_get is
+    looked up in this module's namespace on every call, never captured, so a
+    stand-in assigned over it is the one called.
     """
-    path = f"/1.0/catalog/contributors/{asin}"
-    params = {
-        "locale": LOCALE_MAP.get(region, "en-US"),
-    }
-    return await audible_get(region, path, params)
+    return await fetch_author_profile(audible_get, asin, region)
 
 
 # ============================================================
@@ -116,6 +85,13 @@ async def get_author(
     one dict a single token could describe, and the books it names are attributed by whichever
     call the route makes to get_books_by_asins afterward.
     """
+    # Screened before anything else: a value that is not an ASIN names no
+    # author, which is a terminal answer -- not an outage, so it must not
+    # reach the fetch (which would refuse it with a ValueError that the
+    # fallback below reads as Audible being unreachable).
+    if not is_valid_asin(asin):
+        raise NotFoundException(f"Author not found: {asin}")
+
     if use_cache:
         cached = await cache.get(session, author_key(asin, region))
         # Same reason as the two rollbacks in _walk_author_books (in
@@ -147,7 +123,7 @@ async def get_author(
         if not data or data.get("contributor", {}).get("name") is None:
             raise NotFoundException(f"Author not found: {asin}")
 
-        normalized = _normalize_author(data, asin, region)
+        normalized = normalize_author(data, asin, region)
 
         # Persist to DB and cache in the background
         persist_author_background(normalized, region)
@@ -198,25 +174,8 @@ async def search_authors(
     """Searches for authors by name using Audible search suggestions."""
     try:
         start = time.monotonic()
-        path = "/1.0/searchsuggestions"
-        params = {
-            "keywords": name,
-            "key_strokes": name,
-            "site_variant": "android-mshop",
-            "session_id": _generate_session_id(),
-            "local_time": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
-            "surface": "Android",
-        }
-
-        data = await audible_get(region, path, params)
+        asins = await fetch_author_suggestion_asins(audible_get, name, region)
         search_took = round((time.monotonic() - start) * 1000, 2)
-
-        asins: list[str] = []
-        for item in data.get("model", {}).get("items", []):
-            if item.get("view", {}).get("template") == "AuthorItemV2":
-                asin = item.get("model", {}).get("person_metadata", {}).get("asin")
-                if asin:
-                    asins.append(asin)
 
         logger.info("Requested Audible Author Search", extra={
             "search_took": search_took,

@@ -14,10 +14,9 @@ itself.
 
 This file pins today's answer so a future reorder shows up as a failing
 test rather than a silent behaviour change. It is documented current
-behaviour, not a promise made to AudiMeta consumers: AudiMeta validates
-ASIN and region as a single object and reports both problems in one 422
-`errors` array, so it has no equivalent precedence for Libex to match either
-way.
+behaviour, not a promised contract. AudiMeta validates ASIN and region as
+a single object and reports both problems in one 422 `errors` array, so
+Libex's precedence is its own.
 
 Three cases per route, not one: pinning only the both-invalid case cannot
 tell a future reader whether a change moved the precedence or broke one of

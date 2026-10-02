@@ -492,20 +492,28 @@ def _fish_lines(
     """Completions for a command reached by path, which includes its own name.
 
     __fish_seen_subcommand_from matches a word anywhere on the line, so a
-    top-level command that shares a name with a command inside a group would
-    also fire after the group's word; groups holds the group words, if any, that
-    hold a command of the same name and turn the top-level rule off."""
-    seen = "; and ".join(
+    top-level command that shares a name with a command inside another group
+    would also fire after that group's word; groups holds the group words, if
+    any, that hold a command of the same name and turn this command's rows
+    off. A group folds them into the one negated test its child-listing row
+    already carries, so no row ever needs a third term."""
+    if len(path) > 2:
+        raise ValueError(
+            f"command nested deeper than the completion guard grammar allows: {' '.join(path)}"
+        )
+    head = "; and ".join(
         f"__fish_seen_subcommand_from {_word(word)}" for word in path
     )
+    seen = head
     if groups:
         seen += f"; and not __fish_seen_subcommand_from {_words(groups)}"
     lines = []
     if command.children:
         names = _words(tuple(child.name for child in command.children))
-        held = f"__fish_seen_subcommand_from {names}"
+        held = f"{names} {_words(groups)}" if groups else names
         lines.append(
-            f"complete -c {PROG} -n '{seen}; and not {held}' -a '{names}'"
+            f"complete -c {PROG} -n '{head}; and not __fish_seen_subcommand_from {held}' "
+            f"-a '{names}'"
         )
     for option in command.options:
         lines.append(
@@ -523,7 +531,32 @@ def _fish_lines(
     return lines
 
 
+def _fish_excluded(command: _Command, spec: _Spec) -> tuple[str, ...]:
+    """The other top-level groups holding a command named like this one."""
+    return tuple(
+        group.name
+        for group in spec.commands
+        if group.name != command.name and command.name in _descendant_names(group)
+    )
+
+
+def _fish_check_unambiguous(spec: _Spec) -> None:
+    """A command inside a group is tested as the group word and its own word,
+    both anywhere on the line, so two groups that each hold the other's name
+    cannot be told apart by any two-term test; refuse them rather than emit
+    rows that fire on the wrong line."""
+    held = {group.name: {c.name for c in group.children} for group in spec.commands}
+    for group, names in held.items():
+        for name in names:
+            if group in held.get(name, ()):
+                raise ValueError(
+                    f"commands {group!r} and {name!r} each hold the other: "
+                    "the completion guard grammar cannot tell them apart"
+                )
+
+
 def _fish(spec: _Spec) -> str:
+    _fish_check_unambiguous(spec)
     lines = [
         f"# fish completion for {PROG}, {_GENERATED}",
         f"complete -c {PROG} -f",
@@ -539,16 +572,7 @@ def _fish(spec: _Spec) -> str:
             f"-a {_word(command.name)} -d '{_description(command.summary)}'"
         )
     for command in spec.commands:
-        groups = (
-            ()
-            if command.children
-            else tuple(
-                group.name
-                for group in spec.commands
-                if command.name in _descendant_names(group)
-            )
-        )
-        lines += _fish_lines(command, (command.name,), groups)
+        lines += _fish_lines(command, (command.name,), _fish_excluded(command, spec))
     return "\n".join(lines) + "\n"
 
 

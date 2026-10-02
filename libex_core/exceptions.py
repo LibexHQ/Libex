@@ -54,12 +54,11 @@ class NotFoundException(LibexException):
 class AudibleAPIException(LibexException):
     """Raised when the Audible API returns an unexpected response.
 
-    `status_code` is always 502 — it is what Libex returns to its own callers
-    and is part of Libex's published error contract (shape `{error,
-    status_code, code}`, additive only), so it never carries the upstream
-    value. `upstream_status` is what Audible itself
-    reported, kept separately so callers can distinguish a permanent 4xx from
-    a transient failure. It is `None` when there was no HTTP response at all
+    `status_code` stays 502 for anyone embedding the library, and never carries
+    the upstream value. The hosted HTTP app answers this exception as 503
+    (temporary, retry later) with a Retry-After header. `upstream_status` is
+    what Audible itself reported, kept separately so callers can distinguish a
+    permanent 4xx from a transient failure. It is `None` when there was no HTTP response at all
     (timeouts, connection errors), and that absence is itself meaningful: no
     status means the failure could not have been a deliberate rejection.
     """

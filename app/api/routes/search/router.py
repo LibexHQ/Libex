@@ -15,7 +15,7 @@ from app.db.session import get_session
 
 # Routes
 from app.api.routes.errors import ERROR_RESPONSES
-from app.api.routes.audible_outage import outage_as_not_found
+from app.api.routes.audible_outage import outage_as_unavailable
 from app.api.routes.cache_param import CacheInertParam, CacheStandardParam, apply_cache_control
 
 # Services
@@ -51,12 +51,12 @@ async def search_books(
     cache: CacheInertParam = False,
     session: AsyncSession = Depends(get_session),
 ) -> list[BookResponse]:
-    """Search the Audible catalog. Returns 404 if nothing found."""
+    """Search the Audible catalog. Returns 404 if nothing found, 503 if Audible can't be reached."""
     # query param maps to title if title not provided (AudiMeta behavior)
     effective_title = title or (query if not title else None)
 
     not_found_message = "No books found"
-    books = await outage_as_not_found(
+    books = await outage_as_unavailable(
         search(
             region, session, effective_title, author, keywords,
             limit, narrator, publisher, products_sort_by, page
@@ -81,9 +81,9 @@ async def quick_search_books(
     cache: CacheStandardParam = True,
     session: AsyncSession = Depends(get_session),
 ) -> list[BookResponse]:
-    """Quick search using Audible suggestions. Returns 404 if nothing found."""
+    """Quick search using Audible suggestions. Returns 404 if nothing found, 503 if Audible can't be reached."""
     not_found_message = "No books found"
-    books = await outage_as_not_found(
+    books = await outage_as_unavailable(
         quick_search(keywords, region, session, cache), not_found_message
     )
     if not books:
@@ -112,7 +112,7 @@ async def abs_search(
 
     effective_title = title or query
     not_found_message = "No books found"
-    books = await outage_as_not_found(
+    books = await outage_as_unavailable(
         search(validated_region, session, effective_title, author, keywords, 5),
         not_found_message,
     )
@@ -147,7 +147,7 @@ async def abs_quick_search(
         raise NotFoundException("No search terms provided", code=ErrorCode.INVALID_REQUEST)
 
     not_found_message = "No books found"
-    books = await outage_as_not_found(
+    books = await outage_as_unavailable(
         quick_search(effective_keywords, validated_region, session, cache), not_found_message
     )
     if not books:

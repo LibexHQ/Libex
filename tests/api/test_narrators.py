@@ -11,6 +11,7 @@ import pytest
 
 # Local
 from libex_core.exceptions import AudibleAPIException
+from tests.fixtures.outage import assert_outage_503
 
 
 MOCK_BOOK = {
@@ -188,23 +189,18 @@ async def test_narrator_books_cache_true_sends_no_cache_control_header(async_cli
 
 
 @pytest.mark.asyncio
-async def test_get_narrator_books_outage_returns_404_with_the_routes_own_literal(async_client):
+async def test_get_narrator_books_outage_returns_503_with_the_routes_own_literal(async_client):
     with patch("app.api.routes.narrators.router.search", new_callable=AsyncMock) as mock:
         mock.side_effect = AudibleAPIException("Audible search failed")
         response = await async_client.get("/narrator/books?name=Scott+Brick&region=us")
 
-    assert response.status_code == 404
-    assert response.json() == {
-        "error": "No books found for narrator: Scott Brick",
-        "status_code": 404,
-        "code": "upstream_unavailable",
-    }
+    assert_outage_503(response, "No books found for narrator: Scott Brick")
 
 
 @pytest.mark.asyncio
 async def test_get_narrator_books_genuine_absence_is_unchanged(async_client):
     """search() returns [] on a genuine zero-result search -- unaffected by
-    outage_as_not_found, which only ever applies to a raised
+    outage_as_unavailable, which only ever applies to a raised
     AudibleAPIException."""
     with patch("app.api.routes.narrators.router.search", new_callable=AsyncMock) as mock:
         mock.return_value = []

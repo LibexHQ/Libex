@@ -17,7 +17,7 @@ from app.db.session import get_session
 
 # Routes
 from app.api.routes.errors import ERROR_RESPONSES
-from app.api.routes.audible_outage import outage_as_not_found
+from app.api.routes.audible_outage import outage_as_unavailable
 from app.api.routes.cache_param import CacheInertParam, apply_cache_control
 
 # Services
@@ -52,7 +52,7 @@ async def get_narrator_books(
     Searches the Audible catalog by narrator and returns full book metadata.
     """
     not_found_message = f"No books found for narrator: {name}"
-    results = await outage_as_not_found(
+    results = await outage_as_unavailable(
         search(
             region=region,
             session=session,

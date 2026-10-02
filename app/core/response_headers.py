@@ -37,6 +37,15 @@ EXPOSED_HEADER_NAMES = (
 )
 
 # ============================================================
+# OUTAGE RETRY HINT
+# ============================================================
+
+# Seconds a caller is told to wait before retrying after an Audible outage
+# (503). Sent as the Retry-After header and mirrored as retryAfter in the
+# body, so the two can never disagree.
+RETRY_AFTER_SECONDS = 30
+
+# ============================================================
 # SOURCE TALLY
 # ============================================================
 

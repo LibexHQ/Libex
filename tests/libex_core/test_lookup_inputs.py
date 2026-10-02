@@ -14,7 +14,11 @@ from unittest.mock import AsyncMock
 import pytest
 
 # Local
-from libex_core.exceptions import AudibleAPIException, NotFoundException, RegionException
+from libex_core.exceptions import (
+    AudibleAPIException,
+    NotFoundException,
+    RegionException,
+)
 from libex_core.lookup import (
     categories,
     coming_soon,

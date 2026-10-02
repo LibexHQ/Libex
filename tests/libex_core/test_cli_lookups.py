@@ -23,7 +23,6 @@ from libex_core.cli import _args
 from libex_core.cli.commands import book as book_command
 from libex_core.cli.parser import build_parser
 from libex_core.exceptions import AudibleAPIException, NotFoundException
-from tests.libex_core._cli_support import walk_parsers
 from tests.libex_core._cli_lookup_support import (
     CASE_IDS,
     CASES,
@@ -34,6 +33,7 @@ from tests.libex_core._cli_lookup_support import (
     library_json,
     unclocked,
 )
+from tests.libex_core._cli_support import walk_parsers
 from tests.libex_core.test_lookup import _asins, _batch_get
 
 MAX_FILE_BYTES = 1 << 20

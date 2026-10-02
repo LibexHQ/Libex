@@ -248,7 +248,7 @@ async def test_bulk_shaping_filters_and_sorts_the_books():
 
 async def test_series_books_keep_series_order_without_a_sort():
     result = await get_series_books(fake_get, SERIES)
-    assert [b.asin for b in result] == [
+    assert [b.asin for b in result.books] == [
         "B0SCR00000", "B0SCR00001", "B0SCR00002", "B0SCR00003"
     ]
 
@@ -257,12 +257,12 @@ async def test_a_sort_overrides_series_order():
     result = await get_series_books(
         fake_get, SERIES, sort="lengthMinutes", order="desc"
     )
-    assert [b.lengthMinutes for b in result] == [400, 300, 200, 100]
-    assert [b.asin for b in result] == [
+    assert [b.lengthMinutes for b in result.books] == [400, 300, 200, 100]
+    assert [b.asin for b in result.books] == [
         "B0SCR00003", "B0SCR00002", "B0SCR00001", "B0SCR00000"
     ]
 
 
 async def test_series_filters_apply():
     result = await get_series_books(fake_get, SERIES, filters={"longer_than": 250})
-    assert [b.lengthMinutes for b in result] == [300, 400]
+    assert [b.lengthMinutes for b in result.books] == [300, 400]

@@ -19,9 +19,10 @@ import pytest
 from libex_core import lookup
 from libex_core.cli.commands import releases as releases_command
 from libex_core.exceptions import AudibleAPIException, NotFoundException
-from libex_core.lookup import INCOMPLETE_REASONS, RELEASE_WINDOWS, AuthorBooks
+from libex_core.lookup import INCOMPLETE_REASONS, RELEASE_WINDOWS, BookList
 from libex_core.models import BulkBookResponse
 from libex_core.shaping import BOOK_FILTER_SPECS, BOOK_SORT_FIELDS
+from tests.libex_core import _lookup_support as support
 from tests.libex_core._cli_lookup_support import (
     BY_NAME_NAMES,
     CASES,
@@ -59,8 +60,9 @@ def spy(monkeypatch):
         "get_books": BulkBookResponse(
             books=[], notFound=[], placeholderRecords=[], notFetched=[]
         ),
-        "get_author_books": AuthorBooks(),
-        "get_author_books_by_name": AuthorBooks(),
+        "get_series_books": BookList(),
+        "get_author_books": BookList(),
+        "get_author_books_by_name": BookList(),
     }
 
     def wrap(name):
@@ -362,7 +364,7 @@ def test_a_window_that_is_not_offered_is_a_usage_error_before_any_request(run, s
 
 
 @pytest.mark.parametrize("sub", ["new", "coming-soon"])
-@pytest.mark.parametrize("category", ["", "abc", "12a", "-1", "1 2", "1234567890123", PLANTED])
+@pytest.mark.parametrize("category", ["", "abc", "12a", "-1", "1 2", "1234567890123", "123\n", PLANTED])
 def test_a_category_that_is_not_a_numeric_id_is_refused_without_being_repeated(
     run, sub, category
 ):
@@ -420,6 +422,7 @@ _WARNING = re.compile(
 )
 
 _AUTHOR_BOOKS = [
+    pytest.param(("series", "books", SERIES), "get_series_books", id="series books"),
     pytest.param(("author", "books", AUTHOR), "get_author_books", id="by asin"),
     pytest.param(
         ("author", "books-by-name", AUTHOR_NAME), "get_author_books_by_name", id="by name"
@@ -440,7 +443,7 @@ def _returns(monkeypatch, name, result):
 def test_an_incomplete_list_is_printed_whole_with_status_zero_and_one_warning(
     run, monkeypatch, argv, fn, reasons
 ):
-    _returns(monkeypatch, fn, AuthorBooks(books=[], complete=False, incomplete_reasons=reasons))
+    _returns(monkeypatch, fn, BookList(books=[], complete=False, incomplete_reasons=reasons))
     result = run(argv)
     assert result.code == 0
     assert result.out == "[]\n"
@@ -452,7 +455,7 @@ def test_an_incomplete_list_is_printed_whole_with_status_zero_and_one_warning(
 
 @pytest.mark.parametrize("argv, fn", _AUTHOR_BOOKS)
 def test_a_complete_list_prints_no_warning(run, monkeypatch, argv, fn):
-    _returns(monkeypatch, fn, AuthorBooks(books=[], complete=True))
+    _returns(monkeypatch, fn, BookList(books=[], complete=True))
     result = run(argv)
     assert (result.code, result.out, result.err) == (0, "[]\n", "")
 
@@ -461,7 +464,7 @@ def test_a_complete_list_prints_no_warning(run, monkeypatch, argv, fn):
 def test_quiet_silences_the_warning_and_changes_nothing_else(run, monkeypatch, argv, fn):
     _returns(
         monkeypatch, fn,
-        AuthorBooks(books=[], complete=False, incomplete_reasons=("hydration-failed",)),
+        BookList(books=[], complete=False, incomplete_reasons=("hydration-failed",)),
     )
     loud = run(argv)
     quiet = run(["-q", *argv])
@@ -473,7 +476,7 @@ def test_quiet_silences_the_warning_and_changes_nothing_else(run, monkeypatch, a
 def test_the_warning_holds_only_the_fixed_words(run, monkeypatch):
     _returns(
         monkeypatch, "get_author_books_by_name",
-        AuthorBooks(books=[], complete=False, incomplete_reasons=INCOMPLETE_REASONS),
+        BookList(books=[], complete=False, incomplete_reasons=INCOMPLETE_REASONS),
     )
     result = run(["author", "books-by-name", PLANTED])
     assert PLANTED not in result.err and PLANTED not in result.out
@@ -614,3 +617,38 @@ def test_an_empty_answer_does_not_repeat_typed_text(run, argv):
     result = run(["-vv", *argv], get)
     assert PLANTED not in result.err
     assert PLANTED not in result.out
+
+
+# ============================================================
+# A SERIES' BOOKS WARN THE SAME WAY
+# ============================================================
+
+def test_a_series_with_a_missing_book_warns_with_the_librarys_reason(run, monkeypatch):
+    monkeypatch.setattr(
+        support, "CATALOGUE",
+        {k: v for k, v in support.CATALOGUE.items() if k != "B0SCR00002"},
+    )
+    result = run(["series", "books", SERIES])
+    assert result.code == 0
+    (notice,) = [line for line in result.err.splitlines() if "may be incomplete" in line]
+    assert _WARNING.match(notice)
+    assert notice.endswith("(hydration-not-found)")
+    assert len(json.loads(result.out)) == len(BOOKS) - 1
+    assert run(["-q", "series", "books", SERIES]).err == ""
+
+
+def test_a_whole_series_prints_no_notice(run):
+    result = run(["series", "books", SERIES])
+    assert result.code == 0 and "incomplete" not in result.err
+
+
+def test_a_null_where_audible_sends_an_object_is_status_four(run):
+    async def nulls(region, path, params=None, extra_headers=None):
+        if "contributors/" in path:
+            return {"contributor": None}
+        return {"response_groups": ["a", "b"], "product": {"relationships": None}}
+
+    for argv in (["author", "get", AUTHOR], ["series", "books", SERIES]):
+        result = run(argv, AsyncMock(side_effect=nulls))
+        assert result.code == 4, argv
+        assert result.stdout == b""

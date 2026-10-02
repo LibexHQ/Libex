@@ -21,7 +21,7 @@ from libex_core.audible.books import UNRELEASED_PLACEHOLDER
 from libex_core.exceptions import AudibleAPIException, ErrorCode, NotFoundException
 from libex_core.lookup import (
     INCOMPLETE_REASONS,
-    AuthorBooks,
+    BookList,
     get_author,
     get_author_books,
     get_author_books_by_name,
@@ -183,7 +183,7 @@ async def test_search_authors_suggestions_failing_is_an_outage():
 async def test_a_whole_list_is_complete_with_no_reasons(walk):
     walk(asins(3))
     result = await get_author_books(_hydrating_get(), AUTHOR)
-    assert isinstance(result, AuthorBooks)
+    assert isinstance(result, BookList)
     assert all(isinstance(b, BookResponse) for b in result.books)
     assert len(result.books) == 3
     assert result.complete is True

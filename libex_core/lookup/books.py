@@ -81,13 +81,19 @@ class Hydration:
     exactly one place.
 
     books are settled response dicts in the order Audible returned them, which
-    is not necessarily the order requested. not_found holds the ASINs Audible
-    confirmed it has no record of, plus any identifier that is not ASIN-shaped
-    (given as it arrived; it never reached Audible). placeholders holds ASINs
-    Audible answered with a placeholder record. not_fetched holds ASINs whose
-    request failed, so nothing is known about them. deadline_abandoned is the
-    part of not_fetched whose request was cut off because the caller's
-    deadline arrived rather than because it failed.
+    is not necessarily the order requested; when some of them were answered
+    from the store, the whole list is in the order requested instead. not_found
+    holds the ASINs Audible confirmed it has no record of, plus any identifier
+    that is not ASIN-shaped (given as it arrived; it never reached Audible).
+    placeholders holds ASINs Audible answered with a placeholder record.
+    not_fetched holds ASINs whose request failed, so nothing is known about
+    them. deadline_abandoned is the part of not_fetched whose request was cut
+    off because the caller's deadline arrived rather than because it failed.
+    from_store holds the ASINs
+    of the books that were answered from the store because Audible could not
+    answer for them; it is a subset of books, and those books are the stored
+    copies, not anything Audible said this time. store_write_failed is True
+    when a store was given and some fetched book could not be written to it.
     """
 
     books: list[dict[str, Any]] = field(default_factory=list)
@@ -142,9 +148,9 @@ async def hydrate_books(
 
     store, when given, is written through and served from as the module
     docstring describes, on the hosted service's terms. Chunks that failed
-    are answered from the stored copies of their ASINs, and the stored copy
-    of an ASIN is never used for one a chunk confirmed absent or a
-    placeholder. When no chunk produced a book and the store holds none of
+    are answered from the stored copies of their ASINs (for the region asked
+    only), and the stored copy of an ASIN is never used for one a chunk
+    confirmed absent or a placeholder. Each such answer is logged. When no chunk produced a book and the store holds none of
     the ASINs either, the call raises exactly as it does without a store.
 
     Raises NotFoundException for an empty list, RegionException for a region
@@ -295,8 +301,13 @@ async def hydrate_books(
         # where it holds the ASIN, and only the rest is reported not fetched.
         from_store: list[dict[str, Any]] = []
         if store is not None and failed:
-            from_store = await _store.stored_books(store, failed)
+            from_store = await _store.stored_books(store, failed, region)
             covered = {b["asin"] for b in from_store}
+            if covered:
+                _store.log_served_from_store(
+                    "books, failed chunks", region,
+                    stored_num=len(from_store), requested_num=len(failed),
+                )
             failed = [a for a in failed if a not in covered]
             abandoned = [a for a in abandoned if a not in covered]
 
@@ -306,11 +317,19 @@ async def hydrate_books(
             "not_found_asins": len(not_found),
             "placeholder_asins": len(placeholders),
             "failed_asins": len(failed),
+            "from_store_asins": len(from_store),
             "region": region,
         })
 
+        books = served + from_store
+        if from_store:
+            # The stored copies were appended; put the whole list back in the
+            # order requested.
+            position = {a: i for i, a in enumerate(shaped)}
+            books.sort(key=lambda b: position.get(b.get("asin"), len(position)))
+
         return Hydration(
-            books=served + from_store,
+            books=books,
             not_found=not_found,
             placeholders=placeholders,
             not_fetched=failed,
@@ -324,7 +343,9 @@ async def hydrate_books(
     except Exception as e:
         logger.warning("Audible unavailable for book lookup", extra={"region": region})
         if store is not None:
-            fallback = await _hydrate_from_store(store, shaped, not_found, placeholders)
+            fallback = await _hydrate_from_store(
+                store, region, shaped, not_found, placeholders
+            )
             if fallback is not None:
                 return fallback
         raise as_audible_failure(e, OUTAGE_MESSAGE) from e
@@ -332,6 +353,7 @@ async def hydrate_books(
 
 async def _hydrate_from_store(
     store: "LocalStore",
+    region: str,
     shaped: list[str],
     not_found: list[str],
     placeholders: list[str],
@@ -345,14 +367,13 @@ async def _hydrate_from_store(
     """
     confirmed = set(not_found) | set(placeholders)
     owed = [a for a in shaped if a not in confirmed]
-    rows = await _store.stored_books(store, owed)
+    rows = await _store.stored_books(store, owed, region)
     if not rows:
         return None
     held = {b["asin"] for b in rows}
-    logger.warning("Served books from the store while Audible was unavailable", extra={
-        "stored_num": len(rows),
-        "requested_num": len(owed),
-    })
+    _store.log_served_from_store(
+        "books", region, stored_num=len(rows), requested_num=len(owed)
+    )
     return Hydration(
         books=rows,
         not_found=not_found,
@@ -540,8 +561,9 @@ async def get_chapters(
             "upstream_status": upstream_status_of(e),
         })
         if store is not None:
-            stored = await _store.stored_track(store, canonical)
+            stored = await _store.stored_track(store, canonical, region)
             if stored:
+                _store.log_served_from_store("chapters", region, asin=canonical)
                 return ChapterResponse(**stored)
         raise as_audible_failure(e, OUTAGE_MESSAGE) from e
     if store is not None and await _store.persist_track(store, canonical, result, region):

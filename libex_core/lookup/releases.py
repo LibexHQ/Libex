@@ -2,12 +2,11 @@
 New releases, coming soon and the category taxonomy they are scoped by.
 
 The library's counterparts of the hosted routes, without the cache. Audible
-has no release endpoint, so a window is
-rebuilt from the catalog by one walk, sorted by release date, over the
-un-categoried catalog or over the one category given. The un-categoried walk
-is capped by Audible at a few hundred results, so without a category the
-result is a live sample, not the full catalog; a category scopes the walk and
-returns the window in full for it. Nothing here fans out across categories on
+has no release endpoint, so a window is rebuilt from the catalog by one walk,
+sorted by release date, over the un-categoried catalog or over the one
+category given. The un-categoried walk is capped by Audible at a few hundred
+results, so without a category the result is a live sample, not the full
+catalog; a category scopes the walk and returns the window in full for it. Nothing here fans out across categories on
 its own: that is the caller's to do, with the ids categories returns.
 
 A window that holds nothing is NotFoundException, as on the hosted routes, and

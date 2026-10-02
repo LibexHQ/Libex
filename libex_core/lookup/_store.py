@@ -39,6 +39,10 @@ logger = logging.getLogger("libex")
 # later chunk failing.
 WRITE_CHUNK_SIZE = 50
 
+# Stored books are read this many ASINs to a query, well under the variable
+# limit SQLite binds in one statement.
+READ_CHUNK_SIZE = 500
+
 
 async def check(store: "LocalStore") -> None:
     """
@@ -49,6 +53,16 @@ async def check(store: "LocalStore") -> None:
     """
     async with store.session():
         pass
+
+
+def log_served_from_store(what: str, region: str, **fields: Any) -> None:
+    """One line, always the same message, whenever the store answers in place
+    of Audible. what names the kind of record; fields are counts or an ASIN the
+    lookup already logs, never text a caller supplied."""
+    logger.warning(
+        "Answered from the store while Audible was unavailable",
+        extra={"what": what, "region": region, **fields},
+    )
 
 
 def _log_write_failure(what: str, exc: Exception, **fields: Any) -> None:
@@ -133,9 +147,12 @@ async def persist_track(
 
     # A chapter listing hangs off its book's row, so one for a book the store
     # does not hold cannot be written; the hosted service meets the same limit
-    # and its failure is only logged. Said plainly here, once, and not as a
-    # failed write.
-    if not await stored_books(store, [asin]):
+    # and only logs the failure. A read that fails is not the same as the book
+    # being absent: it is logged as a failed read and nothing is written.
+    held = await _read(store, "chapter book", lambda s: _book_held(s, asin), None)
+    if held is None:
+        return False
+    if not held:
         logger.info("Chapters not stored: the book is not in the store", extra={
             "asin": asin,
             "region": region,
@@ -167,15 +184,47 @@ async def _read(
         return default
 
 
-async def stored_books(store: "LocalStore", asins: list[str]) -> list[dict[str, Any]]:
-    """The stored books for these ASINs, settled, in the order asked, those
-    not stored left out."""
+async def _book_held(session: Any, asin: str) -> bool:
+    from sqlalchemy import select
+
+    from libex_core.storage.models import Book
+
+    result = await session.execute(select(Book.asin).where(Book.asin == asin))
+    return result.first() is not None
+
+
+async def _book_region(session: Any, asin: str) -> str | None:
+    from sqlalchemy import select
+
+    from libex_core.storage.models import Book
+
+    result = await session.execute(select(Book.region).where(Book.asin == asin))
+    return result.scalar_one_or_none()
+
+
+async def _read_books_chunked(session: Any, asins: list[str]) -> list[dict[str, Any]]:
     from libex_core.storage.read import books as read_books
 
+    rows: list[dict[str, Any]] = []
+    for start in range(0, len(asins), READ_CHUNK_SIZE):
+        rows.extend(await read_books.get_books(session, asins[start:start + READ_CHUNK_SIZE]))
+    return rows
+
+
+async def stored_books(
+    store: "LocalStore", asins: list[str], region: str | None = None
+) -> list[dict[str, Any]]:
+    """The stored books for these ASINs, settled, in the order asked, those
+    not stored left out. With a region, only books stored for that marketplace
+    count: a book ASIN is region-specific, so a row another marketplace stored
+    is not this one's. Read in chunks of READ_CHUNK_SIZE."""
     if not asins:
         return []
-    rows = await _read(store, "books", lambda s: read_books.get_books(s, list(asins)), [])
-    by_asin = {row["asin"]: row for row in rows}
+    rows = await _read(store, "books", lambda s: _read_books_chunked(s, list(asins)), [])
+    by_asin = {
+        row["asin"]: row for row in rows
+        if region is None or row.get("region") == region
+    }
     return settle_flags_list([by_asin[a] for a in asins if a in by_asin])
 
 
@@ -196,18 +245,32 @@ async def serve_merged(
     ])
 
 
-async def stored_series(store: "LocalStore", asin: str) -> dict[str, Any] | None:
+async def stored_series(
+    store: "LocalStore", asin: str, region: str | None = None
+) -> dict[str, Any] | None:
+    """The stored series record. With a region, a record stored for another
+    marketplace is not returned; one stored with no region is, since nothing
+    ties it to a different one."""
     from libex_core.storage.read import series as read_series
 
-    return await _read(store, "series", lambda s: read_series.get_series(s, asin), None)
+    row = await _read(store, "series", lambda s: read_series.get_series(s, asin), None)
+    if row and region is not None and row.get("region") not in (None, region):
+        return None
+    return row
 
 
-async def stored_series_books(store: "LocalStore", asin: str) -> list[dict[str, Any]]:
-    """The stored books of a series in series order, settled."""
+async def stored_series_books(
+    store: "LocalStore", asin: str, region: str | None = None
+) -> list[dict[str, Any]]:
+    """The stored books of a series in series order, settled, those stored for
+    the region only when one is given."""
     from libex_core.storage.read import series as read_series
 
     rows = await _read(
-        store, "series books", lambda s: read_series.get_series_books(s, asin), []
+        store,
+        "series books",
+        lambda s: read_series.get_series_books(s, asin, region=region),
+        [],
     )
     return settle_flags_list(rows)
 
@@ -238,22 +301,34 @@ async def stored_author_book_asins(
     )
 
 
-async def stored_track(store: "LocalStore", asin: str) -> dict[str, Any] | None:
+async def stored_track(
+    store: "LocalStore", asin: str, region: str | None = None
+) -> dict[str, Any] | None:
+    """The stored chapters. A listing belongs to its book, so with a region it
+    is returned only when the book is stored for that marketplace."""
     from libex_core.storage.read import books as read_books
 
-    return await _read(store, "chapters", lambda s: read_books.get_track(s, asin), None)
+    async def read_one(session: Any) -> dict[str, Any] | None:
+        if region is not None and await _book_region(session, asin) != region:
+            return None
+        return await read_books.get_track(session, asin)
+
+    return await _read(store, "chapters", read_one, None)
 
 
 async def search_stored_books(
-    store: "LocalStore", title: str, author: str
+    store: "LocalStore", title: str, author: str, region: str | None = None
 ) -> list[dict[str, Any]]:
-    """Stored books matching a title and an author name, settled."""
+    """Stored books matching a title and an author name, settled, those stored
+    for the region only when one is given."""
     from libex_core.storage.read import books as read_books
 
     rows = await _read(
         store,
         "book search",
-        lambda s: read_books.search_books(s, title=title, author_name=author, limit=10),
+        lambda s: read_books.search_books(
+            s, title=title, author_name=author, region=region, limit=10
+        ),
         [],
     )
     return settle_flags_list(rows)

@@ -207,8 +207,12 @@ async def _quick_search_books(
                     found, outage = [], exc
                 if found or store is None:
                     return found
-                stored = await _store.search_stored_books(store, title, author)
+                stored = await _store.search_stored_books(store, title, author, region)
                 if stored:
+                    _store.log_served_from_store(
+                        "book search", region,
+                        stored_num=len(stored), catalog_failed=outage is not None,
+                    )
                     return stored
                 if outage is not None:
                     raise outage

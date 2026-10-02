@@ -82,8 +82,9 @@ async def get_series(
             "upstream_status": upstream_status_of(e),
         })
         if store is not None:
-            stored = await _store.stored_series(store, canonical)
+            stored = await _store.stored_series(store, canonical, region)
             if stored:
+                _store.log_served_from_store("series", region, series_asin=canonical)
                 return SeriesResponse(**stored)
         raise as_audible_failure(e, OUTAGE_MESSAGE) from e
     if store is not None and await _store.persist_series(store, normalized, region):
@@ -112,7 +113,8 @@ async def get_series_books(
     answered from its stored copy.
 
     Reads the series' member ASINs in series order, then hydrates them like a
-    bulk lookup. The books come back in the order Audible returned them. A
+    bulk lookup. The books come back in the order Audible returned them, or in
+    series order when some were answered from the store. A
     member that is not ASIN-shaped, or that Audible has no record of, is left
     out; the bulk lookup is where such ASINs are reported. An empty list is
     possible when none of the members resolves, or when filters leave none.
@@ -122,10 +124,10 @@ async def get_series_books(
     complete is False, with hydration-failed and/or hydration-not-found in
     incomplete_reasons, when a member's request failed or Audible has no record
     of it. The member list is one request, so there is no discovery-incomplete
-    here and no deadline, so no hydration-deadline, unless the stored members
-    answered in place of a member list Audible could not give: then the
-    membership is unconfirmed and discovery-incomplete is reported. Judged
-    before filtering. store_write_failed is True when a store was given and
+    here and no deadline, so no hydration-deadline. The one exception is a
+    member list Audible could not give and the store answered: the stored
+    members may not be the whole series, so discovery-incomplete is reported.
+    Judged before filtering. store_write_failed is True when a store was given and
     some fetched book could not be written to it.
 
     filters, sort and order are applied as on the hosted route: the books keep
@@ -163,12 +165,21 @@ async def get_series_books(
             "upstream_status": upstream_status_of(e),
         })
         if store is not None:
-            members = await _store.stored_series_books(store, canonical)
+            members = await _store.stored_series_books(store, canonical, region)
             if members:
+                _store.log_served_from_store(
+                    "series books", region, series_asin=canonical, stored_num=len(members)
+                )
                 # The stored members are whatever the store holds, which
                 # nothing confirms is the whole series, so the list is
                 # reported as one whose membership was not confirmed.
-                return _assemble(False, Hydration(books=members), filters, sort, order)
+                return _assemble(
+                    False,
+                    Hydration(books=members, from_store=[b["asin"] for b in members]),
+                    filters,
+                    sort,
+                    order,
+                )
         raise as_audible_failure(e, OUTAGE_MESSAGE) from e
 
     if not asins:

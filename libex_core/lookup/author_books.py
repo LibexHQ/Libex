@@ -104,12 +104,17 @@ class BookList:
     fetch. incomplete_reasons names why, in INCOMPLETE_REASONS order, and is
     empty exactly when complete is True. store_write_failed is True when a
     store was given and some fetched book could not be written to it.
+    from_store holds the ASINs of the books answered from the store because
+    Audible could not answer for them (before filtering, so a filtered-out
+    ASIN can appear here); those books are stored copies, not what Audible
+    said this time.
     """
 
     books: list[BookResponse] = field(default_factory=list)
     complete: bool = True
     incomplete_reasons: tuple[str, ...] = ()
     store_write_failed: bool = False
+    from_store: tuple[str, ...] = ()
 
 
 def _reasons(discovery_complete: bool, hydration: Hydration) -> tuple[str, ...]:
@@ -143,6 +148,7 @@ def _assemble(
         complete=not reasons,
         incomplete_reasons=reasons,
         store_write_failed=hydration.store_write_failed,
+        from_store=tuple(hydration.from_store),
     )
 
 

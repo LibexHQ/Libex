@@ -1,12 +1,12 @@
 """
 Books route schemas.
 
-The AudiMeta-shaped models (BookResponse, ChapterResponse, and the rest of
-the drop-in DTOs) live in libex_core.models so they carry no route
-dependency. What stays here is the Audiobookshelf (ABS) custom-metadata-
-provider shape: a narrower, differently-cased response format that only the
-region-prefixed search routes produce, for a consumer that expects it rather
-than AudiMeta's own shape.
+The models derived from AudiMeta's response shapes (BookResponse,
+ChapterResponse, and the rest of the DTOs) live in libex_core.models so
+they carry no route dependency. What stays here is the Audiobookshelf (ABS)
+custom-metadata-provider shape: a narrower, differently-cased response format
+that only the region-prefixed search routes produce, for a consumer that
+expects it rather than AudiMeta's own shape.
 """
 
 # Third party

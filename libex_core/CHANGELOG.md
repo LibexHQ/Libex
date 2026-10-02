@@ -14,6 +14,14 @@ Entries below that predate publication are historical record for whoever
 embeds this package, not evidence that anyone consumed a given version at the
 time it was cut.
 
+## [0.15.0]
+
+### Added
+- **A new `libex_core.storage` subpackage holds the stored schema for books, authors, series, narrators, genres and tracks, and the links between them.** `Book`, `Author`, `Series`, `Narrator`, `Genre` and `Track` are the table classes, `Base` is their declarative base, and `UTCDateTime` and `JSONDocument` are the column types they use. This is groundwork: nothing reads or writes a database yet, no command uses it, and nothing in the package creates the tables. It is the schema the later local-storage work will build on.
+- **The schema works on SQLite as well as Postgres.** On Postgres it is the same tables, columns and indexes as the hosted service has, unchanged. On SQLite, timestamps come back as UTC-aware datetimes (a naive value written in is taken to be UTC), a Python `None` in a JSON column is stored as SQL `NULL` rather than the JSON value `null`, and the partial index on authors with no ASIN is created there too.
+- **Importing `libex_core.storage` loads no database library.** The names above load on first access. If SQLAlchemy or aiosqlite is not installed, accessing one raises `StorageUnavailable`, a subclass of `ImportError`, whose message names the `storage` extra and the command to install it. `require_storage()` runs the same check on its own, without importing the libraries.
+- **Two new install extras.** `libex-core[storage]` adds SQLAlchemy, Alembic and aiosqlite, enough for SQLite. `libex-core[postgres]` adds asyncpg on top of that. The base install is unchanged and still needs only `httpx` and `pydantic`.
+
 ## [0.13.0]
 
 ### Added

@@ -2,15 +2,21 @@
 Looking books up by ASIN: one book, a bulk list, and a book's chapters, each
 returned as the published response model.
 
-These are the library's counterparts of the hosted routes' live path -- fetch,
-normalize, settle the tri-state flags, split what Audible answered from what it
-did not -- without the cache, the database backstop or any persistence. What
-those leave out is what the hosted service answers an outage from, so here an
-outage is simply an outage: an ASIN whose request failed is reported in
-notFetched, and a request in which nothing could be served raises
-AudibleAPIException. Audible confirming it has no record is a different fact
-and stays NotFoundException (a bulk lookup reports it in notFound), never
-retried and never mixed with an outage.
+These are the library's counterparts of the hosted routes -- fetch, normalize,
+settle the tri-state flags, split what Audible answered from what it did not --
+without the cache. With no store, nothing is persisted and an outage is simply
+an outage: an ASIN whose request failed is reported in notFetched, and a
+request in which nothing could be served raises AudibleAPIException. Audible
+confirming it has no record is a different fact and stays NotFoundException (a
+bulk lookup reports it in notFound), never retried and never mixed with an
+outage.
+
+With a LocalStore (keyword store), what Audible answered is written under the
+hosted merge rules and each book is served as the store then holds it, which
+is never less than either side; a chunk or a whole request that fails is
+answered from the stored copies, and only what the store lacks too is
+notFetched, or raises. A confirmed absence is never answered from the store.
+See libex_core.lookup._store.
 
 Every function takes the callable that makes the request (an AudibleGet) as its
 first argument and the region as a keyword. Nothing here reads the
@@ -25,7 +31,7 @@ import logging
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 # Core
 from libex_core.asin import is_valid_asin, normalise_asin
@@ -50,8 +56,12 @@ from libex_core.audible.client import (
     validate_region,
 )
 from libex_core.exceptions import ErrorCode, NotFoundException
+from libex_core.lookup import _store
 from libex_core.lookup._shaping import check_shaping, shape_books
 from libex_core.models import BookResponse, BulkBookResponse, ChapterResponse
+
+if TYPE_CHECKING:
+    from libex_core.storage.store import LocalStore
 
 logger = logging.getLogger("libex")
 
@@ -86,6 +96,8 @@ class Hydration:
     placeholders: list[str] = field(default_factory=list)
     not_fetched: list[str] = field(default_factory=list)
     deadline_abandoned: list[str] = field(default_factory=list)
+    from_store: list[str] = field(default_factory=list)
+    store_write_failed: bool = False
 
 
 class _HydrationDeadlineExceeded(Exception):
@@ -104,6 +116,7 @@ async def hydrate_books(
     *,
     deadline: float | None = None,
     high_concurrency: bool = False,
+    store: "LocalStore | None" = None,
 ) -> Hydration:
     """
     Turns a list of ASINs into books, 50 to a request, all requests at once.
@@ -128,9 +141,18 @@ async def hydrate_books(
     deadline_abandoned. high_concurrency draws the requests from the wider pool
     reserved for an author's whole catalogue.
 
+    store, when given, is written through and served from as the module
+    docstring describes, on the hosted service's terms. Chunks that failed
+    are answered from the stored copies of their ASINs, and the stored copy
+    of an ASIN is never used for one a chunk confirmed absent or a
+    placeholder. When no chunk produced a book and the store holds none of
+    the ASINs either, the call raises exactly as it does without a store.
+
     Raises NotFoundException for an empty list, RegionException for a region
     that is not one of the eleven, and AudibleAPIException as above.
     """
+    if store is not None:
+        await _store.check(store)
     region = validate_region(region)
     if not asins:
         raise NotFoundException("No ASINs provided")
@@ -262,6 +284,23 @@ async def hydrate_books(
 
         normalized = await normalize_products(all_products, region)
 
+        # The books are written as normalized, tri-state flags and all, and
+        # served as the store then holds them.
+        write_failed = False
+        served = settle_flags_list(normalized)
+        if store is not None and normalized:
+            written, write_failed = await _store.persist_books(store, normalized, region)
+            served = await _store.serve_merged(store, normalized, written)
+
+        # What the failed chunks left uncovered is answered from the store
+        # where it holds the ASIN, and only the rest is reported not fetched.
+        from_store: list[dict[str, Any]] = []
+        if store is not None and failed:
+            from_store = await _store.stored_books(store, failed)
+            covered = {b["asin"] for b in from_store}
+            failed = [a for a in failed if a not in covered]
+            abandoned = [a for a in abandoned if a not in covered]
+
         logger.info("Requested books from Audible", extra={
             "requested_num": len(shaped),
             "requested_took": requested_took,
@@ -272,18 +311,56 @@ async def hydrate_books(
         })
 
         return Hydration(
-            books=settle_flags_list(normalized),
+            books=served + from_store,
             not_found=not_found,
             placeholders=placeholders,
             not_fetched=failed,
             deadline_abandoned=abandoned,
+            from_store=[b["asin"] for b in from_store],
+            store_write_failed=write_failed,
         )
 
     except NotFoundException:
         raise
     except Exception as e:
         logger.warning("Audible unavailable for book lookup", extra={"region": region})
+        if store is not None:
+            fallback = await _hydrate_from_store(store, shaped, not_found, placeholders)
+            if fallback is not None:
+                return fallback
         raise as_audible_failure(e, _OUTAGE_MESSAGE) from e
+
+
+async def _hydrate_from_store(
+    store: "LocalStore",
+    shaped: list[str],
+    not_found: list[str],
+    placeholders: list[str],
+) -> Hydration | None:
+    """
+    The whole-request outage answer: every requested ASIN the store holds,
+    minus any a chunk that did answer confirmed absent or a placeholder, which
+    stored data does not overrule. None when the store holds none of them, so
+    the caller raises the outage rather than returning an empty answer that
+    would read as a confirmed absence.
+    """
+    confirmed = set(not_found) | set(placeholders)
+    owed = [a for a in shaped if a not in confirmed]
+    rows = await _store.stored_books(store, owed)
+    if not rows:
+        return None
+    held = {b["asin"] for b in rows}
+    logger.warning("Served books from the store while Audible was unavailable", extra={
+        "stored_num": len(rows),
+        "requested_num": len(owed),
+    })
+    return Hydration(
+        books=rows,
+        not_found=not_found,
+        placeholders=placeholders,
+        not_fetched=[a for a in owed if a not in held],
+        from_store=[b["asin"] for b in rows],
+    )
 
 
 # ============================================================
@@ -297,7 +374,13 @@ def _canonical_asin(asin: str) -> str:
     return normalise_asin(asin)
 
 
-async def get_book(get: AudibleGet, asin: str, *, region: str = "us") -> BookResponse:
+async def get_book(
+    get: AudibleGet,
+    asin: str,
+    *,
+    region: str = "us",
+    store: "LocalStore | None" = None,
+) -> BookResponse:
     """
     Fetches one book by ASIN.
 
@@ -306,10 +389,13 @@ async def get_book(get: AudibleGet, asin: str, *, region: str = "us") -> BookRes
     that is not an ASIN; NotFoundException (code not_on_audible) when Audible
     has no record; NotFoundException (code withheld) when Audible sent only a
     placeholder record, which is never returned; AudibleAPIException when
-    Audible could not be reached; RegionException for an unknown region.
+    Audible could not be reached and the store (if given) does not hold the
+    book; RegionException for an unknown region. With a store the book is
+    written through and served as the store holds it, and an outage is
+    answered from the stored copy.
     """
     canonical = _canonical_asin(asin)
-    hydration = await hydrate_books(get, [canonical], region)
+    hydration = await hydrate_books(get, [canonical], region, store=store)
     if not hydration.books:
         if canonical in hydration.placeholders:
             raise NotFoundException(
@@ -328,6 +414,7 @@ async def get_books(
     filters: dict[str, Any] | None = None,
     sort: str | None = None,
     order: str = "asc",
+    store: "LocalStore | None" = None,
 ) -> BulkBookResponse:
     """
     Fetches up to 1000 books by ASIN.
@@ -350,8 +437,12 @@ async def get_books(
     libex_core.shaping for the filter names and sortable fields; a name or
     value outside them is ValueError, before anything is sent.
 
+    With a store, books are written through and served as the store holds them,
+    and an ASIN whose request failed is answered from its stored copy; only
+    what the store lacks too is notFetched.
+
     Raises AudibleAPIException when a request failed and no book came back at
-    all, and RegionException for an unknown region.
+    all (the store included), and RegionException for an unknown region.
     """
     check_shaping(filters, sort, order)
     asin_list = [
@@ -374,7 +465,9 @@ async def get_books(
             f"Maximum {MAX_BULK_ASINS} ASINs per request", code=ErrorCode.INVALID_REQUEST
         )
 
-    hydration = await hydrate_books(get, [normalise_asin(a) for a in asin_list], region)
+    hydration = await hydrate_books(
+        get, [normalise_asin(a) for a in asin_list], region, store=store
+    )
 
     found = {normalise_asin(book["asin"]) for book in hydration.books}
     placeholder_set = {normalise_asin(a) for a in hydration.placeholders} - found
@@ -398,7 +491,11 @@ async def get_books(
 
 
 async def get_chapters(
-    get: AudibleGet, asin: str, *, region: str = "us"
+    get: AudibleGet,
+    asin: str,
+    *,
+    region: str = "us",
+    store: "LocalStore | None" = None,
 ) -> ChapterResponse:
     """
     Fetches a book's chapter listing.
@@ -410,9 +507,17 @@ async def get_chapters(
     retrying.
     A value that is not an ASIN is NotFoundException (code invalid_request);
     an unknown region is RegionException.
+
+    With a store the chapters are written through, keeping the richer listing
+    of the stored and the offered, and served as the store holds them; when
+    Audible could not be reached the stored listing answers, and without one
+    that is AudibleAPIException. A NotFoundException is never answered from
+    the store.
     """
     canonical = _canonical_asin(asin)
     region = validate_region(region)
+    if store is not None:
+        await _store.check(store)
     try:
         start = time.monotonic()
         data = await fetch_chapter_metadata(get, canonical, region)
@@ -435,5 +540,11 @@ async def get_chapters(
             "error_type": type(e).__name__,
             "upstream_status": upstream_status_of(e),
         })
+        if store is not None:
+            stored = await _store.stored_track(store, canonical)
+            if stored:
+                return ChapterResponse(**stored)
         raise as_audible_failure(e, _OUTAGE_MESSAGE) from e
+    if store is not None and await _store.persist_track(store, canonical, result, region):
+        result = await _store.stored_track(store, canonical) or result
     return ChapterResponse(**result)

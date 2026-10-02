@@ -1,9 +1,12 @@
 """
 Looking an author up: the profile by ASIN, and a search by name.
 
-The library's counterparts of the hosted routes' live path, without the cache,
-the database backstop or persistence: an outage is AudibleAPIException, and
-Audible having no such author is NotFoundException. An author ASIN is global,
+The library's counterparts of the hosted routes, without the cache. With no
+store nothing is persisted: an outage is AudibleAPIException, and Audible
+having no such author is NotFoundException. With a LocalStore (keyword store)
+a profile fetched is written through and served as the store holds it, and an
+outage is answered from the stored profile, never a confirmed absence. An
+author ASIN is global,
 so it resolves in all eleven regions, though the name and bio that come back
 are the marketplace's own, which is why region is still passed through. The
 author's books are in author_books.py.
@@ -15,6 +18,7 @@ repeated in a message. Nothing here reads the environment.
 # Standard library
 import logging
 import time
+from typing import TYPE_CHECKING
 
 # Core
 from libex_core.audible.authors.profile import (
@@ -29,15 +33,30 @@ from libex_core.audible.client import (
     validate_region,
 )
 from libex_core.exceptions import AudibleAPIException, NotFoundException
+from libex_core.lookup import _store
 from libex_core.lookup.books import _OUTAGE_MESSAGE, _canonical_asin
 from libex_core.models import AuthorResponse
+
+if TYPE_CHECKING:
+    from libex_core.storage.store import LocalStore
 
 logger = logging.getLogger("libex")
 
 
-async def get_author(get: AudibleGet, asin: str, *, region: str = "us") -> AuthorResponse:
+async def get_author(
+    get: AudibleGet,
+    asin: str,
+    *,
+    region: str = "us",
+    store: "LocalStore | None" = None,
+) -> AuthorResponse:
     """
     Fetches an author's profile by ASIN.
+
+    With a store the profile is written through (the description kept at its
+    longest, the image never blanked, genres only added) and served as the
+    store holds it; when Audible could not be reached the stored profile for
+    this region answers.
 
     Raises NotFoundException (code invalid_request) for a value that is not an
     ASIN, NotFoundException when Audible has no author behind the ASIN or the
@@ -46,6 +65,8 @@ async def get_author(get: AudibleGet, asin: str, *, region: str = "us") -> Autho
     """
     canonical = _canonical_asin(asin)
     region = validate_region(region)
+    if store is not None:
+        await _store.check(store)
     try:
         start = time.monotonic()
         data = await fetch_author_profile(get, canonical, region)
@@ -69,12 +90,22 @@ async def get_author(get: AudibleGet, asin: str, *, region: str = "us") -> Autho
             "error_type": type(e).__name__,
             "upstream_status": upstream_status_of(e),
         })
+        if store is not None:
+            stored = await _store.stored_author(store, canonical, region)
+            if stored:
+                return AuthorResponse(**stored)
         raise as_audible_failure(e, _OUTAGE_MESSAGE) from e
+    if store is not None and await _store.persist_author(store, normalized, region):
+        normalized = await _store.stored_author(store, canonical, region) or normalized
     return AuthorResponse(**normalized)
 
 
 async def search_authors(
-    get: AudibleGet, name: str, *, region: str = "us"
+    get: AudibleGet,
+    name: str,
+    *,
+    region: str = "us",
+    store: "LocalStore | None" = None,
 ) -> list[AuthorResponse]:
     """
     Searches for authors by name through Audible's search suggestions, then
@@ -83,7 +114,9 @@ async def search_authors(
 
     A suggestion Audible has no record of is left out, and one that could not
     be fetched is left out with a warning, as the hosted route does, since the
-    others are still worth returning.
+    others are still worth returning. With a store each author is looked up as
+    get_author does, so a suggested author Audible could not give is answered
+    from the store where it is held.
 
     Raises NotFoundException when no author was found, AudibleAPIException
     when the suggestions could not be fetched, or when authors were suggested
@@ -92,6 +125,8 @@ async def search_authors(
     region.
     """
     region = validate_region(region)
+    if store is not None:
+        await _store.check(store)
     try:
         start = time.monotonic()
         asins = await fetch_author_suggestion_asins(get, name, region)
@@ -106,7 +141,7 @@ async def search_authors(
         skipped_num = 0
         for asin in asins:
             try:
-                authors.append(await get_author(get, asin, region=region))
+                authors.append(await get_author(get, asin, region=region, store=store))
             except NotFoundException:
                 continue
             except AudibleAPIException:

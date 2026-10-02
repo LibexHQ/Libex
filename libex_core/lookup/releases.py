@@ -1,8 +1,8 @@
 """
 New releases, coming soon and the category taxonomy they are scoped by.
 
-The library's counterparts of the hosted routes' live path, without the cache,
-the database and persistence. Audible has no release endpoint, so a window is
+The library's counterparts of the hosted routes, without the cache. Audible
+has no release endpoint, so a window is
 rebuilt from the catalog by one walk, sorted by release date, over the
 un-categoried catalog or over the one category given. The un-categoried walk
 is capped by Audible at a few hundred results, so without a category the
@@ -12,14 +12,22 @@ its own: that is the caller's to do, with the ids categories returns.
 
 A window that holds nothing is NotFoundException, as on the hosted routes, and
 a walk Audible could not complete is AudibleAPIException: an outage is never
-reported as an empty window. Nothing here reads the environment.
+reported as an empty window.
+
+With a LocalStore (keyword store) the books a window scan finds are written
+through and each is served as the store then holds it; a scan that fails is
+still an outage, as on the hosted service, which does not answer a window from
+stored books. The category taxonomy is not stored: the hosted service keeps it
+in a table the library's schema does not have, so categories accepts store for
+the same call shape as its siblings and does nothing with it. Nothing here
+reads the environment.
 """
 
 # Standard library
 import logging
 import re
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 # Core
 from libex_core.audible.books import settle_flags_list
@@ -36,8 +44,12 @@ from libex_core.audible.releases import (
     fetch_new_releases,
 )
 from libex_core.exceptions import NotFoundException
+from libex_core.lookup import _store
 from libex_core.lookup._shaping import check_shaping, shape_books
 from libex_core.models import BookResponse, CategoryNode, FlatCategoryNode
+
+if TYPE_CHECKING:
+    from libex_core.storage.store import LocalStore
 
 logger = logging.getLogger("libex")
 
@@ -70,9 +82,12 @@ async def _scan(
     days: int,
     category: str | None,
     not_found_message: str,
+    store: "LocalStore | None" = None,
 ) -> list[dict[str, Any]]:
     """Runs one release walk and returns its books settled; NotFoundException
-    when the window held none, AudibleAPIException when the walk failed."""
+    when the window held none, AudibleAPIException when the walk failed. With
+    a store the books are written through, unsettled, and each is served as
+    the store then holds it."""
     try:
         start = time.monotonic()
         books = await walk(get, region, days, category)
@@ -96,7 +111,10 @@ async def _scan(
         "results": len(books),
         "took": took,
     })
-    return settle_flags_list(books)
+    if store is None or not books:
+        return settle_flags_list(books)
+    written, _ = await _store.persist_books(store, books, region)
+    return await _store.serve_merged(store, books, written)
 
 
 async def new_releases(
@@ -108,6 +126,7 @@ async def new_releases(
     filters: dict[str, Any] | None = None,
     sort: str | None = None,
     order: str = "desc",
+    store: "LocalStore | None" = None,
 ) -> list[BookResponse]:
     """
     Books released in the last `days`, newest first, scanned live from Audible.
@@ -118,7 +137,9 @@ async def new_releases(
     filters, sort and order are applied as on the hosted route, after the scan
     and only when given (the default order, desc, matters only with a sort);
     see libex_core.shaping for the filter names and sortable fields. A value
-    outside what is allowed is ValueError, before anything is sent.
+    outside what is allowed is ValueError, before anything is sent. With a
+    store the scanned books are written through and served as the store holds
+    them (see the module docstring).
 
     Raises NotFoundException when no book is left, AudibleAPIException when
     the scan failed, and RegionException for an unknown region.
@@ -126,9 +147,11 @@ async def new_releases(
     region = validate_region(region)
     _check_window(days, category)
     check_shaping(filters, sort, order)
+    if store is not None:
+        await _store.check(store)
     books = await _scan(
         get, fetch_new_releases, "New releases", region, days, category,
-        "No new releases found",
+        "No new releases found", store,
     )
     books = shape_books(books, filters, sort, order)
     if not books:
@@ -145,6 +168,7 @@ async def coming_soon(
     filters: dict[str, Any] | None = None,
     sort: str | None = None,
     order: str = "asc",
+    store: "LocalStore | None" = None,
 ) -> list[BookResponse]:
     """
     Books releasing in the next `days`, soonest first, scanned live from
@@ -155,9 +179,11 @@ async def coming_soon(
     region = validate_region(region)
     _check_window(days, category)
     check_shaping(filters, sort, order)
+    if store is not None:
+        await _store.check(store)
     books = await _scan(
         get, fetch_coming_soon, "Coming soon", region, days, category,
-        "No upcoming releases found",
+        "No upcoming releases found", store,
     )
     books = shape_books(books, filters, sort, order)
     if not books:
@@ -171,6 +197,7 @@ async def categories(
     region: str = "us",
     flat: bool = False,
     depth: int | None = None,
+    store: "LocalStore | None" = None,
 ) -> list[CategoryNode] | list[FlatCategoryNode]:
     """
     Audible's genre categories for a region, the valid `category` values for
@@ -180,7 +207,8 @@ async def categories(
     nested tree; flat=True returns every node at every level once per parent,
     each carrying its ancestors root-first. depth limits how many levels come
     back (1 is the top level only) and composes with flat; less than 1 is
-    ValueError, before anything is sent. Fetched live, every call.
+    ValueError, before anything is sent. Fetched live, every call; store is
+    accepted and unused, as the module docstring explains.
 
     Raises NotFoundException when the taxonomy is empty, AudibleAPIException
     when Audible could not be reached, and RegionException for an unknown

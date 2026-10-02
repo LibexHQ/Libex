@@ -1,9 +1,9 @@
 """
 Looking up the books an author is credited with, by author ASIN or by name.
 
-The library's counterparts of the hosted author-books routes' live path,
-without the cache, the database backstop, background completion or
-persistence. Hosted tells a caller whether the list it got is whole in a
+The library's counterparts of the hosted author-books routes, without the
+cache and background completion. With no store nothing is persisted. Hosted
+tells a caller whether the list it got is whole in a
 response header, X-Libex-Complete, with the reasons in X-Libex-Incomplete-Reason
 on the by-name route; a library caller has no headers, so each lookup returns
 an AuthorBooks carrying the same facts: complete, and incomplete_reasons drawn
@@ -14,12 +14,23 @@ retries or reads complete first.
 By ASIN, two Audible sources are unioned because neither is complete alone:
 the Android author-detail screen (the only ASIN-exact source) and the
 windowed, category-sliced catalog search attributed by author ASIN. The
-hosted route also unions in the books it has stored; the library has none. By
+hosted route also unions in the books it has stored; the library does so
+when given a store. By
 name, a single-sort catalog search is matched on the exact name.
 Discovery and the hydration that follows share one 25 second budget on the
 ASIN route, the figure the hosted route keeps under its proxy's timeout; a
 prolific author's walk that hits it comes back incomplete, and nothing here
 finishes it afterwards.
+
+With a LocalStore (keyword store) the books are written through and served as
+the store holds them (see libex_core.lookup.books), and on the ASIN route the
+author's profile is stored when it is fetched, the name is taken from the
+stored profile when there is one, and the ASINs of the books the store already
+holds for the author are unioned into discovery on every request, as the
+hosted route does, so what was once found is never lost to a thin walk. When
+every live source comes up empty and the store holds none either, the outcome
+is the one it is without a store. AuthorBooks.store_write_failed says that a
+book could not be written, in which case it was still returned.
 
 What a caller typed as a name is never logged or repeated in a message.
 Nothing here reads the environment.
@@ -30,12 +41,12 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 # Core
 from libex_core.audible.authors.by_name import NameWalkOutcome, walk_author_books_by_name
 from libex_core.audible.authors.catalog import CatalogBooksResult, fetch_author_books_by_catalog
-from libex_core.audible.authors.profile import fetch_author_profile
+from libex_core.audible.authors.profile import fetch_author_profile, normalize_author
 from libex_core.audible.authors.screens import (
     SCREENS_BROKEN_REASONS,
     ScreenBooksResult,
@@ -49,9 +60,13 @@ from libex_core.audible.client import (
     validate_region,
 )
 from libex_core.exceptions import AudibleAPIException, NotFoundException
+from libex_core.lookup import _store
 from libex_core.lookup._shaping import check_shaping, shape_books
 from libex_core.lookup.books import Hydration, _canonical_asin, hydrate_books
 from libex_core.models import BookResponse
+
+if TYPE_CHECKING:
+    from libex_core.storage.store import LocalStore
 
 logger = logging.getLogger("libex")
 
@@ -87,12 +102,14 @@ class AuthorBooks:
     books came back than ASINs were found; both are judged before filtering,
     since a filter legitimately shortens the list and says nothing about the
     fetch. incomplete_reasons names why, in INCOMPLETE_REASONS order, and is
-    empty exactly when complete is True.
+    empty exactly when complete is True. store_write_failed is True when a
+    store was given and some fetched book could not be written to it.
     """
 
     books: list[BookResponse] = field(default_factory=list)
     complete: bool = True
     incomplete_reasons: tuple[str, ...] = ()
+    store_write_failed: bool = False
 
 
 def _reasons(discovery_complete: bool, hydration: Hydration) -> tuple[str, ...]:
@@ -125,6 +142,7 @@ def _assemble(
         books=[BookResponse(**book) for book in books],
         complete=not reasons,
         incomplete_reasons=reasons,
+        store_write_failed=hydration.store_write_failed,
     )
 
 
@@ -132,29 +150,45 @@ def _assemble(
 # BY ASIN
 # ============================================================
 
-async def _resolve_author_name(get: AudibleGet, asin: str, region: str) -> str | None:
+async def _resolve_author_name(
+    get: AudibleGet, asin: str, region: str, store: "LocalStore | None" = None
+) -> str | None:
     """
-    Resolves an author ASIN to a name through Audible's contributors endpoint.
+    Resolves an author ASIN to a name, from the store when it holds the author
+    and otherwise through Audible's contributors endpoint, storing the profile
+    that endpoint returns.
 
     None only when Audible confirms the author carries no name (a 404, or a
     200 with an empty name). Any other failure propagates, so "no name on
     record" stays apart from "name resolution failed".
     """
+    if store is not None:
+        stored = await _store.stored_author(store, asin, region)
+        if stored and stored.get("name"):
+            return stored["name"]
     try:
         data = await fetch_author_profile(get, asin, region)
     except NotFoundException:
         return None
     name = (data.get("contributor", {}).get("name") or "").replace("\t", "").strip()
+    if name and store is not None:
+        await _store.persist_author(store, normalize_author(data, asin, region), region)
     return name or None
 
 
 async def _walk_author_books(
-    get: AudibleGet, asin: str, region: str, deadline: float
+    get: AudibleGet,
+    asin: str,
+    region: str,
+    deadline: float,
+    store: "LocalStore | None" = None,
 ) -> tuple[list[str], bool]:
     """
     Discovers an author's book ASINs as a union of the catalog walk (already
     -ReleaseDate first, so that stays at the front) and then any screens-only
-    ASIN, deduped on ASIN alone, never title. Returns (asins, complete).
+    ASIN, deduped on ASIN alone, never title. Returns (asins, complete). With
+    a store, the author's stored book ASINs are unioned in after those, and a
+    failed read of them is a failed source, not an author with no stored books.
 
     A source that fails does not fail the lookup; what the other surfaced is
     still served and the list is incomplete. When the union is empty,
@@ -167,7 +201,7 @@ async def _walk_author_books(
     author_name: str | None = None
     name_resolution_error: str | None = None
     try:
-        author_name = await _resolve_author_name(get, asin, region)
+        author_name = await _resolve_author_name(get, asin, region, store)
     except Exception as e:
         name_resolution_error = type(e).__name__
 
@@ -220,6 +254,17 @@ async def _walk_author_books(
             seen.add(screen_asin)
             asins.append(screen_asin)
 
+    db_error: str | None = None
+    if store is not None:
+        stored_asins = await _store.stored_author_book_asins(store, asin, region)
+        if stored_asins is None:
+            db_error = "StoreReadFailed"
+        for stored_asin in stored_asins or []:
+            stored_asin = stored_asin.upper()
+            if stored_asin not in seen:
+                seen.add(stored_asin)
+                asins.append(stored_asin)
+
     if not asins:
         logger.warning("Audible Author Books unavailable from every path", extra={
             "author_asin": asin,
@@ -229,8 +274,14 @@ async def _walk_author_books(
             "catalog_error": catalog_error,
             "catalog_sort_errors": catalog_result.sort_errors if catalog_result else [],
             "name_resolution_error": name_resolution_error,
+            "db_error": db_error,
         })
-        if screen_error is not None or catalog_degraded or name_resolution_error is not None:
+        if (
+            screen_error is not None
+            or catalog_degraded
+            or name_resolution_error is not None
+            or db_error is not None
+        ):
             # At least one source failed instead of confirming an empty
             # catalogue, so this is silence, not Audible saying there are no
             # books.
@@ -294,9 +345,14 @@ async def get_author_books(
     filters: dict[str, Any] | None = None,
     sort: str | None = None,
     order: str = "asc",
+    store: "LocalStore | None" = None,
 ) -> AuthorBooks:
     """
     Fetches the full books an author is credited with, by author ASIN.
+
+    With a store, discovery also draws on the books the store holds for the
+    author, and the books are written through and served as the store holds
+    them; see the module docstring.
 
     Author ASINs are global, but the catalogue is each marketplace's own, so
     the same ASIN lists different books per region. The books come back in the
@@ -314,13 +370,20 @@ async def get_author_books(
     canonical = _canonical_asin(asin)
     region = validate_region(region)
     check_shaping(filters, sort, order)
+    if store is not None:
+        await _store.check(store)
 
     # One deadline for discovery and hydration together, so the two cannot add
     # up past it.
     deadline = time.monotonic() + AUTHOR_BOOKS_TIME_BUDGET_SECONDS
-    asins, discovery_complete = await _walk_author_books(get, canonical, region, deadline)
+    # The store is passed only when there is one, so a walk without storage is
+    # called exactly as it always was.
+    walk_extra = {"store": store} if store is not None else {}
+    asins, discovery_complete = await _walk_author_books(
+        get, canonical, region, deadline, **walk_extra
+    )
     hydration = await hydrate_books(
-        get, asins, region, deadline=deadline, high_concurrency=True
+        get, asins, region, deadline=deadline, high_concurrency=True, store=store
     )
     return _assemble(discovery_complete, hydration, filters, sort, order)
 
@@ -337,9 +400,14 @@ async def get_author_books_by_name(
     filters: dict[str, Any] | None = None,
     sort: str | None = None,
     order: str = "asc",
+    store: "LocalStore | None" = None,
 ) -> AuthorBooks:
     """
     Fetches the full books an author is credited with, by exact author name.
+
+    With a store the books are written through and served as the store holds
+    them, a book Audible could not give is answered from its stored copy, and
+    the store plays no part in discovery, as on the hosted route.
 
     For a caller with a name and no ASIN. The catalog is searched on the name
     and the results kept only where an author's name matches it exactly,
@@ -357,6 +425,8 @@ async def get_author_books_by_name(
     """
     region = validate_region(region)
     check_shaping(filters, sort, order)
+    if store is not None:
+        await _store.check(store)
     outcome = NameWalkOutcome()
     try:
         start = time.monotonic()
@@ -393,5 +463,5 @@ async def get_author_books_by_name(
             "asins_collected": len(asins),
         })
 
-    hydration = await hydrate_books(get, asins, region)
+    hydration = await hydrate_books(get, asins, region, store=store)
     return _assemble(completed, hydration, filters, sort, order)

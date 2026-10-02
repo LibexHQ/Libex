@@ -2,10 +2,17 @@
 Searching Audible: the catalog search, the suggestions-backed quick search,
 their Audiobookshelf-shaped twins, and the books of a narrator.
 
-The library's counterparts of the hosted routes' live path, without the cache,
-the database backstop or persistence. A search that matches nothing is
-NotFoundException, as on the hosted routes, and a search Audible could not
-answer is AudibleAPIException: an outage is never reported as an empty result.
+The library's counterparts of the hosted routes, without the cache. A search
+that matches nothing is NotFoundException, as on the hosted routes, and a
+search Audible could not answer is AudibleAPIException: an outage is never
+reported as an empty result.
+
+With a LocalStore (keyword store) the books a search returns are written
+through and each is served as the store then holds it. As on the hosted
+service, a catalog search that Audible cannot answer is not answered from the
+store; the one place the store stands in is the quick search's compound
+"Author - Title" leg, and the hydration of suggested ASINs, which falls back
+book by book exactly as the book lookups do.
 
 What a caller typed is sent to Audible as given and never inspected, logged or
 repeated in an exception message. Nothing here reads the environment.
@@ -14,7 +21,7 @@ repeated in an exception message. Nothing here reads the environment.
 # Standard library
 import logging
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 # Core
 from libex_core.audible.books import filter_products, normalize_product, settle_flags_list
@@ -29,12 +36,17 @@ from libex_core.audible.search import (
     fetch_suggestion_asins,
 )
 from libex_core.exceptions import (
+    AudibleAPIException,
     ErrorCode,
     NotFoundException,
     RegionException,
 )
+from libex_core.lookup import _store
 from libex_core.lookup.books import hydrate_books
 from libex_core.models import AbsSearchResponse, BookResponse, to_abs_book
+
+if TYPE_CHECKING:
+    from libex_core.storage.store import LocalStore
 
 logger = logging.getLogger("libex")
 
@@ -66,10 +78,12 @@ async def _search_books(
     products_sort_by: str | None = None,
     limit: int = 10,
     page: int = 0,
+    store: "LocalStore | None" = None,
 ) -> list[dict[str, Any]]:
     """
     Runs one catalog search and returns settled book dicts; empty when Audible
-    answered that nothing matched.
+    answered that nothing matched. With a store the books are written through
+    first and each is served as the store then holds it.
 
     The region and the paging bounds are checked outside the try on purpose: a
     value outside what they accept is the caller's mistake, and inside the try
@@ -81,6 +95,8 @@ async def _search_books(
     region = validate_region(region)
     if page > MAX_SEARCH_PAGE:
         raise ValueError(f"page must be at most {MAX_SEARCH_PAGE}")
+    if store is not None:
+        await _store.check(store)
     params = build_search_params(
         title=title,
         author=author,
@@ -114,7 +130,7 @@ async def _search_books(
 
         # The search call already asked for full product metadata, so the
         # results are normalized directly and nothing is re-fetched.
-        return settle_flags_list([normalize_product(p, region) for p in products])
+        normalized = [normalize_product(p, region) for p in products]
 
     except NotFoundException:
         return []
@@ -127,9 +143,15 @@ async def _search_books(
         # be indistinguishable from a genuine zero-result search.
         raise as_audible_failure(e, "Audible search failed") from e
 
+    if store is None:
+        return settle_flags_list(normalized)
+    # Written unsettled, as the writer needs the tri-state flags.
+    written, _ = await _store.persist_books(store, normalized, region)
+    return await _store.serve_merged(store, normalized, written)
+
 
 async def _quick_search_books(
-    get: AudibleGet, keywords: str, region: str
+    get: AudibleGet, keywords: str, region: str, store: "LocalStore | None" = None
 ) -> list[dict[str, Any]]:
     """
     Resolves keywords through Audible's search suggestions and hydrates the
@@ -138,12 +160,15 @@ async def _quick_search_books(
     When suggestions return nothing and the keywords look like a compound
     "Author - Series - Title" query, the first and last segments are searched
     as author and title. The hosted service also tries its stored books after
-    that; here, a transport failure in that last leg is raised rather than
-    swallowed, because the stored books that justified swallowing it are not
-    part of the library, and an empty result would then pass an outage off as
-    a confirmed absence.
+    that. Here, with a store, so does this: stored books matching that title
+    and author answer a catalog leg that found nothing or could not run. With
+    no store, or none stored, a transport failure in that leg is raised rather
+    than swallowed, because an empty result would pass an outage off as a
+    confirmed absence.
     """
     region = validate_region(region)
+    if store is not None:
+        await _store.check(store)
     try:
         start = time.monotonic()
         asins = await fetch_suggestion_asins(get, keywords, region)
@@ -160,7 +185,7 @@ async def _quick_search_books(
         })
 
         if asins:
-            return (await hydrate_books(get, asins, region)).books
+            return (await hydrate_books(get, asins, region, store=store)).books
 
         if " - " in keywords:
             segments = [s.strip() for s in keywords.split(" - ") if s.strip()]
@@ -170,9 +195,24 @@ async def _quick_search_books(
                     "segments_found": len(segments),
                     "region": region,
                 })
-                return await _search_books(
-                    get, region, title=segments[-1], author=segments[0], limit=10
-                )
+                title, author = segments[-1], segments[0]
+                outage: AudibleAPIException | None = None
+                try:
+                    found = await _search_books(
+                        get, region, title=title, author=author, limit=10, store=store
+                    )
+                except AudibleAPIException as exc:
+                    if store is None:
+                        raise
+                    found, outage = [], exc
+                if found or store is None:
+                    return found
+                stored = await _store.search_stored_books(store, title, author)
+                if stored:
+                    return stored
+                if outage is not None:
+                    raise outage
+                return []
 
         return []
 
@@ -217,9 +257,13 @@ async def search(
     page: int = 0,
     *,
     region: str = "us",
+    store: "LocalStore | None" = None,
 ) -> list[BookResponse]:
     """
     Searches the Audible catalog.
+
+    With a store the results are written through and served as the store holds
+    them; a search Audible cannot answer is an outage, not a stored answer.
 
     query stands in for title when no title is given. Empty strings count as
     not given, and no filter at all is allowed; what Audible makes of that is
@@ -238,21 +282,31 @@ async def search(
         products_sort_by=products_sort_by,
         limit=limit,
         page=page,
+        store=store,
     )
     _require_matches(books)
     return [BookResponse(**b) for b in books]
 
 
 async def quick_search(
-    get: AudibleGet, keywords: str, *, region: str = "us"
+    get: AudibleGet,
+    keywords: str,
+    *,
+    region: str = "us",
+    store: "LocalStore | None" = None,
 ) -> list[BookResponse]:
     """
     Quick search through Audible's search suggestions, hydrated to full books.
 
+    With a store the hydrated books are written through and served as the
+    store holds them, a suggested book Audible could not give is answered from
+    its stored copy, and a compound "Author - Title" query that the catalog
+    could not answer is tried against the stored books.
+
     Raises NotFoundException when nothing matched, AudibleAPIException when
     Audible could not be reached, and RegionException for an unknown region.
     """
-    books = await _quick_search_books(get, keywords, region)
+    books = await _quick_search_books(get, keywords, region, store)
     _require_matches(books)
     return [BookResponse(**b) for b in books]
 
@@ -265,6 +319,7 @@ async def abs_search(
     keywords: str | None = None,
     *,
     region: str = "us",
+    store: "LocalStore | None" = None,
 ) -> AbsSearchResponse:
     """
     The catalog search in the Audiobookshelf custom-metadata-provider shape:
@@ -276,7 +331,7 @@ async def abs_search(
     region = _abs_region(region)
     books = await _search_books(
         get, region, title=title or query, author=author, keywords=keywords,
-        limit=ABS_SEARCH_LIMIT,
+        limit=ABS_SEARCH_LIMIT, store=store,
     )
     _require_matches(books)
     return AbsSearchResponse(matches=[to_abs_book(b) for b in books])
@@ -289,6 +344,7 @@ async def abs_quick_search(
     title: str | None = None,
     *,
     region: str = "us",
+    store: "LocalStore | None" = None,
 ) -> AbsSearchResponse:
     """
     The quick search in the Audiobookshelf custom-metadata-provider shape.
@@ -301,7 +357,7 @@ async def abs_quick_search(
     effective = keywords or query or title
     if not effective:
         raise NotFoundException("No search terms provided", code=ErrorCode.INVALID_REQUEST)
-    books = await _quick_search_books(get, effective, region)
+    books = await _quick_search_books(get, effective, region, store)
     _require_matches(books)
     return AbsSearchResponse(matches=[to_abs_book(b) for b in books])
 
@@ -313,6 +369,7 @@ async def narrator_books(
     page: int = 0,
     *,
     region: str = "us",
+    store: "LocalStore | None" = None,
 ) -> list[BookResponse]:
     """
     Books by narrator name, searched on Audible's narrator filter.
@@ -322,6 +379,8 @@ async def narrator_books(
     message does not repeat the name), AudibleAPIException when Audible could
     not be reached, and RegionException for an unknown region.
     """
-    books = await _search_books(get, region, narrator=name, limit=limit, page=page)
+    books = await _search_books(
+        get, region, narrator=name, limit=limit, page=page, store=store
+    )
     _require_matches(books, "No books found for narrator")
     return [BookResponse(**b) for b in books]

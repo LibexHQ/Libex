@@ -2,16 +2,18 @@
 Looking a series up: by ASIN its own record and the books in it, and by name
 the series whose books match.
 
-Like the book lookups beside it, these are the hosted routes' live path
-without the cache, the database backstop or persistence: an outage is
-AudibleAPIException, and Audible having no such series is NotFoundException.
-Nothing here reads the environment.
+Like the book lookups beside it, these are the hosted routes without the
+cache. With no store nothing is persisted: an outage is AudibleAPIException,
+and Audible having no such series is NotFoundException. With a LocalStore
+(keyword store) a series fetched is written through and served as the store
+holds it, and an outage is answered from the stored copy, never a confirmed
+absence. Nothing here reads the environment.
 """
 
 # Standard library
 import logging
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 # Core
 from libex_core.audible.client import (
@@ -22,18 +24,31 @@ from libex_core.audible.client import (
 )
 from libex_core.audible.series import fetch_series, fetch_series_book_asins, normalize_series
 from libex_core.exceptions import AudibleAPIException, NotFoundException
+from libex_core.lookup import _store
 from libex_core.lookup._shaping import check_shaping, shape_books
 from libex_core.lookup.books import _OUTAGE_MESSAGE, _canonical_asin, hydrate_books
 from libex_core.models import BookResponse, SeriesResponse
+
+if TYPE_CHECKING:
+    from libex_core.storage.store import LocalStore
 
 logger = logging.getLogger("libex")
 
 _SERIES_SEARCH_PATH = "/1.0/catalog/products"
 
 
-async def get_series(get: AudibleGet, asin: str, *, region: str = "us") -> SeriesResponse:
+async def get_series(
+    get: AudibleGet,
+    asin: str,
+    *,
+    region: str = "us",
+    store: "LocalStore | None" = None,
+) -> SeriesResponse:
     """
     Fetches a series' own record by its ASIN.
+
+    With a store the record is written through and served as the store holds
+    it, and when Audible could not be reached the stored record answers.
 
     Raises NotFoundException (code invalid_request) for a value that is not an
     ASIN, NotFoundException when Audible has no series behind the ASIN,
@@ -42,6 +57,8 @@ async def get_series(get: AudibleGet, asin: str, *, region: str = "us") -> Serie
     """
     canonical = _canonical_asin(asin)
     region = validate_region(region)
+    if store is not None:
+        await _store.check(store)
     try:
         start = time.monotonic()
         product = await fetch_series(get, canonical, region)
@@ -62,7 +79,13 @@ async def get_series(get: AudibleGet, asin: str, *, region: str = "us") -> Serie
             "error_type": type(e).__name__,
             "upstream_status": upstream_status_of(e),
         })
+        if store is not None:
+            stored = await _store.stored_series(store, canonical)
+            if stored:
+                return SeriesResponse(**stored)
         raise as_audible_failure(e, _OUTAGE_MESSAGE) from e
+    if store is not None and await _store.persist_series(store, normalized, region):
+        normalized = await _store.stored_series(store, canonical) or normalized
     return SeriesResponse(**normalized)
 
 
@@ -74,9 +97,17 @@ async def get_series_books(
     filters: dict[str, Any] | None = None,
     sort: str | None = None,
     order: str = "asc",
+    store: "LocalStore | None" = None,
 ) -> list[BookResponse]:
     """
     Fetches the full books in a series.
+
+    With a store the books are written through and served as the store holds
+    them. When Audible could not give the member list, the stored members of
+    the series, in series order, answer in its place (the hosted service
+    answers that case from its cache of the list, which the library does not
+    keep); when it could give the list but not the books, each book is
+    answered from its stored copy.
 
     Reads the series' member ASINs in series order, then hydrates them like a
     bulk lookup. The books come back in the order Audible returned them. A
@@ -97,6 +128,8 @@ async def get_series_books(
     canonical = _canonical_asin(asin)
     region = validate_region(region)
     check_shaping(filters, sort, order)
+    if store is not None:
+        await _store.check(store)
     try:
         start = time.monotonic()
         asins = await fetch_series_book_asins(get, canonical, region)
@@ -116,16 +149,26 @@ async def get_series_books(
             "error_type": type(e).__name__,
             "upstream_status": upstream_status_of(e),
         })
+        if store is not None:
+            members = await _store.stored_series_books(store, canonical)
+            if members:
+                return [
+                    BookResponse(**book) for book in shape_books(members, filters, sort, order)
+                ]
         raise as_audible_failure(e, _OUTAGE_MESSAGE) from e
 
     if not asins:
         raise NotFoundException("No books found for series")
-    hydration = await hydrate_books(get, asins, region)
+    hydration = await hydrate_books(get, asins, region, store=store)
     return [BookResponse(**book) for book in shape_books(hydration.books, filters, sort, order)]
 
 
 async def search_series(
-    get: AudibleGet, name: str, *, region: str = "us"
+    get: AudibleGet,
+    name: str,
+    *,
+    region: str = "us",
+    store: "LocalStore | None" = None,
 ) -> list[SeriesResponse]:
     """
     Searches for series by name.
@@ -137,6 +180,11 @@ async def search_series(
     fetched is left out with a warning, as the hosted route does, since
     the others are still worth returning.
 
+    With a store each series is looked up as get_series does, and the stored
+    series whose names match (at most ten) are added after Audible's, those
+    Audible already gave left out, as the hosted route does. A search Audible
+    could not run at all is an outage, as it is there.
+
     The name goes to Audible as given and is never logged or repeated in a
     message. Raises NotFoundException when no series was found,
     AudibleAPIException when the search failed, or when series were found
@@ -145,6 +193,8 @@ async def search_series(
     region.
     """
     region = validate_region(region)
+    if store is not None:
+        await _store.check(store)
     try:
         start = time.monotonic()
         data = await get(region, _SERIES_SEARCH_PATH, {
@@ -168,7 +218,7 @@ async def search_series(
         skipped_num = 0
         for series_asin in series_asins:
             try:
-                results.append(await get_series(get, series_asin, region=region))
+                results.append(await get_series(get, series_asin, region=region, store=store))
             except NotFoundException:
                 continue
             except AudibleAPIException:
@@ -182,6 +232,12 @@ async def search_series(
                 "Series search: could not resolve one or more related series, skipping",
                 extra={"region": region, "skipped_num": skipped_num},
             )
+
+        if store is not None:
+            for stored in await _store.search_stored_series(store, name):
+                if stored.get("asin") and stored["asin"] not in seen_asins:
+                    seen_asins.add(stored["asin"])
+                    results.append(SeriesResponse(**stored))
 
         search_took = round((time.monotonic() - start) * 1000, 2)
 

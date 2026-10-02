@@ -106,7 +106,7 @@ DRAIN_TIMEOUT_SECONDS = _env_float("SEEDER_DRAIN_TIMEOUT_SECONDS", 300.0)
 SEEDER_DB_WRITE_CONCURRENCY = 4
 
 
-# --- proxy containment (unchanged pattern; see LIBEX_LESSONS_HARD_WON.md) ---
+# --- proxy containment -------------------------------------------------------
 
 def _verify_dedicated_proxy() -> None:
     """

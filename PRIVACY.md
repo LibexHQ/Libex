@@ -381,7 +381,8 @@ involved. **It has not been published** to PyPI or any other package index, so
 this section describes the source as it stands, ahead of any release. The
 behaviour described is in `libex_core/audible/client.py`, with the logging of
 individual titles in `libex_core/audible/books.py` and
-`libex_core/audible/extras.py`.
+`libex_core/audible/extras.py`, and the command-line tool in
+`libex_core/cli/`.
 
 If you are using an application that contains this library, that
 application's privacy policy is the one that applies to you. This section
@@ -420,11 +421,23 @@ preventing that from happening by accident:
 - **No telemetry.** It has no analytics, usage reporting, version check, crash
   reporting or any other call home. It cannot import the Axiom client, and a
   test fails if that ever changes.
-- **No storage.** It writes no files, opens no database, keeps no cache and
-  reads no environment variables. Nothing about a lookup outlasts the call
-  that made it. An optional local record of titles already seen has been
-  considered but not built. If it is ever added, this section will change with
-  it.
+- **No storage.** It writes no files, opens no database and keeps no cache.
+  Nothing about a lookup outlasts the call that made it. An optional local
+  record of titles already seen has been considered but not built. If it is
+  ever added, this section will change with it.
+- **The `libex-core` command reads two environment variables.** The
+  command-line tool that comes with the library takes its proxy from
+  `LIBEX_CORE_PROXY_URL` and its permission to connect directly from
+  `LIBEX_CORE_ALLOW_DIRECT_EGRESS`, so a proxy password never has to be typed
+  on a command line, where other programs on the machine can read it. Nothing
+  else in the library reads the environment, and a test fails if that
+  changes. The tool prints results as JSON to standard output. Errors, and
+  the library's warnings listed below, go to standard error. `-vv` adds
+  tracebacks, and `-q` leaves only the error line. It sends none of this
+  anywhere else. It has no lookup commands yet: `libex-core config` prints
+  only whether a proxy is in use and the proxy's hostname, and makes no
+  request. Neither its output nor its error messages contain the proxy URL or
+  the value of either variable.
 - **Its logs go where the application sends them.** It writes to the standard
   Python logger named `libex`, so its records end up wherever the host
   application's logging is configured to send them. There are five:

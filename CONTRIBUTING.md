@@ -52,7 +52,17 @@ pytest tests/ -v -m "not integration" --ignore=tests/integration  # matches the 
 pytest tests/ -v -m integration  # matches the `integration` job (needs Docker and `requirements-dev.lock` installed; all skipped is not a pass)
 ```
 
-No ruff warnings. No test failures. New code needs new tests, and the full suite must stay green with no regressions to existing tests. CI runs all three automatically and will block merge on failure.
+No ruff warnings. No test failures. New code needs new tests, and the full suite must stay green with no regressions to existing tests.
+
+If you touch `pyproject.toml`, `libex_core/` or `libex-core-data/`, also check that the package builds. CI borrows `build`, `flit_core` and `pyproject_hooks` from a hash-checked tooling venv, and `tests/libex_core/test_packaging.py` skips itself when they are missing, so a local skip is not a pass:
+
+```bash
+python3 -m venv <dir>
+<dir>/bin/pip install --require-hashes -r requirements-tooling.lock
+<dir>/bin/python -m build --no-isolation --outdir <outdir> .
+```
+
+CI runs every check above, plus the packaging check and a dependency audit, and will block merge on failure.
 
 ---
 

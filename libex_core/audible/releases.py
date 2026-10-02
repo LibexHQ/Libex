@@ -17,8 +17,8 @@ Nothing here touches a database, a cache, or the environment, and nothing
 settles the books it returns: they leave as normalize_product made them,
 tri-state flags and all, for the caller to store or settle as it needs.
 Whether a window or a taxonomy is read from a cache before Audible is asked
-is the caller's decision, made before it gets here. No message raised from
-this module repeats anything a caller passed in.
+is the caller's decision, made before it gets here. The ValueErrors raised
+here repeat nothing a caller passed in.
 """
 
 # Standard library

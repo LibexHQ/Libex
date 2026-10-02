@@ -38,6 +38,7 @@ _EXPORTS = {
     "StoreOutdated": "libex_core.storage.store",
     "ForeignDatabase": "libex_core.storage.store",
     "StoreClosed": "libex_core.storage.store",
+    "StoreMigrationError": "libex_core.storage.store",
 }
 
 __all__ = ["StorageUnavailable", "require_storage", *_EXPORTS]

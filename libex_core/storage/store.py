@@ -8,6 +8,18 @@ tables but no record of this package's migrations is somebody else's, and is
 refused outright: pointing the store at the hosted production database by
 mistake must not be able to alter it.
 
+The connection settings come from the URL and from nowhere else. A Postgres
+connection is made with every parameter given outright, so the driver never
+falls back on `PG*` variables, `~/.pgpass`, a service file or `~/.postgresql`;
+a URL without a password connects without one. The one thing outside the URL
+is the certificate trust store the verifying modes use, which is the system's,
+and which OpenSSL lets `SSL_CERT_FILE` and `SSL_CERT_DIR` replace; whoever can
+set this process's environment already controls far more than that.
+
+The default TLS mode, `prefer`, encrypts when the server offers it but does not
+verify the server, so it gives no protection against an active attacker on the
+path. On a network that is not trusted use `ssl=verify-full`.
+
 The URL is the caller's secret. It is never logged and never placed in an
 exception or in `repr`; every error raised here names what is wrong without
 quoting it, and a failure to connect drops the driver's own message, which is
@@ -28,6 +40,7 @@ import importlib.util
 import logging
 import os
 import sqlite3
+import ssl
 import stat
 import sys
 import time
@@ -47,9 +60,11 @@ from libex_core.storage.upgrade import (
     BEHIND,
     EMPTY,
     FOREIGN,
+    SchemaIntegrityError,
     SchemaState,
     head_revision,
     read_state,
+    set_foreign_keys,
     upgrade_to_head,
 )
 from libex_core.storage.write.serialize import exclusive_write
@@ -68,6 +83,20 @@ _DRIVERS = {
 # all (it loads code by entry point), is refused rather than passed through.
 _POSTGRES_QUERY = frozenset({"ssl", "application_name"})
 _POSTGRES_PORT = 5432
+# The TLS modes a URL may name, each with the connection attempts it makes in
+# order: True is an encrypted attempt, False a plain one. `disable` is plain
+# only; `allow` tries plain and then encrypted; `prefer` tries encrypted and
+# then plain; `require` and the two verifying modes are encrypted only and never
+# fall back. Named as libpq names them; `ssl` in the query is read the way
+# `sslmode` is. Which failures permit the next attempt is `_may_retry`.
+_TLS_ATTEMPTS = {
+    "disable": (False,),
+    "allow": (False, True),
+    "prefer": (True, False),
+    "require": (True,),
+    "verify-ca": (True,),
+    "verify-full": (True,),
+}
 # How long preparing a new SQLite file keeps retrying while another connection
 # holds it, in seconds.
 WAL_RETRY_SECONDS = 10.0
@@ -98,6 +127,10 @@ class StoreOutdated(StoreError):
 
 class ForeignDatabase(StoreError):
     """The database has tables this library did not create."""
+
+
+class StoreMigrationError(StoreError):
+    """A schema change was rolled back because it broke an invariant."""
 
 
 class StoreClosed(StoreError):
@@ -144,7 +177,104 @@ def _validate(url: str | URL) -> URL:
         raise StoreConfigError("a Postgres URL carries an option this library does not accept")
     if any(not isinstance(value, str) for value in parsed.query.values()):
         raise StoreConfigError("a Postgres URL option was given more than once")
-    return parsed.set(port=parsed.port or _POSTGRES_PORT)
+    parsed = parsed.set(port=parsed.port or _POSTGRES_PORT)
+    _tls_mode(parsed)
+    return parsed
+
+
+def _tls_mode(url: URL) -> str:
+    mode = url.query.get("ssl")
+    if mode is None:
+        return "prefer"
+    mode = mode.lower().replace("_", "-")
+    if mode not in _TLS_ATTEMPTS:
+        raise StoreConfigError(
+            "the ssl option must be one of: " + ", ".join(sorted(_TLS_ATTEMPTS))
+        )
+    return mode
+
+
+def _tls_context(mode: str) -> ssl.SSLContext:
+    """The TLS context for a mode, built here so that the driver reads no
+    client certificate, key, root or revocation file from `PG*` variables or
+    `~/.postgresql`. Verifying modes trust the system store; the opportunistic
+    modes and `require` encrypt without verifying, as libpq does."""
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    if mode in ("verify-ca", "verify-full"):
+        context.load_default_certs()
+        context.check_hostname = mode == "verify-full"
+    else:
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    return context
+
+
+def _may_retry(encrypted: bool, exc: Exception) -> bool:
+    """Whether a failed attempt may be followed by the other way of connecting.
+
+    A password is never sent a second time because the first attempt failed to
+    authenticate: `InvalidPasswordError` and every other rejection of the login
+    end the connection, so a wrong password cannot cost the caller a plain
+    retry. An encrypted attempt moves on only when the server itself answered
+    the SSLRequest with a refusal, which asyncpg raises as a bare
+    `ConnectionError` saying it "rejected SSL upgrade"; a refused or reset
+    connection, a failed handshake or a certificate error stands. A plain
+    attempt moves on only when the server turned it down for being unencrypted
+    (an `InvalidAuthorizationSpecificationError` other than a bad password)."""
+    import asyncpg
+
+    if encrypted:
+        return type(exc) is ConnectionError and "rejected SSL upgrade" in str(exc)
+    return isinstance(exc, asyncpg.InvalidAuthorizationSpecificationError) and not isinstance(
+        exc, asyncpg.InvalidPasswordError
+    )
+
+
+def _postgres_creator(url: URL):
+    """An async connection factory that hands asyncpg every parameter, so it
+    reads no `PG*` variable and no password, service or `~/.postgresql` file:
+    the password is the URL's or empty, the session attribute, GSS library and
+    Kerberos name are fixed, and TLS negotiation is the standard one. The
+    connection settings come only from the URL; the one thing outside it is the
+    certificate trust store the verifying modes load, which is the system's and
+    which OpenSSL lets `SSL_CERT_FILE` and `SSL_CERT_DIR` replace. SQLAlchemy
+    ignores the URL when a creator is given, so everything it carries is passed
+    here. The default `prefer` encrypts without verifying, so it does not stop
+    an active attacker; `verify-full` is the mode for untrusted networks."""
+    mode = _tls_mode(url)
+    attempts = _TLS_ATTEMPTS[mode]
+    settings = {"application_name": url.query["application_name"]} if "application_name" in url.query else None
+    gsslib = "sspi" if sys.platform == "win32" else "gssapi"
+
+    async def create():
+        import asyncpg
+
+        context = _tls_context(mode) if True in attempts else None
+        for position, encrypted in enumerate(attempts):
+            try:
+                return await asyncpg.connect(
+                    host=url.host,
+                    port=url.port,
+                    user=url.username,
+                    password=url.password if url.password is not None else "",
+                    database=url.database,
+                    ssl=context if encrypted else False,
+                    direct_tls=False,
+                    target_session_attrs="any",
+                    krbsrvname="postgres",
+                    gsslib=gsslib,
+                    server_settings=settings,
+                )
+            except Exception as exc:
+                # Only the opportunistic modes move on, and only when the
+                # server refused this way of connecting, never because the
+                # login failed; any other error ends it.
+                if position == len(attempts) - 1 or not _may_retry(encrypted, exc):
+                    raise
+        raise AssertionError("unreachable")
+
+    return create
 
 
 def _is_memory(url: URL) -> bool:
@@ -205,8 +335,9 @@ class LocalStore:
                 "Postgres needs the 'postgres' extra (missing: asyncpg); "
                 "install it with: pip install 'libex-core[postgres]'"
             )
+        options = {"async_creator": _postgres_creator(self._url)} if self._postgres else {}
         self._engine: AsyncEngine = create_async_engine(
-            self._url, hide_parameters=True, echo=False
+            self._url, hide_parameters=True, echo=False, **options
         )
         if not self._postgres:
             # WAL is a property of the file, set by `upgrade()` once the file
@@ -216,6 +347,7 @@ class LocalStore:
         self._sessions = async_sessionmaker(self._engine, expire_on_commit=False)
         self._opened = False
         self._closed = False
+        self._disposal: "asyncio.Future[None] | None" = None
 
     def __repr__(self) -> str:
         return f"LocalStore(backend={self.backend!r})"
@@ -231,13 +363,27 @@ class LocalStore:
             raise StoreClosed("the store is closed")
         try:
             connection = await self._engine.connect()
-            if write and not self._postgres:
-                await connection.execution_options(**{WRITE_OPTION: True})
         except Exception as exc:
             raise StoreConnectionError(
                 f"could not connect to the {self.backend} database ({type(exc).__name__})"
             ) from None
+        if write and not self._postgres:
+            try:
+                await connection.execution_options(**{WRITE_OPTION: True})
+            except Exception as exc:
+                await connection.close()
+                raise StoreConnectionError(
+                    f"could not connect to the {self.backend} database ({type(exc).__name__})"
+                ) from None
         return connection
+
+    async def _read_state(self, connection) -> SchemaState:
+        try:
+            return await connection.run_sync(read_state)
+        except Exception as exc:
+            raise StoreConnectionError(
+                f"could not read the schema of the {self.backend} database ({type(exc).__name__})"
+            ) from None
 
     def _file(self, *, create: bool) -> bool:
         path = _sqlite_path(self._url)
@@ -259,8 +405,17 @@ class LocalStore:
             try:
                 await connection.run_sync(_switch_to_wal)
                 return
-            except sqlite3.OperationalError:
+            except sqlite3.OperationalError as exc:
+                if not _is_busy(exc):
+                    raise StoreConnectionError(
+                        "could not switch the database to write-ahead logging"
+                    ) from None
                 if time.monotonic() >= deadline:
+                    logger.warning(
+                        "gave up switching %s to write-ahead logging after %gs: it stayed locked",
+                        _sqlite_path(self._url).name,
+                        WAL_RETRY_SECONDS,
+                    )
                     raise StoreConnectionError(
                         "could not switch the database to write-ahead logging: it stayed locked"
                     ) from None
@@ -277,7 +432,7 @@ class LocalStore:
             return SchemaState(EMPTY, None)
         connection = await self._connect()
         try:
-            return await connection.run_sync(read_state)
+            return await self._read_state(connection)
         finally:
             await connection.close()
 
@@ -285,20 +440,45 @@ class LocalStore:
         """Brings the schema to the head this library ships, creating a new
         SQLite file first, and returns the revision. The one place DDL runs.
         Refuses a foreign database before touching it, and a database from a
-        newer library. One transaction: a failure leaves the database as it was."""
+        newer library. The schema change is one transaction: if it fails the
+        schema is as it was. On SQLite a new file, and its switch to
+        write-ahead logging, come first and outside it, so a failed first
+        upgrade can leave an empty database file behind."""
+        path = None if self._postgres else _sqlite_path(self._url)
+        existed = path is not None and os.path.lexists(path)
         if not self._postgres:
             self._file(create=True)
             _refuse(await self.status())
             await self._enable_wal()
         connection = await self._connect(write=True)
         try:
-            async with connection.begin():
-                state = await connection.run_sync(read_state)
-                _refuse(state)
-                await connection.run_sync(upgrade_to_head)
-                return await connection.run_sync(head_revision)
+            if not self._postgres:
+                # Off before the transaction begins, as SQLite ignores the
+                # pragma inside one: a batch table rebuild with enforcement on
+                # cascades its drop into the child rows.
+                await connection.run_sync(set_foreign_keys, False)
+            try:
+                async with connection.begin():
+                    _refuse(await self._read_state(connection))
+                    await connection.run_sync(upgrade_to_head)
+                    revision = await connection.run_sync(head_revision)
+            except SchemaIntegrityError:
+                raise StoreMigrationError(
+                    "the migration was rolled back: it would have broken the database's "
+                    "foreign keys"
+                ) from None
+            finally:
+                if not self._postgres:
+                    await connection.run_sync(set_foreign_keys, True)
         finally:
             await connection.close()
+        logger.info(
+            "upgraded the %s database to revision %s%s",
+            self.backend,
+            revision,
+            "" if path is None else f" ({'existing' if existed else 'new'} file {path.name})",
+        )
+        return revision
 
     async def open(self) -> "LocalStore":
         """Checks the schema and makes the store usable. Never upgrades."""
@@ -312,11 +492,13 @@ class LocalStore:
         return self
 
     async def close(self) -> None:
-        """Releases the engine. Safe to call twice, and on a store never opened."""
+        """Releases the engine. Safe to call twice, and on a store never opened;
+        a second call made while the first is still releasing waits for it."""
         self._opened = False
-        if not self._closed:
+        if self._disposal is None:
             self._closed = True
-            await self._engine.dispose()
+            self._disposal = asyncio.ensure_future(self._engine.dispose())
+        await asyncio.shield(self._disposal)
 
     async def __aenter__(self) -> "LocalStore":
         try:
@@ -363,6 +545,12 @@ def _switch_to_wal(sync_connection) -> None:
         cursor.close()
 
 
+def _is_busy(exc: sqlite3.OperationalError) -> bool:
+    """SQLite's SQLITE_BUSY (5) or SQLITE_LOCKED (6), whichever extended code."""
+    code = getattr(exc, "sqlite_errorcode", None)
+    return code is not None and (code & 0xFF) in (5, 6)
+
+
 def _refuse(state: SchemaState) -> None:
     if state.state == FOREIGN:
         raise ForeignDatabase(
@@ -382,6 +570,7 @@ __all__ = [
     "StoreConfigError",
     "StoreConnectionError",
     "StoreError",
+    "StoreMigrationError",
     "StoreNotInitialised",
     "StoreOutdated",
 ]

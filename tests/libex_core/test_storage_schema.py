@@ -61,6 +61,7 @@ _EXPORTS = {
     "StoreOutdated": store_module.StoreOutdated,
     "ForeignDatabase": store_module.ForeignDatabase,
     "StoreClosed": store_module.StoreClosed,
+    "StoreMigrationError": store_module.StoreMigrationError,
 }
 
 

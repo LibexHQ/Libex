@@ -792,7 +792,7 @@ def test_encoding_is_inert_to_httpx_but_not_to_a_decode_then_route_server():
 # sites that send it named, so a template that stops being real can be
 # removed on evidence rather than on a guess:
 _FIXED_PATHS = (
-    # libex_core/audible/search.py (SEARCH_PATH), app/services/audible/releases.py:286
+    # libex_core/audible/search.py and libex_core/audible/releases.py (SEARCH_PATH)
     "/1.0/catalog/products/",
     # app/services/audible/books.py:697, app/services/seeder.py:472,
     # app/services/audible/series.py:254, authors/catalog.py:44 and :555.
@@ -802,7 +802,7 @@ _FIXED_PATHS = (
     "/1.0/catalog/products",
     # libex_core/audible/search.py (SEARCH_SUGGESTIONS_PATH), authors/__init__.py:1011
     "/1.0/searchsuggestions",
-    # app/services/audible/releases.py:122, app/services/seeder.py:564
+    # libex_core/audible/releases.py (CATEGORIES_PATH)
     "/1.0/catalog/categories",
 )
 

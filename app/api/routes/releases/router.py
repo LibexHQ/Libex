@@ -10,7 +10,6 @@ from typing import Annotated
 
 # Third party
 from fastapi import APIRouter, Query, Depends
-from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Database
@@ -24,14 +23,15 @@ from app.api.routes.filter_params import LiveBookFilters
 from app.api.routes.release_params import ReleaseWindow
 
 # Services
-from app.services.audible.releases import get_new_releases, get_coming_soon, _ensure_genres
+from app.services.audible.releases import get_new_releases, get_coming_soon, ensure_genres
 from app.services.sorting import sort_dicts, BOOK_SORT_FIELDS
 from app.services.filtering import filter_dicts
 
 # Core
 from app.core.middleware import valid_region
 from libex_core.exceptions import NotFoundException
-from libex_core.models import BookResponse
+from libex_core.audible.releases import build_category_tree
+from libex_core.models import BookResponse, CategoryNode, FlatCategoryNode
 
 router = APIRouter(tags=["Releases"])
 
@@ -39,23 +39,6 @@ router = APIRouter(tags=["Releases"])
 # String(12)); this keeps the param from carrying arbitrary text into the
 # cache key and the Audible request.
 _CATEGORY_ID_PATTERN = r"^\d{1,12}$"
-
-
-class CategoryNode(BaseModel):
-    id: str
-    name: str
-    children: list["CategoryNode"] = []
-
-
-class CategoryAncestor(BaseModel):
-    id: str
-    name: str
-
-
-class FlatCategoryNode(BaseModel):
-    id: str
-    name: str
-    ancestors: list[CategoryAncestor] = []
 
 
 # ============================================================
@@ -169,64 +152,10 @@ async def categories(
     is stored (code `upstream_unavailable`).
     """
     nodes = await outage_as_unavailable(
-        _ensure_genres(session, region),
+        ensure_genres(session, region),
         "No categories available",
     )
     if not nodes:
         raise NotFoundException("No categories available")
 
-    # Group every node under its parent_id. A node can appear under more than one
-    # parent, so it's keyed by parent in the grouping, not globally. Both the
-    # nested and flat builders walk this same grouping from the top-level roots
-    # (parent_id == "").
-    by_parent: dict[str, list[dict]] = {}
-    for node in nodes:
-        by_parent.setdefault(node.get("parent_id", ""), []).append(node)
-
-    if flat:
-        def build_flat(parent_id: str, ancestors: list[CategoryAncestor]) -> list[FlatCategoryNode]:
-            # This node's level is its ancestor count + 1. Emit it only while
-            # within the depth limit, and stop descending once the next level
-            # would exceed it.
-            level = len(ancestors) + 1
-            out: list[FlatCategoryNode] = []
-            for n in sorted(by_parent.get(parent_id, []), key=lambda x: x["name"]):
-                if depth is None or level <= depth:
-                    out.append(
-                        FlatCategoryNode(
-                            id=n["genre_id"],
-                            name=n["name"],
-                            ancestors=ancestors,
-                        )
-                    )
-                if depth is None or level < depth:
-                    out.extend(
-                        build_flat(
-                            n["genre_id"],
-                            ancestors + [CategoryAncestor(id=n["genre_id"], name=n["name"])],
-                        )
-                    )
-            return out
-
-        return build_flat("", [])
-
-    def build(parent_id: str, level: int = 1) -> list[CategoryNode]:
-        # Recurse into children only while a deeper level is still within the
-        # depth limit; otherwise the node's children come back empty.
-        return sorted(
-            (
-                CategoryNode(
-                    id=n["genre_id"],
-                    name=n["name"],
-                    children=(
-                        build(n["genre_id"], level + 1)
-                        if depth is None or level < depth
-                        else []
-                    ),
-                )
-                for n in by_parent.get(parent_id, [])
-            ),
-            key=lambda c: c.name,
-        )
-
-    return build("")
+    return build_category_tree(nodes, flat=flat, depth=depth)

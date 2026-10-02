@@ -9,9 +9,9 @@ exercise the windowing, the duplicate-page wall, the sorts, the cache-first
 short-circuit, the category scoping, and the cache-key-per-category behavior —
 without real HTTP or DB.
 
-The genre taxonomy helper (_fetch_catalog_genres) flattens every node at every
+The genre taxonomy helper (fetch_catalog_genres) flattens every node at every
 level with its parent_id, feeding the /categories discovery endpoint; it's
-covered here at the unit level, along with the freshness gate in _ensure_genres
+covered here at the unit level, along with the freshness gate in ensure_genres
 that decides whether that fetch happens at all.
 """
 
@@ -25,6 +25,7 @@ import pytest
 
 # Services
 from app.services.audible import releases
+from libex_core.audible.releases import fetch_catalog_genres
 from libex_core.exceptions import AudibleAPIException
 
 
@@ -342,13 +343,13 @@ async def test_empty_scan_returns_empty_and_does_not_cache():
 
 @pytest.mark.asyncio
 async def test_fetch_catalog_genres_keeps_parents_and_leaves():
-    """_fetch_catalog_genres returns parents (parent_id='') AND leaves (parent_id=<parent>)."""
+    """fetch_catalog_genres returns parents (parent_id='') AND leaves (parent_id=<parent>)."""
     taxonomy = _categories(
         ("P1", "History", [("L1", "Ancient"), ("L2", "Modern")]),
         ("P2", "Sci-Fi", [("L3", "Space")]),
     )
     with patch.object(releases, "audible_get", new=_audible(categories=taxonomy)):
-        nodes = await releases._fetch_catalog_genres("us")
+        nodes = await fetch_catalog_genres(releases.audible_get, "us")
     by_id = {(n["genre_id"], n["parent_id"]) for n in nodes}
     assert ("P1", "") in by_id
     assert ("P2", "") in by_id
@@ -366,7 +367,7 @@ async def test_fetch_catalog_genres_dual_parent_leaf_kept_per_parent():
         ("P2", "Society", [("LX", "Shared")]),
     )
     with patch.object(releases, "audible_get", new=_audible(categories=taxonomy)):
-        nodes = await releases._fetch_catalog_genres("us")
+        nodes = await fetch_catalog_genres(releases.audible_get, "us")
     lx = [n for n in nodes if n["genre_id"] == "LX"]
     assert {n["parent_id"] for n in lx} == {"P1", "P2"}
 
@@ -391,7 +392,7 @@ async def test_fetch_catalog_genres_recurses_all_levels():
         ("P2", "History"),                  # childless parent (depth 1)
     )
     with patch.object(releases, "audible_get", new=_audible(categories=taxonomy)):
-        nodes = await releases._fetch_catalog_genres("us")
+        nodes = await fetch_catalog_genres(releases.audible_get, "us")
     by_id = {(n["genre_id"], n["parent_id"]) for n in nodes}
     assert ("P1", "") in by_id          # parent
     assert ("P2", "") in by_id          # childless parent
@@ -403,7 +404,7 @@ async def test_fetch_catalog_genres_recurses_all_levels():
 
 
 # ============================================================
-# _ensure_genres — reconcile vs additive vs fallback
+# ensure_genres — reconcile vs additive vs fallback
 # ============================================================
 
 def _nodes(n):
@@ -419,14 +420,15 @@ async def test_ensure_genres_reconciles_on_complete_fetch():
     """
     stored = _nodes(100)
     fresh = _nodes(100)
-    with patch.object(releases, "_fetch_catalog_genres", new=AsyncMock(return_value=fresh)), \
+    with patch.object(releases, "fetch_catalog_genres", new=AsyncMock(return_value=fresh)) as fetch, \
          patch.object(releases, "get_stored_genres", new=AsyncMock(return_value=(stored, None))), \
          patch.object(releases, "reconcile_genres", new=AsyncMock()) as recon, \
          patch.object(releases, "upsert_genres", new=AsyncMock()) as upsert:
         session = AsyncMock()
-        await releases._ensure_genres(session, "us")
+        await releases.ensure_genres(session, "us")
         recon.assert_awaited_once()
         upsert.assert_not_awaited()
+    fetch.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -437,14 +439,15 @@ async def test_ensure_genres_additive_only_on_tiny_fetch():
     """
     stored = _nodes(1000)
     fresh = _nodes(10)  # 1% of stored — below the reconcile floor
-    with patch.object(releases, "_fetch_catalog_genres", new=AsyncMock(return_value=fresh)), \
+    with patch.object(releases, "fetch_catalog_genres", new=AsyncMock(return_value=fresh)) as fetch, \
          patch.object(releases, "get_stored_genres", new=AsyncMock(return_value=(stored, None))), \
          patch.object(releases, "reconcile_genres", new=AsyncMock()) as recon, \
          patch.object(releases, "upsert_genres", new=AsyncMock()) as upsert:
         session = AsyncMock()
-        await releases._ensure_genres(session, "us")
+        await releases.ensure_genres(session, "us")
         upsert.assert_awaited_once()
         recon.assert_not_awaited()
+    fetch.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -454,14 +457,15 @@ async def test_ensure_genres_reconciles_on_first_populate():
     nothing to remove) rather than being held back as 'too small'.
     """
     fresh = _nodes(50)
-    with patch.object(releases, "_fetch_catalog_genres", new=AsyncMock(return_value=fresh)), \
+    with patch.object(releases, "fetch_catalog_genres", new=AsyncMock(return_value=fresh)) as fetch, \
          patch.object(releases, "get_stored_genres", new=AsyncMock(return_value=([], None))), \
          patch.object(releases, "reconcile_genres", new=AsyncMock()) as recon, \
          patch.object(releases, "upsert_genres", new=AsyncMock()) as upsert:
         session = AsyncMock()
-        await releases._ensure_genres(session, "us")
+        await releases.ensure_genres(session, "us")
         recon.assert_awaited_once()
         upsert.assert_not_awaited()
+    fetch.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -471,34 +475,36 @@ async def test_ensure_genres_serves_stored_on_fetch_failure():
     returned unchanged — an Audible hiccup doesn't empty or alter the response.
     """
     stored = _nodes(100)
-    with patch.object(releases, "_fetch_catalog_genres", new=AsyncMock(side_effect=RuntimeError("down"))), \
+    with patch.object(releases, "fetch_catalog_genres", new=AsyncMock(side_effect=RuntimeError("down"))) as fetch, \
          patch.object(releases, "get_stored_genres", new=AsyncMock(return_value=(stored, None))), \
          patch.object(releases, "reconcile_genres", new=AsyncMock()) as recon, \
          patch.object(releases, "upsert_genres", new=AsyncMock()) as upsert:
         session = AsyncMock()
-        result = await releases._ensure_genres(session, "us")
+        result = await releases.ensure_genres(session, "us")
         assert result == stored
         recon.assert_not_awaited()
         upsert.assert_not_awaited()
+    fetch.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_ensure_genres_empty_fetch_does_not_write():
     """An empty (but non-failing) fetch writes nothing and serves stored."""
     stored = _nodes(100)
-    with patch.object(releases, "_fetch_catalog_genres", new=AsyncMock(return_value=[])), \
+    with patch.object(releases, "fetch_catalog_genres", new=AsyncMock(return_value=[])) as fetch, \
          patch.object(releases, "get_stored_genres", new=AsyncMock(return_value=(stored, None))), \
          patch.object(releases, "reconcile_genres", new=AsyncMock()) as recon, \
          patch.object(releases, "upsert_genres", new=AsyncMock()) as upsert:
         session = AsyncMock()
-        result = await releases._ensure_genres(session, "us")
+        result = await releases.ensure_genres(session, "us")
         assert result == stored
         recon.assert_not_awaited()
         upsert.assert_not_awaited()
+    fetch.assert_awaited_once()
 
 
 # ============================================================
-# _ensure_genres — the freshness gate
+# ensure_genres — the freshness gate
 # ============================================================
 
 def _aged(seconds):
@@ -523,12 +529,12 @@ async def test_ensure_genres_serves_a_fresh_store_without_calling_audible():
     window is returned as-is and Audible is never called.
     """
     stored = _nodes(100)
-    with patch.object(releases, "_fetch_catalog_genres", new=AsyncMock()) as fetch, \
+    with patch.object(releases, "fetch_catalog_genres", new=AsyncMock()) as fetch, \
          patch.object(releases, "get_stored_genres", new=AsyncMock(return_value=(stored, _fresh_enough()))), \
          patch.object(releases, "reconcile_genres", new=AsyncMock()) as recon, \
          patch.object(releases, "upsert_genres", new=AsyncMock()) as upsert:
         session = AsyncMock()
-        result = await releases._ensure_genres(session, "us")
+        result = await releases.ensure_genres(session, "us")
         assert result == stored
         fetch.assert_not_awaited()
         recon.assert_not_awaited()
@@ -541,13 +547,13 @@ async def test_ensure_genres_fetches_when_the_store_is_stale():
     """A stored taxonomy older than the window is refreshed, not served blind."""
     stored = _nodes(100)
     fresh = _nodes(100)
-    with patch.object(releases, "_fetch_catalog_genres", new=AsyncMock(return_value=fresh)) as fetch, \
+    with patch.object(releases, "fetch_catalog_genres", new=AsyncMock(return_value=fresh)) as fetch, \
          patch.object(releases, "get_stored_genres", new=AsyncMock(return_value=(stored, _too_old()))), \
          patch.object(releases, "reconcile_genres", new=AsyncMock()) as recon, \
          patch.object(releases, "upsert_genres", new=AsyncMock()):
         session = AsyncMock()
-        await releases._ensure_genres(session, "us")
-        fetch.assert_awaited_once_with("us")
+        await releases.ensure_genres(session, "us")
+        fetch.assert_awaited_once_with(releases.audible_get, "us")
         recon.assert_awaited_once()
 
 
@@ -558,13 +564,13 @@ async def test_ensure_genres_fetches_when_nothing_is_stored():
     other way, a fresh deployment would serve an empty /categories forever.
     """
     fresh = _nodes(50)
-    with patch.object(releases, "_fetch_catalog_genres", new=AsyncMock(return_value=fresh)) as fetch, \
+    with patch.object(releases, "fetch_catalog_genres", new=AsyncMock(return_value=fresh)) as fetch, \
          patch.object(releases, "get_stored_genres", new=AsyncMock(return_value=([], None))), \
          patch.object(releases, "reconcile_genres", new=AsyncMock()) as recon, \
          patch.object(releases, "upsert_genres", new=AsyncMock()):
         session = AsyncMock()
-        await releases._ensure_genres(session, "us")
-        fetch.assert_awaited_once_with("us")
+        await releases.ensure_genres(session, "us")
+        fetch.assert_awaited_once_with(releases.audible_get, "us")
         recon.assert_awaited_once()
 
 
@@ -576,27 +582,27 @@ async def test_ensure_genres_fetches_when_the_age_is_unknown():
     a fresh store.
     """
     stored = _nodes(100)
-    with patch.object(releases, "_fetch_catalog_genres", new=AsyncMock(return_value=_nodes(100))) as fetch, \
+    with patch.object(releases, "fetch_catalog_genres", new=AsyncMock(return_value=_nodes(100))) as fetch, \
          patch.object(releases, "get_stored_genres", new=AsyncMock(return_value=(stored, None))), \
          patch.object(releases, "reconcile_genres", new=AsyncMock()), \
          patch.object(releases, "upsert_genres", new=AsyncMock()):
         session = AsyncMock()
-        await releases._ensure_genres(session, "us")
-        fetch.assert_awaited_once_with("us")
+        await releases.ensure_genres(session, "us")
+        fetch.assert_awaited_once_with(releases.audible_get, "us")
 
 
 @pytest.mark.asyncio
 async def test_ensure_genres_fetches_at_exactly_the_freshness_boundary():
     """The window is exclusive at its edge: an age equal to it counts as stale."""
     stored = _nodes(100)
-    with patch.object(releases, "_fetch_catalog_genres", new=AsyncMock(return_value=_nodes(100))) as fetch, \
+    with patch.object(releases, "fetch_catalog_genres", new=AsyncMock(return_value=_nodes(100))) as fetch, \
          patch.object(releases, "get_stored_genres",
                       new=AsyncMock(return_value=(stored, _aged(releases._GENRE_FRESHNESS_SECONDS)))), \
          patch.object(releases, "reconcile_genres", new=AsyncMock()), \
          patch.object(releases, "upsert_genres", new=AsyncMock()):
         session = AsyncMock()
-        await releases._ensure_genres(session, "us")
-        fetch.assert_awaited_once_with("us")
+        await releases.ensure_genres(session, "us")
+        fetch.assert_awaited_once_with(releases.audible_get, "us")
 
 
 @pytest.mark.asyncio
@@ -615,17 +621,17 @@ async def test_ensure_genres_freshness_is_scoped_per_region():
     async def stored_for(session, region):
         return stored_by_region[region]
 
-    with patch.object(releases, "_fetch_catalog_genres", new=AsyncMock(return_value=_nodes(100))) as fetch, \
+    with patch.object(releases, "fetch_catalog_genres", new=AsyncMock(return_value=_nodes(100))) as fetch, \
          patch.object(releases, "get_stored_genres", new=AsyncMock(side_effect=stored_for)) as reader, \
          patch.object(releases, "reconcile_genres", new=AsyncMock()) as recon, \
          patch.object(releases, "upsert_genres", new=AsyncMock()):
         session = AsyncMock()
-        await releases._ensure_genres(session, "de")
-        await releases._ensure_genres(session, "us")
-        await releases._ensure_genres(session, "jp")
+        await releases.ensure_genres(session, "de")
+        await releases.ensure_genres(session, "us")
+        await releases.ensure_genres(session, "jp")
 
         # de was fresh and was never fetched; us and jp were not and were.
-        assert [c.args[0] for c in fetch.await_args_list] == ["us", "jp"]
+        assert [c.args[1] for c in fetch.await_args_list] == ["us", "jp"]
         # Every store read named the region it was answering for.
         assert [c.args[1] for c in reader.await_args_list] == ["de", "us", "us", "jp", "jp"]
         assert [c.args[1] for c in recon.await_args_list] == ["us", "jp"]
@@ -640,13 +646,13 @@ async def test_ensure_genres_logs_the_skipped_fetch(caplog):
     raise on this path and nowhere else.
     """
     stored = _nodes(7)
-    with patch.object(releases, "_fetch_catalog_genres", new=AsyncMock()), \
+    with patch.object(releases, "fetch_catalog_genres", new=AsyncMock()) as fetch, \
          patch.object(releases, "get_stored_genres", new=AsyncMock(return_value=(stored, _fresh_enough()))), \
          patch.object(releases, "reconcile_genres", new=AsyncMock()), \
          patch.object(releases, "upsert_genres", new=AsyncMock()), \
          caplog.at_level(logging.INFO):
         session = AsyncMock()
-        await releases._ensure_genres(session, "de")
+        await releases.ensure_genres(session, "de")
 
     matches = [r for r in caplog.records if r.getMessage() == "Served genre taxonomy from fresh store"]
     assert len(matches) == 1
@@ -655,20 +661,22 @@ async def test_ensure_genres_logs_the_skipped_fetch(caplog):
     assert record.nodes == 7
     assert record.age_seconds > 0
     assert record.freshness_seconds == releases._GENRE_FRESHNESS_SECONDS
+    fetch.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_ensure_genres_does_not_log_a_skip_when_it_fetches(caplog):
     """The skip line is a claim about behaviour, so it must not appear on the fetch path."""
-    with patch.object(releases, "_fetch_catalog_genres", new=AsyncMock(return_value=_nodes(10))), \
+    with patch.object(releases, "fetch_catalog_genres", new=AsyncMock(return_value=_nodes(10))) as fetch, \
          patch.object(releases, "get_stored_genres", new=AsyncMock(return_value=(_nodes(10), _too_old()))), \
          patch.object(releases, "reconcile_genres", new=AsyncMock()), \
          patch.object(releases, "upsert_genres", new=AsyncMock()), \
          caplog.at_level(logging.INFO):
         session = AsyncMock()
-        await releases._ensure_genres(session, "us")
+        await releases.ensure_genres(session, "us")
 
     assert not [r for r in caplog.records if r.getMessage() == "Served genre taxonomy from fresh store"]
+    fetch.assert_awaited_once()
 
 
 # ============================================================
@@ -695,23 +703,24 @@ def test_genre_age_seconds_reads_a_naive_timestamp_as_utc():
 
 
 # ============================================================
-# _ensure_genres -- failure with nothing stored
+# ensure_genres -- failure with nothing stored
 # ============================================================
 
 @pytest.mark.asyncio
 async def test_ensure_genres_raises_on_fetch_failure_with_empty_store():
     """No stored set to fall back on: an empty list would claim Audible has no
     categories, so the failure is raised, with nothing written."""
-    with patch.object(releases, "_fetch_catalog_genres", new=AsyncMock(side_effect=RuntimeError("down"))), \
+    with patch.object(releases, "fetch_catalog_genres", new=AsyncMock(side_effect=RuntimeError("down"))) as fetch, \
          patch.object(releases, "get_stored_genres", new=AsyncMock(return_value=([], None))), \
          patch.object(releases, "reconcile_genres", new=AsyncMock()) as recon, \
          patch.object(releases, "upsert_genres", new=AsyncMock()) as upsert:
         with pytest.raises(AudibleAPIException) as exc:
-            await releases._ensure_genres(AsyncMock(), "us")
+            await releases.ensure_genres(AsyncMock(), "us")
 
     assert exc.value.status_code == 502
     recon.assert_not_awaited()
     upsert.assert_not_awaited()
+    fetch.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -719,20 +728,22 @@ async def test_ensure_genres_store_failure_with_empty_store_returns_fetched_node
     """Audible answered but the write failed: that is ours, not an outage, and
     the freshly fetched nodes are the only honest answer."""
     fresh = _nodes(50)
-    with patch.object(releases, "_fetch_catalog_genres", new=AsyncMock(return_value=fresh)), \
+    with patch.object(releases, "fetch_catalog_genres", new=AsyncMock(return_value=fresh)) as fetch, \
          patch.object(releases, "get_stored_genres", new=AsyncMock(return_value=([], None))), \
          patch.object(releases, "reconcile_genres", new=AsyncMock(side_effect=RuntimeError("db write"))):
-        result = await releases._ensure_genres(AsyncMock(), "us")
+        result = await releases.ensure_genres(AsyncMock(), "us")
 
     assert result == fresh
+    fetch.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_ensure_genres_store_failure_with_stored_set_returns_stored():
     stored = _nodes(100)
-    with patch.object(releases, "_fetch_catalog_genres", new=AsyncMock(return_value=_nodes(100))), \
+    with patch.object(releases, "fetch_catalog_genres", new=AsyncMock(return_value=_nodes(100))) as fetch, \
          patch.object(releases, "get_stored_genres", new=AsyncMock(return_value=(stored, None))), \
          patch.object(releases, "reconcile_genres", new=AsyncMock(side_effect=RuntimeError("db write"))):
-        result = await releases._ensure_genres(AsyncMock(), "us")
+        result = await releases.ensure_genres(AsyncMock(), "us")
 
     assert result == stored
+    fetch.assert_awaited_once()

@@ -17,7 +17,7 @@ from libex_core.exceptions import AudibleAPIException
 from tests.fixtures.outage import assert_outage_503
 
 
-# Flat node list as _ensure_genres returns it: parents have parent_id="",
+# Flat node list as ensure_genres returns it: parents have parent_id="",
 # leaves carry their parent's id.
 _NODES = [
     {"genre_id": "P1", "parent_id": "", "name": "History"},
@@ -35,7 +35,7 @@ _NODES = [
 @pytest.mark.asyncio
 async def test_categories_returns_nested_tree(async_client):
     """/categories nests leaves under their parents, sorted by name."""
-    with patch("app.api.routes.releases.router._ensure_genres", new_callable=AsyncMock) as mock:
+    with patch("app.api.routes.releases.router.ensure_genres", new_callable=AsyncMock) as mock:
         mock.return_value = _NODES
         response = await async_client.get("/categories?region=us")
         assert response.status_code == 200
@@ -63,7 +63,7 @@ async def test_categories_nests_deep_tree(async_client):
         {"genre_id": "G1", "parent_id": "C1", "name": "Film & TV"},
         {"genre_id": "GG1", "parent_id": "G1", "name": "Direction"},    # depth 4
     ]
-    with patch("app.api.routes.releases.router._ensure_genres", new_callable=AsyncMock) as mock:
+    with patch("app.api.routes.releases.router.ensure_genres", new_callable=AsyncMock) as mock:
         mock.return_value = nodes
         response = await async_client.get("/categories?region=us")
         assert response.status_code == 200
@@ -89,7 +89,7 @@ async def test_categories_dual_parent_leaf_appears_under_both(async_client):
         {"genre_id": "LX", "parent_id": "P1", "name": "Shared"},
         {"genre_id": "LX", "parent_id": "P2", "name": "Shared"},
     ]
-    with patch("app.api.routes.releases.router._ensure_genres", new_callable=AsyncMock) as mock:
+    with patch("app.api.routes.releases.router.ensure_genres", new_callable=AsyncMock) as mock:
         mock.return_value = nodes
         response = await async_client.get("/categories?region=us")
         assert response.status_code == 200
@@ -101,7 +101,7 @@ async def test_categories_dual_parent_leaf_appears_under_both(async_client):
 @pytest.mark.asyncio
 async def test_categories_empty_returns_404(async_client):
     """No taxonomy available -> 404 with the LibexException error body."""
-    with patch("app.api.routes.releases.router._ensure_genres", new_callable=AsyncMock) as mock:
+    with patch("app.api.routes.releases.router.ensure_genres", new_callable=AsyncMock) as mock:
         mock.return_value = []
         response = await async_client.get("/categories?region=us")
         assert response.status_code == 404
@@ -122,7 +122,7 @@ async def test_categories_invalid_region_returns_400(async_client):
 @pytest.mark.asyncio
 async def test_categories_flat_returns_flat_list(async_client):
     """flat=true returns every node as a flat entry with ancestors, no children."""
-    with patch("app.api.routes.releases.router._ensure_genres", new_callable=AsyncMock) as mock:
+    with patch("app.api.routes.releases.router.ensure_genres", new_callable=AsyncMock) as mock:
         mock.return_value = _NODES
         response = await async_client.get("/categories?region=us&flat=true")
         assert response.status_code == 200
@@ -144,7 +144,7 @@ async def test_categories_flat_ancestors_are_root_first(async_client):
         {"genre_id": "G1", "parent_id": "C1", "name": "Film & TV"},
         {"genre_id": "GG1", "parent_id": "G1", "name": "Direction"},   # depth 4
     ]
-    with patch("app.api.routes.releases.router._ensure_genres", new_callable=AsyncMock) as mock:
+    with patch("app.api.routes.releases.router.ensure_genres", new_callable=AsyncMock) as mock:
         mock.return_value = nodes
         response = await async_client.get("/categories?region=us&flat=true")
         assert response.status_code == 200
@@ -159,7 +159,7 @@ async def test_categories_flat_ancestors_are_root_first(async_client):
 @pytest.mark.asyncio
 async def test_categories_flat_top_level_has_no_ancestors(async_client):
     """A top-level node has an empty ancestors list."""
-    with patch("app.api.routes.releases.router._ensure_genres", new_callable=AsyncMock) as mock:
+    with patch("app.api.routes.releases.router.ensure_genres", new_callable=AsyncMock) as mock:
         mock.return_value = _NODES
         response = await async_client.get("/categories?region=us&flat=true")
         assert response.status_code == 200
@@ -177,7 +177,7 @@ async def test_categories_flat_dual_parent_appears_per_placement(async_client):
         {"genre_id": "LX", "parent_id": "P1", "name": "Shared"},
         {"genre_id": "LX", "parent_id": "P2", "name": "Shared"},
     ]
-    with patch("app.api.routes.releases.router._ensure_genres", new_callable=AsyncMock) as mock:
+    with patch("app.api.routes.releases.router.ensure_genres", new_callable=AsyncMock) as mock:
         mock.return_value = nodes
         response = await async_client.get("/categories?region=us&flat=true")
         assert response.status_code == 200
@@ -192,7 +192,7 @@ async def test_categories_flat_dual_parent_appears_per_placement(async_client):
 @pytest.mark.asyncio
 async def test_categories_flat_false_returns_nested(async_client):
     """flat=false (the default) still returns the nested tree with children."""
-    with patch("app.api.routes.releases.router._ensure_genres", new_callable=AsyncMock) as mock:
+    with patch("app.api.routes.releases.router.ensure_genres", new_callable=AsyncMock) as mock:
         mock.return_value = _NODES
         response = await async_client.get("/categories?region=us&flat=false")
         assert response.status_code == 200
@@ -217,7 +217,7 @@ async def test_categories_depth_one_returns_roots_only(async_client):
         {"genre_id": "C1", "parent_id": "P1", "name": "Performing"},
         {"genre_id": "G1", "parent_id": "C1", "name": "Film & TV"},
     ]
-    with patch("app.api.routes.releases.router._ensure_genres", new_callable=AsyncMock) as mock:
+    with patch("app.api.routes.releases.router.ensure_genres", new_callable=AsyncMock) as mock:
         mock.return_value = nodes
         response = await async_client.get("/categories?region=us&depth=1")
         assert response.status_code == 200
@@ -235,7 +235,7 @@ async def test_categories_depth_two_returns_two_levels(async_client):
         {"genre_id": "C1", "parent_id": "P1", "name": "Performing"},
         {"genre_id": "G1", "parent_id": "C1", "name": "Film & TV"},   # depth 3 — excluded
     ]
-    with patch("app.api.routes.releases.router._ensure_genres", new_callable=AsyncMock) as mock:
+    with patch("app.api.routes.releases.router.ensure_genres", new_callable=AsyncMock) as mock:
         mock.return_value = nodes
         response = await async_client.get("/categories?region=us&depth=2")
         assert response.status_code == 200
@@ -255,7 +255,7 @@ async def test_categories_depth_one_flat_returns_roots_only(async_client):
         {"genre_id": "C1", "parent_id": "P1", "name": "Performing"},
         {"genre_id": "G1", "parent_id": "C1", "name": "Film & TV"},
     ]
-    with patch("app.api.routes.releases.router._ensure_genres", new_callable=AsyncMock) as mock:
+    with patch("app.api.routes.releases.router.ensure_genres", new_callable=AsyncMock) as mock:
         mock.return_value = nodes
         response = await async_client.get("/categories?region=us&flat=true&depth=1")
         assert response.status_code == 200
@@ -273,7 +273,7 @@ async def test_categories_no_depth_returns_full_tree(async_client):
         {"genre_id": "C1", "parent_id": "P1", "name": "Performing"},
         {"genre_id": "G1", "parent_id": "C1", "name": "Film & TV"},   # depth 3 — present
     ]
-    with patch("app.api.routes.releases.router._ensure_genres", new_callable=AsyncMock) as mock:
+    with patch("app.api.routes.releases.router.ensure_genres", new_callable=AsyncMock) as mock:
         mock.return_value = nodes
         response = await async_client.get("/categories?region=us")
         assert response.status_code == 200
@@ -377,7 +377,7 @@ async def test_coming_soon_invalid_category_rejected(async_client):
 @pytest.mark.parametrize("path,service,message", [
     pytest.param("/new-releases", "get_new_releases", "No new releases found", id="new_releases"),
     pytest.param("/coming-soon", "get_coming_soon", "No upcoming releases found", id="coming_soon"),
-    pytest.param("/categories", "_ensure_genres", "No categories available", id="categories"),
+    pytest.param("/categories", "ensure_genres", "No categories available", id="categories"),
 ])
 async def test_outage_is_503_upstream_unavailable_with_the_routes_own_message(
     async_client, path, service, message
@@ -393,7 +393,7 @@ async def test_outage_is_503_upstream_unavailable_with_the_routes_own_message(
 @pytest.mark.parametrize("path,service", [
     pytest.param("/new-releases", "get_new_releases", id="new_releases"),
     pytest.param("/coming-soon", "get_coming_soon", id="coming_soon"),
-    pytest.param("/categories", "_ensure_genres", id="categories"),
+    pytest.param("/categories", "ensure_genres", id="categories"),
 ])
 async def test_genuinely_empty_is_404_not_on_audible(async_client, path, service):
     with patch(f"app.api.routes.releases.router.{service}", new_callable=AsyncMock) as mock:

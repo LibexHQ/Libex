@@ -471,6 +471,27 @@ class SeriesResponse(BaseModel):
 
 
 # ============================================================
+# CATEGORIES
+# ============================================================
+
+class CategoryNode(BaseModel):
+    id: str
+    name: str
+    children: list["CategoryNode"] = []
+
+
+class CategoryAncestor(BaseModel):
+    id: str
+    name: str
+
+
+class FlatCategoryNode(BaseModel):
+    id: str
+    name: str
+    ancestors: list[CategoryAncestor] = []
+
+
+# ============================================================
 # AUTHOR RESPONSE
 # ============================================================
 

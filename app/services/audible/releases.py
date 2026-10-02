@@ -15,7 +15,8 @@ request of the new day. This serves the freshest possible answer while turning
 an otherwise per-request catalog scan into at most one scan per window/region
 per day.
 
-THE SCAN — why it's a per-genre fan-out, not a single walk. Audible exposes no
+THE SCAN — why it's a per-genre fan-out, not a single walk (the walk itself
+lives in libex_core.audible.releases). Audible exposes no
 direct new-releases or coming-soon endpoint, so we reconstruct the list from the
 catalog. Every /catalog/products query is hard-capped at ~535 results regardless
 of how it's filtered, and a parent-category query is NOT a superset of its
@@ -27,26 +28,25 @@ single category by id sorted by -ReleaseDate, applying the window's date gate pl
 a duplicate-page wall stop. The per-genre results are unioned and deduped by ASIN,
 then sorted for the response. The full node list is stored in catalog_genres and
 refreshed from Audible lazily, on the first /categories call that finds the
-stored copy older than _GENRE_FRESHNESS_SECONDS (see _ensure_genres) — no
+stored copy older than _GENRE_FRESHNESS_SECONDS (see ensure_genres) — no
 background task.
 """
 
 # Standard library
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 # Third party
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Core
+from libex_core.audible.books import settle_flags_list
 from libex_core.audible.client import as_audible_failure
-from libex_core.audible.books import (
-    BOOK_RESPONSE_GROUPS,
-    IMAGE_SIZES,
-    filter_products,
-    normalize_product,
-    settle_flags_list,
+from libex_core.audible.releases import (
+    fetch_catalog_genres,
+    fetch_coming_soon,
+    fetch_new_releases,
 )
 from app.core.logging import get_logger
 from app.core.utils import seconds_until_utc_midnight
@@ -59,8 +59,6 @@ from app.services.db.writer import upsert_genres, reconcile_genres
 from app.services.cache import manager as cache
 
 logger = get_logger()
-
-_PAGE_SIZE = 50
 
 # When a fresh taxonomy fetch comes back this fraction (or more) of what's
 # already stored, it's treated as complete enough to reconcile against — stale
@@ -75,7 +73,7 @@ _GENRE_RECONCILE_MIN_FRACTION = 0.5
 # this is a freshness floor over a store that's never emptied, not a cache TTL,
 # which is what actually makes that true rather than merely likely: Audible
 # restructures its category tree rarely, a category id that already exists keeps
-# working, and _ensure_genres returns the stored set on every path that has one,
+# working, and ensure_genres returns the stored set on every path that has one,
 # including a total fetch failure, so the worst case of a too-long window is a
 # newly added category showing up in /categories up to a day late — never a 404, never a
 # shrunken response. "The taxonomy barely moves" only explains why staleness is
@@ -92,52 +90,6 @@ _GENRE_RECONCILE_MIN_FRACTION = 0.5
 # rhythm the rest of this module already runs on (the release-window caches
 # expire at the next UTC midnight).
 _GENRE_FRESHNESS_SECONDS = 24 * 60 * 60
-
-
-def _release_dt(book: dict[str, Any]) -> datetime | None:
-    """Parses a normalized book's releaseDate back into a datetime, or None."""
-    raw = book.get("releaseDate")
-    if not raw:
-        return None
-    try:
-        return datetime.fromisoformat(raw)
-    except ValueError:
-        return None
-
-
-async def _fetch_catalog_genres(region: str) -> list[dict[str, str]]:
-    """
-    Fetches the genre taxonomy from Audible and flattens every node to a list,
-    each tagged with its parent_id.
-
-    The taxonomy is a tree up to five levels deep and ragged — some branches stop
-    at two levels, some go five — so the flatten recurses to whatever depth
-    Audible returns (requested via categories_num_levels). A top-level parent gets
-    parent_id="" ; every other node gets its parent's id. A node that appears under
-    two parents yields one row per parent. Deduped by (genre_id, parent_id). This
-    populates the /categories discovery surface; the live scan walks a single
-    category by id.
-    """
-    data = await audible_get(
-        region,
-        "/1.0/catalog/categories",
-        {"root": "Genres", "categories_num_levels": 5},
-    )
-    seen: set[tuple[str, str]] = set()
-    nodes: list[dict[str, str]] = []
-
-    def emit(node_list: list[dict], parent_id: str) -> None:
-        for n in node_list:
-            nid = n.get("id")
-            name = n.get("name")
-            if nid and name and (nid, parent_id) not in seen:
-                seen.add((nid, parent_id))
-                nodes.append({"genre_id": nid, "name": name, "parent_id": parent_id})
-            if nid:
-                emit(n.get("children", []), nid)
-
-    emit(data.get("categories", []), "")
-    return nodes
 
 
 def _genre_age_seconds(oldest_checked: datetime | None) -> float | None:
@@ -161,7 +113,7 @@ def _genre_age_seconds(oldest_checked: datetime | None) -> float | None:
     return (datetime.now(timezone.utc) - oldest_checked).total_seconds()
 
 
-async def _ensure_genres(session: AsyncSession, region: str) -> list[dict[str, str]]:
+async def ensure_genres(session: AsyncSession, region: str) -> list[dict[str, str]]:
     """
     Returns the catalog genre nodes (every node at every level, each with its
     parent_id) for a region, refreshing them from Audible only when the stored
@@ -215,7 +167,7 @@ async def _ensure_genres(session: AsyncSession, region: str) -> list[dict[str, s
         return stored
 
     try:
-        nodes = await _fetch_catalog_genres(region)
+        nodes = await fetch_catalog_genres(audible_get, region)
     except Exception as e:
         logger.warning(
             "Genre taxonomy fetch failed",
@@ -251,72 +203,6 @@ async def _ensure_genres(session: AsyncSession, region: str) -> list[dict[str, s
     return stored
 
 
-async def _walk_one_catalog(
-    region: str,
-    category_id: str | None,
-    collect,
-    should_stop,
-) -> list[dict[str, Any]]:
-    """
-    Walks a single catalog query sorted by -ReleaseDate (descending), deduped by
-    ASIN. When category_id is given, the walk is scoped to that one category;
-    when it's None, the walk is the un-categoried catalog (the bare-call
-    "sample" — Audible caps it at ~535, so it's a slice, not the full set).
-
-    `collect(dt)` decides whether a book is in-window; `should_stop(dt)` decides
-    when the descending walk has passed the window's near edge. The walk stops at
-    the first book satisfying should_stop, when a page repeats the previous one
-    (Audible's ~535-result wall — a consecutive repeat), or when a page comes
-    back short/empty. Books with no parseable date are skipped. No inter-request
-    delay — this is the live path, and a single category returns in time.
-    """
-    collected: dict[str, dict[str, Any]] = {}
-    page = 0
-    prev_asins: list[str] | None = None
-    while True:
-        params: dict[str, Any] = {
-            "num_results": _PAGE_SIZE,
-            "page": page,
-            "response_groups": BOOK_RESPONSE_GROUPS,
-            "image_sizes": IMAGE_SIZES,
-            "products_sort_by": "-ReleaseDate",
-        }
-        if category_id:
-            params["category_id"] = category_id
-        data = await audible_get(region, "/1.0/catalog/products/", params)
-        products = filter_products(data.get("products", []))
-        if not products:
-            break
-
-        # Duplicate-page wall: Audible repeats the last page once it runs out.
-        page_asins = [p.get("asin") for p in products]
-        if page_asins == prev_asins:
-            break
-        prev_asins = page_asins
-
-        stop = False
-        for product in products:
-            book = normalize_product(product, region)
-            dt = _release_dt(book)
-            if dt is None:
-                continue
-            if should_stop(dt):
-                stop = True
-                break
-            if collect(dt):
-                asin = book.get("asin")
-                if asin:
-                    collected[asin] = book
-
-        if stop:
-            break
-        if len(products) < _PAGE_SIZE:
-            break
-        page += 1
-
-    return list(collected.values())
-
-
 async def get_new_releases(
     region: str,
     session: AsyncSession,
@@ -343,20 +229,9 @@ async def get_new_releases(
     if cached is not None:
         return cached
 
-    now = datetime.now(timezone.utc)
-    window_start = now - timedelta(days=days)
-
-    # Descending scan: skip future (> now), collect in-window, stop once we
-    # descend past the window's old edge.
-    def collect(dt: datetime) -> bool:
-        return window_start <= dt <= now
-
-    def should_stop(dt: datetime) -> bool:
-        return dt < window_start
-
     try:
         start = time.monotonic()
-        books = await _walk_one_catalog(region, category, collect, should_stop)
+        books = await fetch_new_releases(audible_get, region, days, category)
     except Exception as e:
         logger.error(
             "New releases scan failed",
@@ -369,10 +244,6 @@ async def get_new_releases(
         # Audible's, and never reaches this handler.
         raise as_audible_failure(e, "Audible new releases scan failed") from e
 
-    books.sort(
-        key=lambda b: _release_dt(b) or datetime.min.replace(tzinfo=timezone.utc),
-        reverse=True,
-    )
     took = round((time.monotonic() - start) * 1000, 2)
     logger.info("Requested Audible new releases", extra={
         "region": region,
@@ -436,20 +307,9 @@ async def get_coming_soon(
     if cached is not None:
         return cached
 
-    now = datetime.now(timezone.utc)
-    window_end = now + timedelta(days=days)
-
-    # Descending scan: skip far-future (> window_end), collect in-window, stop
-    # once we descend to already-released (<= now).
-    def collect(dt: datetime) -> bool:
-        return now < dt <= window_end
-
-    def should_stop(dt: datetime) -> bool:
-        return dt <= now
-
     try:
         start = time.monotonic()
-        books = await _walk_one_catalog(region, category, collect, should_stop)
+        books = await fetch_coming_soon(audible_get, region, days, category)
     except Exception as e:
         logger.error(
             "Coming soon scan failed",
@@ -462,7 +322,6 @@ async def get_coming_soon(
         # Audible's, and never reaches this handler.
         raise as_audible_failure(e, "Audible coming soon scan failed") from e
 
-    books.sort(key=lambda b: _release_dt(b) or datetime.max.replace(tzinfo=timezone.utc))
     took = round((time.monotonic() - start) * 1000, 2)
     logger.info("Requested Audible coming soon", extra={
         "region": region,

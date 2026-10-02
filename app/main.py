@@ -15,10 +15,10 @@ from fastapi.staticfiles import StaticFiles
 # Core
 from app.core.config import get_settings, check_retired_env_vars
 from app.core.logging import setup_logging, stop_axiom_listener
-from libex_core.exceptions import LibexException
+from libex_core.exceptions import AudibleAPIException, LibexException
 from app.core.middleware import setup_middleware
 from app.core.migration_notice import build_migration_notice, is_new_host_request, MIGRATION_HEADER_NAMES
-from app.core.response_headers import HEADER_REQUEST_ID, EXPOSED_HEADER_NAMES
+from app.core.response_headers import HEADER_REQUEST_ID, EXPOSED_HEADER_NAMES, RETRY_AFTER_SECONDS
 
 
 # Database
@@ -185,7 +185,7 @@ The book, series and author routes also report on the data in the body:
   | `hydration-not-found` | Audible has no record of the ASIN, or answered with a hollow, titleless stub instead of a book — also covers a titled record carrying Audible's 2200-01-01 placeholder date (bulk `/book` lists those in `placeholderRecords`) | No |
   | `hydration-failed` | Libex couldn't reach Audible for part of the request, and neither its stored DB copy nor its cache covered the gap | Yes, once Audible is reachable again |
   | `hydration-deadline` | The request ran out of its time budget before every element was fetched | Not currently emitted by any route — the one caller that imposes such a deadline reports completeness through a separate, coarser check instead |
-  | `discovery-incomplete` | Reserved for a catalogue walk that ends before it finishes enumerating what exists | Not currently emitted by any route |
+  | `discovery-incomplete` | Reserved for a catalogue walk that ends before it finishes enumerating what exists | Emitted by `GET /author/books?name=` when its catalogue walk stops early |
 
 All four headers are exposed through CORS, so browser JavaScript can read them
 directly off the response.
@@ -200,16 +200,28 @@ directly off the response.
   route (`/book/{asin}`, `/series/{asin}`, `/author/{asin}`), a missing
   element fails the whole request rather than returning a partial body —
   which is why those routes always read `true` at 200.
-- On the bulk `/book` route, ASINs Audible had no record of, or that Libex
-  couldn't fetch and had no stored copy of, are listed in
-  **`notFound`**, computed before filtering — a book that was found and then
-  removed by a filter parameter is never reported as missing. ASINs for which
+- On the bulk `/book` route, **`notFound`** lists only the ASINs Audible
+  confirmed it has no record of, computed before filtering — a book that was
+  found and then removed by a filter parameter is never reported as missing.
+  ASINs Libex couldn't fetch because Audible was unreachable, and had no
+  stored or cached copy of, are listed in **`notFetched`** instead — always
+  present, empty when nothing failed. Those are worth retrying; `notFound`
+  ones are not. ASINs for which
   Audible sent a placeholder record (one carrying its 2200-01-01 publication
-  date) are listed in **`placeholderRecords`** instead; `books`, `notFound`
-  and `placeholderRecords` never share an ASIN.
+  date) are listed in **`placeholderRecords`** instead; `books`, `notFound`,
+  `notFetched` and `placeholderRecords` never share an ASIN.
 - The two series-books routes (`/series/books/{asin}`, `/series/{asin}/books`)
   carry **no `notFound` field at all** — `X-Libex-Complete` and
   `X-Libex-Incomplete-Reason` are the only signal that a book is missing.
+
+## Audible outages
+
+When Audible can't be reached and Libex has nothing stored to answer with, the
+response is **503**, not 404 — the data isn't known to be absent, Libex just
+can't answer right now. It carries a `Retry-After: 30` header and
+`Cache-Control: no-store`, and the body is `{"error", "status_code": 503,
+"code": "upstream_unavailable", "retryAfter": 30}`. `retryAfter` appears only
+on these bodies.
 
 ## Caching
 
@@ -484,6 +496,24 @@ async def redoc() -> HTMLResponse:
 
 @app.exception_handler(LibexException)
 async def libex_exception_handler(request: Request, exc: LibexException) -> JSONResponse:
+    if isinstance(exc, AudibleAPIException):
+        # An outage is a temporary inability to answer, not an absence, so it
+        # is 503 with a retry hint, never a 404. The package keeps 502 on the
+        # exception itself; the mapping to 503 lives here, in the app. Only
+        # this branch carries retryAfter or the two headers.
+        return JSONResponse(
+            status_code=503,
+            headers={
+                "Retry-After": str(RETRY_AFTER_SECONDS),
+                "Cache-Control": "no-store",
+            },
+            content={
+                "error": exc.message,
+                "status_code": 503,
+                "code": "upstream_unavailable",
+                "retryAfter": RETRY_AFTER_SECONDS,
+            },
+        )
     return JSONResponse(
         status_code=exc.status_code,
         content={

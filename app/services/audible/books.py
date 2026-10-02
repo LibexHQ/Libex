@@ -282,6 +282,22 @@ def _has_uncovered(asins: list[str], covered: set[str]) -> bool:
     return any(asin not in covered for asin in asins)
 
 
+def _unfetched(asins: list[str], *covered: set[str] | list[str]) -> list[str]:
+    """
+    The ASINs in `asins`, in order and without repeats, that appear in none of
+    the `covered` collections.
+
+    Used to name what an Audible failure left with nothing at all: neither
+    fetched, nor answered from a stored or cached copy, nor confirmed absent
+    or placeholder by a chunk Audible did answer. Each covered argument is one
+    of those reasons an ASIN is accounted for.
+    """
+    accounted: set[str] = set()
+    for group in covered:
+        accounted.update(group)
+    return list(dict.fromkeys(a for a in asins if a not in accounted))
+
+
 def _window_elapsed(last_logged: float | None, now: float, interval: float) -> bool:
     """
     True when a windowed incident report is due: nothing reported yet, or the
@@ -1322,6 +1338,7 @@ async def get_books_by_asins(
     facts: ResponseFacts | None = None,
     persist_outcome: list[PersistOutcome] | None = None,
     placeholder_asins: list[str] | None = None,
+    not_fetched_asins: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Public entry point. Delegates to _get_books_by_asins_unsettled and settles
@@ -1367,6 +1384,19 @@ async def get_books_by_asins(
     chunk Audible answered. When any chunk did produce a book, an uncovered
     failed chunk only adds its ASINs to notFound. None leaves every other
     caller unchanged.
+
+    not_fetched_asins, when given, receives the requested ASINs that an
+    Audible failure (a transient error or an abandoned chunk) left with
+    nothing: never fetched, and with no stored or cached copy in the result
+    either. It is how a caller tells "Audible could not be reached for this
+    ASIN" from "Audible has no such book" -- a confirmed not-found or
+    placeholder ASIN is never listed. On a partial failure it holds the failed
+    chunks' ASINs the DB backstop did not cover. On a whole-request outage
+    that still finds some stored or cached copy, it holds every requested ASIN
+    that copy does not cover, minus the not-found and placeholder ASINs chunks
+    Audible did answer had already confirmed. When the outage finds no copy of
+    anything, the call raises (see as_audible_failure) and the list is left
+    empty. None leaves every other caller unchanged.
     """
     books = await _get_books_by_asins_unsettled(
         asins,
@@ -1378,6 +1408,7 @@ async def get_books_by_asins(
         facts=facts,
         persist_outcome=persist_outcome,
         placeholder_asins=placeholder_asins,
+        not_fetched_asins=not_fetched_asins,
     )
     return _settle_flags_list(books)
 
@@ -1393,6 +1424,7 @@ async def _get_books_by_asins_unsettled(
     facts: ResponseFacts | None = None,
     persist_outcome: list[PersistOutcome] | None = None,
     placeholder_asins: list[str] | None = None,
+    not_fetched_asins: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Fetches one or more books by ASIN from Audible.
@@ -1441,6 +1473,14 @@ async def _get_books_by_asins_unsettled(
     fallback; if no stored or cached copy of any requested ASIN exists
     either, it ends as a route-level 404, so the list is then never seen by
     the caller, placeholders from answered chunks included.
+
+    not_fetched_asins, when given, is extended with the requested ASINs an
+    Audible failure left with nothing -- see get_books_by_asins for the
+    contract. Filled at the two places a failure is covered: the partial
+    path, from transient_failed_asins minus what the DB backstop returned, and
+    the outage fallback, from fetch_asins minus what the DB or cache fallback
+    returned and minus the not-found and placeholder ASINs already confirmed
+    by chunks that answered. The outage branch's final raise leaves it empty.
     """
     if not asins:
         raise NotFoundException("No ASINs provided")
@@ -1501,6 +1541,12 @@ async def _get_books_by_asins_unsettled(
     # outage fallback in the except branch -- each open their own transaction
     # on their next statement, which SQLAlchemy re-acquires transparently.
     await session.rollback()
+
+    # Declared ahead of the try so the outage fallback below can subtract what
+    # chunks Audible did answer already confirmed, whatever point the failure
+    # that sent it there came from.
+    not_found_asins: list[str] = []
+    placeholders: list[str] = []
 
     try:
         start = time.monotonic()
@@ -1570,10 +1616,8 @@ async def _get_books_by_asins_unsettled(
         requested_took = round((time.monotonic() - start) * 1000, 2)
 
         all_products: list[dict[str, Any]] = []
-        not_found_asins: list[str] = []
         deadline_asins: list[str] = []
         transient_failed_asins: list[str] = []
-        placeholders: list[str] = []
         transient_errors: list[Exception] = []
 
         for idx, (chunk, result) in enumerate(zip(chunks, results)):
@@ -1687,6 +1731,10 @@ async def _get_books_by_asins_unsettled(
                 record_incomplete(facts, REASON_HYDRATION_DEADLINE)
             if _has_uncovered(other_failed_asins, backstop_asins):
                 record_incomplete(facts, REASON_HYDRATION_FAILED)
+            if not_fetched_asins is not None:
+                not_fetched_asins.extend(
+                    _unfetched(transient_failed_asins, backstop_asins)
+                )
 
         normalized = await _normalize_products(all_products, region)
 
@@ -1730,6 +1778,10 @@ async def _get_books_by_asins_unsettled(
             db_asins = {b["asin"] for b in db_results}
             if _has_uncovered(fetch_asins, db_asins):
                 record_incomplete(facts, REASON_HYDRATION_FAILED)
+            if not_fetched_asins is not None:
+                not_fetched_asins.extend(
+                    _unfetched(fetch_asins, db_asins, not_found_asins, placeholders)
+                )
             return cached_results + db_results
 
         # Fall back to cache for the misses -- one lookup, same as the
@@ -1760,6 +1812,10 @@ async def _get_books_by_asins_unsettled(
             fallback_asins = {b["asin"] for b in fallback_results}
             if _has_uncovered(fetch_asins, fallback_asins):
                 record_incomplete(facts, REASON_HYDRATION_FAILED)
+            if not_fetched_asins is not None:
+                not_fetched_asins.extend(
+                    _unfetched(fetch_asins, fallback_asins, not_found_asins, placeholders)
+                )
             return cached_results + fallback_results
 
         # Neither a stored copy nor a cached one exists -- that is silence,

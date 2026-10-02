@@ -107,12 +107,11 @@ FACTS_RESPONSE_HEADERS = {
             "either. Not emitted by any route today -- the one caller that "
             "imposes such a deadline reports completeness through a "
             "separate, coarser check instead of this header. "
-            "discovery-incomplete -- reserved for the catalogue walk that "
-            "enumerates which elements exist ending before it finished, "
-            "before any element it found was fetched. Emitted by "
-            "/author/books?name= when its walk ends without confirming the "
-            "catalogue is whole; the body then holds the books gathered so "
-            "far."
+            "discovery-incomplete -- the catalogue walk that enumerates "
+            "which elements exist ended before it finished, before any "
+            "element it found was fetched. Emitted by GET "
+            "/author/books?name= when its catalogue walk stops early; the "
+            "body then holds the books gathered so far."
         ),
         "schema": {"type": "string"},
     },

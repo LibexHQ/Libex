@@ -1,21 +1,34 @@
 """
 What `LocalStore` hands asyncpg for a Postgres URL: every connection
 parameter, so the driver reads nothing from `PG*` variables, `~/.pgpass` or
-`~/.postgresql`. No database needed; the real-server proof is in
-test_store_postgres_environment.
+`~/.postgresql`; and which failures let it try the other transport. No
+database needed; the real-server proof is in test_store_postgres_environment.
 """
 
 # Standard library
 import ssl
+import sys
 
 # Third party
 import asyncpg
 import pytest
 
 # Local
-from libex_core.storage.store import LocalStore, StoreConfigError, _postgres_creator, _validate
+from libex_core.storage import store as store_module
+from libex_core.storage.store import (
+    LocalStore,
+    StoreConfigError,
+    StoreConnectionError,
+    _postgres_creator,
+    _validate,
+)
 
 BASE = "postgresql+asyncpg://u:pw@db.example:6543/d"
+
+# What asyncpg raises when the server answers the SSLRequest with a refusal.
+TLS_REFUSED = ConnectionError("rejected SSL upgrade")
+# What a server that insists on encryption answers a plain attempt with.
+NOT_ENCRYPTED = asyncpg.InvalidAuthorizationSpecificationError("no encryption")
 
 
 class _Fake:
@@ -30,13 +43,29 @@ class _Fake:
         return "connection"
 
 
-async def _connect(monkeypatch, url, refuse=()):
+async def _attempt(monkeypatch, url, refuse=()):
+    """Runs the creator; returns the calls made and what it raised, if anything."""
     fake = _Fake(refuse)
     monkeypatch.setattr(asyncpg, "connect", fake)
     try:
         await _postgres_creator(_validate(url))()
-    finally:
-        return fake.calls
+    except Exception as exc:
+        return fake.calls, exc
+    return fake.calls, None
+
+
+async def _connect(monkeypatch, url, refuse=()):
+    """The calls made. An error the creator raises fails the test, so a
+    helper never hides one."""
+    calls, exc = await _attempt(monkeypatch, url, refuse)
+    if exc is not None:
+        raise exc
+    return calls
+
+
+def _transports(calls):
+    """True for each encrypted attempt, False for each plain one."""
+    return [call["ssl"] is not False for call in calls]
 
 
 async def test_every_parameter_is_given_so_the_driver_has_nothing_to_look_up(monkeypatch):
@@ -45,8 +74,11 @@ async def test_every_parameter_is_given_so_the_driver_has_nothing_to_look_up(mon
     assert (call["user"], call["password"], call["database"]) == ("u", "pw", "d")
     assert isinstance(call["ssl"], ssl.SSLContext)
     # Each of these is read from the environment by asyncpg when left as None.
-    for name in ("direct_tls", "target_session_attrs", "krbsrvname", "gsslib"):
-        assert call[name] is not None, name
+    assert call["direct_tls"] is False
+    assert call["target_session_attrs"] == "any"
+    assert call["krbsrvname"] == "postgres"
+    assert call["gsslib"] == ("sspi" if sys.platform == "win32" else "gssapi")
+    assert call["server_settings"] is None
     assert "dsn" not in call and "passfile" not in call and "servicefile" not in call
 
 
@@ -56,35 +88,115 @@ async def test_a_url_without_a_password_connects_with_an_empty_one_not_none(monk
 
 
 async def test_the_default_is_encrypt_if_offered_then_plain(monkeypatch):
-    first, second = await _connect(monkeypatch, BASE, refuse=[ConnectionError("no tls")])
+    first, second = await _connect(monkeypatch, BASE, refuse=[TLS_REFUSED])
     assert isinstance(first["ssl"], ssl.SSLContext) and second["ssl"] is False
     assert first["ssl"].verify_mode == ssl.CERT_NONE
 
 
 async def test_require_and_verify_never_fall_back_to_plain(monkeypatch):
     for mode in ("require", "verify-ca", "verify-full"):
-        calls = await _connect(monkeypatch, f"{BASE}?ssl={mode}", refuse=[ConnectionError("no tls")])
-        assert len(calls) == 1, mode
+        for refusal in (TLS_REFUSED, NOT_ENCRYPTED, ConnectionResetError("x")):
+            calls, exc = await _attempt(monkeypatch, f"{BASE}?ssl={mode}", refuse=[refusal])
+            assert _transports(calls) == [True], mode
+            assert exc is refusal, mode
+
+
+async def test_disable_makes_one_plain_attempt(monkeypatch):
+    calls, exc = await _attempt(monkeypatch, BASE + "?ssl=disable", refuse=[NOT_ENCRYPTED])
+    assert _transports(calls) == [False] and exc is NOT_ENCRYPTED
 
 
 async def test_verify_modes_verify_and_the_others_do_not(monkeypatch):
     (ca,) = await _connect(monkeypatch, BASE + "?ssl=verify-ca")
     (full,) = await _connect(monkeypatch, BASE + "?ssl=verify-full")
     (req,) = await _connect(monkeypatch, BASE + "?ssl=require")
+    (pref,) = await _connect(monkeypatch, BASE)
     assert (ca["ssl"].verify_mode, ca["ssl"].check_hostname) == (ssl.CERT_REQUIRED, False)
     assert (full["ssl"].verify_mode, full["ssl"].check_hostname) == (ssl.CERT_REQUIRED, True)
     assert (req["ssl"].verify_mode, req["ssl"].check_hostname) == (ssl.CERT_NONE, False)
+    assert (pref["ssl"].verify_mode, pref["ssl"].check_hostname) == (ssl.CERT_NONE, False)
     assert full["ssl"].minimum_version >= ssl.TLSVersion.TLSv1_2
 
 
+async def test_only_the_verifying_modes_load_the_system_trust_store(monkeypatch):
+    loaded = []
+    monkeypatch.setattr(
+        ssl.SSLContext, "load_default_certs", lambda self, *a, **k: loaded.append(self)
+    )
+    for mode, expected in (
+        ("verify-ca", 1), ("verify-full", 1), ("require", 0), ("allow", 0), ("disable", 0),
+    ):
+        loaded.clear()
+        await _connect(monkeypatch, f"{BASE}?ssl={mode}")
+        assert len(loaded) == expected, mode
+    loaded.clear()
+    await _connect(monkeypatch, BASE)
+    assert loaded == []
+
+
 async def test_allow_tries_plain_first(monkeypatch):
-    first, second = await _connect(monkeypatch, BASE + "?ssl=allow", refuse=[ConnectionError("x")])
+    first, second = await _connect(monkeypatch, BASE + "?ssl=allow", refuse=[NOT_ENCRYPTED])
     assert first["ssl"] is False and isinstance(second["ssl"], ssl.SSLContext)
 
 
+@pytest.mark.parametrize("refusal", [
+    ConnectionRefusedError("refused"),
+    ConnectionResetError("reset"),
+    ConnectionError("unexpected connection_lost() call"),
+    ssl.SSLError("handshake"),
+    asyncpg.InvalidPasswordError("bad"),
+    asyncpg.InvalidAuthorizationSpecificationError("no encryption"),
+    ValueError("boom"),
+])
+async def test_prefer_retries_plain_only_when_the_server_refused_tls(monkeypatch, refusal):
+    calls, exc = await _attempt(monkeypatch, BASE, refuse=[refusal])
+    assert _transports(calls) == [True]
+    assert exc is refusal
+
+
+async def test_prefer_retries_plain_on_the_refusal_signal_alone(monkeypatch):
+    calls, exc = await _attempt(monkeypatch, BASE, refuse=[TLS_REFUSED])
+    assert _transports(calls) == [True, False] and exc is None
+
+
+async def test_a_wrong_password_is_never_sent_again_over_plain_on_prefer(monkeypatch):
+    bad = asyncpg.InvalidPasswordError("password authentication failed")
+    calls, exc = await _attempt(monkeypatch, BASE, refuse=[bad])
+    assert _transports(calls) == [True]
+    assert exc is bad
+
+
+async def test_a_wrong_password_ends_allow_after_the_plain_attempt(monkeypatch):
+    bad = asyncpg.InvalidPasswordError("password authentication failed")
+    calls, exc = await _attempt(monkeypatch, BASE + "?ssl=allow", refuse=[bad])
+    assert _transports(calls) == [False]
+    assert exc is bad
+
+
+@pytest.mark.parametrize("refusal", [
+    ConnectionRefusedError("refused"), ConnectionResetError("reset"), TLS_REFUSED,
+])
+async def test_allow_retries_encrypted_only_when_the_server_wants_encryption(monkeypatch, refusal):
+    calls, exc = await _attempt(monkeypatch, BASE + "?ssl=allow", refuse=[refusal])
+    assert _transports(calls) == [False] and exc is refusal
+
+
+async def test_a_wrong_password_reaches_the_caller_as_a_connection_error_with_one_attempt(monkeypatch):
+    fake = _Fake([asyncpg.InvalidPasswordError("password authentication failed for hunter2")])
+    monkeypatch.setattr(asyncpg, "connect", fake)
+    store = LocalStore(BASE)
+    try:
+        with pytest.raises(StoreConnectionError) as caught:
+            await store.status()
+    finally:
+        await store.close()
+    assert _transports(fake.calls) == [True]
+    assert "InvalidPasswordError" in str(caught.value) and "hunter2" not in str(caught.value)
+
+
 async def test_an_unrelated_error_is_not_retried(monkeypatch):
-    calls = await _connect(monkeypatch, BASE, refuse=[ValueError("boom")])
-    assert len(calls) == 1
+    calls, exc = await _attempt(monkeypatch, BASE, refuse=[ValueError("boom")])
+    assert len(calls) == 1 and isinstance(exc, ValueError)
 
 
 async def test_application_name_goes_in_as_a_server_setting(monkeypatch):
@@ -96,3 +208,14 @@ def test_an_unknown_ssl_mode_is_refused_without_quoting_it():
     with pytest.raises(StoreConfigError) as caught:
         LocalStore(BASE + "?ssl=hunter2")
     assert "hunter2" not in str(caught.value)
+
+
+def test_the_attempt_table_matches_the_documented_modes():
+    assert store_module._TLS_ATTEMPTS == {
+        "disable": (False,),
+        "allow": (False, True),
+        "prefer": (True, False),
+        "require": (True,),
+        "verify-ca": (True,),
+        "verify-full": (True,),
+    }

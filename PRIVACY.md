@@ -383,8 +383,8 @@ behaviour described is in `libex_core/audible/client.py`, with the logging of
 individual titles in `libex_core/audible/books.py` and
 `libex_core/audible/extras.py`, searching in `libex_core/audible/search.py`,
 author lookups in `libex_core/audible/authors/`, browsing new releases,
-coming soon and categories in `libex_core/audible/releases.py`, and the
-command-line tool in
+coming soon and categories in `libex_core/audible/releases.py`, the optional
+storage in `libex_core/storage/`, and the command-line tool in
 `libex_core/cli/`.
 
 If you are using an application that contains this library, that
@@ -427,10 +427,22 @@ The library is built around preventing that from happening by accident:
 - **No telemetry.** It has no analytics, usage reporting, version check, crash
   reporting or any other call home. It cannot import the Axiom client, and a
   test fails if that ever changes.
-- **No storage.** It writes no files, opens no database and keeps no cache.
-  Nothing about a lookup outlasts the call that made it. An optional local
-  record of titles already seen has been considered but not built. If it is
-  ever added, this section will change with it.
+- **Nothing is stored unless the application asks.** Looking something up
+  writes no files, opens no database and keeps no cache, so on its own nothing
+  about a lookup outlasts the call that made it. The library also has an
+  optional storage part, `libex_core.storage`, installed separately as the
+  `storage` extra, which can write what was fetched into a SQLite or
+  PostgreSQL database. It never opens or creates that database itself: the
+  application does, and decides where it lives and what goes into it. What
+  it writes is Audible's catalogue data, the same kind the public instance's
+  database holds, with no field about the person who looked it up. On
+  someone's own device, though, the titles stored are the titles looked up,
+  and each stored row records when it was first written and last updated, so
+  a local store is part of that person's reading history, with dates. For a
+  SQLite file, the library's set-up turns on write-ahead logging, which keeps
+  recent writes in a second file beside the database (ending in `-wal`) until
+  they are moved into the main file. Deleting only the main file can leave
+  them behind.
 - **The `libex-core` command reads two environment variables.** The
   command-line tool that comes with the library takes its proxy from
   `LIBEX_CORE_PROXY_URL` and its permission to connect directly from
@@ -446,10 +458,11 @@ The library is built around preventing that from happening by accident:
   the value of either variable.
 - **Its logs go where the application sends them.** It writes to the standard
   Python logger named `libex`, so its records end up wherever the host
-  application's logging is configured to send them. There are nine:
+  application's logging is configured to send them. There are ten:
   - closing a stale connection fails (debug): a traceback;
   - request throttled or degraded by Audible: status, region, API path (with the ASIN for a lookup of a single title or author), pool, attempt count, the wait Audible asked for;
   - malformed author ASIN: title ASIN, region, the malformed value, the author's name;
+  - unreadable publication date, only when storing: title ASIN and the kind of value, not the value;
   - unreadable subscription plans: title ASIN, a count;
   - extra data cleaned up or held back: title ASIN, region, the reason, a count and, if oversized, its size; none of the data itself;
   - an author's book list from Audible's author page ended without a confirmed end: author ASIN, region, why it stopped, pages fetched, books found, Audible's own count, how much was cut off, and the error message if a page failed;
@@ -461,7 +474,9 @@ The library is built around preventing that from happening by accident:
   (extras, once a minute per reason), naming only the latest title. Only the region and the
   looked-up ASIN come from the caller: query parameters, where search text and
   author names would appear, are left out, and any ASIN, name or value not
-  shaped like an ASIN or a short catalogue entry is logged as `REDACTED`. An
+  shaped like an ASIN or a short catalogue entry is logged as `REDACTED`. The
+  unreadable-publication-date record is the exception: its title ASIN comes
+  from data the application chose to store and is logged without that check. An
   error message is whatever the request function raised. The library's own
   client builds its messages from Audible's host and the API path, never the
   query string. An application that passes in a request function of its own

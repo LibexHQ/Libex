@@ -336,14 +336,16 @@ class BulkBookResponse(BaseModel):
     notFound: list[str] = Field(
         default_factory=list,
         description=(
-            "Requested ASINs Audible could not resolve, computed before "
-            "filtering is applied. A book that was found and then removed "
-            "by a filter is not reported here -- it is simply absent from "
-            "both books and notFound. ASINs for which Audible sent a "
-            "placeholder record are listed in placeholderRecords instead. "
-            "This list also holds ASINs Libex could not fetch in this "
-            "request and had no stored copy of; X-Libex-Incomplete-Reason "
-            "tells those apart from ASINs Audible has no record of."
+            "Requested ASINs Audible confirmed it has no record of, "
+            "computed before filtering is applied. A book that was found "
+            "and then removed by a filter is not reported here -- it is "
+            "simply absent from both books and notFound. ASINs for which "
+            "Audible sent a placeholder record are listed in "
+            "placeholderRecords instead, and ASINs Libex could not look up "
+            "because Audible was unreachable are listed in notFetched "
+            "instead. An ASIN in notFound is a confirmed absence; retrying "
+            "will not change it. ASINs are given as the caller sent them, "
+            "in request order."
         ),
     )
     placeholderRecords: list[str] = Field(
@@ -355,6 +357,20 @@ class BulkBookResponse(BaseModel):
             "deliberately left out of books, and never appear in books or "
             "notFound as well. ASINs are given as the caller sent them, in "
             "request order, and computed before filtering is applied. "
+            "Always present; empty when there are none."
+        ),
+    )
+    notFetched: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Requested ASINs Libex could not look up in this request "
+            "because Audible was unreachable and neither the stored "
+            "database copy nor the cache had them. Unlike notFound this is "
+            "not a statement about the ASIN: retry later, and the ASIN may "
+            "resolve. Never appears in books, notFound or placeholderRecords "
+            "as well. ASINs are given as the caller sent them, in request "
+            "order, and computed before filtering is applied. "
+            "X-Libex-Incomplete-Reason says why the response is partial. "
             "Always present; empty when there are none."
         ),
     )

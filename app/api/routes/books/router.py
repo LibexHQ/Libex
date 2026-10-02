@@ -16,7 +16,7 @@ from app.db.session import get_session
 
 # Routes
 from app.api.routes.errors import ERROR_RESPONSES
-from app.api.routes.audible_outage import outage_as_not_found
+from app.api.routes.audible_outage import outage_as_unavailable
 from app.api.routes.cache_param import CacheStandardParam, apply_cache_control
 from app.api.routes.facts_headers import FACTS_RESPONSE_HEADERS, stamp_facts_headers
 from app.api.routes.large_response import build_large_list_response
@@ -70,7 +70,7 @@ async def get_book(
     Returns a single book object directly.
     """
     facts = ResponseFacts()
-    data = await outage_as_not_found(get_book_by_asin(asin, region, session, cache, facts=facts))
+    data = await outage_as_unavailable(get_book_by_asin(asin, region, session, cache, facts=facts))
     apply_cache_control(response, cache)
     stamp_facts_headers(response, facts, has_entities=True)
     return BookResponse(**data)
@@ -85,7 +85,7 @@ async def get_book_chapters(
 ) -> ChapterResponse:
     """Get chapter information for a book by ASIN."""
     facts = ResponseFacts()
-    data = await outage_as_not_found(get_chapters(asin, region, session, facts=facts))
+    data = await outage_as_unavailable(get_chapters(asin, region, session, facts=facts))
     stamp_facts_headers(response, facts, has_entities=True)
     return ChapterResponse(**data)
 
@@ -104,7 +104,7 @@ async def get_book_chapters_legacy(
 ) -> ChapterResponse:
     """Legacy endpoint. Use /book/{asin}/chapters instead."""
     facts = ResponseFacts()
-    data = await outage_as_not_found(get_chapters(asin, region, session, facts=facts))
+    data = await outage_as_unavailable(get_chapters(asin, region, session, facts=facts))
     stamp_facts_headers(response, facts, has_entities=True)
     return ChapterResponse(**data)
 
@@ -123,8 +123,10 @@ async def get_books_bulk(
     """
     Get multiple books by ASIN.
     Accepts all three forms: ?asins=X,Y — ?asins=X&asins=Y — ?asins=X,Y&asins=Z
-    Returns {"books": [...], "notFound": [...], "placeholderRecords": [...]};
-    the bulk envelope is Libex's own, not a copy of AudiMeta's.
+    Returns {"books": [...], "notFound": [...], "placeholderRecords": [...],
+    "notFetched": [...]}; the bulk envelope is Libex's own, not a copy of
+    AudiMeta's. Returns 503 with Retry-After if Audible can't be reached and
+    no requested book could be served (code `upstream_unavailable`).
     """
     asin_list = [
         a.strip()
@@ -152,27 +154,41 @@ async def get_books_bulk(
 
     facts = ResponseFacts()
     placeholders: list[str] = []
-    data = await outage_as_not_found(
+    unfetched: list[str] = []
+    data = await outage_as_unavailable(
         get_books_by_asins(
-            asin_list, region, session, cache, facts=facts, placeholder_asins=placeholders
+            asin_list,
+            region,
+            session,
+            cache,
+            facts=facts,
+            placeholder_asins=placeholders,
+            not_fetched_asins=unfetched,
         )
     )
 
-    # notFound holds ASINs Audible didn't have or Libex couldn't fetch —
-    # computed before filtering, so a book that was found but filtered out is
-    # not reported as missing. Both sides are normalised so the caller's form
-    # and the product's form are compared on equal terms.
+    # notFound holds ASINs Audible confirmed it doesn't have; notFetched holds
+    # ASINs an outage kept Libex from finding out about. Both are computed
+    # before filtering, so a book that was found but filtered out is not
+    # reported as missing. Both sides are normalised so the caller's form and
+    # the product's form are compared on equal terms.
     found_asins = {normalise_asin(book["asin"]) for book in data}
     placeholder_set = {normalise_asin(a) for a in placeholders} - found_asins
-    # Found wins, then placeholder: books, placeholderRecords and notFound
-    # never share an ASIN.
+    not_fetched_set = {normalise_asin(a) for a in unfetched} - found_asins - placeholder_set
+    # Found wins, then placeholder, then notFetched: books, placeholderRecords,
+    # notFetched and notFound never share an ASIN.
     placeholder_records = [
         a for a in original_asin_list if normalise_asin(a) in placeholder_set
+    ]
+    not_fetched = [
+        a for a in original_asin_list if normalise_asin(a) in not_fetched_set
     ]
     not_found = [
         a
         for a in original_asin_list
-        if normalise_asin(a) not in found_asins and normalise_asin(a) not in placeholder_set
+        if normalise_asin(a) not in found_asins
+        and normalise_asin(a) not in placeholder_set
+        and normalise_asin(a) not in not_fetched_set
     ]
 
     data = filter_dicts(data, filters.as_kwargs())
@@ -188,6 +204,7 @@ async def get_books_bulk(
             books=[BookResponse(**book) for book in data],
             notFound=not_found,
             placeholderRecords=placeholder_records,
+            notFetched=not_fetched,
         ),
         injected_response=response,
     )

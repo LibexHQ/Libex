@@ -7,6 +7,10 @@ fails by name. The tables are exhaustive for app/api/routes/**: 17 sites in
 db/router.py, 4 in books/router.py, 7 in search/router.py, 4 in series, 4 in
 authors, 1 in narrators and 3 in releases. Sites that rely on the class
 default (not_on_audible) are pinned too, since the default is what they mean.
+
+The outage rows at the end pin the other half: every live route's
+AudibleAPIException answers 503 with `upstream_unavailable`, Retry-After and
+no-store, carrying the route's own literal where the route has one.
 """
 
 # Standard library
@@ -15,6 +19,10 @@ from unittest.mock import AsyncMock, patch
 
 # Third party
 import pytest
+
+# Local
+from libex_core.exceptions import AudibleAPIException
+from tests.fixtures.outage import assert_outage_503
 
 ASIN = "B08G9PRS1K"
 DB = "app.api.routes.db.router."
@@ -195,3 +203,51 @@ async def test_live_route_genuine_empty_is_not_on_audible(async_client, path, mo
 
     assert response.status_code == 404
     assert response.json() == {"error": message, "status_code": 404, "code": "not_on_audible"}
+
+
+# ============================================================
+# Audible outage -- every live route answers 503 upstream_unavailable
+# ============================================================
+
+# (id, path, router module, service name, message the 503 carries). A route
+# with its own literal for the failed lookup shows that literal; the rest show
+# the service's message.
+_SERVICE_MESSAGE = "Audible service failure"
+_OUTAGE_SITES = [
+    ("book", f"/book/{ASIN}", "books", "get_book_by_asin", _SERVICE_MESSAGE),
+    ("book_chapters", f"/book/{ASIN}/chapters", "books", "get_chapters", _SERVICE_MESSAGE),
+    ("book_chapters_legacy", f"/book/chapters/{ASIN}", "books", "get_chapters", _SERVICE_MESSAGE),
+    ("book_bulk", f"/book?asins={ASIN}", "books", "get_books_by_asins", _SERVICE_MESSAGE),
+    ("search", "/search?title=x", "search", "search", "No books found"),
+    ("quick_search", "/quick-search?keywords=x", "search", "quick_search", "No books found"),
+    ("abs_search", "/us/search?title=x", "search", "search", "No books found"),
+    ("abs_quick_search", "/us/quick-search/search?keywords=x", "search", "quick_search", "No books found"),
+    ("narrator_books", "/narrator/books?name=Nobody", "narrators", "search", "No books found for narrator: Nobody"),
+    ("series_search", "/series/search?name=x", "series", "search_series", _SERVICE_MESSAGE),
+    ("series_search_legacy", "/series?name=x", "series", "search_series", _SERVICE_MESSAGE),
+    ("series_books", f"/series/books/{ASIN}", "series", "get_series_books", _SERVICE_MESSAGE),
+    ("series_books_legacy", f"/series/{ASIN}/books", "series", "get_series_books", _SERVICE_MESSAGE),
+    ("series", f"/series/{ASIN}", "series", "get_series", _SERVICE_MESSAGE),
+    ("authors_search", "/author?name=x", "authors", "search_authors", _SERVICE_MESSAGE),
+    ("authors_books_by_name", "/author/books?name=x", "authors", "get_author_books_by_name", _SERVICE_MESSAGE),
+    ("authors_books", f"/author/books/{ASIN}", "authors", "get_author_books", _SERVICE_MESSAGE),
+    ("authors_books_legacy", f"/author/{ASIN}/books", "authors", "get_author_books", _SERVICE_MESSAGE),
+    ("author", f"/author/{ASIN}", "authors", "get_author", _SERVICE_MESSAGE),
+    ("releases_new", "/new-releases", "releases", "get_new_releases", "No new releases found"),
+    ("releases_coming_soon", "/coming-soon", "releases", "get_coming_soon", "No upcoming releases found"),
+    ("releases_categories", "/categories", "releases", "_ensure_genres", "No categories available"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path,module,service,message",
+    [c[1:] for c in _OUTAGE_SITES],
+    ids=[c[0] for c in _OUTAGE_SITES],
+)
+async def test_live_route_outage_is_503_upstream_unavailable(async_client, path, module, service, message):
+    with patch(f"app.api.routes.{module}.router.{service}", new_callable=AsyncMock) as mock:
+        mock.side_effect = AudibleAPIException(_SERVICE_MESSAGE)
+        response = await async_client.get(path)
+
+    assert_outage_503(response, message)

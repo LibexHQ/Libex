@@ -15,6 +15,7 @@ from httpx import AsyncClient, ASGITransport
 from app.main import app
 from app.api.routes.large_response import LARGE_RESPONSE_THREAD_THRESHOLD
 from libex_core.exceptions import AudibleAPIException, NotFoundException
+from tests.fixtures.outage import assert_outage_503
 from app.core.response_headers import (
     REASON_HYDRATION_FAILED,
     SOURCE_AUDIBLE,
@@ -703,8 +704,9 @@ async def test_get_books_bulk_source_header_false_on_a_real_hydration_shortfall(
     the real stack is actually reachable. Audible down, no pre-fetch cache
     hit for either ASIN, and the DB fallback recovering only one of the
     two -- the response must be marked incomplete with the hydration-failed
-    token, and the uncovered ASIN must show up in notFound, not silently
-    vanish."""
+    token, and the uncovered ASIN must show up in notFetched (Audible was
+    unreachable, so it was never confirmed absent), not in notFound and not
+    silently vanish."""
     recovered_asin = MOCK_BOOK["asin"]
     missing_asin = "B000000001"
     recovered_book = {**MOCK_BOOK}
@@ -723,7 +725,8 @@ async def test_get_books_bulk_source_header_false_on_a_real_hydration_shortfall(
     assert response.status_code == 200
     data = response.json()
     assert [b["asin"] for b in data["books"]] == [recovered_asin]
-    assert data["notFound"] == [missing_asin]
+    assert data["notFetched"] == [missing_asin]
+    assert data["notFound"] == []
     assert response.headers["x-libex-source"] == "db"
     assert response.headers["x-libex-complete"] == "false"
     assert response.headers["x-libex-incomplete-reason"] == "hydration-failed"
@@ -732,7 +735,7 @@ async def test_get_books_bulk_source_header_false_on_a_real_hydration_shortfall(
 @pytest.mark.asyncio
 async def test_get_books_bulk_source_header_is_mixed_with_counts_summing_to_the_body(async_client):
     async def fake_get_books_by_asins(
-        asin_list, region, session, cache, *, facts=None, placeholder_asins=None
+        asin_list, region, session, cache, *, facts=None, placeholder_asins=None, not_fetched_asins=None
     ):
         record_source_keys(facts, SOURCE_AUDIBLE, ["B000000000", "B000000001"])
         record_source_keys(facts, SOURCE_CACHE, ["B000000002"])
@@ -768,7 +771,7 @@ async def test_get_books_bulk_can_be_both_mixed_source_and_incomplete_at_once(as
     load-bearing, not incidental set dressing."""
 
     async def fake_get_books_by_asins(
-        asin_list, region, session, cache, *, facts=None, placeholder_asins=None
+        asin_list, region, session, cache, *, facts=None, placeholder_asins=None, not_fetched_asins=None
     ):
         record_source_keys(facts, SOURCE_AUDIBLE, ["B000000000"])
         record_source_keys(facts, SOURCE_DB, ["B000000001"])
@@ -794,7 +797,7 @@ async def test_get_books_bulk_source_header_omitted_when_post_filter_body_is_emp
     source attributed to zero returned elements."""
 
     async def fake_get_books_by_asins(
-        asin_list, region, session, cache, *, facts=None, placeholder_asins=None
+        asin_list, region, session, cache, *, facts=None, placeholder_asins=None, not_fetched_asins=None
     ):
         record_source(facts, SOURCE_AUDIBLE, 1)
         return [MOCK_BOOK]  # rating 4.5
@@ -822,7 +825,7 @@ async def test_get_books_bulk_source_header_names_only_the_filter_survivors_sour
     cache_book = {**MOCK_BOOK, "asin": "B000000002", "rating": 1.0}
 
     async def fake_get_books_by_asins(
-        asin_list, region, session, cache, *, facts=None, placeholder_asins=None
+        asin_list, region, session, cache, *, facts=None, placeholder_asins=None, not_fetched_asins=None
     ):
         record_source_keys(facts, SOURCE_AUDIBLE, [audible_book["asin"]])
         record_source_keys(facts, SOURCE_CACHE, [cache_book["asin"]])
@@ -855,7 +858,7 @@ async def test_bulk_books_above_threshold_still_carries_facts_and_cache_headers(
     found_asins = [b["asin"] for b in books]
 
     async def fake_get_books_by_asins(
-        asin_list, region, session, cache, *, facts=None, placeholder_asins=None
+        asin_list, region, session, cache, *, facts=None, placeholder_asins=None, not_fetched_asins=None
     ):
         record_source_keys(facts, SOURCE_AUDIBLE, found_asins)
         return books
@@ -873,71 +876,51 @@ async def test_bulk_books_above_threshold_still_carries_facts_and_cache_headers(
 
 
 # ============================================================
-# AUDIBLE OUTAGE CONTRACT — AudibleAPIException still comes back as the
-# same 404 HEAD produced, byte for byte, via outage_as_not_found
+# AUDIBLE OUTAGE CONTRACT — AudibleAPIException comes back as a 503 with
+# Retry-After, via outage_as_unavailable and the handler in app.main
 # ============================================================
 
 @pytest.mark.asyncio
-async def test_get_book_outage_returns_404_matching_head(async_client):
+async def test_get_book_outage_returns_503_with_retry_after(async_client):
     with patch("app.api.routes.books.router.get_book_by_asin", new_callable=AsyncMock) as mock:
         mock.side_effect = AudibleAPIException("Audible unavailable and no cached data found")
         response = await async_client.get("/book/B08G9PRS1K")
 
-    assert response.status_code == 404
-    assert response.json() == {
-        "error": "Audible unavailable and no cached data found",
-        "status_code": 404,
-        "code": "upstream_unavailable",
-    }
+    assert_outage_503(response, "Audible unavailable and no cached data found")
 
 
 @pytest.mark.asyncio
-async def test_get_book_chapters_outage_returns_404_matching_head(async_client):
+async def test_get_book_chapters_outage_returns_503_with_retry_after(async_client):
     with patch("app.api.routes.books.router.get_chapters", new_callable=AsyncMock) as mock:
         mock.side_effect = AudibleAPIException("Audible unavailable and no cached chapter data found")
         response = await async_client.get("/book/B08G9PRS1K/chapters")
 
-    assert response.status_code == 404
-    assert response.json() == {
-        "error": "Audible unavailable and no cached chapter data found",
-        "status_code": 404,
-        "code": "upstream_unavailable",
-    }
+    assert_outage_503(response, "Audible unavailable and no cached chapter data found")
 
 
 @pytest.mark.asyncio
-async def test_get_book_chapters_legacy_outage_returns_404_matching_head(async_client):
+async def test_get_book_chapters_legacy_outage_returns_503_with_retry_after(async_client):
     """Legacy twin (/book/chapters/{asin}) must not diverge."""
     with patch("app.api.routes.books.router.get_chapters", new_callable=AsyncMock) as mock:
         mock.side_effect = AudibleAPIException("Audible unavailable and no cached chapter data found")
         response = await async_client.get("/book/chapters/B08G9PRS1K")
 
-    assert response.status_code == 404
-    assert response.json() == {
-        "error": "Audible unavailable and no cached chapter data found",
-        "status_code": 404,
-        "code": "upstream_unavailable",
-    }
+    assert_outage_503(response, "Audible unavailable and no cached chapter data found")
 
 
 @pytest.mark.asyncio
-async def test_bulk_books_outage_returns_404_matching_head(async_client):
+async def test_bulk_books_outage_returns_503_with_retry_after(async_client):
     with patch("app.api.routes.books.router.get_books_by_asins", new_callable=AsyncMock) as mock:
         mock.side_effect = AudibleAPIException("Audible unavailable and no cached data found")
         response = await async_client.get("/book?asins=B08G9PRS1K")
 
-    assert response.status_code == 404
-    assert response.json() == {
-        "error": "Audible unavailable and no cached data found",
-        "status_code": 404,
-        "code": "upstream_unavailable",
-    }
+    assert_outage_503(response, "Audible unavailable and no cached data found")
 
 
 @pytest.mark.asyncio
 async def test_get_book_genuine_absence_is_unchanged(async_client):
     """A real NotFoundException must be completely unaffected by
-    outage_as_not_found -- same status and body as any other confirmed
+    outage_as_unavailable -- same status and body as any other confirmed
     absence."""
     with patch("app.api.routes.books.router.get_book_by_asin", new_callable=AsyncMock) as mock:
         mock.side_effect = NotFoundException("Book not found: B08G9PRS1K")
@@ -965,7 +948,7 @@ PLACEHOLDER_ASIN = "B0PLACE001"
 
 
 def _bulk_service_fake(books, placeholders, facts_reason=None):
-    async def fake(asin_list, region, session, cache, *, facts=None, placeholder_asins=None):
+    async def fake(asin_list, region, session, cache, *, facts=None, placeholder_asins=None, not_fetched_asins=None):
         placeholder_asins.extend(placeholders)
         if facts_reason:
             record_incomplete(facts, facts_reason)
@@ -1142,7 +1125,7 @@ async def test_bulk_end_to_end_cache_mixed_path_classifies_the_placeholder_fresh
 
 
 @pytest.mark.asyncio
-async def test_bulk_end_to_end_placeholder_in_a_failed_chunk_lands_in_not_found(async_client):
+async def test_bulk_end_to_end_placeholder_in_a_failed_chunk_lands_in_not_fetched(async_client):
     good = [f"B{i:09d}" for i in range(50)]
 
     async def _get(region, path, params):
@@ -1160,6 +1143,208 @@ async def test_bulk_end_to_end_placeholder_in_a_failed_chunk_lands_in_not_found(
     data = response.json()
     assert response.status_code == 200
     assert len(data["books"]) == 50
-    assert data["notFound"] == [PLACEHOLDER_ASIN]
+    assert data["notFetched"] == [PLACEHOLDER_ASIN]
+    assert data["notFound"] == []
     assert data["placeholderRecords"] == []
     assert response.headers["x-libex-incomplete-reason"] == "hydration-failed"
+
+
+# ============================================================
+# NOT-FETCHED ASINS -- notFetched on the bulk response
+# ============================================================
+# notFetched holds the requested ASINs an Audible outage kept Libex from
+# looking up (no stored or cached copy either). Same router-level shape as
+# notFound and placeholderRecords: the caller's own strings, request order,
+# once per occurrence; the four lists are disjoint with precedence found >
+# placeholder > notFetched > notFound.
+
+def _bulk_unfetched_fake(books, unfetched, placeholders=()):
+    async def fake(asin_list, region, session, cache, *, facts=None, placeholder_asins=None, not_fetched_asins=None):
+        placeholder_asins.extend(placeholders)
+        not_fetched_asins.extend(unfetched)
+        return books
+
+    return fake
+
+
+@pytest.mark.asyncio
+async def test_bulk_not_fetched_is_always_present_and_empty_on_a_clean_request(async_client):
+    fake = _bulk_unfetched_fake([MOCK_BOOK], [])
+
+    with patch("app.api.routes.books.router.get_books_by_asins", side_effect=fake):
+        response = await async_client.get(f"/book?asins={MOCK_BOOK['asin']}")
+
+    data = response.json()
+    assert response.status_code == 200
+    assert data["notFetched"] == []
+    assert data["notFound"] == []
+    assert data["placeholderRecords"] == []
+
+
+@pytest.mark.asyncio
+async def test_bulk_not_fetched_echoes_the_callers_spelling_in_request_order_once_per_occurrence(async_client):
+    fake = _bulk_unfetched_fake([], ["B0UNFETCH2", "B0UNFETCH1"])
+
+    with patch("app.api.routes.books.router.get_books_by_asins", side_effect=fake):
+        response = await async_client.get(
+            "/book?asins=b0unfetch1,B0UNFETCH2,b0unfetch1,B0UNFETCH2"
+        )
+
+    data = response.json()
+    assert data["notFetched"] == ["b0unfetch1", "B0UNFETCH2", "b0unfetch1", "B0UNFETCH2"]
+    assert data["notFound"] == []
+
+
+@pytest.mark.asyncio
+async def test_bulk_not_fetched_and_not_found_split_the_unresolved_asins(async_client):
+    fake = _bulk_unfetched_fake([MOCK_BOOK], ["B0UNFETCH1"])
+
+    with patch("app.api.routes.books.router.get_books_by_asins", side_effect=fake):
+        response = await async_client.get(
+            f"/book?asins={MOCK_BOOK['asin']},B0UNFETCH1,B0MISSING1"
+        )
+
+    data = response.json()
+    assert [b["asin"] for b in data["books"]] == [MOCK_BOOK["asin"]]
+    assert data["notFetched"] == ["B0UNFETCH1"]
+    assert data["notFound"] == ["B0MISSING1"]
+
+
+@pytest.mark.asyncio
+async def test_bulk_precedence_found_over_placeholder_over_not_fetched_over_not_found(async_client):
+    found = MOCK_BOOK["asin"]
+    fake = _bulk_unfetched_fake(
+        [MOCK_BOOK],
+        [found, PLACEHOLDER_ASIN, "B0UNFETCH1"],
+        placeholders=[PLACEHOLDER_ASIN],
+    )
+
+    with patch("app.api.routes.books.router.get_books_by_asins", side_effect=fake):
+        response = await async_client.get(
+            f"/book?asins={found},{PLACEHOLDER_ASIN},B0UNFETCH1,B0MISSING1"
+        )
+
+    data = response.json()
+    assert [b["asin"] for b in data["books"]] == [found]
+    assert data["placeholderRecords"] == [PLACEHOLDER_ASIN]
+    assert data["notFetched"] == ["B0UNFETCH1"]
+    assert data["notFound"] == ["B0MISSING1"]
+    lists = [
+        {b["asin"] for b in data["books"]},
+        set(data["placeholderRecords"]),
+        set(data["notFetched"]),
+        set(data["notFound"]),
+    ]
+    assert sum(len(x) for x in lists) == len(set().union(*lists))
+
+
+@pytest.mark.asyncio
+async def test_bulk_not_fetched_is_computed_before_filtering(async_client):
+    """A book that was found but filtered out is neither unfetched nor
+    missing; an unfetched ASIN stays listed when filters empty the books."""
+    fake = _bulk_unfetched_fake([MOCK_BOOK], ["B0UNFETCH1"])
+
+    with patch("app.api.routes.books.router.get_books_by_asins", side_effect=fake):
+        response = await async_client.get(
+            f"/book?asins={MOCK_BOOK['asin']},B0UNFETCH1&language=klingon"
+        )
+
+    data = response.json()
+    assert data["books"] == []
+    assert data["notFetched"] == ["B0UNFETCH1"]
+    assert data["notFound"] == []
+
+
+@pytest.mark.asyncio
+async def test_bulk_above_threshold_response_carries_not_fetched(async_client):
+    unfetched = [f"B0UNF{i:05d}" for i in range(LARGE_RESPONSE_THREAD_THRESHOLD + 1)]
+    fake = _bulk_unfetched_fake([MOCK_BOOK], unfetched)
+
+    with patch("app.api.routes.books.router.get_books_by_asins", side_effect=fake):
+        response = await async_client.get(
+            f"/book?asins={MOCK_BOOK['asin']},{','.join(unfetched)}"
+        )
+
+    assert response.status_code == 200
+    assert response.json()["notFetched"] == unfetched
+
+
+@pytest.mark.asyncio
+async def test_bulk_end_to_end_mixed_stub_chunk_and_failed_chunk_split_not_found_and_not_fetched(async_client):
+    """The real service, one chunk answered with a real book, a stub and a
+    placeholder, a second chunk failing with nothing stored: the stub is a
+    confirmed absence (notFound), the placeholder is a placeholder, and only
+    the failed chunk's ASIN is notFetched."""
+    good = [f"B{i:09d}" for i in range(48)]
+    stub = "B0STUB0001"
+    failed = "B0FAIL0001"
+
+    async def _get(region, path, params):
+        asins = params["asins"].split(",")
+        if failed in asins:
+            raise RuntimeError("Audible 500")
+        return {"products": [_cache_route_product(a) for a in good]
+                + [_placeholder_audible_product(PLACEHOLDER_ASIN),
+                   {"asin": stub, "product_state": "NOT_AVAILABLE_FOR_PURCHASE"}]}
+
+    with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.books.get_books_from_db", new=AsyncMock(return_value=[])), \
+         patch("app.services.audible.books.persist_books_background"):
+        response = await async_client.get(
+            f"/book?asins={','.join(good)},{PLACEHOLDER_ASIN},{stub},{failed}&cache=false"
+        )
+
+    data = response.json()
+    assert response.status_code == 200
+    assert len(data["books"]) == 48
+    assert data["placeholderRecords"] == [PLACEHOLDER_ASIN]
+    assert data["notFound"] == [stub]
+    assert data["notFetched"] == [failed]
+
+
+@pytest.mark.asyncio
+async def test_bulk_end_to_end_lowercase_caller_spelling_is_echoed_in_not_fetched(async_client):
+    good = [f"B{i:09d}" for i in range(50)]
+    failed = "B0FAIL0001"
+
+    async def _get(region, path, params):
+        asins = params["asins"].split(",")
+        if failed in asins:
+            raise RuntimeError("Audible 500")
+        return {"products": [_cache_route_product(a) for a in asins]}
+
+    with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.books.get_books_from_db", new=AsyncMock(return_value=[])), \
+         patch("app.services.audible.books.persist_books_background"):
+        response = await async_client.get(
+            f"/book?asins={','.join(good)},{failed.lower()}&cache=false"
+        )
+
+    data = response.json()
+    assert data["notFetched"] == [failed.lower()]
+    assert data["notFound"] == []
+
+
+@pytest.mark.asyncio
+async def test_bulk_end_to_end_total_outage_with_nothing_stored_is_a_503_not_a_not_fetched_body(async_client):
+    with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=RuntimeError("down"))), \
+         patch("app.services.audible.books.get_books_from_db", new=AsyncMock(return_value=[])), \
+         patch("app.services.audible.books.cache.get_many", new=AsyncMock(return_value={})):
+        response = await async_client.get("/book?asins=B0ASIN0001,B0ASIN0002&cache=false")
+
+    assert_outage_503(response, "Audible unavailable and no cached data found")
+
+
+@pytest.mark.asyncio
+async def test_bulk_end_to_end_outage_with_a_stored_copy_is_200_listing_the_rest_as_not_fetched(async_client):
+    with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=RuntimeError("down"))), \
+         patch("app.services.audible.books.get_books_from_db",
+               new=AsyncMock(return_value=[{**MOCK_BOOK}])), \
+         patch("app.services.audible.books.cache.get_many", new=AsyncMock(return_value={})):
+        response = await async_client.get(f"/book?asins={MOCK_BOOK['asin']},B0ASIN0002&cache=false")
+
+    data = response.json()
+    assert response.status_code == 200
+    assert [b["asin"] for b in data["books"]] == [MOCK_BOOK["asin"]]
+    assert data["notFetched"] == ["B0ASIN0002"]
+    assert data["notFound"] == []

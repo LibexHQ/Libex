@@ -26,6 +26,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 # Local
+from libex_core.exceptions import AudibleAPIException
 from app.services.audible.authors import get_author_books_by_name
 from app.services.audible.authors.catalog import fetch_author_books_by_name
 
@@ -87,7 +88,7 @@ async def test_author_books_by_name_logs_the_lookup_never_the_name(caplog):
 
 
 @pytest.mark.asyncio
-async def test_catalog_partial_harvest_warning_reports_where_not_who(caplog):
+async def test_catalog_first_page_failure_warning_reports_where_not_who(caplog):
     """The by-name walk's failure path: the name is in scope there too."""
     with (
         patch(
@@ -97,18 +98,17 @@ async def test_catalog_partial_harvest_warning_reports_where_not_who(caplog):
         caplog.at_level(logging.INFO),
     ):
         mock_page.side_effect = RuntimeError("upstream exploded")
-        await fetch_author_books_by_name(TYPED_NAME, "jp")
+        with pytest.raises(AudibleAPIException):
+            await fetch_author_books_by_name(TYPED_NAME, "jp")
 
     records = _named(
         caplog,
-        "Audible Author Books by-name page fetch failed, keeping partial harvest",
+        "Audible Author Books by-name first page fetch failed",
     )
     assert len(records) == 1
     record = records[0]
 
     assert record.region == "jp"
-    assert record.page == 0
-    assert record.asins_collected == 0
     assert record.error == "RuntimeError: upstream exploded"
 
     assert not hasattr(record, "author_name")

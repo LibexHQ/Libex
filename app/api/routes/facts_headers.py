@@ -109,25 +109,37 @@ FACTS_RESPONSE_HEADERS = {
             "separate, coarser check instead of this header. "
             "discovery-incomplete -- reserved for the catalogue walk that "
             "enumerates which elements exist ending before it finished, "
-            "before any element it found was fetched. Not emitted by any "
-            "route today -- nothing currently wires a walk's own shortfall "
-            "into this header."
+            "before any element it found was fetched. Emitted by "
+            "/author/books?name= when its walk ends without confirming the "
+            "catalogue is whole; the body then holds the books gathered so "
+            "far."
         ),
         "schema": {"type": "string"},
     },
 }
 
-# The two /author/books routes never build a ResponseFacts at all -- they
+# The two /author/books/{asin} routes never build a ResponseFacts -- they
 # mark completeness through _mark_completeness in authors/router.py, on the
 # discovery walk's own success, not through anything this module's
 # X-Libex-Source/X-Libex-Incomplete-Reason machinery tracks. Declaring the
 # full FACTS_RESPONSE_HEADERS block on them would document two headers
 # they never send. This is the subset they actually do -- X-Request-Id
 # included, since that one is never tied to ResponseFacts at all and these
-# two routes carry it exactly like every other response does.
+# two routes carry it exactly like every other response does. The by-name
+# route /author/books is the exception: it does build a ResponseFacts, and
+# sends X-Libex-Complete and X-Libex-Incomplete-Reason through
+# stamp_facts_headers.
 COMPLETE_ONLY_RESPONSE_HEADERS = {
     HEADER_REQUEST_ID: FACTS_RESPONSE_HEADERS[HEADER_REQUEST_ID],
     HEADER_COMPLETE: FACTS_RESPONSE_HEADERS[HEADER_COMPLETE],
+}
+
+# What /author/books?name= sends: completeness and its reason, but no
+# X-Libex-Source, since that route has no per-element provenance to report.
+COMPLETE_WITH_REASON_RESPONSE_HEADERS = {
+    HEADER_REQUEST_ID: FACTS_RESPONSE_HEADERS[HEADER_REQUEST_ID],
+    HEADER_COMPLETE: FACTS_RESPONSE_HEADERS[HEADER_COMPLETE],
+    HEADER_INCOMPLETE_REASON: FACTS_RESPONSE_HEADERS[HEADER_INCOMPLETE_REASON],
 }
 
 

@@ -9,7 +9,7 @@ import base64
 from datetime import datetime, timezone
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # Third party
 import pytest
@@ -20,6 +20,7 @@ from app.services.audible.authors import (
     _generate_session_id,
     _CatalogBooksResult,
 )
+from app.core.response_headers import REASON_DISCOVERY_INCOMPLETE, ResponseFacts, record_incomplete
 from app.services.audible.authors.screens import (
     _select_asin_rows,
     _extract_row_asins,
@@ -439,6 +440,111 @@ async def test_fetch_author_books_by_name_stops_on_short_page():
     with patch("app.services.audible.authors.catalog.audible_get", new=mock_get):
         await fetch_author_books_by_name("Frank Herbert", "us")
     assert mock_get.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_author_books_by_name_first_page_failure_raises_not_empty():
+    """An outage on page 0 is an AudibleAPIException, never an empty catalog."""
+    from app.services.audible.authors import fetch_author_books_by_name
+    from libex_core.exceptions import AudibleAPIException
+
+    facts = ResponseFacts()
+    mock_get = AsyncMock(side_effect=AudibleAPIException("down", upstream_status=503))
+    with patch("app.services.audible.authors.catalog.audible_get", new=mock_get):
+        with pytest.raises(AudibleAPIException) as exc:
+            await fetch_author_books_by_name("Frank Herbert", "us", facts=facts)
+    assert exc.value.upstream_status == 503
+
+
+@pytest.mark.asyncio
+async def test_fetch_author_books_by_name_later_page_failure_keeps_prefix_and_signals():
+    """A later-page failure returns what was gathered and marks facts incomplete."""
+    from app.services.audible.authors import fetch_author_books_by_name
+
+    full_page = {"products": [_product_by_name(f"B0FULL{i:05d}", "Frank Herbert") for i in range(50)]}
+    facts = ResponseFacts()
+    mock_get = AsyncMock(side_effect=[full_page, RuntimeError("boom")])
+    with patch("app.services.audible.authors.catalog.audible_get", new=mock_get):
+        asins, pages = await fetch_author_books_by_name("Frank Herbert", "us", facts=facts)
+    assert len(asins) == 50
+    assert pages == 1
+    assert facts.incomplete_reasons == {REASON_DISCOVERY_INCOMPLETE}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["page_failed", "deadline", "plateau", "page_cap", "completed"])
+async def test_fetch_author_books_by_name_reports_how_the_walk_stopped(kind):
+    from app.services.audible.authors import fetch_author_books_by_name
+    from app.services.audible.authors import catalog
+    from app.services.audible.authors.catalog import NameWalkOutcome
+
+    full = {"products": [_product_by_name(f"B0FULL{i:05d}", "Frank Herbert") for i in range(50)]}
+    other = {"products": [_product_by_name(f"B0NEXT{i:05d}", "Frank Herbert") for i in range(50)]}
+    short = {"products": [_product_by_name("B0SHORT0003", "Frank Herbert")]}
+    kwargs = {}
+    patches = []
+    if kind == "page_failed":
+        mock_get = AsyncMock(side_effect=[full, RuntimeError("boom")])
+        expected, transient = catalog.STOP_PAGE_FAILED, True
+    elif kind == "deadline":
+        mock_get = AsyncMock(return_value=full)
+        kwargs["deadline"] = 0.0
+        expected, transient = catalog.STOP_DEADLINE, True
+    elif kind == "plateau":
+        mock_get = AsyncMock(return_value=full)
+        expected, transient = catalog.STOP_PLATEAU, False
+    elif kind == "page_cap":
+        mock_get = AsyncMock(side_effect=lambda r, p, params: {
+            "products": [_product_by_name(f"B0P{params['page']:04d}{i:03d}", "Frank Herbert") for i in range(50)]
+        })
+        patches.append(patch.object(catalog, "NAME_SEARCH_MAX_PAGES", 2))
+        expected, transient = catalog.STOP_PAGE_CAP, False
+    else:
+        mock_get = AsyncMock(side_effect=[full, other, short])
+        expected, transient = catalog.STOP_COMPLETED, False
+
+    outcome = NameWalkOutcome()
+    facts = ResponseFacts()
+    with patch("app.services.audible.authors.catalog.audible_get", new=mock_get):
+        for p in patches:
+            p.start()
+        try:
+            await fetch_author_books_by_name("Frank Herbert", "us", facts=facts, outcome=outcome, **kwargs)
+        finally:
+            for p in patches:
+                p.stop()
+    assert outcome.stop == expected
+    assert outcome.transient is transient
+    assert bool(facts.incomplete_reasons) is (kind != "completed")
+
+
+@pytest.mark.asyncio
+async def test_get_author_books_by_name_passes_facts_through_to_the_walk():
+    """The route's ResponseFacts must reach the walk, or a truncated list
+    comes back with nothing to label it."""
+    from app.services.audible.authors import get_author_books_by_name
+
+    facts = ResponseFacts()
+
+    async def _walk(name, region, deadline=None, *, facts=None, outcome=None):
+        record_incomplete(facts, REASON_DISCOVERY_INCOMPLETE)
+        return ["B0BOOK0001"], 2
+
+    with patch("app.services.audible.authors.fetch_author_books_by_name", new=_walk):
+        asins = await get_author_books_by_name("Frank Herbert", "us", MagicMock(), facts=facts)
+    assert asins == ["B0BOOK0001"]
+    assert facts.incomplete_reasons == {REASON_DISCOVERY_INCOMPLETE}
+
+
+@pytest.mark.asyncio
+async def test_fetch_author_books_by_name_complete_walk_does_not_signal():
+    from app.services.audible.authors import fetch_author_books_by_name
+
+    facts = ResponseFacts()
+    page = {"products": [_product_by_name("B0SHORT0002", "Frank Herbert")]}
+    with patch("app.services.audible.authors.catalog.audible_get", new=AsyncMock(return_value=page)):
+        await fetch_author_books_by_name("Frank Herbert", "us", facts=facts)
+    assert not facts.incomplete_reasons
 
 
 @pytest.mark.asyncio

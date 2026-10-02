@@ -52,9 +52,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 # Core
-from libex_core.exceptions import NotFoundException
+from libex_core.exceptions import AudibleAPIException, NotFoundException
 
 # Services
+from app.core.response_headers import REASON_DISCOVERY_INCOMPLETE, record_incomplete
+from app.services.audible.authors.catalog import (
+    STOP_COMPLETED,
+    STOP_DEADLINE,
+    STOP_PAGE_CAP,
+    STOP_PAGE_FAILED,
+    STOP_PLATEAU,
+)
 from app.services import seeder
 from app.services.db.persist_queue import PersistOutcome
 
@@ -173,6 +181,63 @@ async def test_expand_authors_stamps_and_counts_when_persist_is_admitted():
     assert stats["authors_processed"] == 1
     assert stats["books_discovered"] == 1
     assert stats["errors"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stop,stamped",
+    [
+        (STOP_PAGE_FAILED, False),
+        (STOP_DEADLINE, False),
+        (STOP_PLATEAU, True),
+        (STOP_PAGE_CAP, True),
+        (STOP_COMPLETED, True),
+    ],
+)
+async def test_expand_authors_stamps_by_how_the_name_walk_stopped(stop, stamped):
+    """Only a transient stop (page failure, deadline) leaves the author
+    unstamped for a retry; a plateau or the page cap would stop in the same
+    place again, so those stamp. Either way the found books are persisted."""
+    fake_authors = [(1, "B000AUTHOR1", "Frank Herbert")]
+
+    async def _walk(name, region, deadline=None, *, facts=None, outcome=None):
+        outcome.stop = stop
+        if stop != STOP_COMPLETED:
+            record_incomplete(facts, REASON_DISCOVERY_INCOMPLETE)
+        return ["B0BOOK0001"], 1
+
+    with patch.object(seeder, "SessionFactory", return_value=_FakeSessionCM(_select_session(fake_authors))), \
+         patch.object(seeder, "fetch_author_books_by_name", new=AsyncMock(side_effect=_walk)), \
+         patch.object(seeder, "_get_missing_asins", new=AsyncMock(return_value=["B0BOOK0001"])), \
+         patch.object(seeder, "_fetch_and_persist", new=AsyncMock(return_value=True)) as mock_persist, \
+         patch.object(seeder, "_stamp_author", new=AsyncMock()) as mock_stamp:
+        stats = await seeder._expand_authors("us", delay=0)
+
+    mock_persist.assert_awaited_once()
+    assert stats["books_discovered"] == 1
+    assert stats["errors"] == 0
+    if stamped:
+        mock_stamp.assert_awaited_once_with(1)
+        assert stats["authors_processed"] == 1
+    else:
+        mock_stamp.assert_not_awaited()
+        assert stats["authors_processed"] == 0
+
+
+@pytest.mark.asyncio
+async def test_expand_authors_does_not_stamp_when_the_first_page_fails():
+    """A page-0 outage raises out of the walk, lands in the per-author
+    except as an error, and never stamps."""
+    fake_authors = [(1, "B000AUTHOR1", "Frank Herbert")]
+
+    with patch.object(seeder, "SessionFactory", return_value=_FakeSessionCM(_select_session(fake_authors))), \
+         patch.object(seeder, "fetch_author_books_by_name", new=AsyncMock(side_effect=AudibleAPIException("down"))), \
+         patch.object(seeder, "_stamp_author", new=AsyncMock()) as mock_stamp:
+        stats = await seeder._expand_authors("us", delay=0)
+
+    mock_stamp.assert_not_awaited()
+    assert stats["authors_processed"] == 0
+    assert stats["errors"] == 1
 
 
 @pytest.mark.asyncio

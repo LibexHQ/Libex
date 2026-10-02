@@ -21,6 +21,7 @@ from app.api.routes.authors.schemas import AuthorResponse
 from app.api.routes.cache_param import CacheAuthorBooksParam, CacheStandardParam, apply_cache_control
 from app.api.routes.facts_headers import (
     COMPLETE_ONLY_RESPONSE_HEADERS,
+    COMPLETE_WITH_REASON_RESPONSE_HEADERS,
     FACTS_RESPONSE_HEADERS,
     stamp_facts_headers,
 )
@@ -65,9 +66,14 @@ async def search(
     return [AuthorResponse(**a) for a in authors]
 
 
-@router.get("/books", response_model=list[BookResponse])
+@router.get(
+    "/books",
+    response_model=list[BookResponse],
+    responses={200: {"headers": COMPLETE_WITH_REASON_RESPONSE_HEADERS}},
+)
 async def get_books_by_author_name(
     name: Annotated[str, Query(description="Author name")],
+    response: Response,
     region: str = Depends(valid_region),
     filters: LiveBookFilters = Depends(),
     sort: Annotated[BookSortField | None, Query(description="Field to sort the returned books by")] = None,
@@ -78,15 +84,29 @@ async def get_books_by_author_name(
     Get books by author name.
     Used when no author ASIN is available.
     Returns full book objects matching AudiMeta's BookDto format.
+
+    Both phases record into one ResponseFacts. A walk that stopped before it
+    could confirm the catalogue is whole, or a hydration that returned fewer
+    books than it was handed, still returns what was gathered, labelled
+    X-Libex-Complete: false with the reasons in X-Libex-Incomplete-Reason.
     """
-    asins = await outage_as_not_found(get_author_books_by_name(name, region, session))
+    facts = ResponseFacts()
+    asins = await outage_as_not_found(get_author_books_by_name(name, region, session, facts=facts))
     if not asins:
         raise NotFoundException("No books found for author")
-    books = await outage_as_not_found(get_books_by_asins(asins, region, session))
+    books = await outage_as_not_found(get_books_by_asins(asins, region, session, facts=facts))
     books = filter_dicts(books, filters.as_kwargs())
     books = sort_dicts(books, sort.value if sort is not None else None, order.value, BOOK_SORT_FIELDS)
+    stamp_facts_headers(response, facts, has_entities=False)
+    if not facts.is_complete:
+        # Same refusal as /author/books/{asin}: no cache or CDN may hold a
+        # truncated list and serve it to everyone.
+        response.headers["Cache-Control"] = "no-store"
     return await build_large_list_response(
-        list[BookResponse], len(books), lambda: [BookResponse(**b) for b in books]
+        list[BookResponse],
+        len(books),
+        lambda: [BookResponse(**b) for b in books],
+        injected_response=response,
     )
 
 

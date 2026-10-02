@@ -10,6 +10,17 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [Unreleased]
+
+Bump class: MINOR (a new response header signal on an existing route; no field, shape or status code removed or changed).
+
+### Added
+- **`GET /author/books?name=` now says when its list is incomplete.** The response is still `200` with the bare list of books, but it now carries `X-Libex-Complete`. It is `false` when the walk through Audible's results stopped before it could confirm it reached the end (a later page failed, Libex hit its page cap, or Audible's results stopped advancing at about 500), or when fewer books came back with full details than the walk found. In either case `X-Libex-Incomplete-Reason` gives the reason (`discovery-incomplete` for the walk, or the hydration reason for the details), and `Cache-Control: no-store` is set so no cache holds the short list for everyone. `X-Libex-Complete` is `true` only when the walk finished and every book it found came back with full details. Before, a walk cut short returned the truncated list with nothing to tell you it was truncated.
+
+### Fixed
+- **An Audible outage on the first page of a by-name lookup is now reported as an outage, not as an author with no books.** The route previously treated a failed first page as an empty catalogue. It still answers `404` on this route, with the upstream failure's message rather than a "no books found" one.
+- **The background seeder no longer marks an author as done after a walk that stopped on a temporary failure.** A failed page leaves the author to be retried next cycle, so the rest of their catalogue is not skipped for good. An author whose walk ended at Audible's result plateau or the page cap is still marked done, since a retry would stop in the same place.
+
 ## [1.26.0]
 
 ### Added

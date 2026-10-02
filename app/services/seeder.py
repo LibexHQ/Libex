@@ -43,9 +43,11 @@ from app.db.session import engine
 # Core
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.core.response_headers import ResponseFacts
 
 # Services
 from app.services.audible.authors import fetch_author_books_by_name
+from app.services.audible.authors.catalog import NameWalkOutcome
 from app.services.audible.books import fetch_and_store_chapters, get_books_by_asins
 from app.services.db.persist_queue import PersistOutcome
 
@@ -284,7 +286,11 @@ async def _expand_authors(region: str, delay: float) -> dict[str, int]:
 
     for author_id, author_asin, author_name in authors:
         try:
-            book_asins, _ = await fetch_author_books_by_name(author_name, region)
+            facts = ResponseFacts()
+            outcome = NameWalkOutcome()
+            book_asins, _ = await fetch_author_books_by_name(
+                author_name, region, facts=facts, outcome=outcome
+            )
             await asyncio.sleep(delay)
 
             persisted = True
@@ -299,7 +305,33 @@ async def _expand_authors(region: str, delay: float) -> dict[str, int]:
                         extra={"author_name": author_name, "new_books": len(missing)},
                     )
 
-            if persisted:
+            if persisted and outcome.transient:
+                # The by-name walk stopped on a page failure or the deadline,
+                # so the list is a prefix a rerun could extend. The books it
+                # did find are persisted above; leaving the author unstamped
+                # makes the next cycle walk it again for the rest. A plateau
+                # or the page cap is stamped instead: it would stop at the
+                # same place again, so retrying is only wasted traffic.
+                logger.warning(
+                    "Seeder: not stamping author -- by-name walk stopped "
+                    "early, will retry next cycle",
+                    extra={
+                        "region": region,
+                        "stop": outcome.stop,
+                        "books_found": len(book_asins),
+                    },
+                )
+            elif persisted:
+                if facts.incomplete_reasons:
+                    logger.info(
+                        "Seeder: stamping author -- by-name walk ended at a "
+                        "deterministic limit",
+                        extra={
+                            "region": region,
+                            "stop": outcome.stop,
+                            "books_found": len(book_asins),
+                        },
+                    )
                 await _stamp_author(author_id)
                 stats["authors_processed"] += 1
             else:

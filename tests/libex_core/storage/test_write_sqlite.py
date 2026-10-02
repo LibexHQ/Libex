@@ -217,6 +217,7 @@ async def test_one_engines_writers_do_not_wait_on_anothers(tmp_path):
         configure_sqlite(eng)
         engines.append(eng)
     active = peak = 0
+    both_inside = asyncio.Event()
 
     async def hold(eng):
         nonlocal active, peak
@@ -224,7 +225,9 @@ async def test_one_engines_writers_do_not_wait_on_anothers(tmp_path):
             async with exclusive_write(session):
                 active += 1
                 peak = max(peak, active)
-                await asyncio.sleep(0.02)
+                if active == 2:
+                    both_inside.set()
+                await asyncio.wait_for(both_inside.wait(), timeout=5)
                 active -= 1
 
     try:

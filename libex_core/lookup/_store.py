@@ -43,6 +43,9 @@ WRITE_CHUNK_SIZE = 50
 # limit SQLite binds in one statement.
 READ_CHUNK_SIZE = 500
 
+# What a failed read returns where None already means a book that is not stored.
+_READ_FAILED = object()
+
 
 async def check(store: "LocalStore") -> None:
     """
@@ -72,6 +75,13 @@ def _log_write_failure(what: str, exc: Exception, **fields: Any) -> None:
     )
 
 
+def _log_foreign_skip(what: str, region: str, skipped: int) -> None:
+    logger.warning(
+        "Store write skipped: stored for another region",
+        extra={"what": what, "region": region, "skipped_num": skipped},
+    )
+
+
 # ============================================================
 # WRITING
 # ============================================================
@@ -83,22 +93,37 @@ async def persist_books(
     Writes normalized books, unsettled (the writer needs the tri-state flags as
     normalization produced them), and returns the ASINs that were committed and
     whether any chunk failed to be.
+
+    Rows are keyed by ASIN alone, so a book whose stored row belongs to another
+    marketplace is skipped, book and links together, and the caller is served
+    the live copy for it; the rest of the list is written as usual. Interim,
+    until stored keys are region-aware. The stored regions are read inside the
+    write transaction, so another writer cannot slip a row in between the check
+    and the write. The one window left is on Postgres, where two transactions
+    that first insert the same new ASIN at once cannot see each other: the
+    upsert keeps the region of whichever committed first.
     """
     from libex_core.storage import write
 
     persistable = [b for b in books if b.get("asin")]
     written: set[str] = set()
     failed = False
+    skipped = 0
     for start in range(0, len(persistable), WRITE_CHUNK_SIZE):
         chunk = persistable[start:start + WRITE_CHUNK_SIZE]
         try:
             async with store.write() as session:
-                await write.write_books(session, chunk)
+                foreign = await _foreign_book_asins(session, [b["asin"] for b in chunk], region)
+                to_write = [b for b in chunk if b["asin"] not in foreign]
+                await write.write_books(session, to_write)
         except Exception as exc:
             failed = True
             _log_write_failure("books", exc, books=len(chunk), region=region)
             continue
-        written.update(b["asin"] for b in chunk)
+        skipped += len(chunk) - len(to_write)
+        written.update(b["asin"] for b in to_write)
+    if skipped:
+        _log_foreign_skip("books", region, skipped)
     if written:
         logger.info("Wrote books to the store", extra={
             "books": len(written),
@@ -121,12 +146,27 @@ async def _persist_one(
 
 
 async def persist_series(store: "LocalStore", data: dict[str, Any], region: str) -> bool:
-    """Writes a series profile. False when the write failed."""
+    """Writes a series profile. False when the write failed, or when the series
+    is stored for another marketplace (or for none), which is left as it is:
+    rows are keyed by ASIN alone, interim until stored keys are region-aware.
+    The check runs inside the write transaction."""
     from libex_core.storage import write
 
-    return await _persist_one(
-        store, "series", lambda s: write.write_series_profile(s, data), region=region
-    )
+    skipped = False
+    try:
+        async with store.write() as session:
+            if await _series_is_foreign(session, data.get("asin"), region):
+                skipped = True
+            else:
+                await write.write_series_profile(session, data)
+    except Exception as exc:
+        _log_write_failure("series", exc, region=region)
+        return False
+    if skipped:
+        _log_foreign_skip("series", region, 1)
+        return False
+    logger.info("Wrote to the store", extra={"what": "series", "region": region})
+    return True
 
 
 async def persist_author(store: "LocalStore", data: dict[str, Any], region: str) -> bool:
@@ -149,11 +189,19 @@ async def persist_track(
     # does not hold cannot be written; the hosted service meets the same limit
     # and only logs the failure. A read that fails is not the same as the book
     # being absent: it is logged as a failed read and nothing is written.
-    held = await _read(store, "chapter book", lambda s: _book_held(s, asin, region), None)
-    if held is None:
+    stored_region = await _read(
+        store, "chapter book", lambda s: _book_region(s, asin), _READ_FAILED
+    )
+    if stored_region is _READ_FAILED:
         return False
-    if not held:
+    if stored_region is None:
         logger.info("Chapters not stored: the book is not in the store", extra={
+            "asin": asin,
+            "region": region,
+        })
+        return False
+    if stored_region != region:
+        logger.info("Chapters not stored: the book is stored for another marketplace", extra={
             "asin": asin,
             "region": region,
         })
@@ -184,18 +232,40 @@ async def _read(
         return default
 
 
-async def _book_held(session: Any, asin: str, region: str) -> bool:
-    """Whether the book is stored for this marketplace. Rows are keyed by ASIN
-    alone, so a book stored for another marketplace is not this one's, and
-    chapters are never written onto it."""
+async def _foreign_book_asins(session: Any, asins: list[str], region: str) -> set[str]:
+    """Of these ASINs, those whose stored row is for another marketplace. Read
+    in chunks of READ_CHUNK_SIZE, locking the rows on Postgres (SQLite's write
+    transaction already excludes other writers). A book row always has a region."""
     from sqlalchemy import select
 
     from libex_core.storage.models import Book
 
+    foreign: set[str] = set()
+    for start in range(0, len(asins), READ_CHUNK_SIZE):
+        result = await session.execute(
+            select(Book.asin, Book.region)
+            .where(Book.asin.in_(asins[start:start + READ_CHUNK_SIZE]))
+            .with_for_update()
+        )
+        foreign.update(asin for asin, stored in result.all() if stored != region)
+    return foreign
+
+
+async def _series_is_foreign(session: Any, asin: str | None, region: str) -> bool:
+    """Whether the series is stored for another marketplace. A stored row with
+    no region counts as foreign: the writer never fills one in, so writing
+    through it would never make it this region's."""
+    from sqlalchemy import select
+
+    from libex_core.storage.models import Series
+
+    if not asin:
+        return False
     result = await session.execute(
-        select(Book.asin).where(Book.asin == asin, Book.region == region)
+        select(Series.region).where(Series.asin == asin).with_for_update()
     )
-    return result.first() is not None
+    row = result.first()
+    return row is not None and row[0] != region
 
 
 async def _book_region(session: Any, asin: str) -> str | None:

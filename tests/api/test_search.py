@@ -222,7 +222,7 @@ async def test_search_outage_returns_404_with_the_routes_own_literal(async_clien
         response = await async_client.get("/search?title=Dune")
 
     assert response.status_code == 404
-    assert response.json() == {"error": "No books found", "status_code": 404}
+    assert response.json() == {"error": "No books found", "status_code": 404, "code": "upstream_unavailable"}
 
 
 @pytest.mark.asyncio
@@ -232,7 +232,7 @@ async def test_quick_search_outage_returns_404_with_the_routes_own_literal(async
         response = await async_client.get("/quick-search?keywords=dune")
 
     assert response.status_code == 404
-    assert response.json() == {"error": "No books found", "status_code": 404}
+    assert response.json() == {"error": "No books found", "status_code": 404, "code": "upstream_unavailable"}
 
 
 @pytest.mark.asyncio
@@ -242,7 +242,7 @@ async def test_abs_search_outage_returns_404_with_the_routes_own_literal(async_c
         response = await async_client.get("/us/search?title=Dune")
 
     assert response.status_code == 404
-    assert response.json() == {"error": "No books found", "status_code": 404}
+    assert response.json() == {"error": "No books found", "status_code": 404, "code": "upstream_unavailable"}
 
 
 @pytest.mark.asyncio
@@ -252,7 +252,7 @@ async def test_abs_quick_search_outage_returns_404_with_the_routes_own_literal(a
         response = await async_client.get("/us/quick-search/search?keywords=dune")
 
     assert response.status_code == 404
-    assert response.json() == {"error": "No books found", "status_code": 404}
+    assert response.json() == {"error": "No books found", "status_code": 404, "code": "upstream_unavailable"}
 
 
 @pytest.mark.asyncio
@@ -265,4 +265,4 @@ async def test_search_genuine_absence_is_unchanged(async_client):
         response = await async_client.get("/search?title=xyznotarealbook")
 
     assert response.status_code == 404
-    assert response.json() == {"error": "No books found", "status_code": 404}
+    assert response.json() == {"error": "No books found", "status_code": 404, "code": "not_on_audible"}

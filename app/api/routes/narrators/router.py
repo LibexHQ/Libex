@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_session
 
 # Routes
+from app.api.routes.errors import ERROR_RESPONSES
 from app.api.routes.audible_outage import outage_as_not_found
 from app.api.routes.cache_param import CacheInertParam, apply_cache_control
 
@@ -30,7 +31,7 @@ from app.core.middleware import valid_region
 router = APIRouter(prefix="/narrator", tags=["Narrators"])
 
 
-@router.get("/books", response_model=list[BookResponse])
+@router.get("/books", response_model=list[BookResponse], responses=ERROR_RESPONSES)
 async def get_narrator_books(
     name: Annotated[str, Query(description="Narrator name")],
     response: Response,

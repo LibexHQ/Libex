@@ -636,7 +636,7 @@ async def test_search_series_outage_returns_404_matching_head(async_client):
         response = await async_client.get("/series/search?name=Dune")
 
     assert response.status_code == 404
-    assert response.json() == {"error": "Series search failed", "status_code": 404}
+    assert response.json() == {"error": "Series search failed", "status_code": 404, "code": "upstream_unavailable"}
 
 
 @pytest.mark.asyncio
@@ -647,7 +647,7 @@ async def test_search_series_legacy_outage_returns_404_matching_head(async_clien
         response = await async_client.get("/series?name=Dune")
 
     assert response.status_code == 404
-    assert response.json() == {"error": "Series search failed", "status_code": 404}
+    assert response.json() == {"error": "Series search failed", "status_code": 404, "code": "upstream_unavailable"}
 
 
 @pytest.mark.asyncio
@@ -662,6 +662,7 @@ async def test_get_books_by_series_outage_on_discovery_returns_404_matching_head
     assert response.json() == {
         "error": "Audible unavailable and no cached series books found",
         "status_code": 404,
+        "code": "upstream_unavailable",
     }
 
 
@@ -677,6 +678,7 @@ async def test_get_books_by_series_outage_on_hydration_returns_404_matching_head
     assert response.json() == {
         "error": "Audible unavailable and no cached data found",
         "status_code": 404,
+        "code": "upstream_unavailable",
     }
 
 
@@ -691,6 +693,7 @@ async def test_get_books_by_series_primary_outage_on_discovery_returns_404_match
     assert response.json() == {
         "error": "Audible unavailable and no cached series books found",
         "status_code": 404,
+        "code": "upstream_unavailable",
     }
 
 
@@ -707,6 +710,7 @@ async def test_get_books_by_series_primary_outage_on_hydration_returns_404_match
     assert response.json() == {
         "error": "Audible unavailable and no cached data found",
         "status_code": 404,
+        "code": "upstream_unavailable",
     }
 
 
@@ -720,6 +724,7 @@ async def test_get_series_by_asin_outage_returns_404_matching_head(async_client)
     assert response.json() == {
         "error": "Audible unavailable and no cached series data found",
         "status_code": 404,
+        "code": "upstream_unavailable",
     }
 
 
@@ -736,4 +741,5 @@ async def test_get_series_by_asin_genuine_absence_is_unchanged(async_client):
     assert response.json() == {
         "error": "Series not found: B00SERIES1",
         "status_code": 404,
+        "code": "not_on_audible",
     }

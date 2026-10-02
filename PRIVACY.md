@@ -381,8 +381,8 @@ involved. **It has not been published** to PyPI or any other package index, so
 this section describes the source as it stands, ahead of any release. The
 behaviour described is in `libex_core/audible/client.py`, with the logging of
 individual titles in `libex_core/audible/books.py` and
-`libex_core/audible/extras.py`, and the command-line tool in
-`libex_core/cli/`.
+`libex_core/audible/extras.py`, searching in `libex_core/audible/search.py`,
+and the command-line tool in `libex_core/cli/`.
 
 If you are using an application that contains this library, that
 application's privacy policy is the one that applies to you. This section
@@ -391,9 +391,9 @@ covers only the part that belongs to Libex.
 **Why it differs from the hosted service.** The public instance reaches Audible
 from one address, shared by everyone who calls it. An embedded copy runs on
 each user's own device. Without a proxy, Audible sees that device's address
-together with the titles it looks up, which amounts to part of someone's
-reading history tied to their home connection. The library is built around
-preventing that from happening by accident:
+together with the titles it looks up and the words searched for, which
+amounts to part of someone's reading history tied to their home connection.
+The library is built around preventing that from happening by accident:
 
 - **It won't connect until someone decides how.** The client is created as
   `LibexClient(proxy_url=..., allow_direct_egress=...)`. `proxy_url` has no
@@ -415,7 +415,9 @@ preventing that from happening by accident:
   checked so that a crafted path cannot redirect the request elsewhere.
 - **It adds nothing about the user.** Each request carries fixed headers: an
   Audible app user agent, the region's locale, and a random number in
-  `X-ADP-SW` that is regenerated for every request. The one constant that
+  `X-ADP-SW` that is regenerated for every request. A quick search also
+  sends a random session number, made fresh for each search, and the current
+  time in UTC, which gives no time zone. The one constant that
   looks like a device ID is a device *type* ID, identical in every copy of
   Libex.
 - **No telemetry.** It has no analytics, usage reporting, version check, crash

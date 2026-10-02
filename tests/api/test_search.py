@@ -263,3 +263,37 @@ async def test_search_genuine_absence_is_unchanged(async_client):
 
     assert response.status_code == 404
     assert response.json() == {"error": "No books found", "status_code": 404, "code": "not_on_audible"}
+
+
+# ============================================================
+# limit is capped at the route, so the service's bounds check is unreachable
+# ============================================================
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("params", ["limit=51", "limit=0", "limit=-1", "page=-1", "page=10"])
+async def test_search_out_of_bounds_paging_is_a_422_not_a_500(async_client, params):
+    with patch("app.api.routes.search.router.search", new_callable=AsyncMock) as mock:
+        response = await async_client.get(f"/search?title=Dune&{params}")
+
+    assert response.status_code == 422
+    mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_search_limit_fifty_is_accepted_and_passed_through(async_client):
+    with patch("app.api.routes.search.router.search", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        response = await async_client.get("/search?title=Dune&limit=50")
+
+    assert response.status_code == 200
+    assert 50 in mock.await_args.args
+
+
+@pytest.mark.asyncio
+async def test_abs_search_uses_a_fixed_limit_inside_the_bound(async_client):
+    with patch("app.api.routes.search.router.search", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        response = await async_client.get("/us/search?title=Dune&limit=999")
+
+    assert response.status_code == 200
+    assert mock.await_args.args[5] == 5

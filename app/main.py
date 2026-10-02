@@ -159,9 +159,14 @@ async def lifespan(app: FastAPI):
 # stayed silent on.
 migration_notice = build_migration_notice(settings)
 
+# The sections after the intro are collapsed <details> blocks so a returning reader
+# is not pushed below a wall of text; the migration notice above stays open because
+# it is time-sensitive. Each blank line after <summary> is what lets the markdown
+# inside (tables, code spans) render.
 _BASE_DESCRIPTION = """Open, unrestricted Audible metadata API for the audiobook automation community.
 
-## Response headers
+<details>
+<summary><strong>Response headers</strong></summary>
 
 Every response carries **`X-Request-Id`** — an id minted fresh for that response
 alone, never taken from anything the caller sent. Quote it back when reporting
@@ -190,7 +195,8 @@ The book, series and author routes also report on the data in the body:
 All four headers are exposed through CORS, so browser JavaScript can read them
 directly off the response.
 
-### What a response actually tells you
+<details>
+<summary><strong>What a response actually tells you</strong></summary>
 
 - **200 with `X-Libex-Complete: true`** — the body has everything that was
   asked for.
@@ -214,7 +220,12 @@ directly off the response.
   carry **no `notFound` field at all** — `X-Libex-Complete` and
   `X-Libex-Incomplete-Reason` are the only signal that a book is missing.
 
-## Audible outages
+</details>
+
+</details>
+
+<details>
+<summary><strong>Audible outages</strong></summary>
 
 When Audible can't be reached and Libex has nothing stored to answer with, the
 response is **503**, not 404 — the data isn't known to be absent, Libex just
@@ -223,11 +234,16 @@ can't answer right now. It carries a `Retry-After: 30` header and
 "code": "upstream_unavailable", "retryAfter": 30}`. `retryAfter` appears only
 on these bodies.
 
-## Caching
+</details>
+
+<details>
+<summary><strong>Caching</strong></summary>
 
 The book, series and author routes default to `cache=true`, serving Libex's
 stored copy when one exists. Pass `cache=false` on any of them to force a
-live Audible fetch instead."""
+live Audible fetch instead.
+
+</details>"""
 
 if migration_notice is not None:
     # Served from both hostnames off one description built at import time, so this can't

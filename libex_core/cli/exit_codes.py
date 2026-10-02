@@ -13,10 +13,13 @@ raises them and an embedder cannot receive them from it.
 """
 
 import enum
+import sys
 from dataclasses import dataclass
 
 from libex_core.cli.environment import ConfigError
+from libex_core.cli.store_state import StoreNotReady
 from libex_core.exceptions import ErrorCode, LibexException
+from libex_core.storage import StorageUnavailable
 
 
 class ExitCode(enum.IntEnum):
@@ -37,7 +40,7 @@ DESCRIPTIONS: dict[ExitCode, str] = {
     ExitCode.USAGE: "The command line was not understood, or an argument was rejected.",
     ExitCode.NOT_FOUND: "The requested item does not exist.",
     ExitCode.UPSTREAM_UNAVAILABLE: "Audible could not be reached or did not answer. Retrying later may succeed.",
-    ExitCode.CONFIG: "The environment configuration is missing or invalid. The error line names this as config_error, a code of this tool that the library itself never reports.",
+    ExitCode.CONFIG: "The environment configuration is missing or invalid, or the local store is off, missing its extra, unreachable or not ready. The error line names this as config_error or store_error, codes of this tool that the library itself never reports.",
     ExitCode.INTERRUPTED: "Interrupted by SIGINT.",
     ExitCode.BROKEN_PIPE: "The reader of standard output went away before the output was complete.",
 }
@@ -63,10 +66,20 @@ _BY_ERROR_CODE: dict[ErrorCode, ExitCode] = {
 
 
 def classify(exc: Exception) -> Failure:
-    # Both branches print the message as-is, so both are limited to classes
+    # Every branch prints the message as-is, so both are limited to classes
     # whose text is fixed by this package or by libex_core.
     if isinstance(exc, ConfigError):
         return Failure(ExitCode.CONFIG, "config_error", str(exc))
+    if isinstance(exc, StoreNotReady):
+        return Failure(ExitCode.CONFIG, "store_error", str(exc))
+    if isinstance(exc, StorageUnavailable):
+        return Failure(ExitCode.CONFIG, "config_error", str(exc))
+    store = sys.modules.get("libex_core.storage.store")
+    if store is not None and isinstance(exc, store.StoreError):
+        # The store's own messages name what is wrong and never quote the
+        # URL, which is the one thing that must not reach this line.
+        code = "config_error" if isinstance(exc, store.StoreConfigError) else "store_error"
+        return Failure(ExitCode.CONFIG, code, str(exc))
     if isinstance(exc, LibexException):
         return Failure(
             _BY_ERROR_CODE.get(exc.code, ExitCode.ERROR),

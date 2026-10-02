@@ -78,14 +78,14 @@ def run_get(args: argparse.Namespace) -> int:
     from libex_core.cli._run import run_lookup
     from libex_core.lookup import get_author
 
-    return run_lookup(lambda get: get_author(get, args.asin, region=args.region))
+    return run_lookup(lambda get, store: get_author(get, args.asin, region=args.region, store=store))
 
 
 def run_search(args: argparse.Namespace) -> int:
     from libex_core.cli._run import run_lookup
     from libex_core.lookup import search_authors
 
-    return run_lookup(lambda get: search_authors(get, args.name, region=args.region))
+    return run_lookup(lambda get, store: search_authors(get, args.name, region=args.region, store=store))
 
 
 def _books_only(result: Any) -> Any:
@@ -106,8 +106,9 @@ def run_books(args: argparse.Namespace) -> int:
     from libex_core.lookup import get_author_books
 
     return run_lookup(
-        lambda get: get_author_books(
-            get, args.asin, region=args.region, **shaping_kwargs(args)
+        lambda get, store: get_author_books(
+            get, args.asin, region=args.region, **shaping_kwargs(args),
+            store=store
         ),
         _books_only,
     )
@@ -118,8 +119,9 @@ def run_books_by_name(args: argparse.Namespace) -> int:
     from libex_core.lookup import get_author_books_by_name
 
     return run_lookup(
-        lambda get: get_author_books_by_name(
-            get, args.name, region=args.region, **shaping_kwargs(args)
+        lambda get, store: get_author_books_by_name(
+            get, args.name, region=args.region, **shaping_kwargs(args),
+            store=store
         ),
         _books_only,
     )

@@ -55,7 +55,7 @@ def run_get(args: argparse.Namespace) -> int:
     from libex_core.cli._run import run_lookup
     from libex_core.lookup import get_series
 
-    return run_lookup(lambda get: get_series(get, args.asin, region=args.region))
+    return run_lookup(lambda get, store: get_series(get, args.asin, region=args.region, store=store))
 
 
 def run_books(args: argparse.Namespace) -> int:
@@ -63,8 +63,9 @@ def run_books(args: argparse.Namespace) -> int:
     from libex_core.lookup import get_series_books
 
     return run_lookup(
-        lambda get: get_series_books(
-            get, args.asin, region=args.region, **shaping_kwargs(args)
+        lambda get, store: get_series_books(
+            get, args.asin, region=args.region, **shaping_kwargs(args),
+            store=store
         )
     )
 
@@ -73,4 +74,4 @@ def run_search(args: argparse.Namespace) -> int:
     from libex_core.cli._run import run_lookup
     from libex_core.lookup import search_series
 
-    return run_lookup(lambda get: search_series(get, args.name, region=args.region))
+    return run_lookup(lambda get, store: search_series(get, args.name, region=args.region, store=store))

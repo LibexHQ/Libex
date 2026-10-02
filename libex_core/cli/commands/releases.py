@@ -108,12 +108,13 @@ def run_new(args: argparse.Namespace) -> int:
     from libex_core.lookup import new_releases
 
     return run_lookup(
-        lambda get: new_releases(
+        lambda get, store: new_releases(
             get,
             int(args.days),
             args.category,
             region=args.region,
             **shaping_kwargs(args),
+            store=store,
         )
     )
 
@@ -123,12 +124,13 @@ def run_coming_soon(args: argparse.Namespace) -> int:
     from libex_core.lookup import coming_soon
 
     return run_lookup(
-        lambda get: coming_soon(
+        lambda get, store: coming_soon(
             get,
             int(args.days),
             args.category,
             region=args.region,
             **shaping_kwargs(args),
+            store=store,
         )
     )
 
@@ -138,7 +140,7 @@ def run_categories(args: argparse.Namespace) -> int:
     from libex_core.lookup import categories
 
     return run_lookup(
-        lambda get: categories(
+        lambda get, store: categories(
             get, region=args.region, flat=args.flat, depth=args.depth
         )
     )

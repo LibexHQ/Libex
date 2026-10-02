@@ -12,10 +12,10 @@ _libex_core() {
         esac
     done
     case "$cmd" in
-        "") candidates=(-h --help --version -q --quiet -v --verbose book series author search quick-search abs narrator releases completion config) ;;
+        "") candidates=(-h --help --version -q --quiet -v --verbose book series author search quick-search abs narrator releases db completion config) ;;
         book)
             if (( COMP_CWORD == ci + 1 )); then
-                candidates=(get bulk chapters)
+                candidates=(get bulk chapters sku)
             else
                 case "${COMP_WORDS[ci + 1]}" in
                     get)
@@ -42,6 +42,7 @@ _libex_core() {
                             *) candidates=(-h --help --region) ;;
                         esac
                         ;;
+                    sku) candidates=(-h --help) ;;
                     *) candidates=() ;;
                 esac
             fi
@@ -207,6 +208,157 @@ _libex_core() {
                         case "${COMP_WORDS[COMP_CWORD - 1]}" in
                             --region) candidates=(us uk ca au de fr it es jp in br) ;;
                             *) candidates=(-h --help --flat --depth --region) ;;
+                        esac
+                        ;;
+                    *) candidates=() ;;
+                esac
+            fi
+            ;;
+        db)
+            if (( COMP_CWORD == ci + 1 )); then
+                candidates=(upgrade status book books chapters sku author author-books series series-books narrators narrator-books genres plans plan vvab new-releases coming-soon stats)
+            else
+                case "${COMP_WORDS[ci + 1]}" in
+                    upgrade) candidates=(-h --help) ;;
+                    status) candidates=(-h --help) ;;
+                    book) candidates=(-h --help) ;;
+                    books)
+                        case "${COMP_WORDS[COMP_CWORD - 1]}" in
+                            --region) candidates=(us uk ca au de fr it es jp in br) ;;
+                            --explicit) candidates=(true false) ;;
+                            --whisper-sync) candidates=(true false) ;;
+                            --has-pdf) candidates=(true false) ;;
+                            --is-listenable) candidates=(true false) ;;
+                            --is-buyable) candidates=(true false) ;;
+                            --is-vvab) candidates=(true false) ;;
+                            --sort) candidates=(title releaseDate rating lengthMinutes language publisher updatedAt) ;;
+                            --order) candidates=(asc desc) ;;
+                            *) candidates=(-h --help --title --subtitle --region --description --summary --publisher --copyright --isbn --author-name --series-name --language --rating-better-than --rating-worse-than --longer-than --shorter-than --explicit --whisper-sync --has-pdf --book-format --content-type --content-delivery-type --is-listenable --is-buyable --is-vvab --plan-name --genre --category --sort --order --limit --page) ;;
+                        esac
+                        ;;
+                    chapters) candidates=(-h --help) ;;
+                    sku) candidates=(-h --help) ;;
+                    author)
+                        case "${COMP_WORDS[COMP_CWORD - 1]}" in
+                            --region) candidates=(us uk ca au de fr it es jp in br) ;;
+                            *) candidates=(-h --help --region) ;;
+                        esac
+                        ;;
+                    author-books)
+                        case "${COMP_WORDS[COMP_CWORD - 1]}" in
+                            --region) candidates=(us uk ca au de fr it es jp in br) ;;
+                            --book-region) candidates=(us uk ca au de fr it es jp in br) ;;
+                            --explicit) candidates=(true false) ;;
+                            --whisper-sync) candidates=(true false) ;;
+                            --has-pdf) candidates=(true false) ;;
+                            --is-listenable) candidates=(true false) ;;
+                            --is-buyable) candidates=(true false) ;;
+                            --is-vvab) candidates=(true false) ;;
+                            --sort) candidates=(title releaseDate rating lengthMinutes language publisher updatedAt) ;;
+                            --order) candidates=(asc desc) ;;
+                            *) candidates=(-h --help --region --book-region --title --subtitle --description --summary --publisher --copyright --isbn --series-name --language --rating-better-than --rating-worse-than --longer-than --shorter-than --explicit --whisper-sync --has-pdf --book-format --content-type --content-delivery-type --is-listenable --is-buyable --is-vvab --plan-name --genre --category --sort --order) ;;
+                        esac
+                        ;;
+                    series) candidates=(-h --help) ;;
+                    series-books)
+                        case "${COMP_WORDS[COMP_CWORD - 1]}" in
+                            --region) candidates=(us uk ca au de fr it es jp in br) ;;
+                            --explicit) candidates=(true false) ;;
+                            --whisper-sync) candidates=(true false) ;;
+                            --has-pdf) candidates=(true false) ;;
+                            --is-listenable) candidates=(true false) ;;
+                            --is-buyable) candidates=(true false) ;;
+                            --is-vvab) candidates=(true false) ;;
+                            --sort) candidates=(title releaseDate rating lengthMinutes language publisher updatedAt) ;;
+                            --order) candidates=(asc desc) ;;
+                            *) candidates=(-h --help --title --subtitle --region --description --summary --publisher --copyright --isbn --author-name --language --rating-better-than --rating-worse-than --longer-than --shorter-than --explicit --whisper-sync --has-pdf --book-format --content-type --content-delivery-type --is-listenable --is-buyable --is-vvab --plan-name --genre --category --sort --order) ;;
+                        esac
+                        ;;
+                    narrators)
+                        case "${COMP_WORDS[COMP_CWORD - 1]}" in
+                            --audiobooks-produced) candidates=(1-10 11-20 21-50 51-100 more-than-100 none-yet) ;;
+                            --sort) candidates=(name source sourceUpdatedAt updatedAt) ;;
+                            --order) candidates=(asc desc) ;;
+                            *) candidates=(-h --help --gender --language --audiobooks-produced --source --cultural-heritage --sort --order --limit --page) ;;
+                        esac
+                        ;;
+                    narrator-books)
+                        case "${COMP_WORDS[COMP_CWORD - 1]}" in
+                            --region) candidates=(us uk ca au de fr it es jp in br) ;;
+                            --explicit) candidates=(true false) ;;
+                            --whisper-sync) candidates=(true false) ;;
+                            --has-pdf) candidates=(true false) ;;
+                            --is-listenable) candidates=(true false) ;;
+                            --is-buyable) candidates=(true false) ;;
+                            --is-vvab) candidates=(true false) ;;
+                            --sort) candidates=(title releaseDate rating lengthMinutes language publisher updatedAt) ;;
+                            --order) candidates=(asc desc) ;;
+                            *) candidates=(-h --help --title --subtitle --region --description --summary --publisher --copyright --isbn --author-name --series-name --language --rating-better-than --rating-worse-than --longer-than --shorter-than --explicit --whisper-sync --has-pdf --book-format --content-type --content-delivery-type --is-listenable --is-buyable --is-vvab --plan-name --genre --category --sort --order --limit --page) ;;
+                        esac
+                        ;;
+                    genres) candidates=(-h --help --search) ;;
+                    plans) candidates=(-h --help) ;;
+                    plan)
+                        case "${COMP_WORDS[COMP_CWORD - 1]}" in
+                            --region) candidates=(us uk ca au de fr it es jp in br) ;;
+                            --explicit) candidates=(true false) ;;
+                            --whisper-sync) candidates=(true false) ;;
+                            --has-pdf) candidates=(true false) ;;
+                            --is-listenable) candidates=(true false) ;;
+                            --is-buyable) candidates=(true false) ;;
+                            --is-vvab) candidates=(true false) ;;
+                            --sort) candidates=(title releaseDate rating lengthMinutes language publisher updatedAt) ;;
+                            --order) candidates=(asc desc) ;;
+                            *) candidates=(-h --help --title --subtitle --region --description --summary --publisher --copyright --isbn --author-name --series-name --language --rating-better-than --rating-worse-than --longer-than --shorter-than --explicit --whisper-sync --has-pdf --book-format --content-type --content-delivery-type --is-listenable --is-buyable --is-vvab --genre --category --sort --order --limit --page) ;;
+                        esac
+                        ;;
+                    vvab)
+                        case "${COMP_WORDS[COMP_CWORD - 1]}" in
+                            --region) candidates=(us uk ca au de fr it es jp in br) ;;
+                            --explicit) candidates=(true false) ;;
+                            --whisper-sync) candidates=(true false) ;;
+                            --has-pdf) candidates=(true false) ;;
+                            --is-listenable) candidates=(true false) ;;
+                            --is-buyable) candidates=(true false) ;;
+                            --sort) candidates=(title releaseDate rating lengthMinutes language publisher updatedAt) ;;
+                            --order) candidates=(asc desc) ;;
+                            *) candidates=(-h --help --title --subtitle --region --description --summary --publisher --copyright --isbn --author-name --series-name --language --rating-better-than --rating-worse-than --longer-than --shorter-than --explicit --whisper-sync --has-pdf --book-format --content-type --content-delivery-type --is-listenable --is-buyable --plan-name --genre --category --sort --order --limit --page) ;;
+                        esac
+                        ;;
+                    new-releases)
+                        case "${COMP_WORDS[COMP_CWORD - 1]}" in
+                            --days) candidates=(30 60 90 120 240 365) ;;
+                            --region) candidates=(us uk ca au de fr it es jp in br) ;;
+                            --explicit) candidates=(true false) ;;
+                            --whisper-sync) candidates=(true false) ;;
+                            --has-pdf) candidates=(true false) ;;
+                            --is-listenable) candidates=(true false) ;;
+                            --is-buyable) candidates=(true false) ;;
+                            --is-vvab) candidates=(true false) ;;
+                            --sort) candidates=(title releaseDate rating lengthMinutes language publisher updatedAt) ;;
+                            --order) candidates=(asc desc) ;;
+                            *) candidates=(-h --help --days --title --subtitle --region --description --summary --publisher --copyright --isbn --author-name --series-name --language --rating-better-than --rating-worse-than --longer-than --shorter-than --explicit --whisper-sync --has-pdf --book-format --content-type --content-delivery-type --is-listenable --is-buyable --is-vvab --plan-name --genre --category --sort --order --limit --page) ;;
+                        esac
+                        ;;
+                    coming-soon)
+                        case "${COMP_WORDS[COMP_CWORD - 1]}" in
+                            --days) candidates=(30 60 90 120 240 365) ;;
+                            --region) candidates=(us uk ca au de fr it es jp in br) ;;
+                            --explicit) candidates=(true false) ;;
+                            --whisper-sync) candidates=(true false) ;;
+                            --has-pdf) candidates=(true false) ;;
+                            --is-listenable) candidates=(true false) ;;
+                            --is-buyable) candidates=(true false) ;;
+                            --is-vvab) candidates=(true false) ;;
+                            --sort) candidates=(title releaseDate rating lengthMinutes language publisher updatedAt) ;;
+                            --order) candidates=(asc desc) ;;
+                            *) candidates=(-h --help --days --title --subtitle --region --description --summary --publisher --copyright --isbn --author-name --series-name --language --rating-better-than --rating-worse-than --longer-than --shorter-than --explicit --whisper-sync --has-pdf --book-format --content-type --content-delivery-type --is-listenable --is-buyable --is-vvab --plan-name --genre --category --sort --order --limit --page) ;;
+                        esac
+                        ;;
+                    stats)
+                        case "${COMP_WORDS[COMP_CWORD - 1]}" in
+                            --region) candidates=(us uk ca au de fr it es jp in br) ;;
+                            *) candidates=(-h --help --region) ;;
                         esac
                         ;;
                     *) candidates=() ;;

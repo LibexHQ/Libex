@@ -12,12 +12,17 @@ from libex_core.cli.commands import (
     book,
     completion,
     config,
+    db,
     narrator,
     releases,
     search,
     series,
 )
-from libex_core.cli.environment import ALLOW_DIRECT_EGRESS_VARIABLE, PROXY_URL_VARIABLE
+from libex_core.cli.environment import (
+    ALLOW_DIRECT_EGRESS_VARIABLE,
+    PROXY_URL_VARIABLE,
+    STORAGE_VARIABLE,
+)
 
 PROG = "libex-core"
 
@@ -30,6 +35,7 @@ COMMANDS = (
     abs_search,
     narrator,
     releases,
+    db,
     completion,
     config,
 )
@@ -46,7 +52,9 @@ def build_parser() -> Parser:
         epilog=(
             f"Environment: {PROXY_URL_VARIABLE} sets the proxy requests go "
             f"through, and {ALLOW_DIRECT_EGRESS_VARIABLE}=1 permits sending "
-            "them from this machine's own address when there is none."
+            "them from this machine's own address when there is none. "
+            f"{STORAGE_VARIABLE} turns on the local store that the db "
+            "commands read and lookups keep their results in."
         ),
         **parser_options(),
     )

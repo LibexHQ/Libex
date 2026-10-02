@@ -46,7 +46,7 @@ def run_search(args: argparse.Namespace) -> int:
     from libex_core.lookup import search
 
     return run_lookup(
-        lambda get: search(
+        lambda get, store: search(
             get,
             title=args.title,
             author=args.author,
@@ -58,6 +58,7 @@ def run_search(args: argparse.Namespace) -> int:
             limit=args.limit,
             page=args.page,
             region=args.region,
+            store=store,
         )
     )
 
@@ -66,4 +67,4 @@ def run_quick_search(args: argparse.Namespace) -> int:
     from libex_core.cli._run import run_lookup
     from libex_core.lookup import quick_search
 
-    return run_lookup(lambda get: quick_search(get, args.keywords, region=args.region))
+    return run_lookup(lambda get, store: quick_search(get, args.keywords, region=args.region, store=store))

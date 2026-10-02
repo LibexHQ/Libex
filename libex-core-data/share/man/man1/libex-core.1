@@ -105,6 +105,16 @@ show this help message and exit
 .TP
 \fB\-\-region\fR
 the Audible marketplace to ask, default us
+.SS book sku
+\fBlibex\-core book sku\fR \fISKU\fR
+.PP
+Print every stored book of a SKU group as JSON, usually the same title in several marketplaces. This is answered from the local store alone, which is off unless LIBEX_CORE_STORAGE is set, and makes no request to Audible. Exits 3 when the store holds none and 5 when storage is off or not ready.
+.TP
+\fISKU\fR
+SKU group identifier
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
 .SS series get
 \fBlibex\-core series get\fR \fIASIN\fR
 .PP
@@ -564,6 +574,934 @@ how many levels to return, 1 is the top level only, default all
 .TP
 \fB\-\-region\fR
 the Audible marketplace to ask, default us
+.SS db upgrade
+\fBlibex\-core db upgrade\fR
+.PP
+Create the store, or bring its schema to the one this version ships, and print the revision as JSON. It is the only command that changes the database's structure and it never runs on its own. It refuses a database that holds tables this tool did not create.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.SS db status
+\fBlibex\-core db status\fR
+.PP
+Print the state of the store as JSON: ok, not\-initialised, outdated, ahead (made by a newer version) or foreign (not made by this tool), with the revision it records. Exits 0 only when the state is ok and 5 otherwise. Nothing is created or changed.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.SS db book
+\fBlibex\-core db book\fR \fIASIN\fR
+.PP
+Print one stored book as JSON.
+.TP
+\fIASIN\fR
+ASIN of the book
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.SS db books
+\fBlibex\-core db books\fR
+.PP
+Print the stored books that match every filter given, as JSON. Give at least one filter or \-\-sort.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-title\fR
+only books whose title contains this text
+.TP
+\fB\-\-subtitle\fR
+only books whose subtitle contains this text
+.TP
+\fB\-\-region\fR
+only books of this marketplace
+.TP
+\fB\-\-description\fR
+only books whose description contains this text
+.TP
+\fB\-\-summary\fR
+only books whose summary contains this text
+.TP
+\fB\-\-publisher\fR
+only books whose publisher contains this text
+.TP
+\fB\-\-copyright\fR
+only books whose copyright line contains this text
+.TP
+\fB\-\-isbn\fR
+only the book with this ISBN
+.TP
+\fB\-\-author\-name\fR
+only books by an author whose name contains this text
+.TP
+\fB\-\-series\-name\fR
+only books in a series whose name contains this text
+.TP
+\fB\-\-language\fR
+only books in this language
+.TP
+\fB\-\-rating\-better\-than\fR
+only books rated at least this
+.TP
+\fB\-\-rating\-worse\-than\fR
+only books rated at most this
+.TP
+\fB\-\-longer\-than\fR
+only books at least this many minutes long
+.TP
+\fB\-\-shorter\-than\fR
+only books at most this many minutes long
+.TP
+\fB\-\-explicit\fR
+only books that are explicit (true) or are not (false)
+.TP
+\fB\-\-whisper\-sync\fR
+only books with Whispersync (true) or without (false)
+.TP
+\fB\-\-has\-pdf\fR
+only books with a PDF companion (true) or without (false)
+.TP
+\fB\-\-book\-format\fR
+only books of this format
+.TP
+\fB\-\-content\-type\fR
+only books of this content type
+.TP
+\fB\-\-content\-delivery\-type\fR
+only books of this content delivery type
+.TP
+\fB\-\-is\-listenable\fR
+only books that are listenable (true) or are not (false)
+.TP
+\fB\-\-is\-buyable\fR
+only books that are buyable (true) or are not (false)
+.TP
+\fB\-\-is\-vvab\fR
+only virtual voice audiobooks (true) or none of them (false)
+.TP
+\fB\-\-plan\-name\fR
+only books available under this Audible plan
+.TP
+\fB\-\-genre\fR
+only books with a genre or tag whose name contains this text, db genres lists them
+.TP
+\fB\-\-category\fR
+only books in this exact category id, or any of several separated by commas
+.TP
+\fB\-\-sort\fR
+sort the books by this field
+.TP
+\fB\-\-order\fR
+the direction of \-\-sort, default asc
+.TP
+\fB\-\-limit\fR
+results per page, 1 to 100, default 20
+.TP
+\fB\-\-page\fR
+page of results to return, counting from 1, default 1
+.SS db chapters
+\fBlibex\-core db chapters\fR \fIASIN\fR
+.PP
+Print a stored book's chapters as JSON.
+.TP
+\fIASIN\fR
+ASIN of the book
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.SS db sku
+\fBlibex\-core db sku\fR \fISKU\fR
+.PP
+Print every stored book of a SKU group as JSON, which is usually the same title in several marketplaces.
+.TP
+\fISKU\fR
+SKU group identifier
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.SS db author
+\fBlibex\-core db author\fR \fIASIN\fR
+.PP
+Print one stored author as JSON.
+.TP
+\fIASIN\fR
+ASIN of the author
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-region\fR
+the marketplace of the author, default us
+.SS db author\-books
+\fBlibex\-core db author\-books\fR \fIASIN\fR
+.PP
+Print every stored book of an author as JSON, with every filter that applies. \-\-region picks the author's marketplace and \-\-book\-region narrows the books.
+.TP
+\fIASIN\fR
+ASIN of the author
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-region\fR
+the marketplace of the author, default us
+.TP
+\fB\-\-book\-region\fR
+only books of this marketplace
+.TP
+\fB\-\-title\fR
+only books whose title contains this text
+.TP
+\fB\-\-subtitle\fR
+only books whose subtitle contains this text
+.TP
+\fB\-\-description\fR
+only books whose description contains this text
+.TP
+\fB\-\-summary\fR
+only books whose summary contains this text
+.TP
+\fB\-\-publisher\fR
+only books whose publisher contains this text
+.TP
+\fB\-\-copyright\fR
+only books whose copyright line contains this text
+.TP
+\fB\-\-isbn\fR
+only the book with this ISBN
+.TP
+\fB\-\-series\-name\fR
+only books in a series whose name contains this text
+.TP
+\fB\-\-language\fR
+only books in this language
+.TP
+\fB\-\-rating\-better\-than\fR
+only books rated at least this
+.TP
+\fB\-\-rating\-worse\-than\fR
+only books rated at most this
+.TP
+\fB\-\-longer\-than\fR
+only books at least this many minutes long
+.TP
+\fB\-\-shorter\-than\fR
+only books at most this many minutes long
+.TP
+\fB\-\-explicit\fR
+only books that are explicit (true) or are not (false)
+.TP
+\fB\-\-whisper\-sync\fR
+only books with Whispersync (true) or without (false)
+.TP
+\fB\-\-has\-pdf\fR
+only books with a PDF companion (true) or without (false)
+.TP
+\fB\-\-book\-format\fR
+only books of this format
+.TP
+\fB\-\-content\-type\fR
+only books of this content type
+.TP
+\fB\-\-content\-delivery\-type\fR
+only books of this content delivery type
+.TP
+\fB\-\-is\-listenable\fR
+only books that are listenable (true) or are not (false)
+.TP
+\fB\-\-is\-buyable\fR
+only books that are buyable (true) or are not (false)
+.TP
+\fB\-\-is\-vvab\fR
+only virtual voice audiobooks (true) or none of them (false)
+.TP
+\fB\-\-plan\-name\fR
+only books available under this Audible plan
+.TP
+\fB\-\-genre\fR
+only books with a genre or tag whose name contains this text, db genres lists them
+.TP
+\fB\-\-category\fR
+only books in this exact category id, or any of several separated by commas
+.TP
+\fB\-\-sort\fR
+sort the books by this field
+.TP
+\fB\-\-order\fR
+the direction of \-\-sort, default asc
+.SS db series
+\fBlibex\-core db series\fR \fIASIN\fR
+.PP
+Print one stored series as JSON.
+.TP
+\fIASIN\fR
+ASIN of the series
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.SS db series\-books
+\fBlibex\-core db series\-books\fR \fIASIN\fR
+.PP
+Print every stored book of a series as JSON, in series order unless sorted.
+.TP
+\fIASIN\fR
+ASIN of the series
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-title\fR
+only books whose title contains this text
+.TP
+\fB\-\-subtitle\fR
+only books whose subtitle contains this text
+.TP
+\fB\-\-region\fR
+only books of this marketplace
+.TP
+\fB\-\-description\fR
+only books whose description contains this text
+.TP
+\fB\-\-summary\fR
+only books whose summary contains this text
+.TP
+\fB\-\-publisher\fR
+only books whose publisher contains this text
+.TP
+\fB\-\-copyright\fR
+only books whose copyright line contains this text
+.TP
+\fB\-\-isbn\fR
+only the book with this ISBN
+.TP
+\fB\-\-author\-name\fR
+only books by an author whose name contains this text
+.TP
+\fB\-\-language\fR
+only books in this language
+.TP
+\fB\-\-rating\-better\-than\fR
+only books rated at least this
+.TP
+\fB\-\-rating\-worse\-than\fR
+only books rated at most this
+.TP
+\fB\-\-longer\-than\fR
+only books at least this many minutes long
+.TP
+\fB\-\-shorter\-than\fR
+only books at most this many minutes long
+.TP
+\fB\-\-explicit\fR
+only books that are explicit (true) or are not (false)
+.TP
+\fB\-\-whisper\-sync\fR
+only books with Whispersync (true) or without (false)
+.TP
+\fB\-\-has\-pdf\fR
+only books with a PDF companion (true) or without (false)
+.TP
+\fB\-\-book\-format\fR
+only books of this format
+.TP
+\fB\-\-content\-type\fR
+only books of this content type
+.TP
+\fB\-\-content\-delivery\-type\fR
+only books of this content delivery type
+.TP
+\fB\-\-is\-listenable\fR
+only books that are listenable (true) or are not (false)
+.TP
+\fB\-\-is\-buyable\fR
+only books that are buyable (true) or are not (false)
+.TP
+\fB\-\-is\-vvab\fR
+only virtual voice audiobooks (true) or none of them (false)
+.TP
+\fB\-\-plan\-name\fR
+only books available under this Audible plan
+.TP
+\fB\-\-genre\fR
+only books with a genre or tag whose name contains this text, db genres lists them
+.TP
+\fB\-\-category\fR
+only books in this exact category id, or any of several separated by commas
+.TP
+\fB\-\-sort\fR
+sort the books by this field, replacing series order
+.TP
+\fB\-\-order\fR
+the direction of \-\-sort, default asc
+.SS db narrators
+\fBlibex\-core db narrators\fR \fINAME\fR
+.PP
+Print the stored narrator profiles whose name contains the text, as JSON.
+.TP
+\fINAME\fR
+text in the narrator's name
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-gender\fR
+only narrators whose gender contains this text
+.TP
+\fB\-\-language\fR
+only narrators who work in this language
+.TP
+\fB\-\-audiobooks\-produced\fR
+only narrators in this audiobooks\-produced bucket
+.TP
+\fB\-\-source\fR
+only profiles from this source
+.TP
+\fB\-\-cultural\-heritage\fR
+only narrators whose cultural heritage contains this text
+.TP
+\fB\-\-sort\fR
+sort by this field
+.TP
+\fB\-\-order\fR
+the direction of \-\-sort, default asc
+.TP
+\fB\-\-limit\fR
+results per page, 1 to 100, default 20
+.TP
+\fB\-\-page\fR
+page of results to return, counting from 1, default 1
+.SS db narrator\-books
+\fBlibex\-core db narrator\-books\fR \fINAME\fR
+.PP
+Print the stored books read by the narrator, matched by exact name, as JSON.
+.TP
+\fINAME\fR
+name of the narrator
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-title\fR
+only books whose title contains this text
+.TP
+\fB\-\-subtitle\fR
+only books whose subtitle contains this text
+.TP
+\fB\-\-region\fR
+only books of this marketplace
+.TP
+\fB\-\-description\fR
+only books whose description contains this text
+.TP
+\fB\-\-summary\fR
+only books whose summary contains this text
+.TP
+\fB\-\-publisher\fR
+only books whose publisher contains this text
+.TP
+\fB\-\-copyright\fR
+only books whose copyright line contains this text
+.TP
+\fB\-\-isbn\fR
+only the book with this ISBN
+.TP
+\fB\-\-author\-name\fR
+only books by an author whose name contains this text
+.TP
+\fB\-\-series\-name\fR
+only books in a series whose name contains this text
+.TP
+\fB\-\-language\fR
+only books in this language
+.TP
+\fB\-\-rating\-better\-than\fR
+only books rated at least this
+.TP
+\fB\-\-rating\-worse\-than\fR
+only books rated at most this
+.TP
+\fB\-\-longer\-than\fR
+only books at least this many minutes long
+.TP
+\fB\-\-shorter\-than\fR
+only books at most this many minutes long
+.TP
+\fB\-\-explicit\fR
+only books that are explicit (true) or are not (false)
+.TP
+\fB\-\-whisper\-sync\fR
+only books with Whispersync (true) or without (false)
+.TP
+\fB\-\-has\-pdf\fR
+only books with a PDF companion (true) or without (false)
+.TP
+\fB\-\-book\-format\fR
+only books of this format
+.TP
+\fB\-\-content\-type\fR
+only books of this content type
+.TP
+\fB\-\-content\-delivery\-type\fR
+only books of this content delivery type
+.TP
+\fB\-\-is\-listenable\fR
+only books that are listenable (true) or are not (false)
+.TP
+\fB\-\-is\-buyable\fR
+only books that are buyable (true) or are not (false)
+.TP
+\fB\-\-is\-vvab\fR
+only virtual voice audiobooks (true) or none of them (false)
+.TP
+\fB\-\-plan\-name\fR
+only books available under this Audible plan
+.TP
+\fB\-\-genre\fR
+only books with a genre or tag whose name contains this text, db genres lists them
+.TP
+\fB\-\-category\fR
+only books in this exact category id, or any of several separated by commas
+.TP
+\fB\-\-sort\fR
+sort the books by this field
+.TP
+\fB\-\-order\fR
+the direction of \-\-sort, default asc
+.TP
+\fB\-\-limit\fR
+results per page, 1 to 100, default 20
+.TP
+\fB\-\-page\fR
+page of results to return, counting from 1, default 1
+.SS db genres
+\fBlibex\-core db genres\fR
+.PP
+Print every distinct genre and tag name in the store as JSON.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-search\fR
+only names that contain this text
+.SS db plans
+\fBlibex\-core db plans\fR
+.PP
+Print every distinct plan name in the store as JSON.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.SS db plan
+\fBlibex\-core db plan\fR \fINAME\fR
+.PP
+Print the stored books available under an Audible plan, as JSON.
+.TP
+\fINAME\fR
+plan name, as db plans prints it
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-title\fR
+only books whose title contains this text
+.TP
+\fB\-\-subtitle\fR
+only books whose subtitle contains this text
+.TP
+\fB\-\-region\fR
+only books of this marketplace
+.TP
+\fB\-\-description\fR
+only books whose description contains this text
+.TP
+\fB\-\-summary\fR
+only books whose summary contains this text
+.TP
+\fB\-\-publisher\fR
+only books whose publisher contains this text
+.TP
+\fB\-\-copyright\fR
+only books whose copyright line contains this text
+.TP
+\fB\-\-isbn\fR
+only the book with this ISBN
+.TP
+\fB\-\-author\-name\fR
+only books by an author whose name contains this text
+.TP
+\fB\-\-series\-name\fR
+only books in a series whose name contains this text
+.TP
+\fB\-\-language\fR
+only books in this language
+.TP
+\fB\-\-rating\-better\-than\fR
+only books rated at least this
+.TP
+\fB\-\-rating\-worse\-than\fR
+only books rated at most this
+.TP
+\fB\-\-longer\-than\fR
+only books at least this many minutes long
+.TP
+\fB\-\-shorter\-than\fR
+only books at most this many minutes long
+.TP
+\fB\-\-explicit\fR
+only books that are explicit (true) or are not (false)
+.TP
+\fB\-\-whisper\-sync\fR
+only books with Whispersync (true) or without (false)
+.TP
+\fB\-\-has\-pdf\fR
+only books with a PDF companion (true) or without (false)
+.TP
+\fB\-\-book\-format\fR
+only books of this format
+.TP
+\fB\-\-content\-type\fR
+only books of this content type
+.TP
+\fB\-\-content\-delivery\-type\fR
+only books of this content delivery type
+.TP
+\fB\-\-is\-listenable\fR
+only books that are listenable (true) or are not (false)
+.TP
+\fB\-\-is\-buyable\fR
+only books that are buyable (true) or are not (false)
+.TP
+\fB\-\-is\-vvab\fR
+only virtual voice audiobooks (true) or none of them (false)
+.TP
+\fB\-\-genre\fR
+only books with a genre or tag whose name contains this text, db genres lists them
+.TP
+\fB\-\-category\fR
+only books in this exact category id, or any of several separated by commas
+.TP
+\fB\-\-sort\fR
+sort the books by this field
+.TP
+\fB\-\-order\fR
+the direction of \-\-sort, default asc
+.TP
+\fB\-\-limit\fR
+results per page, 1 to 100, default 20
+.TP
+\fB\-\-page\fR
+page of results to return, counting from 1, default 1
+.SS db vvab
+\fBlibex\-core db vvab\fR
+.PP
+Print the stored virtual voice (AI\-narrated) audiobooks as JSON.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-title\fR
+only books whose title contains this text
+.TP
+\fB\-\-subtitle\fR
+only books whose subtitle contains this text
+.TP
+\fB\-\-region\fR
+only books of this marketplace
+.TP
+\fB\-\-description\fR
+only books whose description contains this text
+.TP
+\fB\-\-summary\fR
+only books whose summary contains this text
+.TP
+\fB\-\-publisher\fR
+only books whose publisher contains this text
+.TP
+\fB\-\-copyright\fR
+only books whose copyright line contains this text
+.TP
+\fB\-\-isbn\fR
+only the book with this ISBN
+.TP
+\fB\-\-author\-name\fR
+only books by an author whose name contains this text
+.TP
+\fB\-\-series\-name\fR
+only books in a series whose name contains this text
+.TP
+\fB\-\-language\fR
+only books in this language
+.TP
+\fB\-\-rating\-better\-than\fR
+only books rated at least this
+.TP
+\fB\-\-rating\-worse\-than\fR
+only books rated at most this
+.TP
+\fB\-\-longer\-than\fR
+only books at least this many minutes long
+.TP
+\fB\-\-shorter\-than\fR
+only books at most this many minutes long
+.TP
+\fB\-\-explicit\fR
+only books that are explicit (true) or are not (false)
+.TP
+\fB\-\-whisper\-sync\fR
+only books with Whispersync (true) or without (false)
+.TP
+\fB\-\-has\-pdf\fR
+only books with a PDF companion (true) or without (false)
+.TP
+\fB\-\-book\-format\fR
+only books of this format
+.TP
+\fB\-\-content\-type\fR
+only books of this content type
+.TP
+\fB\-\-content\-delivery\-type\fR
+only books of this content delivery type
+.TP
+\fB\-\-is\-listenable\fR
+only books that are listenable (true) or are not (false)
+.TP
+\fB\-\-is\-buyable\fR
+only books that are buyable (true) or are not (false)
+.TP
+\fB\-\-plan\-name\fR
+only books available under this Audible plan
+.TP
+\fB\-\-genre\fR
+only books with a genre or tag whose name contains this text, db genres lists them
+.TP
+\fB\-\-category\fR
+only books in this exact category id, or any of several separated by commas
+.TP
+\fB\-\-sort\fR
+sort the books by this field
+.TP
+\fB\-\-order\fR
+the direction of \-\-sort, default asc
+.TP
+\fB\-\-limit\fR
+results per page, 1 to 100, default 20
+.TP
+\fB\-\-page\fR
+page of results to return, counting from 1, default 1
+.SS db new\-releases
+\fBlibex\-core db new\-releases\fR
+.PP
+Print the stored books released in the window as JSON, newest first unless sorted. Titles that are not yet out, or are already out, and the no\-date\-yet placeholder are left out as the hosted route leaves them out.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-days\fR
+how many days back to look, default 30
+.TP
+\fB\-\-title\fR
+only books whose title contains this text
+.TP
+\fB\-\-subtitle\fR
+only books whose subtitle contains this text
+.TP
+\fB\-\-region\fR
+only books of this marketplace
+.TP
+\fB\-\-description\fR
+only books whose description contains this text
+.TP
+\fB\-\-summary\fR
+only books whose summary contains this text
+.TP
+\fB\-\-publisher\fR
+only books whose publisher contains this text
+.TP
+\fB\-\-copyright\fR
+only books whose copyright line contains this text
+.TP
+\fB\-\-isbn\fR
+only the book with this ISBN
+.TP
+\fB\-\-author\-name\fR
+only books by an author whose name contains this text
+.TP
+\fB\-\-series\-name\fR
+only books in a series whose name contains this text
+.TP
+\fB\-\-language\fR
+only books in this language
+.TP
+\fB\-\-rating\-better\-than\fR
+only books rated at least this
+.TP
+\fB\-\-rating\-worse\-than\fR
+only books rated at most this
+.TP
+\fB\-\-longer\-than\fR
+only books at least this many minutes long
+.TP
+\fB\-\-shorter\-than\fR
+only books at most this many minutes long
+.TP
+\fB\-\-explicit\fR
+only books that are explicit (true) or are not (false)
+.TP
+\fB\-\-whisper\-sync\fR
+only books with Whispersync (true) or without (false)
+.TP
+\fB\-\-has\-pdf\fR
+only books with a PDF companion (true) or without (false)
+.TP
+\fB\-\-book\-format\fR
+only books of this format
+.TP
+\fB\-\-content\-type\fR
+only books of this content type
+.TP
+\fB\-\-content\-delivery\-type\fR
+only books of this content delivery type
+.TP
+\fB\-\-is\-listenable\fR
+only books that are listenable (true) or are not (false)
+.TP
+\fB\-\-is\-buyable\fR
+only books that are buyable (true) or are not (false)
+.TP
+\fB\-\-is\-vvab\fR
+only virtual voice audiobooks (true) or none of them (false)
+.TP
+\fB\-\-plan\-name\fR
+only books available under this Audible plan
+.TP
+\fB\-\-genre\fR
+only books with a genre or tag whose name contains this text, db genres lists them
+.TP
+\fB\-\-category\fR
+only books in this exact category id, or any of several separated by commas
+.TP
+\fB\-\-sort\fR
+sort the books by this field
+.TP
+\fB\-\-order\fR
+the direction of \-\-sort, default desc
+.TP
+\fB\-\-limit\fR
+results per page, 1 to 100, default 20
+.TP
+\fB\-\-page\fR
+page of results to return, counting from 1, default 1
+.SS db coming\-soon
+\fBlibex\-core db coming\-soon\fR
+.PP
+Print the stored books released in the window as JSON, soonest first unless sorted. Titles that are not yet out, or are already out, and the no\-date\-yet placeholder are left out as the hosted route leaves them out.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-days\fR
+how many days ahead to look, default 30
+.TP
+\fB\-\-title\fR
+only books whose title contains this text
+.TP
+\fB\-\-subtitle\fR
+only books whose subtitle contains this text
+.TP
+\fB\-\-region\fR
+only books of this marketplace
+.TP
+\fB\-\-description\fR
+only books whose description contains this text
+.TP
+\fB\-\-summary\fR
+only books whose summary contains this text
+.TP
+\fB\-\-publisher\fR
+only books whose publisher contains this text
+.TP
+\fB\-\-copyright\fR
+only books whose copyright line contains this text
+.TP
+\fB\-\-isbn\fR
+only the book with this ISBN
+.TP
+\fB\-\-author\-name\fR
+only books by an author whose name contains this text
+.TP
+\fB\-\-series\-name\fR
+only books in a series whose name contains this text
+.TP
+\fB\-\-language\fR
+only books in this language
+.TP
+\fB\-\-rating\-better\-than\fR
+only books rated at least this
+.TP
+\fB\-\-rating\-worse\-than\fR
+only books rated at most this
+.TP
+\fB\-\-longer\-than\fR
+only books at least this many minutes long
+.TP
+\fB\-\-shorter\-than\fR
+only books at most this many minutes long
+.TP
+\fB\-\-explicit\fR
+only books that are explicit (true) or are not (false)
+.TP
+\fB\-\-whisper\-sync\fR
+only books with Whispersync (true) or without (false)
+.TP
+\fB\-\-has\-pdf\fR
+only books with a PDF companion (true) or without (false)
+.TP
+\fB\-\-book\-format\fR
+only books of this format
+.TP
+\fB\-\-content\-type\fR
+only books of this content type
+.TP
+\fB\-\-content\-delivery\-type\fR
+only books of this content delivery type
+.TP
+\fB\-\-is\-listenable\fR
+only books that are listenable (true) or are not (false)
+.TP
+\fB\-\-is\-buyable\fR
+only books that are buyable (true) or are not (false)
+.TP
+\fB\-\-is\-vvab\fR
+only virtual voice audiobooks (true) or none of them (false)
+.TP
+\fB\-\-plan\-name\fR
+only books available under this Audible plan
+.TP
+\fB\-\-genre\fR
+only books with a genre or tag whose name contains this text, db genres lists them
+.TP
+\fB\-\-category\fR
+only books in this exact category id, or any of several separated by commas
+.TP
+\fB\-\-sort\fR
+sort the books by this field
+.TP
+\fB\-\-order\fR
+the direction of \-\-sort, default asc
+.TP
+\fB\-\-limit\fR
+results per page, 1 to 100, default 20
+.TP
+\fB\-\-page\fR
+page of results to return, counting from 1, default 1
+.SS db stats
+\fBlibex\-core db stats\fR
+.PP
+Print how many books, authors, narrators, series and books with chapters the store holds, as JSON. \-\-region scopes all but narrators, and then seriesRegionUnknown counts the series that have no region.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-region\fR
+count only this marketplace, default all
 .SS completion
 \fBlibex\-core completion\fR \fIshell\fR
 .PP
@@ -588,6 +1526,9 @@ URL of the http or https proxy that every request goes through. It may carry cre
 .TP
 \fBLIBEX_CORE_ALLOW_DIRECT_EGRESS\fR
 Set to 1, true, yes or on to let requests leave on this machine's own address when no proxy is set. 0, false, no, off or empty keeps that refused. A proxy, when set, is always used.
+.TP
+\fBLIBEX_CORE_STORAGE\fR
+Where the local store lives. off or empty, the default, keeps nothing. sqlite uses libex.db in this user's data directory, an absolute path uses that SQLite file, and a sqlite:/// or postgresql:// URL uses that database. It may carry credentials, so it is read from the environment, never accepted as an option, and never printed. Needs the storage extra, and the postgres extra for postgresql.
 .SH EXIT STATUS
 .TP
 \fB0\fR
@@ -606,7 +1547,7 @@ The requested item does not exist.
 Audible could not be reached or did not answer. Retrying later may succeed.
 .TP
 \fB5\fR
-The environment configuration is missing or invalid. The error line names this as config_error, a code of this tool that the library itself never reports.
+The environment configuration is missing or invalid, or the local store is off, missing its extra, unreachable or not ready. The error line names this as config_error or store_error, codes of this tool that the library itself never reports.
 .TP
 \fB130\fR
 Interrupted by SIGINT.

@@ -37,7 +37,8 @@ def run_books(args: argparse.Namespace) -> int:
     from libex_core.lookup import narrator_books
 
     return run_lookup(
-        lambda get: narrator_books(
-            get, args.name, limit=args.limit, page=args.page, region=args.region
+        lambda get, store: narrator_books(
+            get, args.name, limit=args.limit, page=args.page, region=args.region,
+            store=store
         )
     )

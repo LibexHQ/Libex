@@ -70,19 +70,40 @@ def register(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") 
     add_region_option(chapters)
     chapters.set_defaults(handler=run_chapters)
 
+    sku = add_command(
+        book,
+        "sku",
+        "stored books of one SKU group",
+        "Print every stored book of a SKU group as JSON, usually the same "
+        "title in several marketplaces. This is answered from the local "
+        "store alone, which is off unless LIBEX_CORE_STORAGE is set, and "
+        "makes no request to Audible. Exits 3 when the store holds none "
+        "and 5 when storage is off or not ready.",
+    )
+    sku.add_argument("sku", metavar="SKU", help="SKU group identifier")
+    sku.set_defaults(handler=run_sku)
+
 
 def run_get(args: argparse.Namespace) -> int:
     from libex_core.cli._run import run_lookup
     from libex_core.lookup import get_book
 
-    return run_lookup(lambda get: get_book(get, args.asin, region=args.region))
+    return run_lookup(lambda get, store: get_book(get, args.asin, region=args.region, store=store))
 
 
 def run_chapters(args: argparse.Namespace) -> int:
     from libex_core.cli._run import run_lookup
     from libex_core.lookup import get_chapters
 
-    return run_lookup(lambda get: get_chapters(get, args.asin, region=args.region))
+    return run_lookup(lambda get, store: get_chapters(get, args.asin, region=args.region, store=store))
+
+
+def run_sku(args: argparse.Namespace) -> int:
+    # The hosted /book/sku route reads the database only, so this is the same
+    # read as db sku.
+    from libex_core.cli.commands.db import run_sku as run_db_sku
+
+    return run_db_sku(args)
 
 
 def _read_file(path: str) -> str:
@@ -118,7 +139,8 @@ def run_bulk(args: argparse.Namespace) -> int:
         parts.append(_read_file(args.file))
     asins = split_asins(parts)
     return run_lookup(
-        lambda get: get_books(
-            get, asins, region=args.region, **shaping_kwargs(args)
+        lambda get, store: get_books(
+            get, asins, region=args.region, **shaping_kwargs(args),
+            store=store
         )
     )

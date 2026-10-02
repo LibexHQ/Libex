@@ -55,13 +55,14 @@ def run_search(args: argparse.Namespace) -> int:
     from libex_core.lookup import abs_search
 
     return run_lookup(
-        lambda get: abs_search(
+        lambda get, store: abs_search(
             get,
             title=args.title,
             query=args.query,
             author=args.author,
             keywords=args.keywords,
             region=args.region,
+            store=store,
         )
     )
 
@@ -71,11 +72,12 @@ def run_quick_search(args: argparse.Namespace) -> int:
     from libex_core.lookup import abs_quick_search
 
     return run_lookup(
-        lambda get: abs_quick_search(
+        lambda get, store: abs_quick_search(
             get,
             keywords=args.keywords,
             query=args.query,
             title=args.title,
             region=args.region,
+            store=store,
         )
     )

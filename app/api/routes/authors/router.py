@@ -86,10 +86,10 @@ async def get_books_by_author_name(
     Used when no author ASIN is available.
     Returns full book objects in the BookDto shape derived from AudiMeta's.
 
-    Both phases record into one ResponseFacts. A walk that stopped before it
-    could confirm the catalogue is whole, or a hydration that returned fewer
-    books than it was handed, still returns what was gathered, labelled
-    X-Libex-Complete: false with the reasons in X-Libex-Incomplete-Reason.
+    If the author walk stopped before confirming the catalogue is whole, or
+    fewer books came back with full details than the walk found, the books
+    gathered are still returned, labelled X-Libex-Complete: false with the
+    reasons in X-Libex-Incomplete-Reason.
     """
     facts = ResponseFacts()
     asins = await outage_as_not_found(get_author_books_by_name(name, region, session, facts=facts))

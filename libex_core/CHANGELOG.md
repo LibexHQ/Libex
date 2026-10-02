@@ -22,6 +22,13 @@ time it was cut.
 - **`AuthorResponse` is now public in `libex_core.models`.** Field names, optionality and defaults are those of the hosted service's copy: `id`, `asin`, `name`, `description`, `image`, `region`, `regions`, `genres` and `updatedAt`.
 - **`fetch_author_profile` raises `ValueError` for a value that is not an ASIN, and `fetch_author_books_by_screen` answers one with an empty, clean result.** In both cases nothing is sent, and the `ValueError` message never repeats the rejected value. The screen walk returns no ASINs, no pages fetched and a completed reason rather than raising, because Audible answers an unknown author ASIN the same way. `fetch_author_books_by_catalog` does not validate its author ASIN, since it is only compared with what comes back and never sent.
 
+## [0.10.0]
+
+### Added
+- **The package can now filter and sort a list of book dictionaries.** A new public module, `libex_core.shaping`, exposes `filter_dicts` and `sort_dicts`, the in-memory filtering and sorting the live book lists use, with no database or web framework involved. `filter_dicts(items, filters)` takes a dictionary of filter name to value, ignores `None` values and unknown names, keeps the input order, and returns the input list itself when no filter is active. `sort_dicts(items, sort, order, allowed)` returns the list unchanged when `sort` is empty or not in `allowed`; otherwise it sorts ascending, or descending when `order` is `desc`, and books missing the field or holding `None` for it go to the end in either direction. `allowed` is any container of field names, such as a tuple or the keys of a dictionary; only membership is tested.
+- **The filter and sort surface is published as data, so a front end can build its parameters from it.** `BOOK_FILTER_SPECS` is a tuple of `FilterSpec` entries (`name`, `type`, `description`) for the twelve filters: `language`, `book_format`, `explicit`, `whisper_sync`, `has_pdf`, `is_vvab`, `plan_name`, `rating_better_than`, `rating_worse_than`, `longer_than`, `shorter_than` and `genre`. `BOOK_FILTER_FIELDS` is the set of their names. `BOOK_SORT_FIELDS` is the tuple of sortable book fields (`title`, `releaseDate`, `rating`, `lengthMinutes`, `language`, `publisher`, `updatedAt`), `BookSortField` is an enum with exactly those members, and `SortOrder` is the `asc`/`desc` enum.
+- **Filters are limited to what is cheap on a list already in memory.** Numeric ranges, equality on the format and boolean fields, plan membership, and a case-insensitive partial match on genre names. Free-text search on title or description is not offered. A book missing the field a range filter targets is excluded by that filter, so a book with no length is never "longer than" anything.
+
 ## [0.9.0]
 
 ### Added

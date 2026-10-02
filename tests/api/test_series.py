@@ -14,6 +14,7 @@ from httpx import AsyncClient, ASGITransport
 # Local
 from app.main import app
 from libex_core.exceptions import AudibleAPIException, NotFoundException
+from tests.fixtures.outage import assert_outage_503
 from app.core.response_headers import SOURCE_AUDIBLE, SOURCE_CACHE, record_source, record_source_keys
 
 MOCK_SERIES = {
@@ -643,80 +644,63 @@ async def test_get_series_books_primary_marks_incomplete_on_a_hollow_stub_with_n
 
 
 # ============================================================
-# AUDIBLE OUTAGE CONTRACT — AudibleAPIException still comes back as the
-# same 404 HEAD produced, byte for byte, via outage_as_not_found
+# AUDIBLE OUTAGE CONTRACT — AudibleAPIException comes back as a 503 with
+# Retry-After, via outage_as_unavailable and the handler in app.main
 # ============================================================
 
 @pytest.mark.asyncio
-async def test_search_series_outage_returns_404_matching_head(async_client):
+async def test_search_series_outage_returns_503_with_retry_after(async_client):
     with patch("app.api.routes.series.router.search_series", new_callable=AsyncMock) as mock:
         mock.side_effect = AudibleAPIException("Series search failed")
         response = await async_client.get("/series/search?name=Dune")
 
-    assert response.status_code == 404
-    assert response.json() == {"error": "Series search failed", "status_code": 404, "code": "upstream_unavailable"}
+    assert_outage_503(response, "Series search failed")
 
 
 @pytest.mark.asyncio
-async def test_search_series_legacy_outage_returns_404_matching_head(async_client):
+async def test_search_series_legacy_outage_returns_503_with_retry_after(async_client):
     """Legacy twin (/series) must not diverge."""
     with patch("app.api.routes.series.router.search_series", new_callable=AsyncMock) as mock:
         mock.side_effect = AudibleAPIException("Series search failed")
         response = await async_client.get("/series?name=Dune")
 
-    assert response.status_code == 404
-    assert response.json() == {"error": "Series search failed", "status_code": 404, "code": "upstream_unavailable"}
+    assert_outage_503(response, "Series search failed")
 
 
 @pytest.mark.asyncio
-async def test_get_books_by_series_outage_on_discovery_returns_404_matching_head(async_client):
+async def test_get_books_by_series_outage_on_discovery_returns_503_with_retry_after(async_client):
     """/series/books/{asin} -- a route whose 404 message comes from the
     service, not a route literal."""
     with patch("app.api.routes.series.router.get_series_books", new_callable=AsyncMock) as mock:
         mock.side_effect = AudibleAPIException("Audible unavailable and no cached series books found")
         response = await async_client.get("/series/books/B00SERIES1")
 
-    assert response.status_code == 404
-    assert response.json() == {
-        "error": "Audible unavailable and no cached series books found",
-        "status_code": 404,
-        "code": "upstream_unavailable",
-    }
+    assert_outage_503(response, "Audible unavailable and no cached series books found")
 
 
 @pytest.mark.asyncio
-async def test_get_books_by_series_outage_on_hydration_returns_404_matching_head(async_client):
+async def test_get_books_by_series_outage_on_hydration_returns_503_with_retry_after(async_client):
     with patch("app.api.routes.series.router.get_series_books", new_callable=AsyncMock) as mock_series, \
          patch("app.api.routes.series.router.get_books_by_asins", new_callable=AsyncMock) as mock_books:
         mock_series.return_value = ["B08G9PRS1K"]
         mock_books.side_effect = AudibleAPIException("Audible unavailable and no cached data found")
         response = await async_client.get("/series/books/B00SERIES1")
 
-    assert response.status_code == 404
-    assert response.json() == {
-        "error": "Audible unavailable and no cached data found",
-        "status_code": 404,
-        "code": "upstream_unavailable",
-    }
+    assert_outage_503(response, "Audible unavailable and no cached data found")
 
 
 @pytest.mark.asyncio
-async def test_get_books_by_series_primary_outage_on_discovery_returns_404_matching_head(async_client):
+async def test_get_books_by_series_primary_outage_on_discovery_returns_503_with_retry_after(async_client):
     """Legacy twin (/series/{asin}/books) must not diverge."""
     with patch("app.api.routes.series.router.get_series_books", new_callable=AsyncMock) as mock:
         mock.side_effect = AudibleAPIException("Audible unavailable and no cached series books found")
         response = await async_client.get("/series/B00SERIES1/books")
 
-    assert response.status_code == 404
-    assert response.json() == {
-        "error": "Audible unavailable and no cached series books found",
-        "status_code": 404,
-        "code": "upstream_unavailable",
-    }
+    assert_outage_503(response, "Audible unavailable and no cached series books found")
 
 
 @pytest.mark.asyncio
-async def test_get_books_by_series_primary_outage_on_hydration_returns_404_matching_head(async_client):
+async def test_get_books_by_series_primary_outage_on_hydration_returns_503_with_retry_after(async_client):
     """Legacy twin (/series/{asin}/books) must not diverge."""
     with patch("app.api.routes.series.router.get_series_books", new_callable=AsyncMock) as mock_series, \
          patch("app.api.routes.series.router.get_books_by_asins", new_callable=AsyncMock) as mock_books:
@@ -724,32 +708,38 @@ async def test_get_books_by_series_primary_outage_on_hydration_returns_404_match
         mock_books.side_effect = AudibleAPIException("Audible unavailable and no cached data found")
         response = await async_client.get("/series/B00SERIES1/books")
 
-    assert response.status_code == 404
-    assert response.json() == {
-        "error": "Audible unavailable and no cached data found",
-        "status_code": 404,
-        "code": "upstream_unavailable",
-    }
+    assert_outage_503(response, "Audible unavailable and no cached data found")
 
 
 @pytest.mark.asyncio
-async def test_get_series_by_asin_outage_returns_404_matching_head(async_client):
+async def test_get_series_by_asin_outage_returns_503_with_retry_after(async_client):
     with patch("app.api.routes.series.router.get_series", new_callable=AsyncMock) as mock:
         mock.side_effect = AudibleAPIException("Audible unavailable and no cached series data found")
         response = await async_client.get("/series/B00SERIES1")
 
-    assert response.status_code == 404
-    assert response.json() == {
-        "error": "Audible unavailable and no cached series data found",
-        "status_code": 404,
-        "code": "upstream_unavailable",
-    }
+    assert_outage_503(response, "Audible unavailable and no cached series data found")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/series/books/B00SERIES1", "/series/B00SERIES1/books"])
+async def test_series_books_total_hydration_failure_is_503(async_client, path):
+    """Discovery succeeded, then every book failed to hydrate with nothing
+    stored or cached: the real service raises the outage, and the route
+    answers 503 rather than an empty list or a 404."""
+    with patch("app.api.routes.series.router.get_series_books", new_callable=AsyncMock) as mock_walk:
+        mock_walk.return_value = ["B0BOOK0001", "B0BOOK0002"]
+        with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=RuntimeError("down"))), \
+             patch("app.services.audible.books.get_books_from_db", new=AsyncMock(return_value=[])), \
+             patch("app.services.audible.books.cache.get_many", new=AsyncMock(return_value={})):
+            response = await async_client.get(path)
+
+    assert_outage_503(response, "Audible unavailable and no cached data found")
 
 
 @pytest.mark.asyncio
 async def test_get_series_by_asin_genuine_absence_is_unchanged(async_client):
     """A real NotFoundException must be completely unaffected by
-    outage_as_not_found -- same status and body as any other confirmed
+    outage_as_unavailable -- same status and body as any other confirmed
     absence."""
     with patch("app.api.routes.series.router.get_series", new_callable=AsyncMock) as mock:
         mock.side_effect = NotFoundException("Series not found: B00SERIES1")

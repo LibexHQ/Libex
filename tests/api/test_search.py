@@ -12,6 +12,7 @@ from httpx import AsyncClient, ASGITransport
 # Local
 from app.main import app
 from libex_core.exceptions import AudibleAPIException
+from tests.fixtures.outage import assert_outage_503
 
 MOCK_BOOK = {
     "asin": "B08G9PRS1K",
@@ -209,56 +210,52 @@ async def test_abs_quick_search_cache_false_marks_the_response_no_store(async_cl
 
 # ============================================================
 # AUDIBLE OUTAGE CONTRACT — the route's own literal, not the
-# service's message, must reach the caller. outage_as_not_found is called
+# service's message, must reach the caller. outage_as_unavailable is called
 # with "No books found" explicitly at every site in this router, so the
-# 404 body must read that literal regardless of what the service raised it
+# 503 body must read that literal regardless of what the service raised it
 # with.
 # ============================================================
 
 @pytest.mark.asyncio
-async def test_search_outage_returns_404_with_the_routes_own_literal(async_client):
+async def test_search_outage_returns_503_with_the_routes_own_literal(async_client):
     with patch("app.api.routes.search.router.search", new_callable=AsyncMock) as mock:
         mock.side_effect = AudibleAPIException("Audible search failed")
         response = await async_client.get("/search?title=Dune")
 
-    assert response.status_code == 404
-    assert response.json() == {"error": "No books found", "status_code": 404, "code": "upstream_unavailable"}
+    assert_outage_503(response, "No books found")
 
 
 @pytest.mark.asyncio
-async def test_quick_search_outage_returns_404_with_the_routes_own_literal(async_client):
+async def test_quick_search_outage_returns_503_with_the_routes_own_literal(async_client):
     with patch("app.api.routes.search.router.quick_search", new_callable=AsyncMock) as mock:
         mock.side_effect = AudibleAPIException("Audible quick search failed")
         response = await async_client.get("/quick-search?keywords=dune")
 
-    assert response.status_code == 404
-    assert response.json() == {"error": "No books found", "status_code": 404, "code": "upstream_unavailable"}
+    assert_outage_503(response, "No books found")
 
 
 @pytest.mark.asyncio
-async def test_abs_search_outage_returns_404_with_the_routes_own_literal(async_client):
+async def test_abs_search_outage_returns_503_with_the_routes_own_literal(async_client):
     with patch("app.api.routes.search.router.search", new_callable=AsyncMock) as mock:
         mock.side_effect = AudibleAPIException("Audible search failed")
         response = await async_client.get("/us/search?title=Dune")
 
-    assert response.status_code == 404
-    assert response.json() == {"error": "No books found", "status_code": 404, "code": "upstream_unavailable"}
+    assert_outage_503(response, "No books found")
 
 
 @pytest.mark.asyncio
-async def test_abs_quick_search_outage_returns_404_with_the_routes_own_literal(async_client):
+async def test_abs_quick_search_outage_returns_503_with_the_routes_own_literal(async_client):
     with patch("app.api.routes.search.router.quick_search", new_callable=AsyncMock) as mock:
         mock.side_effect = AudibleAPIException("Audible quick search failed")
         response = await async_client.get("/us/quick-search/search?keywords=dune")
 
-    assert response.status_code == 404
-    assert response.json() == {"error": "No books found", "status_code": 404, "code": "upstream_unavailable"}
+    assert_outage_503(response, "No books found")
 
 
 @pytest.mark.asyncio
 async def test_search_genuine_absence_is_unchanged(async_client):
     """search() itself returns [] (not raises) on a genuine NotFoundException
-    from Audible -- unaffected by outage_as_not_found, which only ever
+    from Audible -- unaffected by outage_as_unavailable, which only ever
     applies to a raised AudibleAPIException."""
     with patch("app.api.routes.search.router.search", new_callable=AsyncMock) as mock:
         mock.return_value = []

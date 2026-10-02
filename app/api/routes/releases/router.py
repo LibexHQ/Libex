@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_session
 
 # Routes
-from app.api.routes.audible_outage import outage_as_not_found
+from app.api.routes.audible_outage import outage_as_unavailable
 from app.api.routes.errors import ERROR_RESPONSES
 from app.api.routes.sort_params import BookSortField, SortOrder
 from app.api.routes.filter_params import LiveBookFilters
@@ -75,7 +75,8 @@ async def new_releases(
     """
     Recently released books from the last N days, scanned live from Audible,
     newest first. Cached until the next UTC midnight. Returns 404 if none found,
-    or if Audible can't be reached (code `upstream_unavailable`).
+    or 503 with Retry-After if Audible can't be reached (code
+    `upstream_unavailable`).
 
     Pass a `category` id (from GET /categories) to scope the scan to one category
     and get the full window for it. Without a category, the scan walks Audible's
@@ -84,7 +85,7 @@ async def new_releases(
     a category, or use the DB endpoint /db/new-releases (kept current by the
     seeder), or aggregate per-category calls client-side.
     """
-    books = await outage_as_not_found(
+    books = await outage_as_unavailable(
         get_new_releases(region, session, days.value, category),
         "No new releases found",
     )
@@ -109,7 +110,8 @@ async def coming_soon(
     """
     Upcoming books releasing in the next N days, scanned live from Audible,
     soonest first. Cached until the next UTC midnight. Returns 404 if none found,
-    or if Audible can't be reached (code `upstream_unavailable`).
+    or 503 with Retry-After if Audible can't be reached (code
+    `upstream_unavailable`).
 
     Pass a `category` id (from GET /categories) to scope the scan to one category
     and get the full window for it. Without a category, the scan walks Audible's
@@ -118,7 +120,7 @@ async def coming_soon(
     a category, or use the DB endpoint /db/coming-soon (kept current by the
     seeder), or aggregate per-category calls client-side.
     """
-    books = await outage_as_not_found(
+    books = await outage_as_unavailable(
         get_coming_soon(region, session, days.value, category),
         "No upcoming releases found",
     )
@@ -163,10 +165,10 @@ async def categories(
     no longer exist are pruned — unless the fetch comes back suspiciously small,
     in which case it's treated as partial and only added to, never pruned, so a
     transient glitch can't wipe out real branches. Returns 404 if the taxonomy
-    can't be loaded, including when Audible can't be reached and nothing is
-    stored (code `upstream_unavailable`).
+    is empty, or 503 with Retry-After if Audible can't be reached and nothing
+    is stored (code `upstream_unavailable`).
     """
-    nodes = await outage_as_not_found(
+    nodes = await outage_as_unavailable(
         _ensure_genres(session, region),
         "No categories available",
     )

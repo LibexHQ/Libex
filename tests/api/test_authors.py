@@ -17,6 +17,7 @@ from httpx import AsyncClient, ASGITransport
 # Local
 from app.main import app
 from libex_core.exceptions import AudibleAPIException, NotFoundException
+from tests.fixtures.outage import assert_outage_503
 from app.core.response_headers import (
     REASON_DISCOVERY_INCOMPLETE,
     REASON_HYDRATION_FAILED,
@@ -890,53 +891,45 @@ async def test_get_books_by_author_primary_never_emits_x_libex_source(async_clie
 
 
 # ============================================================
-# AUDIBLE OUTAGE CONTRACT — AudibleAPIException still comes back as the
-# same 404 HEAD produced, byte for byte, via outage_as_not_found
+# AUDIBLE OUTAGE CONTRACT — AudibleAPIException comes back as a 503 with
+# Retry-After, via outage_as_unavailable and the handler in app.main
 # ============================================================
 # Every one of these mocks the service one level above the router (the same
 # level the rest of this file already mocks at) and raises
 # AudibleAPIException with the exact message the real service site raises
-# it with -- HEAD raised NotFoundException with that same message directly,
-# so the served body must be unchanged.
+# it with; the served body carries that message verbatim.
 
 @pytest.mark.asyncio
-async def test_search_authors_outage_returns_404_matching_head(async_client):
+async def test_search_authors_outage_returns_503_with_retry_after(async_client):
     with patch("app.api.routes.authors.router.search_authors", new_callable=AsyncMock) as mock:
         mock.side_effect = AudibleAPIException("Author search failed")
         response = await async_client.get("/author?name=Frank+Herbert")
 
-    assert response.status_code == 404
-    assert response.json() == {"error": "Author search failed", "status_code": 404, "code": "upstream_unavailable"}
+    assert_outage_503(response, "Author search failed")
 
 
 @pytest.mark.asyncio
-async def test_get_author_books_by_name_outage_on_discovery_returns_404_matching_head(async_client):
+async def test_get_author_books_by_name_outage_on_discovery_returns_503_with_retry_after(async_client):
     with patch("app.api.routes.authors.router.get_author_books_by_name", new_callable=AsyncMock) as mock:
         mock.side_effect = AudibleAPIException("Failed to fetch author books by name")
         response = await async_client.get("/author/books?name=Frank+Herbert")
 
-    assert response.status_code == 404
-    assert response.json() == {"error": "Failed to fetch author books by name", "status_code": 404, "code": "upstream_unavailable"}
+    assert_outage_503(response, "Failed to fetch author books by name")
 
 
 @pytest.mark.asyncio
-async def test_get_author_books_by_name_outage_on_hydration_returns_404_matching_head(async_client):
+async def test_get_author_books_by_name_outage_on_hydration_returns_503_with_retry_after(async_client):
     with patch("app.api.routes.authors.router.get_author_books_by_name", new_callable=AsyncMock) as mock_books, \
          patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
         mock_books.return_value = ["B08G9PRS1K"]
         mock_asins.side_effect = AudibleAPIException("Audible unavailable and no cached data found")
         response = await async_client.get("/author/books?name=Frank+Herbert")
 
-    assert response.status_code == 404
-    assert response.json() == {
-        "error": "Audible unavailable and no cached data found",
-        "status_code": 404,
-        "code": "upstream_unavailable",
-    }
+    assert_outage_503(response, "Audible unavailable and no cached data found")
 
 
 @pytest.mark.asyncio
-async def test_get_books_by_author_outage_on_walk_returns_404_matching_head(async_client):
+async def test_get_books_by_author_outage_on_walk_returns_503_with_retry_after(async_client):
     """/author/books/{asin} -- a route whose 404 message comes from the
     service (_walk_author_books' own degraded-path raise), not a route
     literal."""
@@ -944,47 +937,32 @@ async def test_get_books_by_author_outage_on_walk_returns_404_matching_head(asyn
         mock.side_effect = AudibleAPIException("Audible unavailable and no cached author books found")
         response = await async_client.get("/author/books/B000APF21M")
 
-    assert response.status_code == 404
-    assert response.json() == {
-        "error": "Audible unavailable and no cached author books found",
-        "status_code": 404,
-        "code": "upstream_unavailable",
-    }
+    assert_outage_503(response, "Audible unavailable and no cached author books found")
 
 
 @pytest.mark.asyncio
-async def test_get_books_by_author_outage_on_hydration_returns_404_matching_head(async_client):
+async def test_get_books_by_author_outage_on_hydration_returns_503_with_retry_after(async_client):
     with patch("app.api.routes.authors.router.get_author_books", new_callable=AsyncMock) as mock_books, \
          patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
         mock_books.return_value = AuthorBooksResult(["B08G9PRS1K"], True)
         mock_asins.side_effect = AudibleAPIException("Audible unavailable and no cached data found")
         response = await async_client.get("/author/books/B000APF21M")
 
-    assert response.status_code == 404
-    assert response.json() == {
-        "error": "Audible unavailable and no cached data found",
-        "status_code": 404,
-        "code": "upstream_unavailable",
-    }
+    assert_outage_503(response, "Audible unavailable and no cached data found")
 
 
 @pytest.mark.asyncio
-async def test_get_books_by_author_primary_outage_on_walk_returns_404_matching_head(async_client):
+async def test_get_books_by_author_primary_outage_on_walk_returns_503_with_retry_after(async_client):
     """Legacy twin of /author/books/{asin} -- must not diverge."""
     with patch("app.api.routes.authors.router.get_author_books", new_callable=AsyncMock) as mock:
         mock.side_effect = AudibleAPIException("Audible unavailable and no cached author books found")
         response = await async_client.get("/author/B000APF21M/books")
 
-    assert response.status_code == 404
-    assert response.json() == {
-        "error": "Audible unavailable and no cached author books found",
-        "status_code": 404,
-        "code": "upstream_unavailable",
-    }
+    assert_outage_503(response, "Audible unavailable and no cached author books found")
 
 
 @pytest.mark.asyncio
-async def test_get_books_by_author_primary_outage_on_hydration_returns_404_matching_head(async_client):
+async def test_get_books_by_author_primary_outage_on_hydration_returns_503_with_retry_after(async_client):
     """Legacy twin of /author/books/{asin} -- must not diverge."""
     with patch("app.api.routes.authors.router.get_author_books", new_callable=AsyncMock) as mock_books, \
          patch("app.api.routes.authors.router.get_books_by_asins", new_callable=AsyncMock) as mock_asins:
@@ -992,33 +970,43 @@ async def test_get_books_by_author_primary_outage_on_hydration_returns_404_match
         mock_asins.side_effect = AudibleAPIException("Audible unavailable and no cached data found")
         response = await async_client.get("/author/B000APF21M/books")
 
-    assert response.status_code == 404
-    assert response.json() == {
-        "error": "Audible unavailable and no cached data found",
-        "status_code": 404,
-        "code": "upstream_unavailable",
-    }
+    assert_outage_503(response, "Audible unavailable and no cached data found")
 
 
 @pytest.mark.asyncio
-async def test_get_author_by_asin_outage_returns_404_matching_head(async_client):
+async def test_get_author_by_asin_outage_returns_503_with_retry_after(async_client):
     with patch("app.api.routes.authors.router.get_author", new_callable=AsyncMock) as mock:
         mock.side_effect = AudibleAPIException("Audible unavailable and no cached author data found")
         response = await async_client.get("/author/B000APF21M")
 
-    assert response.status_code == 404
-    assert response.json() == {
-        "error": "Audible unavailable and no cached author data found",
-        "status_code": 404,
-        "code": "upstream_unavailable",
-    }
+    assert_outage_503(response, "Audible unavailable and no cached author data found")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path,walk_service,walk_value", [
+    ("/author/books?name=Frank+Herbert", "get_author_books_by_name", ["B0BOOK0001", "B0BOOK0002"]),
+    ("/author/books/B000APF21M", "get_author_books", AuthorBooksResult(["B0BOOK0001", "B0BOOK0002"], True)),
+    ("/author/B000APF21M/books", "get_author_books", AuthorBooksResult(["B0BOOK0001", "B0BOOK0002"], True)),
+])
+async def test_author_books_total_hydration_failure_is_503(async_client, path, walk_service, walk_value):
+    """Discovery succeeded, then every book failed to hydrate with nothing
+    stored or cached: the real service raises the outage, and the route
+    answers 503 rather than an empty list or a 404."""
+    with patch(f"app.api.routes.authors.router.{walk_service}", new_callable=AsyncMock) as mock_walk, \
+         patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=RuntimeError("down"))), \
+         patch("app.services.audible.books.get_books_from_db", new=AsyncMock(return_value=[])), \
+         patch("app.services.audible.books.cache.get_many", new=AsyncMock(return_value={})):
+        mock_walk.return_value = walk_value
+        response = await async_client.get(path)
+
+    assert_outage_503(response, "Audible unavailable and no cached data found")
 
 
 @pytest.mark.asyncio
 async def test_get_author_by_asin_genuine_absence_is_unchanged(async_client):
     """A real NotFoundException (Audible answered and said no) must be
-    completely unaffected by outage_as_not_found -- same status and body as
-    any other confirmed absence."""
+    completely unaffected by outage_as_unavailable -- same status and body as
+    any other confirmed absence, with no retryAfter."""
     with patch("app.api.routes.authors.router.get_author", new_callable=AsyncMock) as mock:
         mock.side_effect = NotFoundException("Author not found: B000APF21M")
         response = await async_client.get("/author/B000APF21M")
@@ -1072,14 +1060,13 @@ async def test_by_name_complete_walk_is_marked_complete(async_client):
 
 
 @pytest.mark.asyncio
-async def test_by_name_first_page_outage_is_still_404(async_client):
-    """Pins the 404 status for an outage before anything was gathered."""
+async def test_by_name_first_page_outage_is_503(async_client):
+    """An outage before anything was gathered is a 503, not a 404."""
     with patch("app.api.routes.authors.router.get_author_books_by_name", new_callable=AsyncMock) as mock:
         mock.side_effect = AudibleAPIException("Failed to fetch author books by name")
         response = await async_client.get("/author/books?name=Frank+Herbert")
 
-    assert response.status_code == 404
-    assert response.json()["error"] == "Failed to fetch author books by name"
+    assert_outage_503(response, "Failed to fetch author books by name")
 
 
 @pytest.mark.asyncio

@@ -365,7 +365,7 @@ what a task actually did.
 - `upstream_unavailable` — Audible couldn't answer right now and Libex has no stored copy to fall back on. Retry later.
 - `invalid_request` — the request itself is malformed.
 
-`upstream_unavailable` is always a `503`, never a `404`. That response carries `Retry-After: 30` and `Cache-Control: no-store`, and its body adds `retryAfter` (seconds, matching the header): `{error, status_code: 503, code: "upstream_unavailable", retryAfter: 30}`. `retryAfter` appears on no other error.
+An Audible outage is always a `503`, never a `404`. That response carries `Retry-After: 30` and `Cache-Control: no-store`, and its body adds `retryAfter` (seconds, matching the header): `{error, status_code: 503, code: "upstream_unavailable", retryAfter: 30}`. `retryAfter` appears on no other error.
 
 FastAPI's own request-validation errors (`422`) and unknown-route responses keep their `{detail}` body, and an unhandled server error (`500`) is still just `{error, status_code}`.
 
@@ -722,10 +722,6 @@ If you deployed Libex before the VPN requirement and the backup/backfill/refresh
 ## Roadmap
 
 None of this has shipped yet, and none of it comes with a date. It is where things are headed.
-
-**In progress for the hosted API**
-
-- Honest completeness flags on author-by-name lookups, so a partial result says it is partial.
 
 **Planned**
 

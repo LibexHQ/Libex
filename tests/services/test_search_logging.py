@@ -113,3 +113,21 @@ async def test_compound_fallback_logs_segment_count_never_the_segments(caplog):
 
     for secret in SECRETS[:3]:
         assert secret not in _serialised(caplog)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [{"limit": 0}, {"limit": 51}, {"page": -1}])
+async def test_search_out_of_bounds_paging_is_a_bug_not_an_audible_outage(bad):
+    """A paging bound the builder rejects escapes as ValueError, unwrapped.
+
+    Inside the try it would be mapped to an Audible failure and a caller
+    would be told Audible is down when the fault is Libex's own.
+    """
+    with (
+        patch("app.services.audible.search.audible_get", new_callable=AsyncMock) as mock_get,
+        patch("app.services.audible.search.persist_books_background"),
+    ):
+        with pytest.raises(ValueError):
+            await search(region="us", session=MagicMock(), title="Dune", **bad)
+
+    mock_get.assert_not_awaited()

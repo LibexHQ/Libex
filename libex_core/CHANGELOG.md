@@ -14,6 +14,13 @@ Entries below that predate publication are historical record for whoever
 embeds this package, not evidence that anyone consumed a given version at the
 time it was cut.
 
+## [0.9.0]
+
+### Added
+- **The package can now search Audible, not only fetch by ASIN.** A new public module, `libex_core.audible.search`, exposes `build_search_params`, `fetch_search_products` and `fetch_suggestion_asins`, plus the constants `SEARCH_PATH`, `SEARCH_SUGGESTIONS_PATH` and `MAX_SEARCH_RESULTS` (50). `build_search_params` takes the filters (`title`, `author`, `keywords`, `narrator`, `publisher`, `products_sort_by`) and `limit` and `page`, keyword-only, and returns the parameters of a catalog search; a filter that is missing or an empty string is left out, and no filter at all is allowed. `fetch_search_products` sends them and returns the matched products raw, with the response groups and image sizes added so full product metadata comes back in one call. `fetch_suggestion_asins` asks Audible's search suggestions what a partial query resolves to and returns the ASINs of the book rows in the order Audible gave them, unvalidated. As with the other fetch functions, the request callable is the first argument, and the region is checked first (`RegionException` for one of the eleven it is not).
+- **`build_search_params` raises `ValueError` for a `limit` outside 1 to `MAX_SEARCH_RESULTS` or a negative `page`.** The message names the bounds and never repeats any search text; the package neither inspects nor logs search text. Earlier hosted behaviour silently clamped an over-large `limit` to 50; the package does not clamp, it refuses. Audible stops returning results past page 9, and that is not enforced here: a `page` above 9 is accepted and sent.
+- **The Audiobookshelf custom-metadata-provider models are now public in `libex_core.models`.** `AbsSeriesRef`, `AbsBookResponse` and `AbsSearchResponse` describe that format, which is deliberately narrower than the AudiMeta-derived shapes; the module docstring now says they are not derived from AudiMeta. `to_abs_book` converts a normalized book dictionary into an `AbsBookResponse`. Field names, optionality and defaults are unchanged from the hosted service's copy.
+
 ## [0.8.0]
 
 ### Added

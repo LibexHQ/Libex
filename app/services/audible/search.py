@@ -4,7 +4,6 @@ Audible search service.
 
 # Standard library
 import time
-from datetime import datetime, timezone
 from typing import Any
 
 # Third party
@@ -12,13 +11,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 # Core
 from libex_core.audible.books import (
-    BOOK_RESPONSE_GROUPS,
-    IMAGE_SIZES,
     filter_products,
     normalize_product,
     settle_flags_list,
 )
 from libex_core.audible.client import as_audible_failure
+from libex_core.audible.search import (
+    build_search_params,
+    fetch_search_products,
+    fetch_suggestion_asins,
+)
 from libex_core.exceptions import AudibleAPIException, NotFoundException
 from app.core.logging import get_logger
 
@@ -29,17 +31,6 @@ from app.services.db.persist_queue import persist_books_background
 from app.services.db.reader import search_books_from_db
 
 logger = get_logger()
-
-
-def _generate_session_id() -> str:
-    """
-    Generates a random session ID matching AudiMeta's format.
-    Format: 000-XXXXXXX-XXXXXXX
-    """
-    import random
-    def random_digits() -> str:
-        return str(random.randint(0, 9999999)).zfill(7)
-    return f"000-{random_digits()}-{random_digits()}"
 
 
 async def search(
@@ -59,44 +50,37 @@ async def search(
 
     Includes response_groups in the search call so Audible returns full
     product metadata directly. This avoids re-fetching each book
-    individually — one API call instead of N+1.
+    individually -- one API call instead of N+1.
     """
+    # Built outside the try on purpose: a limit or page outside what the
+    # builder accepts is a bug in the caller's contract, and inside the try
+    # it would be reported as an Audible outage.
+    params = build_search_params(
+        title=title,
+        author=author,
+        keywords=keywords,
+        narrator=narrator,
+        publisher=publisher,
+        products_sort_by=products_sort_by,
+        limit=limit,
+        page=page,
+    )
+
     try:
-        params: dict[str, Any] = {
-            "num_results": min(limit, 50),
-            "page": page,
-            "response_groups": BOOK_RESPONSE_GROUPS,
-            "image_sizes": IMAGE_SIZES,
-        }
-
-        if title:
-            params["title"] = title
-        if author:
-            params["author"] = author
-        if keywords:
-            params["keywords"] = keywords
-        if narrator:
-            params["narrator"] = narrator
-        if publisher:
-            params["publisher"] = publisher
-        if products_sort_by:
-            params["products_sort_by"] = products_sort_by
-
-        search_params = {k: v for k, v in params.items()
-                         if k not in ("response_groups", "image_sizes")}
-
         start = time.monotonic()
-        data = await audible_get(region, "/1.0/catalog/products/", params)
+        # audible_get is looked up in this module's namespace on every call,
+        # never captured, so a stand-in assigned over it is the one called.
+        raw_products = await fetch_search_products(audible_get, region, params)
         search_took = round((time.monotonic() - start) * 1000, 2)
 
-        products = filter_products(data.get("products", []))
+        products = filter_products(raw_products)
 
-        # search_params carries the caller's own title/author/narrator text,
+        # params carries the caller's own title/author/narrator text,
         # so only its keys are logged, never its values. Which fields a
         # consumer searched on is the operational question; what they typed
         # into them is not Libex's to keep.
         logger.info("Requested Audible Search", extra={
-            "search_fields": sorted(search_params),
+            "search_fields": sorted(params),
             "search_took": search_took,
             "region": region,
             "results": len(products),
@@ -105,7 +89,7 @@ async def search(
         if not products:
             return []
 
-        # Normalize directly from search results — no re-fetch needed
+        # Normalize directly from search results -- no re-fetch needed
         normalized = [normalize_product(p, region) for p in products]
 
         # Persist to DB and cache in the background. Unsettled: the writer
@@ -150,26 +134,9 @@ async def quick_search(
     comparable ASIN list to key a cache read on and stays uncached.
     """
     try:
-        params = {
-            "keywords": keywords,
-            "key_strokes": keywords,
-            "site_variant": "desktop",
-            "session_id": _generate_session_id(),
-            "local_time": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
-            "surface": "Android",
-        }
-
         start = time.monotonic()
-        data = await audible_get(region, "/1.0/searchsuggestions", params)
+        asins = await fetch_suggestion_asins(audible_get, keywords, region)
         search_took = round((time.monotonic() - start) * 1000, 2)
-
-        asins: list[str] = []
-
-        for item in data.get("model", {}).get("items", []):
-            if item.get("view", {}).get("template") == "AsinRow":
-                asin = item.get("model", {}).get("product_metadata", {}).get("asin")
-                if asin:
-                    asins.append(asin)
 
         # Deliberately no "keywords" field. It is verbatim caller-authored
         # text, and Libex records nothing that identifies a caller and nothing

@@ -16,7 +16,6 @@ from app.db.session import get_session
 # Routes
 from app.api.routes.errors import ERROR_RESPONSES
 from app.api.routes.audible_outage import outage_as_unavailable
-from app.api.routes.books.schemas import AbsBookResponse, AbsSearchResponse, AbsSeriesRef
 from app.api.routes.cache_param import CacheInertParam, CacheStandardParam, apply_cache_control
 
 # Services
@@ -26,39 +25,9 @@ from app.services.audible.search import search, quick_search
 from app.core.middleware import valid_region
 from libex_core.audible.client import validate_region
 from libex_core.exceptions import ErrorCode, NotFoundException, RegionException
-from libex_core.models import BookResponse
+from libex_core.models import AbsSearchResponse, BookResponse, to_abs_book
 
 router = APIRouter(tags=["Search"])
-
-# ============================================================
-# HELPERS
-# ============================================================
-
-def _to_abs_book(book: dict) -> AbsBookResponse:
-    """Converts a full BookResponse dict to AbsBookResponse format."""
-    authors = book.get("authors", [])
-    narrators = book.get("narrators", [])
-    genres = book.get("genres", [])
-    series = book.get("series", [])
-
-    return AbsBookResponse(
-        asin=book.get("asin", ""),
-        title=book.get("title"),
-        subtitle=book.get("subtitle"),
-        description=book.get("summary") or book.get("description"),
-        cover=book.get("imageUrl"),
-        publisher=book.get("publisher"),
-        publishedYear=book.get("releaseDate", "")[:4] if book.get("releaseDate") else None,
-        isbn=book.get("isbn"),
-        language=book.get("language"),
-        duration=str(book.get("lengthMinutes")) if book.get("lengthMinutes") else None,
-        author=", ".join(a.get("name", "") for a in authors if a.get("name")) or None,
-        narrator=", ".join(n.get("name", "") for n in narrators if n.get("name")) or None,
-        tags=[g.get("name") for g in genres if g.get("type") == "Tags" and g.get("name")] or None,
-        genres=[g.get("name") for g in genres if g.get("type") == "Genres" and g.get("name")] or None,
-        series=[AbsSeriesRef(series=s.get("name"), sequence=s.get("position")) for s in series] or None,
-    )
-
 
 # ============================================================
 # ENDPOINTS
@@ -149,7 +118,7 @@ async def abs_search(
     )
     if not books:
         raise NotFoundException(not_found_message)
-    return AbsSearchResponse(matches=[_to_abs_book(b) for b in books])
+    return AbsSearchResponse(matches=[to_abs_book(b) for b in books])
 
 
 @router.get("/{region}/quick-search/search", response_model=AbsSearchResponse, responses=ERROR_RESPONSES)
@@ -184,4 +153,4 @@ async def abs_quick_search(
     if not books:
         raise NotFoundException(not_found_message)
     apply_cache_control(response, cache)
-    return AbsSearchResponse(matches=[_to_abs_book(b) for b in books])
+    return AbsSearchResponse(matches=[to_abs_book(b) for b in books])

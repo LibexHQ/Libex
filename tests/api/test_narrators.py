@@ -212,3 +212,14 @@ async def test_get_narrator_books_genuine_absence_is_unchanged(async_client):
         "status_code": 404,
         "code": "not_on_audible",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("params", ["limit=51", "limit=0", "page=-1", "page=10"])
+async def test_get_narrator_books_out_of_bounds_paging_is_a_422_not_a_500(async_client, params):
+    """The route caps what the search service's own bounds check enforces."""
+    with patch("app.api.routes.narrators.router.search", new_callable=AsyncMock) as mock:
+        response = await async_client.get(f"/narrator/books?name=Scott+Brick&{params}")
+
+    assert response.status_code == 422
+    mock.assert_not_awaited()

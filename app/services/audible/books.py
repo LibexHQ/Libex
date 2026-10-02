@@ -781,7 +781,7 @@ async def get_chapters(
         if not has_chapter_info(data):
             raise NotFoundException(f"No chapter information found for {asin}")
 
-        result = normalize_chapters(data)
+        result = normalize_chapters(data, asin, region)
 
         # Persist to DB and cache in the background
         persist_track_background(asin, result, region)
@@ -884,7 +884,7 @@ async def fetch_and_store_chapters(
         return "none"
 
     try:
-        chapters = normalize_chapters(data)
+        chapters = normalize_chapters(data, asin, region)
         await upsert_track(session, asin, chapters)
         await _mark_chapters_checked(session, asin)
         return "stored"

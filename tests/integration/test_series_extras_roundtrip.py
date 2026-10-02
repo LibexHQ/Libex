@@ -83,6 +83,22 @@ async def test_a_series_without_extras_stores_null_for_both_and_reads_them_back_
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_an_absent_blob_is_sql_null_not_the_json_null_scalar(db_session):
+    """Reading the row through the ORM turns a stored JSON null back into None,
+    so the test above cannot tell it from SQL NULL; IS NULL in the database can,
+    and the NULL arms of the merge only recognise the latter."""
+    await upsert_series_profile(db_session, normalize_series(_product(), REGION))
+    db_session.expire_all()
+
+    for column in (Series.audible_extras, Series.extras_withheld):
+        found = (
+            await db_session.execute(select(Series.asin).where(Series.asin == ASIN, column.is_(None)))
+        ).scalar_one_or_none()
+        assert found == ASIN, f"{column.key} was not stored as SQL NULL"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_search_from_db_serves_both_keys(db_session):
     await _write(db_session, _product(language="english"))
     results = await search_series_from_db(db_session, "A Series")

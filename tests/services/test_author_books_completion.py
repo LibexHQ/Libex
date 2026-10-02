@@ -18,7 +18,7 @@ import pytest
 # Local
 import app.services.audible.authors.completion as completion
 from app.services.audible.authors import AuthorBooksResult, _walk_author_books
-from app.services.audible.authors.screens import _ScreenBooksResult, SCREENS_REASON_COMPLETED
+from libex_core.audible.authors.screens import ScreenBooksResult, SCREENS_REASON_COMPLETED
 
 
 @pytest.fixture(autouse=True)
@@ -272,7 +272,7 @@ async def test_a_clean_walk_never_requests_completion():
     no-name case), and db_clean all true at once.
     """
     session = AsyncMock()
-    screen_result = _ScreenBooksResult(
+    screen_result = ScreenBooksResult(
         asins=["B0CLEAN0001"],
         pages_fetched=1,
         product_count=1,

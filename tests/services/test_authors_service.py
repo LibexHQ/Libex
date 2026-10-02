@@ -15,17 +15,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 # Local
-from app.services.audible.authors import _CatalogBooksResult
-from app.services.audible.authors.profile import (
-    _normalize_author,
-    _generate_session_id,
-)
+from libex_core.audible.authors.catalog import CatalogBooksResult
+from libex_core.audible.authors.profile import normalize_author
+from libex_core.audible.search import _generate_session_id
 from app.core.response_headers import REASON_DISCOVERY_INCOMPLETE, ResponseFacts, record_incomplete
-from app.services.audible.authors.screens import (
+from libex_core.audible.authors.screens import (
     _select_asin_rows,
     _extract_row_asins,
     _extract_next_token,
-    _ScreenBooksResult,
+    ScreenBooksResult,
     SCREENS_REASON_COMPLETED,
     SCREENS_REASON_TOKEN_REPEATED,
     SCREENS_REASON_TOKEN_REJECTED,
@@ -133,49 +131,49 @@ def test_generate_session_id_is_unique():
 def test_normalize_author_extracts_name():
     """Normalized author includes name from contributor."""
     data = {"contributor": {"name": "Frank Herbert", "bio": None, "profile_image_url": None}}
-    result = _normalize_author(data, "B000APF21M", "us")
+    result = normalize_author(data, "B000APF21M", "us")
     assert result["name"] == "Frank Herbert"
 
 
 def test_normalize_author_extracts_bio():
     """Normalized author includes bio as description."""
     data = {"contributor": {"name": "Frank Herbert", "bio": "An author.", "profile_image_url": None}}
-    result = _normalize_author(data, "B000APF21M", "us")
+    result = normalize_author(data, "B000APF21M", "us")
     assert result["description"] == "An author."
 
 
 def test_normalize_author_extracts_image():
     """Normalized author includes profile image URL."""
     data = {"contributor": {"name": "Frank Herbert", "bio": None, "profile_image_url": "https://example.com/img.jpg"}}
-    result = _normalize_author(data, "B000APF21M", "us")
+    result = normalize_author(data, "B000APF21M", "us")
     assert result["image"] == "https://example.com/img.jpg"
 
 
 def test_normalize_author_sets_asin():
     """Normalized author includes provided ASIN."""
     data = {"contributor": {"name": "Frank Herbert", "bio": None, "profile_image_url": None}}
-    result = _normalize_author(data, "B000APF21M", "us")
+    result = normalize_author(data, "B000APF21M", "us")
     assert result["asin"] == "B000APF21M"
 
 
 def test_normalize_author_sets_region():
     """Normalized author includes provided region."""
     data = {"contributor": {"name": "Frank Herbert", "bio": None, "profile_image_url": None}}
-    result = _normalize_author(data, "B000APF21M", "uk")
+    result = normalize_author(data, "B000APF21M", "uk")
     assert result["region"] == "uk"
 
 
 def test_normalize_author_sets_regions_list():
     """Normalized author includes regions list (AudiMeta MinimalAuthorDto shape)."""
     data = {"contributor": {"name": "Frank Herbert", "bio": None, "profile_image_url": None}}
-    result = _normalize_author(data, "B000APF21M", "us")
+    result = normalize_author(data, "B000APF21M", "us")
     assert result["regions"] == ["us"]
 
 
 def test_normalize_author_includes_id_field():
     """Normalized author includes id field (AudiMeta MinimalAuthorDto shape)."""
     data = {"contributor": {"name": "Frank Herbert", "bio": None, "profile_image_url": None}}
-    result = _normalize_author(data, "B000APF21M", "us")
+    result = normalize_author(data, "B000APF21M", "us")
     assert "id" in result
     assert result["id"] is None
 
@@ -183,7 +181,7 @@ def test_normalize_author_includes_id_field():
 def test_normalize_author_includes_updated_at():
     """Normalized author includes updatedAt field."""
     data = {"contributor": {"name": "Frank Herbert", "bio": None, "profile_image_url": None}}
-    result = _normalize_author(data, "B000APF21M", "us")
+    result = normalize_author(data, "B000APF21M", "us")
     assert "updatedAt" in result
     assert result["updatedAt"] is not None
 
@@ -191,28 +189,28 @@ def test_normalize_author_includes_updated_at():
 def test_normalize_author_includes_genres():
     """Normalized author includes empty genres list (AudiMeta AuthorDto shape)."""
     data = {"contributor": {"name": "Frank Herbert", "bio": None, "profile_image_url": None}}
-    result = _normalize_author(data, "B000APF21M", "us")
+    result = normalize_author(data, "B000APF21M", "us")
     assert result["genres"] == []
 
 
 def test_normalize_author_strips_tabs_from_name():
     """Normalized author name has tabs stripped."""
     data = {"contributor": {"name": "\tFrank Herbert\t", "bio": None, "profile_image_url": None}}
-    result = _normalize_author(data, "B000APF21M", "us")
+    result = normalize_author(data, "B000APF21M", "us")
     assert result["name"] == "Frank Herbert"
 
 
 def test_normalize_author_empty_bio_returns_none():
     """Empty bio returns None for description."""
     data = {"contributor": {"name": "Frank Herbert", "bio": "", "profile_image_url": None}}
-    result = _normalize_author(data, "B000APF21M", "us")
+    result = normalize_author(data, "B000APF21M", "us")
     assert result["description"] is None
 
 
 def test_normalize_author_handles_missing_contributor():
     """Normalizer handles response without contributor wrapper."""
     data = {"name": "Frank Herbert", "bio": "An author.", "profile_image_url": None}
-    result = _normalize_author(data, "B000APF21M", "us")
+    result = normalize_author(data, "B000APF21M", "us")
     assert result["asin"] == "B000APF21M"
 
 
@@ -498,8 +496,8 @@ async def test_fetch_author_books_by_name_later_page_failure_keeps_prefix_and_si
 @pytest.mark.parametrize("kind", ["page_failed", "deadline", "plateau", "page_cap", "completed"])
 async def test_fetch_author_books_by_name_reports_how_the_walk_stopped(kind):
     from app.services.audible.authors import fetch_author_books_by_name
-    from app.services.audible.authors import by_name
-    from app.services.audible.authors.by_name import NameWalkOutcome
+    from libex_core.audible.authors import by_name
+    from libex_core.audible.authors.by_name import NameWalkOutcome
 
     full = {"products": [_product_by_name(f"B0FULL{i:05d}", "Frank Herbert") for i in range(50)]}
     other = {"products": [_product_by_name(f"B0NEXT{i:05d}", "Frank Herbert") for i in range(50)]}
@@ -861,6 +859,119 @@ async def test_search_authors_emits_no_summary_warning_when_nothing_was_skipped(
     mock_get_author.assert_awaited_once()
     assert results == [reachable]
     mock_logger.warning.assert_not_called()
+
+
+# ============================================================
+# A VALUE THAT IS NOT AN ASIN -- the hosted screen in front of the core fetch
+# ============================================================
+# The core profile fetch refuses a non-ASIN with a ValueError, which the
+# hosted fallback would read as Audible being unreachable. The hosted layer
+# therefore answers first, as the 404 it has always been: no request, no DB
+# read, no cache read, and nothing counted as an unreachable author.
+
+_NOT_ASINS = ["not-an-asin", "", "B000APF21", "B000APF21M1", "../etc/passwd"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("use_cache", [False, True])
+@pytest.mark.parametrize("bad", _NOT_ASINS)
+async def test_get_author_of_a_non_asin_is_not_found_without_touching_audible_or_the_db(bad, use_cache):
+    from app.services.audible.authors import get_author
+    from libex_core.exceptions import NotFoundException
+
+    mock_session = AsyncMock()
+    mock_get = AsyncMock()
+    mock_db = AsyncMock(return_value=None)
+    mock_cache = AsyncMock(return_value=None)
+    with patch("app.services.audible.authors.profile.audible_get", new=mock_get), \
+         patch("app.services.audible.authors.profile.get_author_from_db", new=mock_db), \
+         patch("app.services.audible.authors.profile.cache.get", new=mock_cache), \
+         patch("app.services.audible.authors.profile.persist_author_background") as mock_persist:
+        with pytest.raises(NotFoundException) as exc:
+            await get_author(bad, "us", mock_session, use_cache=use_cache)
+
+    assert str(exc.value) == f"Author not found: {bad}"
+    mock_get.assert_not_awaited()
+    mock_db.assert_not_awaited()
+    mock_cache.assert_not_awaited()
+    mock_persist.assert_not_called()
+    assert mock_session.mock_calls == []
+
+
+@pytest.mark.asyncio
+async def test_get_author_of_a_valid_asin_still_reaches_audible():
+    """The counterpart of the screen above: it must refuse only what is not
+    an ASIN, so a well-formed one still goes out."""
+    from app.services.audible.authors import get_author
+
+    mock_get = AsyncMock(return_value={"contributor": {"name": "Frank Herbert"}})
+    with patch("app.services.audible.authors.profile.audible_get", new=mock_get), \
+         patch("app.services.audible.authors.profile.persist_author_background"):
+        result = await get_author("b000apf21m", "us", AsyncMock())
+
+    mock_get.assert_awaited_once()
+    assert mock_get.await_args.args[1] == "/1.0/catalog/contributors/B000APF21M"
+    assert result["name"] == "Frank Herbert"
+
+
+@pytest.mark.asyncio
+async def test_search_authors_skips_a_malformed_suggestion_asin_silently_like_a_404():
+    """A suggestion whose ASIN is malformed is a NotFound, not an
+    unreachable author: it is not requested, not listed in skipped_asins and
+    draws no warning, exactly as a 404 for it always did."""
+    from app.services.audible.authors import search_authors
+
+    def row(asin):
+        return {"view": {"template": "AuthorItemV2"}, "model": {"person_metadata": {"asin": asin}}}
+
+    suggestions = {"model": {"items": [row("not-an-asin"), row("B000REACH1"), row("B000APF21")]}}
+    profile = {"contributor": {"name": "Reachable Author"}}
+
+    async def _get(region, path, params=None, *args, **kwargs):
+        if path.startswith("/1.0/searchsuggestions"):
+            return suggestions
+        assert path == "/1.0/catalog/contributors/B000REACH1", f"unexpected request: {path}"
+        return profile
+
+    mock_get = AsyncMock(side_effect=_get)
+    with patch("app.services.audible.authors.profile.audible_get", new=mock_get), \
+         patch("app.services.audible.authors.profile.persist_author_background"), \
+         patch("app.services.audible.authors.profile.logger") as mock_logger:
+        results = await search_authors("Reachable", "us", AsyncMock())
+
+    assert [a["asin"] for a in results] == ["B000REACH1"]
+    assert mock_get.await_count == 2  # the suggestions call and the one valid author
+    mock_logger.warning.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", _NOT_ASINS)
+async def test_resolve_author_name_of_a_non_asin_is_none_without_asking_audible(bad):
+    from app.services.audible.authors import _resolve_author_name
+
+    mock_get = AsyncMock()
+    mock_details = AsyncMock()
+    with patch("app.services.audible.authors.get_author_from_db", new=AsyncMock(return_value=None)), \
+         patch("app.services.audible.authors._fetch_author_details", new=mock_details), \
+         patch("app.services.audible.authors.profile.audible_get", new=mock_get), \
+         patch("app.services.audible.authors.persist_author_background") as mock_persist:
+        assert await _resolve_author_name(bad, "us", AsyncMock()) is None
+
+    mock_details.assert_not_awaited()
+    mock_get.assert_not_awaited()
+    mock_persist.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_resolve_author_name_still_prefers_the_db_even_for_a_stored_name():
+    from app.services.audible.authors import _resolve_author_name
+
+    mock_details = AsyncMock()
+    with patch("app.services.audible.authors.get_author_from_db",
+               new=AsyncMock(return_value={"name": "Stored Name"})), \
+         patch("app.services.audible.authors._fetch_author_details", new=mock_details):
+        assert await _resolve_author_name("B000APF21M", "us", AsyncMock()) == "Stored Name"
+    mock_details.assert_not_awaited()
 
 
 # ============================================================
@@ -1291,7 +1402,7 @@ async def test_fetch_author_books_by_screen_exceeding_deadline_stops_walk_and_se
     mock_get = AsyncMock(return_value=page1)
 
     with patch("app.services.audible.authors.screens.audible_get", new=mock_get), \
-         patch("app.services.audible.authors.screens.time.monotonic", side_effect=[0.0, 100.0]):
+         patch("libex_core.audible.authors.screens.time.monotonic", side_effect=[0.0, 100.0]):
         result = await _fetch_author_books_by_screen("B000TARGET", "us", deadline=50.0)
 
     assert mock_get.await_count == 1
@@ -1432,7 +1543,7 @@ async def test_fetch_author_books_by_screen_stops_at_page_cap_and_warns_once():
     get_author_books' own union total rather than a single source's reach —
     see the GET AUTHOR BOOKS shortfall-warning tests."""
     from app.services.audible.authors import _fetch_author_books_by_screen
-    from app.services.audible.authors.screens import SCREENS_MAX_PAGES
+    from libex_core.audible.authors.screens import SCREENS_MAX_PAGES
 
     call_count = {"n": 0}
 
@@ -1452,7 +1563,7 @@ async def test_fetch_author_books_by_screen_stops_at_page_cap_and_warns_once():
         )]}
 
     with patch("app.services.audible.authors.screens.audible_get", new=AsyncMock(side_effect=_get)), \
-         patch("app.services.audible.authors.screens.logger") as mock_logger:
+         patch("libex_core.audible.authors.screens.logger") as mock_logger:
         result = await _fetch_author_books_by_screen("B000TARGET", "us")
 
     assert result.pages_fetched == SCREENS_MAX_PAGES
@@ -1478,7 +1589,7 @@ async def test_fetch_author_books_by_screen_stops_at_page_cap_and_warns_once():
 @pytest.mark.asyncio
 async def test_fetch_author_books_by_screen_stops_at_asin_cap_and_warns_once():
     from app.services.audible.authors import _fetch_author_books_by_screen
-    from app.services.audible.authors.screens import SCREENS_MAX_ASINS
+    from libex_core.audible.authors.screens import SCREENS_MAX_ASINS
 
     call_count = {"n": 0}
     reported_product_count = SCREENS_MAX_ASINS + 5000
@@ -1496,7 +1607,7 @@ async def test_fetch_author_books_by_screen_stops_at_asin_cap_and_warns_once():
         return {"sections": [_asin_section(rows, product_count=product_count, pagination=f"TOK{n:04d}")]}
 
     with patch("app.services.audible.authors.screens.audible_get", new=AsyncMock(side_effect=_get)), \
-         patch("app.services.audible.authors.screens.logger") as mock_logger:
+         patch("libex_core.audible.authors.screens.logger") as mock_logger:
         result = await _fetch_author_books_by_screen("B000TARGET", "us")
 
     assert len(result.asins) == SCREENS_MAX_ASINS
@@ -1548,7 +1659,7 @@ async def test_fetch_author_books_by_screen_fanout_walk_matching_product_count_e
         return {"sections": [_asin_section(rows, product_count=product_count, pagination=None)]}
 
     with patch("app.services.audible.authors.screens.audible_get", new=AsyncMock(side_effect=_get)), \
-         patch("app.services.audible.authors.screens.logger") as mock_logger:
+         patch("libex_core.audible.authors.screens.logger") as mock_logger:
         result = await _fetch_author_books_by_screen("B000TARGET", "us")
 
     assert result.pages_fetched == total_pages
@@ -1569,7 +1680,7 @@ async def test_fetch_author_books_by_screen_no_warning_on_normal_complete_walk()
     page2 = {"sections": [_asin_section([_row("B0PAGE2001")], pagination=None)]}
 
     with patch("app.services.audible.authors.screens.audible_get", new=AsyncMock(side_effect=[page1, page2])), \
-         patch("app.services.audible.authors.screens.logger") as mock_logger:
+         patch("libex_core.audible.authors.screens.logger") as mock_logger:
         result = await _fetch_author_books_by_screen("B000TARGET", "us")
 
     assert len(result.asins) == 3 == result.product_count
@@ -1588,7 +1699,7 @@ async def test_fetch_author_books_by_screen_unclean_warning_fires_independent_of
     echoing_page = {"sections": [_asin_section([_row("B0ECHO0002")], pagination="SAMETOKEN")]}
 
     with patch("app.services.audible.authors.screens.audible_get", new=AsyncMock(return_value=echoing_page)), \
-         patch("app.services.audible.authors.screens.logger") as mock_logger:
+         patch("libex_core.audible.authors.screens.logger") as mock_logger:
         result = await _fetch_author_books_by_screen("B000TARGET", "us")
 
     assert result.product_count is None
@@ -1627,7 +1738,7 @@ async def test_fetch_author_books_by_screen_plateau_on_real_shaped_pages_scores_
     mock_get = AsyncMock(side_effect=_screen_page_router({1: page1, 2: page2}, default=page2))
 
     with patch("app.services.audible.authors.screens.audible_get", new=mock_get), \
-         patch("app.services.audible.authors.screens.logger") as mock_logger:
+         patch("libex_core.audible.authors.screens.logger") as mock_logger:
         result = await _fetch_author_books_by_screen("B000APENBC", "us")
 
     assert result.termination_reason == SCREENS_REASON_PLATEAU_TRUNCATED
@@ -1708,7 +1819,7 @@ async def test_fetch_author_books_by_screen_repeated_page_content_scores_plateau
     )]}
 
     with patch("app.services.audible.authors.screens.audible_get", new=AsyncMock(return_value=echoing_page)), \
-         patch("app.services.audible.authors.screens.logger") as mock_logger:
+         patch("libex_core.audible.authors.screens.logger") as mock_logger:
         result = await _fetch_author_books_by_screen("B000TARGET", "us")
 
     assert result.termination_reason == SCREENS_REASON_PLATEAU_TRUNCATED
@@ -1866,7 +1977,7 @@ def test_mint_screen_token_exact_shape():
     as a literal rather than inferred from behavior. The equality check
     also pins page_load_id's absence: the endpoint ignores it, so anything
     sent there would be a constant outbound string and nothing else."""
-    from app.services.audible.authors.screens import _mint_screen_token
+    from libex_core.audible.authors.screens import _mint_screen_token
 
     token = _mint_screen_token(5)
     raw = base64.b64decode(token)
@@ -1888,7 +1999,7 @@ def test_mint_screen_token_page_num_stringified_not_left_as_int():
     itself round-trips an int-typed page_num back as an int on decode, so
     this asserts against the pre-decode literal, not just the decoded
     type."""
-    from app.services.audible.authors.screens import _mint_screen_token
+    from libex_core.audible.authors.screens import _mint_screen_token
 
     raw = base64.b64decode(_mint_screen_token(12)).decode("ascii")
     assert '"page_num":"12"' in raw
@@ -2013,7 +2124,7 @@ async def test_fetch_author_books_by_screen_sequential_fallback_when_product_cou
     page2 = {"sections": [_asin_section([_row("B0SEQ00002")], pagination=None)]}
 
     with patch("app.services.audible.authors.screens.audible_get", new=AsyncMock(side_effect=[page1, page2])), \
-         patch("app.services.audible.authors.screens._fanout_screen_pages", new=AsyncMock()) as mock_fanout:
+         patch("libex_core.audible.authors.screens._fanout_screen_pages", new=AsyncMock()) as mock_fanout:
         result = await _fetch_author_books_by_screen("B000TARGET", "us")
 
     mock_fanout.assert_not_called()
@@ -2050,7 +2161,7 @@ async def test_fetch_author_books_by_catalog_sliced_false_at_exact_boundary():
     CATALOG_RESULT_CEILING is a measured, live-probed value that can be
     corrected independently of this boundary rule."""
     from app.services.audible.authors import _fetch_author_books_by_catalog
-    from app.services.audible.authors.catalog import CATALOG_RESULT_CEILING
+    from libex_core.audible.authors.catalog import CATALOG_RESULT_CEILING
 
     boundary_total = CATALOG_RESULT_CEILING
 
@@ -2097,7 +2208,7 @@ async def test_fetch_author_books_by_catalog_sliced_true_from_observed_plateau()
     boundary check -- see the dedicated slicing_incomplete tests below for
     that consequence on its own."""
     from app.services.audible.authors import _fetch_author_books_by_catalog
-    from app.services.audible.authors.catalog import _CATALOG_SORTS
+    from libex_core.audible.authors.catalog import _CATALOG_SORTS
 
     plateau_products = _catalog_asin_match_products("PLATEAU", 50)
 
@@ -2134,7 +2245,7 @@ async def test_fetch_author_books_by_catalog_sliced_false_when_walk_reaches_tota
     content is still genuinely new (a distinct ASIN prefix per page, never
     repeating the page before it)."""
     from app.services.audible.authors import _fetch_author_books_by_catalog
-    from app.services.audible.authors.catalog import _CATALOG_SORTS
+    from libex_core.audible.authors.catalog import _CATALOG_SORTS
 
     async def _get(region, path, params):
         sort = params["products_sort_by"]
@@ -2178,7 +2289,7 @@ async def test_fetch_author_books_by_catalog_sliced_false_when_no_total_results(
 @pytest.mark.asyncio
 async def test_fetch_author_books_by_catalog_preserves_release_date_prefix_despite_completion_order():
     """The compat-critical -ReleaseDate-first prefix (see
-    _CatalogBooksResult's own docstring) is a FOLD-order guarantee, not a
+    CatalogBooksResult's own docstring) is a FOLD-order guarantee, not a
     fetch-order one: Phase 1 fires both baseline windows together in one
     gather, but -ReleaseDate is made to resolve strictly AFTER ReleaseDate
     here, and the assembled asins list must still open with -ReleaseDate's
@@ -2232,7 +2343,7 @@ async def test_fetch_author_books_by_catalog_sanderson_control_never_slices_unde
     real page count 203 total_results implies) are ever fetched, and every
     one of them carries no category_id and a baseline sort."""
     from app.services.audible.authors import _fetch_author_books_by_catalog
-    from app.services.audible.authors.catalog import _CATALOG_BASELINE_SORTS
+    from libex_core.audible.authors.catalog import _CATALOG_BASELINE_SORTS
 
     def _product(page, i):
         return {
@@ -2298,7 +2409,7 @@ async def test_fetch_author_books_by_catalog_dry_streak_stops_walk_and_only_payi
        test_a_category_past_the_ceiling_still_gets_its_extra_sorts pins.
     """
     from app.services.audible.authors import _fetch_author_books_by_catalog
-    from app.services.audible.authors.catalog import (
+    from libex_core.audible.authors.catalog import (
         _CATALOG_CATEGORY_PROBE_SORT,
         CATALOG_DRY_STREAK_LIMIT,
     )
@@ -2414,7 +2525,7 @@ async def test_fetch_author_books_by_catalog_page0_alone_meeting_threshold_still
     either formula -- proving this test doesn't just make every category
     pay, only the one that actually earned it."""
     from app.services.audible.authors import _fetch_author_books_by_catalog
-    from app.services.audible.authors.catalog import (
+    from libex_core.audible.authors.catalog import (
         _CATALOG_CATEGORY_PROBE_SORT,
         _CATALOG_CATEGORY_SPEND_SORTS,
         CATALOG_DRY_WINDOW_MIN_NEW,
@@ -2489,7 +2600,7 @@ async def test_fetch_author_books_by_catalog_page0_alone_meeting_threshold_still
 @pytest.mark.asyncio
 async def test_fetch_author_books_by_catalog_candidate_cap_does_not_mark_slicing_incomplete():
     """THE MOST IMPORTANT TEST IN THIS SLICE'S REWRITE (see
-    _CatalogBooksResult.slicing_incomplete's own docstring and
+    CatalogBooksResult.slicing_incomplete's own docstring and
     CATALOG_MAX_CANDIDATE_CATEGORIES's). Live measurement showed Conan
     Doyle harvests roughly 120 categories and Christie roughly 112 --
     hitting CATALOG_MAX_CANDIDATE_CATEGORIES (40) is routine for exactly
@@ -2502,7 +2613,7 @@ async def test_fetch_author_books_by_catalog_candidate_cap_does_not_mark_slicing
     than the cap) and asserts the cap truncating the ranked list does NOT,
     on its own, set slicing_incomplete."""
     from app.services.audible.authors import _fetch_author_books_by_catalog
-    from app.services.audible.authors.catalog import CATALOG_MAX_CANDIDATE_CATEGORIES
+    from libex_core.audible.authors.catalog import CATALOG_MAX_CANDIDATE_CATEGORIES
 
     harvested_count = CATALOG_MAX_CANDIDATE_CATEGORIES + 5
     rungs = [{"id": f"CAT{i:03d}", "name": f"Category {i}"} for i in range(harvested_count)]
@@ -2593,7 +2704,7 @@ async def test_fetch_author_books_by_catalog_probes_categories_with_title_sort_n
     it fails if the probe sort is ever reverted to (or silently replaced
     by) a baseline sort."""
     from app.services.audible.authors import _fetch_author_books_by_catalog
-    from app.services.audible.authors.catalog import _CATALOG_BASELINE_SORTS, _CATALOG_CATEGORY_PROBE_SORT
+    from libex_core.audible.authors.catalog import _CATALOG_BASELINE_SORTS, _CATALOG_CATEGORY_PROBE_SORT
 
     assert _CATALOG_CATEGORY_PROBE_SORT == "-Title"
     assert _CATALOG_CATEGORY_PROBE_SORT not in _CATALOG_BASELINE_SORTS
@@ -2635,7 +2746,7 @@ def test_process_catalog_page_populates_names_into_an_already_empty_dict():
     other caller either passes None (which both spellings handle
     identically) or a dict that's already non-empty by the time it
     matters."""
-    from app.services.audible.authors.catalog import _process_catalog_page
+    from libex_core.audible.authors.catalog import _process_catalog_page
 
     product = {
         "asin": "B0CATNAME01",
@@ -2724,7 +2835,7 @@ def _screen_result(
     termination_reason=SCREENS_REASON_COMPLETED,
     page_error=None,
 ):
-    return _ScreenBooksResult(
+    return ScreenBooksResult(
         asins=asins,
         pages_fetched=pages_fetched,
         product_count=product_count,
@@ -2753,7 +2864,7 @@ def _catalog_result(
     windows_used=0,
 ):
     asins = list(asins)
-    return _CatalogBooksResult(
+    return CatalogBooksResult(
         asins=asins,
         pages_fetched=pages_fetched,
         total_results=total_results,
@@ -4232,7 +4343,7 @@ async def test_fetch_author_books_by_name_detailed_mid_batch_failure_truncates_a
 
     mock_get = AsyncMock(side_effect=_get)
     with patch("app.services.audible.authors.by_name.audible_get", new=mock_get), \
-         patch("app.services.audible.authors.by_name.logger") as mock_logger:
+         patch("libex_core.audible.authors.by_name.logger") as mock_logger:
         asins, pages_fetched, completed = await _fetch_author_books_by_name_detailed(
             "Frank Herbert", "us", concurrency=3,
         )
@@ -4426,7 +4537,7 @@ async def test_fetch_author_books_by_screen_grid_not_found_fires_unclean_warning
     from app.services.audible.authors import _fetch_author_books_by_screen
 
     with patch("app.services.audible.authors.screens.audible_get", new=AsyncMock(return_value={})), \
-         patch("app.services.audible.authors.screens.logger") as mock_logger:
+         patch("libex_core.audible.authors.screens.logger") as mock_logger:
         result = await _fetch_author_books_by_screen("B000TARGET", "us")
 
     assert result.termination_reason == SCREENS_REASON_GRID_NOT_FOUND
@@ -5020,7 +5131,7 @@ async def test_fetch_author_books_by_screen_every_warning_line_carries_author_as
         [_row("B0BOTH0001")], product_count=1000, pagination="SAMETOKEN",
     )]}
     with patch("app.services.audible.authors.screens.audible_get", new=AsyncMock(return_value=echoing_page)), \
-         patch("app.services.audible.authors.screens.logger") as mock_logger:
+         patch("libex_core.audible.authors.screens.logger") as mock_logger:
         await _fetch_author_books_by_screen(asin, "us")
 
     mock_logger.warning.assert_called_once()
@@ -5063,7 +5174,7 @@ def test_needs_further_sorts_only_past_the_ceiling():
     An unknown total is treated as needing more, not less: _pages_needed_for
     falls back to a single page when total_results is missing, so that
     category was NOT fully enumerated and skipping its sorts would lose books."""
-    from app.services.audible.authors.catalog import (
+    from libex_core.audible.authors.catalog import (
         _needs_further_sorts, CATALOG_RESULT_CEILING,
     )
 
@@ -5098,7 +5209,7 @@ async def test_a_category_past_the_ceiling_still_gets_its_extra_sorts():
     500. Skipping the sorts there would be a silent data loss, which is why
     the gate keys on the category's own total rather than on a flat cap."""
     from app.services.audible.authors import _fetch_author_books_by_catalog
-    from app.services.audible.authors.catalog import (
+    from libex_core.audible.authors.catalog import (
         _CATALOG_SORTS, CATALOG_RESULT_CEILING, _CATALOG_CATEGORY_SPEND_SORTS,
     )
 
@@ -5152,7 +5263,7 @@ async def test_a_category_whose_probe_lost_a_page_still_gets_its_extra_sorts():
     "less data is never accepted" rule exists to prevent, so a lost page has
     to override an otherwise-complete-looking total."""
     from app.services.audible.authors import _fetch_author_books_by_catalog
-    from app.services.audible.authors.catalog import (
+    from libex_core.audible.authors.catalog import (
         _CATALOG_SORTS, CATALOG_RESULT_CEILING, _CATALOG_CATEGORY_SPEND_SORTS,
     )
 
@@ -5202,7 +5313,7 @@ async def test_a_walk_mixing_over_and_under_ceiling_categories_expands_only_the_
     would quietly strip the sorts from the large category while spending them
     on the small one."""
     from app.services.audible.authors import _fetch_author_books_by_catalog
-    from app.services.audible.authors.catalog import (
+    from libex_core.audible.authors.catalog import (
         _CATALOG_SORTS, CATALOG_RESULT_CEILING, _CATALOG_CATEGORY_SPEND_SORTS,
     )
 
@@ -5271,7 +5382,7 @@ async def test_a_probe_page_missing_from_the_rest_batch_is_marked_lost_and_recov
     sorts, and those sorts firing is the recovery this test exists to
     prove actually happens, not merely that the gap was noticed."""
     from app.services.audible.authors import _fetch_author_books_by_catalog
-    from app.services.audible.authors.catalog import (
+    from libex_core.audible.authors.catalog import (
         _CATALOG_SORTS, _CATALOG_CATEGORY_PROBE_SORT, _CATALOG_CATEGORY_SPEND_SORTS,
         CATALOG_RESULT_CEILING,
     )
@@ -5305,7 +5416,7 @@ async def test_a_probe_page_missing_from_the_rest_batch_is_marked_lost_and_recov
 
         raise AssertionError(f"unexpected request: category={category_id} sort={sort} page={page}")
 
-    async def _fake_rest_batch(author_name, region, targets):
+    async def _fake_rest_batch(get, author_name, region, targets):
         # Every requested target gets a normal page back except PMISS's
         # own page 2 -- the batch silently drops exactly that one key,
         # the shape `target not in probe_rest` exists to catch.
@@ -5318,7 +5429,7 @@ async def test_a_probe_page_missing_from_the_rest_batch_is_marked_lost_and_recov
         return result
 
     with patch("app.services.audible.authors.catalog.audible_get", new=AsyncMock(side_effect=_get)), \
-         patch("app.services.audible.authors.catalog._fetch_window_rest_batch", new=AsyncMock(side_effect=_fake_rest_batch)):
+         patch("libex_core.audible.authors.catalog._fetch_window_rest_batch", new=AsyncMock(side_effect=_fake_rest_batch)):
         result = await _fetch_author_books_by_catalog("B000AUTHOR", "Some Author", "us")
 
     # The gap is real: nothing from PMISS's page 2 ever entered the union.
@@ -5344,7 +5455,7 @@ async def test_a_non_dict_probe_page_is_marked_lost_and_recovered():
     category still gets its extra sorts -- the recovery, not merely the
     complaint."""
     from app.services.audible.authors import _fetch_author_books_by_catalog
-    from app.services.audible.authors.catalog import (
+    from libex_core.audible.authors.catalog import (
         _CATALOG_SORTS, _CATALOG_CATEGORY_PROBE_SORT, _CATALOG_CATEGORY_SPEND_SORTS,
         CATALOG_RESULT_CEILING,
     )
@@ -5402,7 +5513,7 @@ async def test_a_probe_page_whose_products_is_not_a_list_is_marked_lost_and_reco
     missing key, so this is provably testing the isinstance check and not
     just a missing-key .get() fallback."""
     from app.services.audible.authors import _fetch_author_books_by_catalog
-    from app.services.audible.authors.catalog import (
+    from libex_core.audible.authors.catalog import (
         _CATALOG_SORTS, _CATALOG_CATEGORY_PROBE_SORT, _CATALOG_CATEGORY_SPEND_SORTS,
         CATALOG_RESULT_CEILING,
     )
@@ -5464,13 +5575,13 @@ async def test_a_malformed_baseline_rest_page_is_visible_and_blocks_caching():
     slicing_incomplete is asserted False alongside sort_errors: that
     field's own contract is narrower (a harvest that surfaced zero
     categories to slice with, not a page that failed to fetch -- see
-    _CatalogBooksResult's docstring), and this fixture never even reaches
+    CatalogBooksResult's docstring), and this fixture never even reaches
     Phase 2, so folding this failure into slicing_incomplete would both
     misuse a field with a precise, different meaning and be reached by a
     code path that plateaus/over-claims a total, not a plain rest-page
     loss. sort_errors alone is what has to do the blocking, and does."""
     from app.services.audible.authors import _fetch_author_books_by_catalog
-    from app.services.audible.authors.catalog import _CATALOG_SORTS
+    from libex_core.audible.authors.catalog import _CATALOG_SORTS
 
     async def _get(region, path, params):
         sort = params["products_sort_by"]
@@ -5509,7 +5620,7 @@ async def test_a_malformed_expand_rest_page_is_visible_with_no_further_recovery_
     below; there is no completeness signal to prove recovering, because
     there is nothing further to recover into."""
     from app.services.audible.authors import _fetch_author_books_by_catalog
-    from app.services.audible.authors.catalog import (
+    from libex_core.audible.authors.catalog import (
         _CATALOG_SORTS, _CATALOG_CATEGORY_SPEND_SORTS, CATALOG_RESULT_CEILING,
     )
 
@@ -5575,7 +5686,7 @@ async def test_a_malformed_probe_page_0_does_not_consume_a_dry_streak_slot():
     and recovered (categories_expanded, since a page-0 total of None
     forces _needs_further_sorts True)."""
     from app.services.audible.authors import _fetch_author_books_by_catalog
-    from app.services.audible.authors.catalog import _CATALOG_SORTS, _CATALOG_CATEGORY_SPEND_SORTS
+    from libex_core.audible.authors.catalog import _CATALOG_SORTS, _CATALOG_CATEGORY_SPEND_SORTS
 
     base_products = _catalog_asin_match_products("BASE", 50)
     # Distinct, strictly descending frequencies so Phase 2's ranking is
@@ -5646,7 +5757,7 @@ async def test_a_probe_page_0_that_raises_is_visible_but_unrecoverable_pinning_e
     not silent: it lands in sort_errors, which is why the two sub-cases
     are "visible either way" but only one of them is "recoverable"."""
     from app.services.audible.authors import _fetch_author_books_by_catalog
-    from app.services.audible.authors.catalog import (
+    from libex_core.audible.authors.catalog import (
         _CATALOG_SORTS, _CATALOG_CATEGORY_SPEND_SORTS, CATALOG_RESULT_CEILING,
     )
 
@@ -5716,7 +5827,7 @@ async def test_a_malformed_baseline_page_0_is_visible_and_not_reported_clean():
     keeping, just an implementation accident of validating one field
     without validating the one that actually carries the data."""
     from app.services.audible.authors import _fetch_author_books_by_catalog
-    from app.services.audible.authors.catalog import _CATALOG_SORTS
+    from libex_core.audible.authors.catalog import _CATALOG_SORTS
 
     async def _get(region, path, params):
         sort = params["products_sort_by"]
@@ -5759,7 +5870,7 @@ async def test_a_malformed_expand_page_0_is_visible_and_never_folds():
     which is why visibility (sort_errors) is the only thing this guard
     can or needs to provide."""
     from app.services.audible.authors import _fetch_author_books_by_catalog
-    from app.services.audible.authors.catalog import (
+    from libex_core.audible.authors.catalog import (
         _CATALOG_SORTS, _CATALOG_CATEGORY_SPEND_SORTS, CATALOG_RESULT_CEILING,
     )
 
@@ -5831,7 +5942,7 @@ async def test_deadline_tripping_after_the_probe_completes_does_not_truncate_a_w
     call, which only happens if the Phase 4 gate widens back to `paying`
     and weighs CAT1 against the deadline anyway, reads "after"."""
     from app.services.audible.authors import _fetch_author_books_by_catalog
-    from app.services.audible.authors.catalog import (
+    from libex_core.audible.authors.catalog import (
         _CATALOG_SORTS, _CATALOG_CATEGORY_PROBE_SORT, CATALOG_RESULT_CEILING,
     )
 
@@ -5864,7 +5975,7 @@ async def test_deadline_tripping_after_the_probe_completes_does_not_truncate_a_w
         return 0.0 if call_count["n"] <= 16 else 1_000_000.0
 
     with patch("app.services.audible.authors.catalog.audible_get", new=AsyncMock(side_effect=_get)), \
-         patch("app.services.audible.authors.catalog.time.monotonic", side_effect=_fake_monotonic):
+         patch("libex_core.audible.authors.catalog.time.monotonic", side_effect=_fake_monotonic):
         result = await _fetch_author_books_by_catalog(
             "B000AUTHOR", "Some Author", "us", deadline=500_000.0,
         )
@@ -5898,7 +6009,7 @@ async def test_an_already_truncated_walk_stays_truncated_even_with_nothing_left_
     to_expand ends up empty for a reason that has nothing to do with
     CATA's lost pages -- which is exactly what must not erase them."""
     from app.services.audible.authors import _fetch_author_books_by_catalog
-    from app.services.audible.authors.catalog import _CATALOG_SORTS, CATALOG_RESULT_CEILING
+    from libex_core.audible.authors.catalog import _CATALOG_SORTS, CATALOG_RESULT_CEILING
 
     async def _get(region, path, params):
         sort = params["products_sort_by"]
@@ -5937,7 +6048,7 @@ async def test_an_already_truncated_walk_stays_truncated_even_with_nothing_left_
         return 0.0 if call_count["n"] < 13 else 1_000_000.0
 
     with patch("app.services.audible.authors.catalog.audible_get", new=AsyncMock(side_effect=_get)), \
-         patch("app.services.audible.authors.catalog.time.monotonic", side_effect=_fake_monotonic):
+         patch("libex_core.audible.authors.catalog.time.monotonic", side_effect=_fake_monotonic):
         result = await _fetch_author_books_by_catalog(
             "B000AUTHOR", "Some Author", "us", deadline=500_000.0,
         )

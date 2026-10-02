@@ -504,6 +504,21 @@ def test_shipped_completions_are_checked_too(built, shell):
         ),
         (
             "fish",
+            "complete -c libex-core -n '__fish_seen_subcommand_from search; and not __fish_seen_subcommand_from abs; and not __fish_seen_subcommand_from x' -l limit",
+            "fish condition",
+        ),
+        (
+            "fish",
+            "complete -c libex-core -n '__fish_seen_subcommand_from search; and not __fish_seen_subcommand_from abs || id' -l limit",
+            "fish condition",
+        ),
+        (
+            "fish",
+            "complete -c libex-core -n '__fish_seen_subcommand_from search; and not not __fish_seen_subcommand_from abs' -l limit",
+            "fish condition",
+        ),
+        (
+            "fish",
             "complete -c libex-core -n '__fish_seen_subcommand_from book; or __fish_seen_subcommand_from get' -a x",
             "fish condition",
         ),

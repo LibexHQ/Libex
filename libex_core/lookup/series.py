@@ -12,7 +12,6 @@ import logging
 import time
 
 # Core
-from libex_core.asin import is_valid_asin, normalise_asin
 from libex_core.audible.client import (
     AudibleGet,
     as_audible_failure,
@@ -20,20 +19,11 @@ from libex_core.audible.client import (
     validate_region,
 )
 from libex_core.audible.series import fetch_series, fetch_series_book_asins, normalize_series
-from libex_core.exceptions import ErrorCode, NotFoundException
-from libex_core.lookup.books import hydrate_books
+from libex_core.exceptions import NotFoundException
+from libex_core.lookup.books import _OUTAGE_MESSAGE, _canonical_asin, hydrate_books
 from libex_core.models import BookResponse, SeriesResponse
 
 logger = logging.getLogger("libex")
-
-_OUTAGE_MESSAGE = "Audible unavailable"
-
-
-def _canonical_series_asin(asin: str) -> str:
-    """The uppercase form of a valid ASIN; the rejected value is not echoed."""
-    if not isinstance(asin, str) or not is_valid_asin(asin):
-        raise NotFoundException("Invalid ASIN format", code=ErrorCode.INVALID_REQUEST)
-    return normalise_asin(asin)
 
 
 async def get_series(get: AudibleGet, asin: str, *, region: str = "us") -> SeriesResponse:
@@ -45,7 +35,7 @@ async def get_series(get: AudibleGet, asin: str, *, region: str = "us") -> Serie
     AudibleAPIException when Audible could not be reached, and RegionException
     for an unknown region.
     """
-    canonical = _canonical_series_asin(asin)
+    canonical = _canonical_asin(asin)
     region = validate_region(region)
     try:
         start = time.monotonic()
@@ -88,7 +78,7 @@ async def get_series_books(
     when Audible could not be reached (for the member list, or for every book),
     and RegionException for an unknown region.
     """
-    canonical = _canonical_series_asin(asin)
+    canonical = _canonical_asin(asin)
     region = validate_region(region)
     try:
         start = time.monotonic()

@@ -472,6 +472,16 @@ async def test_quick_search_compound_query_falls_back_to_author_and_title():
     assert params["num_results"] == 10
 
 
+@pytest.mark.parametrize("keywords", ["foo - ", " - foo", "foo -  - "])
+async def test_quick_search_one_usable_segment_is_not_a_compound_query(keywords):
+    """A trailing or doubled separator leaves one non-empty segment, and one
+    segment has no author and title to search for: no catalog request is made."""
+    get = _suggestion_get([], catalog=[_product("B0LOOK0009")])
+    with pytest.raises(NotFoundException):
+        await quick_search(get, keywords)
+    assert [c.args[1] for c in get.await_args_list] == ["/1.0/searchsuggestions"]
+
+
 async def test_quick_search_compound_fallback_outage_is_an_outage_not_an_absence():
     get = _suggestion_get([], catalog=AudibleAPIException("boom"))
     with pytest.raises(AudibleAPIException):

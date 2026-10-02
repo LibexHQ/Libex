@@ -401,7 +401,8 @@ def _zsh_branch(
     command: _Command, depth: int, indent: str, lead: tuple[str, ...] = ()
 ) -> list[str]:
     """A case arm for a command whose name is line[depth]; lead holds the
-    names of the commands between it and the top, excluding the first."""
+    names of the commands below the top-level one down to and including this
+    command's own name, so it is empty for a top-level command."""
     lines = [f"{indent}{_word(command.name)})"]
     inner = f"{indent}    "
     if command.children:
@@ -477,11 +478,28 @@ def _fish_flags(option: _Option) -> str:
     return " ".join(parts)
 
 
-def _fish_lines(command: _Command, path: tuple[str, ...]) -> list[str]:
-    """Completions for a command reached by path, which includes its own name."""
+def _descendant_names(command: _Command) -> set[str]:
+    names: set[str] = set()
+    for child in command.children:
+        names.add(child.name)
+        names |= _descendant_names(child)
+    return names
+
+
+def _fish_lines(
+    command: _Command, path: tuple[str, ...], groups: tuple[str, ...] = ()
+) -> list[str]:
+    """Completions for a command reached by path, which includes its own name.
+
+    __fish_seen_subcommand_from matches a word anywhere on the line, so a
+    top-level command that shares a name with a command inside a group would
+    also fire after the group's word; groups holds the group words, if any, that
+    hold a command of the same name and turn the top-level rule off."""
     seen = "; and ".join(
         f"__fish_seen_subcommand_from {_word(word)}" for word in path
     )
+    if groups:
+        seen += f"; and not __fish_seen_subcommand_from {_words(groups)}"
     lines = []
     if command.children:
         names = _words(tuple(child.name for child in command.children))
@@ -521,7 +539,16 @@ def _fish(spec: _Spec) -> str:
             f"-a {_word(command.name)} -d '{_description(command.summary)}'"
         )
     for command in spec.commands:
-        lines += _fish_lines(command, (command.name,))
+        groups = (
+            ()
+            if command.children
+            else tuple(
+                group.name
+                for group in spec.commands
+                if command.name in _descendant_names(group)
+            )
+        )
+        lines += _fish_lines(command, (command.name,), groups)
     return "\n".join(lines) + "\n"
 
 

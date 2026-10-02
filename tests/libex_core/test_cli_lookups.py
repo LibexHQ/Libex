@@ -21,7 +21,9 @@ import pytest
 from libex_core.audible.client import VALID_REGIONS
 from libex_core.cli import _args
 from libex_core.cli.commands import book as book_command
+from libex_core.cli.parser import build_parser
 from libex_core.exceptions import AudibleAPIException, NotFoundException
+from tests.libex_core._cli_support import walk_parsers
 from tests.libex_core._cli_lookup_support import (
     CASE_IDS,
     CASES,
@@ -138,9 +140,6 @@ def test_the_cli_region_list_is_the_library_region_list():
 
 
 def test_the_default_region_is_us_on_every_command():
-    from tests.libex_core._cli_support import walk_parsers
-    from libex_core.cli.parser import build_parser
-
     seen = 0
     for path, parser in walk_parsers(build_parser()):
         for action in parser._actions:

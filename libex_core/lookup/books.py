@@ -14,7 +14,9 @@ retried and never mixed with an outage.
 
 Every function takes the callable that makes the request (an AudibleGet) as its
 first argument and the region as a keyword. Nothing here reads the
-environment, and nothing logged or raised repeats a value the caller typed.
+environment. Nothing logged or raised repeats raw caller input; where a value
+does appear (a log field, the no-chapter-information message) it is a
+validated ASIN in its uppercase form.
 """
 
 # Standard library
@@ -325,9 +327,10 @@ async def get_chapters(
     Fetches a book's chapter listing.
 
     A 404 from Audible, and a 200 that carries no chapter listing, are both
-    NotFoundException: the record is not there and will not be on a retry (the
-    ISBN-keyed records are a large population that 404 everywhere). Only a
-    transient failure is AudibleAPIException, and only that is worth retrying.
+    NotFoundException: the record is not there and will not be on a retry (a
+    population of books has no chapters, and Audible answers those with a 404).
+    Only a transient failure is AudibleAPIException, and only that is worth
+    retrying.
     A value that is not an ASIN is NotFoundException (code invalid_request);
     an unknown region is RegionException.
     """

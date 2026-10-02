@@ -316,5 +316,56 @@ def test_fish_spec_holds_each_nested_commands_flags_and_region_choices(path):
 
 def test_the_top_level_request_commands_complete_their_flags_too():
     assert "'--region[" in _SCRIPTS["zsh"]
-    assert "-n '__fish_seen_subcommand_from search' -l region" in _SCRIPTS["fish"]
+    assert "-n '__fish_seen_subcommand_from search; and not __fish_seen_subcommand_from abs' -l region" in _SCRIPTS["fish"]
     assert "-l sort-by" in _SCRIPTS["fish"] and "'--sort-by[" in _SCRIPTS["zsh"]
+
+
+# ============================================================
+# FISH -- `search` is both a top-level command and an abs command
+# ============================================================
+
+_TOP_ONLY = ("narrator", "publisher", "sort-by", "limit", "page")
+
+
+def _fish_lines():
+    return [
+        row for row in _SCRIPTS["fish"].splitlines()
+        if row.startswith("complete -c libex-core -n '__fish_seen_subcommand_from")
+    ]
+
+
+@pytest.mark.parametrize("word", ["search", "quick-search"])
+def test_fish_top_level_search_flags_are_not_offered_after_abs(word):
+    """`abs search` contains the word `search`, so a bare test for it would
+    offer the top-level flags (--narrator, --limit...) that abs search does
+    not take."""
+    condition = (
+        f"-n '__fish_seen_subcommand_from {word}; and not __fish_seen_subcommand_from abs'"
+    )
+    top = [row for row in _fish_lines() if f"seen_subcommand_from {word};" in row
+           and "seen_subcommand_from abs;" not in row]
+    assert top, word
+    for row in top:
+        assert condition in row, row
+    flags = {m for row in top for m in re.findall(r" -l ([a-z-]+)", row)}
+    assert flags == {a[2:] for a in _flags(dict(_LEAVES)[(word,)])}
+
+
+def test_fish_abs_leaves_keep_their_own_flags_and_never_the_top_level_only_ones():
+    for leaf in ("search", "quick-search"):
+        condition = (
+            f"-n '__fish_seen_subcommand_from abs; and __fish_seen_subcommand_from {leaf}'"
+        )
+        rows = [row for row in _fish_lines() if condition in row]
+        flags = {m for row in rows for m in re.findall(r" -l ([a-z-]+)", row)}
+        assert flags == {a[2:] for a in _flags(dict(_LEAVES)[("abs", leaf)])}
+        assert not flags & set(_TOP_ONLY)
+    assert not [r for r in _fish_lines() if "seen_subcommand_from abs;" in r and " -l limit" in r]
+
+
+def test_every_top_level_search_row_is_conditioned_on_abs_not_being_named():
+    prefixes = ("-n '__fish_seen_subcommand_from search;", "-n '__fish_seen_subcommand_from quick-search;")
+    rows = [row for row in _fish_lines() if any(p in row for p in prefixes)]
+    assert len(rows) == 13  # search: help, nine options, region; quick-search: help, region
+    for row in rows:
+        assert "; and not __fish_seen_subcommand_from abs'" in row, row

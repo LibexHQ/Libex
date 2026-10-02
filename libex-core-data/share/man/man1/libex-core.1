@@ -37,7 +37,7 @@ the Audible marketplace to ask, default us
 .SS book bulk
 \fBlibex\-core book bulk\fR \fIASIN\fR
 .PP
-Print up to 1000 books as JSON, with the ASINs that were not found, were only placeholders, or could not be fetched listed beside them. ASINs may be given as arguments, in a file, or both, separated by commas or white space. A result that is only partly complete is still printed and the status is 0.
+Print up to 1000 books as JSON, with the ASINs that were not found, were only placeholders, or could not be fetched listed beside them. ASINs may be given as arguments, in a file, or both, separated by commas or white space. The books can be filtered and sorted. A result that is only partly complete is still printed and the status is 0.
 .TP
 \fIASIN\fR
 ASIN of a book, repeat for more
@@ -50,6 +50,48 @@ read more ASINs from this file, or from standard input when it is \-
 .TP
 \fB\-\-region\fR
 the Audible marketplace to ask, default us
+.TP
+\fB\-\-language\fR
+Filter by language (exact match)
+.TP
+\fB\-\-book\-format\fR
+Filter by book format (e.g. unabridged)
+.TP
+\fB\-\-explicit\fR
+Filter by explicit
+.TP
+\fB\-\-whisper\-sync\fR
+Filter by Whispersync availability
+.TP
+\fB\-\-has\-pdf\fR
+Filter by PDF companion availability
+.TP
+\fB\-\-is\-vvab\fR
+Filter by VVAB (virtual voice audiobook) status
+.TP
+\fB\-\-plan\-name\fR
+Filter by Audible plan name (e.g. US Minerva)
+.TP
+\fB\-\-rating\-better\-than\fR
+Minimum rating
+.TP
+\fB\-\-rating\-worse\-than\fR
+Maximum rating
+.TP
+\fB\-\-longer\-than\fR
+Minimum length in minutes
+.TP
+\fB\-\-shorter\-than\fR
+Maximum length in minutes
+.TP
+\fB\-\-genre\fR
+Filter by genre or tag name (partial match, e.g. fantasy)
+.TP
+\fB\-\-sort\fR
+sort the books by this field, default is the order they were found in
+.TP
+\fB\-\-order\fR
+the direction of \-\-sort, default asc
 .SS book chapters
 \fBlibex\-core book chapters\fR \fIASIN\fR
 .PP
@@ -79,7 +121,7 @@ the Audible marketplace to ask, default us
 .SS series books
 \fBlibex\-core series books\fR \fIASIN\fR
 .PP
-Print the full books in a series as JSON, in series order. A member that cannot be resolved is left out.
+Print the full books in a series as JSON, in series order unless sorted. A member that cannot be resolved is left out. The books can be filtered and sorted.
 .TP
 \fIASIN\fR
 ASIN of the series
@@ -89,6 +131,197 @@ show this help message and exit
 .TP
 \fB\-\-region\fR
 the Audible marketplace to ask, default us
+.TP
+\fB\-\-language\fR
+Filter by language (exact match)
+.TP
+\fB\-\-book\-format\fR
+Filter by book format (e.g. unabridged)
+.TP
+\fB\-\-explicit\fR
+Filter by explicit
+.TP
+\fB\-\-whisper\-sync\fR
+Filter by Whispersync availability
+.TP
+\fB\-\-has\-pdf\fR
+Filter by PDF companion availability
+.TP
+\fB\-\-is\-vvab\fR
+Filter by VVAB (virtual voice audiobook) status
+.TP
+\fB\-\-plan\-name\fR
+Filter by Audible plan name (e.g. US Minerva)
+.TP
+\fB\-\-rating\-better\-than\fR
+Minimum rating
+.TP
+\fB\-\-rating\-worse\-than\fR
+Maximum rating
+.TP
+\fB\-\-longer\-than\fR
+Minimum length in minutes
+.TP
+\fB\-\-shorter\-than\fR
+Maximum length in minutes
+.TP
+\fB\-\-genre\fR
+Filter by genre or tag name (partial match, e.g. fantasy)
+.TP
+\fB\-\-sort\fR
+sort the books by this field, default is the order they were found in
+.TP
+\fB\-\-order\fR
+the direction of \-\-sort, default asc
+.SS series search
+\fBlibex\-core series search\fR \fINAME\fR
+.PP
+Print the series whose books are titled with the name, as JSON. Exits 3 when no series was found.
+.TP
+\fINAME\fR
+name of the series
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-region\fR
+the Audible marketplace to ask, default us
+.SS author get
+\fBlibex\-core author get\fR \fIASIN\fR
+.PP
+Print the author's profile as JSON. Exits 3 when Audible has no such author.
+.TP
+\fIASIN\fR
+ASIN of the author
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-region\fR
+the Audible marketplace to ask, default us
+.SS author search
+\fBlibex\-core author search\fR \fINAME\fR
+.PP
+Print the authors Audible suggests for the name, as JSON. Exits 3 when no author was found.
+.TP
+\fINAME\fR
+name of the author
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-region\fR
+the Audible marketplace to ask, default us
+.SS author books
+\fBlibex\-core author books\fR \fIASIN\fR
+.PP
+Print the full books an author is credited with as JSON, newest first unless sorted. The books can be filtered and sorted. When the list may not be whole, it is still printed, a warning naming the reasons goes to standard error, and the status is 0.
+.TP
+\fIASIN\fR
+ASIN of the author
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-region\fR
+the Audible marketplace to ask, default us
+.TP
+\fB\-\-language\fR
+Filter by language (exact match)
+.TP
+\fB\-\-book\-format\fR
+Filter by book format (e.g. unabridged)
+.TP
+\fB\-\-explicit\fR
+Filter by explicit
+.TP
+\fB\-\-whisper\-sync\fR
+Filter by Whispersync availability
+.TP
+\fB\-\-has\-pdf\fR
+Filter by PDF companion availability
+.TP
+\fB\-\-is\-vvab\fR
+Filter by VVAB (virtual voice audiobook) status
+.TP
+\fB\-\-plan\-name\fR
+Filter by Audible plan name (e.g. US Minerva)
+.TP
+\fB\-\-rating\-better\-than\fR
+Minimum rating
+.TP
+\fB\-\-rating\-worse\-than\fR
+Maximum rating
+.TP
+\fB\-\-longer\-than\fR
+Minimum length in minutes
+.TP
+\fB\-\-shorter\-than\fR
+Maximum length in minutes
+.TP
+\fB\-\-genre\fR
+Filter by genre or tag name (partial match, e.g. fantasy)
+.TP
+\fB\-\-sort\fR
+sort the books by this field, default is the order they were found in
+.TP
+\fB\-\-order\fR
+the direction of \-\-sort, default asc
+.SS author books\-by\-name
+\fBlibex\-core author books\-by\-name\fR \fINAME\fR
+.PP
+Print the full books whose author name matches exactly, ignoring case, as JSON. For when the ASIN is not known. The books can be filtered and sorted. When the list may not be whole, it is still printed, a warning naming the reasons goes to standard error, and the status is 0. Exits 3 when no book matched.
+.TP
+\fINAME\fR
+exact name of the author
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-region\fR
+the Audible marketplace to ask, default us
+.TP
+\fB\-\-language\fR
+Filter by language (exact match)
+.TP
+\fB\-\-book\-format\fR
+Filter by book format (e.g. unabridged)
+.TP
+\fB\-\-explicit\fR
+Filter by explicit
+.TP
+\fB\-\-whisper\-sync\fR
+Filter by Whispersync availability
+.TP
+\fB\-\-has\-pdf\fR
+Filter by PDF companion availability
+.TP
+\fB\-\-is\-vvab\fR
+Filter by VVAB (virtual voice audiobook) status
+.TP
+\fB\-\-plan\-name\fR
+Filter by Audible plan name (e.g. US Minerva)
+.TP
+\fB\-\-rating\-better\-than\fR
+Minimum rating
+.TP
+\fB\-\-rating\-worse\-than\fR
+Maximum rating
+.TP
+\fB\-\-longer\-than\fR
+Minimum length in minutes
+.TP
+\fB\-\-shorter\-than\fR
+Maximum length in minutes
+.TP
+\fB\-\-genre\fR
+Filter by genre or tag name (partial match, e.g. fantasy)
+.TP
+\fB\-\-sort\fR
+sort the books by this field, default is the order they were found in
+.TP
+\fB\-\-order\fR
+the direction of \-\-sort, default asc
 .SS search
 \fBlibex\-core search\fR
 .PP
@@ -196,6 +429,138 @@ results per page, 1 to 50, default 10
 .TP
 \fB\-\-page\fR
 page of results to return, counting from 0 to 9, default 0
+.TP
+\fB\-\-region\fR
+the Audible marketplace to ask, default us
+.SS releases new
+\fBlibex\-core releases new\fR
+.PP
+Print the books released in the last \-\-days as JSON, newest first unless sorted. Pre\-orders are left out. The books can be filtered and sorted. Exits 3 when none are left.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-days\fR
+how many days back to look, default 30
+.TP
+\fB\-\-category\fR
+only this category, by the id that releases categories prints. Without one the scan is a live sample, not the whole catalog
+.TP
+\fB\-\-region\fR
+the Audible marketplace to ask, default us
+.TP
+\fB\-\-language\fR
+Filter by language (exact match)
+.TP
+\fB\-\-book\-format\fR
+Filter by book format (e.g. unabridged)
+.TP
+\fB\-\-explicit\fR
+Filter by explicit
+.TP
+\fB\-\-whisper\-sync\fR
+Filter by Whispersync availability
+.TP
+\fB\-\-has\-pdf\fR
+Filter by PDF companion availability
+.TP
+\fB\-\-is\-vvab\fR
+Filter by VVAB (virtual voice audiobook) status
+.TP
+\fB\-\-plan\-name\fR
+Filter by Audible plan name (e.g. US Minerva)
+.TP
+\fB\-\-rating\-better\-than\fR
+Minimum rating
+.TP
+\fB\-\-rating\-worse\-than\fR
+Maximum rating
+.TP
+\fB\-\-longer\-than\fR
+Minimum length in minutes
+.TP
+\fB\-\-shorter\-than\fR
+Maximum length in minutes
+.TP
+\fB\-\-genre\fR
+Filter by genre or tag name (partial match, e.g. fantasy)
+.TP
+\fB\-\-sort\fR
+sort the books by this field, default is the order they were found in
+.TP
+\fB\-\-order\fR
+the direction of \-\-sort, default desc
+.SS releases coming\-soon
+\fBlibex\-core releases coming\-soon\fR
+.PP
+Print the books releasing in the next \-\-days as JSON, soonest first unless sorted. Titles already out are left out. The books can be filtered and sorted. Exits 3 when none are left.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-days\fR
+how many days ahead to look, default 30
+.TP
+\fB\-\-category\fR
+only this category, by the id that releases categories prints. Without one the scan is a live sample, not the whole catalog
+.TP
+\fB\-\-region\fR
+the Audible marketplace to ask, default us
+.TP
+\fB\-\-language\fR
+Filter by language (exact match)
+.TP
+\fB\-\-book\-format\fR
+Filter by book format (e.g. unabridged)
+.TP
+\fB\-\-explicit\fR
+Filter by explicit
+.TP
+\fB\-\-whisper\-sync\fR
+Filter by Whispersync availability
+.TP
+\fB\-\-has\-pdf\fR
+Filter by PDF companion availability
+.TP
+\fB\-\-is\-vvab\fR
+Filter by VVAB (virtual voice audiobook) status
+.TP
+\fB\-\-plan\-name\fR
+Filter by Audible plan name (e.g. US Minerva)
+.TP
+\fB\-\-rating\-better\-than\fR
+Minimum rating
+.TP
+\fB\-\-rating\-worse\-than\fR
+Maximum rating
+.TP
+\fB\-\-longer\-than\fR
+Minimum length in minutes
+.TP
+\fB\-\-shorter\-than\fR
+Maximum length in minutes
+.TP
+\fB\-\-genre\fR
+Filter by genre or tag name (partial match, e.g. fantasy)
+.TP
+\fB\-\-sort\fR
+sort the books by this field, default is the order they were found in
+.TP
+\fB\-\-order\fR
+the direction of \-\-sort, default asc
+.SS releases categories
+\fBlibex\-core releases categories\fR
+.PP
+Print Audible's genre categories as JSON, a tree by default. The ids are the values \-\-category takes.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-flat\fR
+a flat list, each node carrying its ancestors, instead of a tree
+.TP
+\fB\-\-depth\fR
+how many levels to return, 1 is the top level only, default all
 .TP
 \fB\-\-region\fR
 the Audible marketplace to ask, default us

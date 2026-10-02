@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from libex_core.cli._args import add_command, add_group, add_region_option
+from libex_core.cli._shaping import add_shaping_options, shaping_kwargs
 
 # 1000 ASINs of 10 characters with separators is about 11 KB, so anything
 # near this is not a list of ASINs.
@@ -42,8 +43,9 @@ def register(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") 
         "Print up to 1000 books as JSON, with the ASINs that were not found, "
         "were only placeholders, or could not be fetched listed beside them. "
         "ASINs may be given as arguments, in a file, or both, separated by "
-        "commas or white space. A result that is only partly complete is "
-        "still printed and the status is 0.",
+        "commas or white space. The books can be filtered and sorted. A "
+        "result that is only partly complete is still printed and the "
+        "status is 0.",
     )
     bulk.add_argument(
         "asins", metavar="ASIN", nargs="*", help="ASIN of a book, repeat for more"
@@ -54,6 +56,7 @@ def register(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") 
         help="read more ASINs from this file, or from standard input when it is -",
     )
     add_region_option(bulk)
+    add_shaping_options(bulk, "asc")
     bulk.set_defaults(handler=run_bulk)
 
     chapters = add_command(
@@ -114,4 +117,8 @@ def run_bulk(args: argparse.Namespace) -> int:
     if args.file is not None:
         parts.append(_read_file(args.file))
     asins = split_asins(parts)
-    return run_lookup(lambda get: get_books(get, asins, region=args.region))
+    return run_lookup(
+        lambda get: get_books(
+            get, asins, region=args.region, **shaping_kwargs(args)
+        )
+    )

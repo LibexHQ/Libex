@@ -382,7 +382,8 @@ this section describes the source as it stands, ahead of any release. The
 behaviour described is in `libex_core/audible/client.py`, with the logging of
 individual titles in `libex_core/audible/books.py` and
 `libex_core/audible/extras.py`, searching in `libex_core/audible/search.py`,
-and the command-line tool in `libex_core/cli/`.
+reading a local store in `libex_core/storage/read/`, and the command-line tool
+in `libex_core/cli/`.
 
 If you are using an application that contains this library, that
 application's privacy policy is the one that applies to you. This section
@@ -426,7 +427,9 @@ The library is built around preventing that from happening by accident:
 - **No storage.** It writes no files, opens no database and keeps no cache.
   Nothing about a lookup outlasts the call that made it. An optional local
   record of titles already seen has been considered but not built. If it is
-  ever added, this section will change with it.
+  ever added, this section will change with it. Its store readers only read
+  a database that the application has opened itself and passes in, and they
+  change nothing in it.
 - **The `libex-core` command reads two environment variables.** The
   command-line tool that comes with the library takes its proxy from
   `LIBEX_CORE_PROXY_URL` and its permission to connect directly from
@@ -442,19 +445,29 @@ The library is built around preventing that from happening by accident:
   the value of either variable.
 - **Its logs go where the application sends them.** It writes to the standard
   Python logger named `libex`, so its records end up wherever the host
-  application's logging is configured to send them. There are five:
+  application's logging is configured to send them. From fetching and
+  reading Audible's answers:
   - closing a stale connection fails (debug): a traceback;
   - request throttled or degraded by Audible: status, region, API path (with the ASIN for a single-title lookup), pool, attempt count, the wait Audible asked for;
   - malformed author ASIN: title ASIN, region, the malformed value, the author's name;
   - unreadable subscription plans: title ASIN, a count;
   - extra data cleaned up or held back: title ASIN, region, the reason, a count and, if oversized, its size; none of the data itself.
 
-  The last two log at most once a minute (extras, once a minute per reason),
-  naming only the latest title. Only the region and the looked-up ASIN come from the
-  caller: query parameters, where search text would appear, are left out, and
-  any ASIN, name or value not shaped like an ASIN or a short catalogue entry
-  is logged as `REDACTED`. A title ASIN is still a title someone looked up or
-  searched for, so these records are part of their reading history.
+  The subscription-plan and extra-data records log at most once a minute
+  (extras, once a minute per reason), naming only the latest title.
+
+  From reading a local store, which happens only when an application reads
+  data it has stored:
+  - more than one stored row found for an author (warning): author ASIN, region, the number of rows.
+
+  Only the region and the looked-up ASIN come from the caller: query
+  parameters, where search text would appear, are left out, and in the
+  records from Audible's answers any ASIN, name or value not shaped like an
+  ASIN or a short catalogue entry is logged as `REDACTED`. The local-store
+  record logs its author ASIN and region without that check, but only once
+  both have matched rows already in the store. A title or author ASIN is
+  still something someone looked up or searched for, so these records are
+  part of their reading history.
 
 An application that includes the library still has to answer three questions
 for its own users. Does it connect directly or through a proxy, and if through

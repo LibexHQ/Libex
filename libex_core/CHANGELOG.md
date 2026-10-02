@@ -14,6 +14,23 @@ Entries below that predate publication are historical record for whoever
 embeds this package, not evidence that anyone consumed a given version at the
 time it was cut.
 
+## [0.17.0]
+
+### Added
+- **`libex_core.storage.read` reads the stored catalog.** It covers books (by ASIN, in bulk, by SKU group, search, plan, VVAB, new releases, coming soon, the distinct plans and genres, and tracks), authors and their books, narrators and their books, series and their books, and `count_stored` for per-table counts. Each function is async and takes a SQLAlchemy session as its first argument, and the results are the same dictionaries the hosted service serves from its stored-data routes. The building blocks that produce those dictionaries (book, narrator and series-position shaping) are in `libex_core.storage.read.shapes`.
+- **The readers raise on failure.** A broken database raises; it is never turned into an empty result, so a caller can tell a missing book (`None` or an empty list) from a database that could not be read.
+- **`libex_core.storage.filtering` and `libex_core.storage.sorting` build the filters and the sort for those reads.** `apply_book_filters`, `apply_narrator_filters`, `apply_genre_filter`, `apply_category_filter` and `apply_sort` take and return SQLAlchemy statements, and the sort allow-lists for books and narrators are published there.
+- **The reads work on SQLite as well as Postgres.** Case-insensitive matching, JSON containment and key checks, series-position classification and putting missing values last each have a SQLite equivalent. The statements Postgres receives are unchanged.
+
+### Changed
+- **Known difference: text sort order is not the same on both backends.** Sorting by title, publisher, narrator name or a non-numeric series position follows the database's locale collation on Postgres and plain byte order on SQLite, so mixed-case or accented text can come back in a different order.
+- **Known difference: a search pattern ending in a lone backslash.** On Postgres it is an error; on SQLite it is accepted and matches nothing.
+- **Known difference: series-position ordering and non-ASCII digits.** SQLite treats only ASCII digits (0-9) as digits when deciding whether a series position is numeric. Postgres's `\d` may also accept other Unicode digits, depending on locale. This affects series-position ordering only.
+- **Known difference: distinct plan names that are not strings.** Plan names are strings by contract. If a plan list holds a non-string JSON element, SQLite renders it with its own spacing, which can differ from Postgres's.
+- **SQLite version requirements.** The reads need SQLite 3.30 or later for `NULLS LAST`, and the JSON1 functions, which are built in from 3.38.
+
+Still groundwork: nothing opens a database or creates tables yet, and no command uses these readers. They need a session you have built yourself over tables you have created.
+
 ## [0.15.0]
 
 ### Added

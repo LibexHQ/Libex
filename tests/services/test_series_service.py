@@ -502,3 +502,80 @@ async def test_search_series_deduplicates_audible_and_db_results():
         results = await search_series("Dune", "us", mock_session)
         asins = [r["asin"] for r in results]
         assert asins.count("B00SERIES1") == 1
+
+# ============================================================
+# MALFORMED RELATIONSHIP ASIN -- a not-found, as it was on main, never an
+# outage. Audible answered an ASIN it could not resolve with a hollow
+# response that fetch_series turned into NotFoundException; the core fetch
+# now rejects a non-ASIN with ValueError before any request, and the hosted
+# get_series must not read that as Audible being unreachable.
+# ============================================================
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", ["B000SERIES1", "B0SERIES", "not-an-asin!"])
+async def test_get_series_malformed_asin_is_not_found_not_an_outage(bad):
+    from app.services.audible.series import get_series
+    from libex_core.exceptions import AudibleAPIException, NotFoundException
+
+    audible = AsyncMock()
+
+    with patch("app.services.audible.series.audible_get", new=audible), \
+         patch("app.services.audible.series.get_series_from_db", new_callable=AsyncMock, return_value=None), \
+         patch("app.services.audible.series.cache.get", new=AsyncMock(return_value=None)):
+        with pytest.raises(NotFoundException) as exc:
+            await get_series(bad, "us", AsyncMock())
+
+    assert not isinstance(exc.value, AudibleAPIException)
+    audible.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", ["B000SERIES1", "B0SERIES", "not-an-asin!"])
+async def test_get_series_books_malformed_asin_is_not_found_not_an_outage(bad):
+    from app.services.audible.series import get_series_books
+    from libex_core.exceptions import AudibleAPIException, NotFoundException
+
+    audible = AsyncMock()
+
+    with patch("app.services.audible.series.audible_get", new=audible), \
+         patch("app.services.audible.series.cache.get", new=AsyncMock(return_value=None)):
+        with pytest.raises(NotFoundException) as exc:
+            await get_series_books(bad, "us", AsyncMock())
+
+    assert not isinstance(exc.value, AudibleAPIException)
+    audible.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_search_series_skips_a_malformed_relationship_asin_without_counting_it_as_unreachable():
+    """A malformed series ASIN in a search hit's relationships is a
+    not-found: it is passed over like any other, and does not land in the
+    skipped (unreachable) ASINs a search warns about."""
+    from app.services.audible.series import search_series
+
+    good = "B0SERIES01"
+    bad = "B000SERIES1"
+
+    async def _get(region, path, params):
+        if path == "/1.0/catalog/products" and "title" in params:
+            return {"products": [{"relationships": [
+                {"relationship_type": "series", "asin": bad},
+                {"relationship_type": "series", "asin": good},
+            ]}]}
+        assert good in path, f"request for {path} must not be made"
+        return {
+            "response_groups": ["product_attrs", "product_desc"],
+            "product": {"asin": good, "title": "Real Series", "publisher_summary": None},
+        }
+
+    with patch("app.services.audible.series.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.series.get_series_from_db", new_callable=AsyncMock, return_value=None), \
+         patch("app.services.audible.series.search_series_from_db", new_callable=AsyncMock, return_value=[]), \
+         patch("app.services.audible.series.persist_series_background"), \
+         patch("app.services.audible.series.logger") as log, \
+         patch("app.services.audible.series.cache.get", new=AsyncMock(return_value=None)):
+        results = await search_series("Real", "us", AsyncMock())
+
+    assert [r["asin"] for r in results] == [good]
+    for call in log.warning.call_args_list:
+        assert "skipped_asins" not in (call.kwargs.get("extra") or {})

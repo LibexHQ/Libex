@@ -50,6 +50,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import Book
 
 # Core
+from libex_core.asin import is_valid_asin, normalise_asin
 from libex_core.audible.books import (
     MAX_ASINS_PER_REQUEST,
     fetch_products,
@@ -129,6 +130,10 @@ async def _await_chunks(tasks, timeout, chunks, region) -> None:
     an OUTER cancel stays one readable statement -- see that finally for why
     it has to exist at all.
     """
+    if not tasks:
+        # asyncio.wait refuses an empty set; a request whose every ASIN was
+        # screened out before chunking has nothing in flight to wait for.
+        return
     _, pending = await asyncio.wait(tasks, timeout=timeout)
     for task in pending:
         task.cancel()
@@ -261,7 +266,7 @@ async def _get_books_by_asins_unsettled(
     Falls back to DB then cache when Audible is unavailable.
 
     high_concurrency, when True, runs the chunk fan-out below inside
-    author_books_concurrency() (see client.py), drawing from the wider
+    author_books_concurrency() (see libex_core/audible/_concurrency.py), drawing from the wider
     AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT pool instead of the default one.
     Set only by the author-ASIN routes hydrating get_author_books' own
     result -- the one path where a single request legitimately fans out to
@@ -347,7 +352,7 @@ async def _get_books_by_asins_unsettled(
     # holding the xmin horizon against autovacuum until it ends. Held across
     # the fan-out below, that window is whatever Audible takes: the chunk
     # requests are unbounded in time and queue against the process-wide pool
-    # in client.py, so a bulk request at the route's 1000-ASIN cap is 20
+    # in libex_core/audible/_concurrency.py, so a bulk request at the route's 1000-ASIN cap is 20
     # chunks draining through a handful of permits in successive waves, with
     # nothing between the cache read and the last chunk that needs a
     # transaction open. Released here, before any of it.
@@ -363,11 +368,43 @@ async def _get_books_by_asins_unsettled(
     # on their next statement, which SQLAlchemy re-acquires transparently.
     await session.rollback()
 
+    not_found_asins: list[str] = []
+
     try:
         start = time.monotonic()
+        # An ASIN that is not ASIN-shaped is screened out before chunking,
+        # because the core fetch rejects the whole 50-ASIN chunk with a
+        # ValueError for one of them, which the chunk loop below would read as
+        # a transient failure and so cost the other 49 their hydration. The
+        # lists that reach here are Audible-sourced (series relationships,
+        # search suggestions, an author's catalog) and can carry a malformed
+        # or ISBN-keyed id. Audible answered such an id with a hollow stub
+        # that filter_products dropped, which is a not-found for that ASIN
+        # alone; it is recorded as exactly that, without a request.
+        shaped_asins: list[str] = []
+        shaped_seen: set[str] = set()
+        unshaped: list[str] = []
+        for a in fetch_asins:
+            if isinstance(a, str) and is_valid_asin(a):
+                # The core uppercases what it sends, so the chunk is kept in
+                # that form: otherwise a lowercase ASIN is fetched under its
+                # uppercase name and then reported as a stub.
+                upper = normalise_asin(a)
+                if upper not in shaped_seen:
+                    shaped_seen.add(upper)
+                    shaped_asins.append(upper)
+            else:
+                unshaped.append(a)
+        if unshaped:
+            not_found_asins.extend(unshaped)
+            record_incomplete(facts, REASON_HYDRATION_NOT_FOUND)
+            logger.warning("Skipped non-ASIN identifiers before fetch", extra={
+                "skipped_num": len(unshaped),
+                "region": region,
+            })
         chunks = [
-            fetch_asins[i:i + MAX_ASINS_PER_REQUEST]
-            for i in range(0, len(fetch_asins), MAX_ASINS_PER_REQUEST)
+            shaped_asins[i:i + MAX_ASINS_PER_REQUEST]
+            for i in range(0, len(shaped_asins), MAX_ASINS_PER_REQUEST)
         ]
 
         # Fire every chunk concurrently -- audible_get itself is the throttle
@@ -434,7 +471,6 @@ async def _get_books_by_asins_unsettled(
         requested_took = round((time.monotonic() - start) * 1000, 2)
 
         all_products: list[dict[str, Any]] = []
-        not_found_asins: list[str] = []
         deadline_asins: list[str] = []
         transient_failed_asins: list[str] = []
         placeholders: list[str] = []
@@ -667,6 +703,10 @@ async def get_chapters(
     needs.
     """
     try:
+        # A value that is not ASIN-shaped is a terminal not-found, as it was
+        # when Audible itself answered for it, never an outage.
+        if not is_valid_asin(asin):
+            raise NotFoundException(f"No chapter information found for {asin}")
         start = time.monotonic()
         data = await fetch_chapter_metadata(audible_get, asin, region)
         chapters_took = round((time.monotonic() - start) * 1000, 2)
@@ -749,7 +789,10 @@ async def fetch_and_store_chapters(
     """
     try:
         data = await fetch_chapter_metadata(audible_get, asin, region)
-    except NotFoundException:
+    except (NotFoundException, ValueError):
+        # ValueError is the core's refusal of a value that is not an ASIN:
+        # Audible would have answered such an id with a 404, and an id that
+        # never resolves must be marked, not retried on every pass.
         await _mark_chapters_checked(session, asin)
         return "not_found"
     except Exception as e:

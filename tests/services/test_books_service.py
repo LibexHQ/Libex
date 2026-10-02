@@ -1406,6 +1406,103 @@ async def test_get_books_by_asins_facts_records_hydration_not_found_for_a_hollow
 
 
 @pytest.mark.asyncio
+async def test_get_books_by_asins_one_malformed_asin_does_not_cost_its_chunk_mates():
+    """One 11-char identifier among 50. The core fetch rejects a whole chunk
+    for one non-ASIN, which this function would read as a transient failure
+    and answer from the DB backstop -- the 49 valid books would lose their
+    fresh hydration and the response would carry REASON_HYDRATION_FAILED. The
+    malformed one is screened out first: it alone is a not-found (what
+    Audible's hollow stub produced on main), and the 49 are hydrated fresh
+    from Audible in a single request that never contained it."""
+    from app.services.audible.books import get_books_by_asins
+
+    valid = [f"B0MIXED{i:03d}" for i in range(49)]
+    bad = "B0MIXEDBAD1"
+    assert len(bad) == 11
+    requested = valid[:10] + [bad] + valid[10:]
+    assert len(requested) == 50
+
+    sent = []
+
+    async def _get(region, path, params):
+        sent.append(params["asins"].split(","))
+        return {"products": [_hydration_product(a) for a in sent[-1]]}
+
+    facts = ResponseFacts()
+    db_backstop = AsyncMock(return_value=[])
+
+    with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.books.get_books_from_db", new=db_backstop), \
+         patch("app.services.audible.books.persist_books_background"), \
+         patch("app.services.audible.books.cache.get_many", new=AsyncMock(return_value={})):
+        result = await get_books_by_asins(
+            requested, "us", AsyncMock(), use_cache=True, facts=facts
+        )
+
+    assert sent == [valid]
+    assert [b["asin"] for b in result] == valid
+    db_backstop.assert_not_awaited()
+    assert facts.source_by_key == {a: SOURCE_AUDIBLE for a in valid}
+    assert facts.incomplete_reasons == {REASON_HYDRATION_NOT_FOUND}
+    assert REASON_HYDRATION_FAILED not in facts.incomplete_reasons
+
+
+@pytest.mark.asyncio
+async def test_get_books_by_asins_all_malformed_is_not_found_never_the_outage_path():
+    """Nothing in the request is an ASIN: no request is made, nothing is
+    raised, and the whole list reads as not-found -- the answer main gave
+    when Audible returned stubs for all of them -- not as an Audible outage."""
+    from app.services.audible.books import get_books_by_asins
+
+    facts = ResponseFacts()
+    audible = AsyncMock()
+    db_backstop = AsyncMock(return_value=[])
+
+    with patch("app.services.audible.books.audible_get", new=audible), \
+         patch("app.services.audible.books.get_books_from_db", new=db_backstop), \
+         patch("app.services.audible.books.persist_books_background"), \
+         patch("app.services.audible.books.cache.get_many", new=AsyncMock(return_value={})):
+        result = await get_books_by_asins(
+            ["B0ELEVENCHR", "B0SHORT", "not-an-asin!"], "us", AsyncMock(),
+            use_cache=True, facts=facts,
+        )
+
+    assert result == []
+    audible.assert_not_awaited()
+    assert facts.incomplete_reasons == {REASON_HYDRATION_NOT_FOUND}
+
+
+@pytest.mark.asyncio
+async def test_get_books_by_asins_hydrates_a_lowercase_valid_asin():
+    """A well-formed ASIN in lowercase is valid (is_valid_asin has always
+    accepted either case) and Audible answers with the uppercase record. It
+    must come back hydrated, not be reported as a stub because the requested
+    spelling differs from the one Audible returned."""
+    from app.services.audible.books import get_books_by_asins
+
+    facts = ResponseFacts()
+
+    async def _get(region, path, params):
+        # One ASIN is asked for on its own product path and answered with a
+        # single product, not a batch.
+        assert path.endswith("B0LOWER001")
+        return {"product": _hydration_product("B0LOWER001")}
+
+    with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.books.get_books_from_db", new=AsyncMock(return_value=[])), \
+         patch("app.services.audible.books.persist_books_background"), \
+         patch("app.services.audible.books.cache.get", new=AsyncMock(return_value=None)), \
+         patch("app.services.audible.books.cache.get_many", new=AsyncMock(return_value={})):
+        result = await get_books_by_asins(
+            ["b0lower001"], "us", AsyncMock(), use_cache=True, facts=facts
+        )
+
+    assert [b["asin"] for b in result] == ["B0LOWER001"]
+    assert facts.incomplete_reasons == set()
+    assert facts.is_complete
+
+
+@pytest.mark.asyncio
 async def test_get_books_by_asins_facts_records_outage_db_fallback():
     """Audible down, a pre-fetch cache hit already in hand, and the in-try
     DB backstop read itself failing -- the only way to reach the
@@ -1609,8 +1706,8 @@ async def test_get_books_by_asins_facts_full_backstop_recovery_of_a_deadline_chu
     deadline having fired partway through."""
     import app.services.audible.books as books_mod
 
-    fast_asins = [f"B0FAST{i:05d}" for i in range(50)]
-    slow_asins = [f"B0SLOW{i:05d}" for i in range(50)]
+    fast_asins = [f"B0FAST{i:04d}" for i in range(50)]
+    slow_asins = [f"B0SLOW{i:04d}" for i in range(50)]
     stored = [{"asin": a, "title": "from the db", "region": "us"} for a in slow_asins]
 
     async def _one_fast_one_hanging(asins, region):
@@ -1645,8 +1742,8 @@ async def test_get_books_by_asins_facts_partial_backstop_recovery_of_a_deadline_
     hit."""
     import app.services.audible.books as books_mod
 
-    fast_asins = [f"B0FAST{i:05d}" for i in range(50)]
-    slow_asins = [f"B0SLOW{i:05d}" for i in range(50)]
+    fast_asins = [f"B0FAST{i:04d}" for i in range(50)]
+    slow_asins = [f"B0SLOW{i:04d}" for i in range(50)]
     partially_stored = [{"asin": a, "title": "from the db", "region": "us"} for a in slow_asins[:40]]
 
     async def _one_fast_one_hanging(asins, region):
@@ -1898,7 +1995,7 @@ async def test_hydration_stops_at_the_deadline_and_keeps_what_landed():
     session.rollback = AsyncMock()
     # Distinct ASINs: the fetch dedupes, and chunking is at 50, so this is
     # exactly one fast chunk followed by one that never returns.
-    asins = [f"B0FAST{i:05d}" for i in range(50)] + [f"B0SLOW{i:05d}" for i in range(50)]
+    asins = [f"B0FAST{i:04d}" for i in range(50)] + [f"B0SLOW{i:04d}" for i in range(50)]
 
     with patch.object(books_mod, "_fetch_chunk", new=AsyncMock(side_effect=_one_fast_one_hanging)), \
          patch.object(books_mod, "get_books_from_db", new=AsyncMock(return_value=[])), \
@@ -2000,7 +2097,7 @@ async def test_an_abandoned_chunk_falls_through_to_the_stored_copy():
     passes both other hydration tests, which is how the gap was found."""
     import app.services.audible.books as books_mod
 
-    stored = [{"asin": f"B0SLOW{i:05d}", "title": "from the db", "region": "us"}
+    stored = [{"asin": f"B0SLOW{i:04d}", "title": "from the db", "region": "us"}
               for i in range(50)]
 
     async def _one_fast_one_hanging(asins, region):
@@ -2011,7 +2108,7 @@ async def test_an_abandoned_chunk_falls_through_to_the_stored_copy():
 
     session = AsyncMock()
     session.rollback = AsyncMock()
-    asins = [f"B0FAST{i:05d}" for i in range(50)] + [f"B0SLOW{i:05d}" for i in range(50)]
+    asins = [f"B0FAST{i:04d}" for i in range(50)] + [f"B0SLOW{i:04d}" for i in range(50)]
 
     with patch.object(books_mod, "_fetch_chunk", new=AsyncMock(side_effect=_one_fast_one_hanging)), \
          patch.object(books_mod, "get_books_from_db", new=AsyncMock(return_value=stored)) as mock_db, \
@@ -2400,3 +2497,49 @@ async def test_results_are_identical_with_and_without_the_out_param():
 
     assert results[0] == results[1]
     assert [b["asin"] for b in results[0]] == [asins[0]]
+
+
+# ============================================================
+# CHAPTERS: a value that is not an ASIN is a terminal not-found, as it was
+# when Audible answered for it -- never an outage, never retried
+# ============================================================
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", ["B0ELEVENCHR", "B0SHORT", "not-an-asin!"])
+async def test_get_chapters_malformed_asin_is_not_found_before_any_request(bad):
+    from app.services.audible.books import get_chapters
+    from libex_core.exceptions import AudibleAPIException, NotFoundException
+
+    audible = AsyncMock()
+    db = AsyncMock(return_value=None)
+
+    with patch("app.services.audible.books.audible_get", new=audible), \
+         patch("app.services.audible.books.get_track_from_db", new=db), \
+         patch("app.services.audible.books.cache.get", new=AsyncMock(return_value=None)):
+        with pytest.raises(NotFoundException) as exc:
+            await get_chapters(bad, "us", AsyncMock())
+
+    assert not isinstance(exc.value, AudibleAPIException)
+    audible.assert_not_awaited()
+    db.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", ["B0ELEVENCHR", "B0SHORT", "not-an-asin!"])
+async def test_fetch_and_store_chapters_malformed_asin_is_marked_checked_as_not_found(bad):
+    """The core refuses a non-ASIN with ValueError. Audible used to answer
+    such an id with a 404, which is "not_found" and is marked so the seeder
+    does not retry it on every pass; "error" would leave it unmarked."""
+    from app.services.audible.books import fetch_and_store_chapters
+
+    audible = AsyncMock()
+    mark = AsyncMock()
+
+    with patch("app.services.audible.books.audible_get", new=audible), \
+         patch("app.services.audible.books._mark_chapters_checked", new=mark):
+        outcome = await fetch_and_store_chapters(bad, "us", AsyncMock())
+
+    assert outcome == "not_found"
+    audible.assert_not_awaited()
+    mark.assert_awaited_once()
+    assert mark.await_args.args[1] == bad

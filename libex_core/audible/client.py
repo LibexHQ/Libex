@@ -198,8 +198,8 @@ class TransportSummary:
 # keepalive pool -- means a fan-out that reuses the same client across
 # dozens to hundreds of sequential requests (measured: 179 for Christie, 651
 # for Conan Doyle -- see AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT's own
-# docstring) gets a reused, already-negotiated connection almost every time
-# instead of paying a fresh TCP+TLS handshake per call.
+# comment in _concurrency.py) gets a reused, already-negotiated connection
+# almost every time instead of paying a fresh TCP+TLS handshake per call.
 #
 # keepalive_expiry overrides httpx's 5.0s default because the waste this
 # pool exists to avoid falls between walks, not inside one: new connections

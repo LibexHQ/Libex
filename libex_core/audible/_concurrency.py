@@ -81,7 +81,7 @@ AUDIBLE_CONCURRENCY_LIMIT = 10
 # authors/, then get_books_by_asins hydrating the result), entered via
 # author_books_concurrency() below. That workload is a fundamentally different
 # shape from the sustained one above -- one user request fires a bounded,
-# self-terminating burst (measured locally, same session: 179 requests for
+# self-terminating burst (measured locally: 179 requests for
 # Christie, 651 for Conan Doyle -- several times more than "well under 100"
 # once assumed here, but still capped by the screens plateau and
 # CATALOG_RESULT_CEILING rather than open-ended -- see screens.py and

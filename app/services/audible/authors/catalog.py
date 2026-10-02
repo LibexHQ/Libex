@@ -70,7 +70,7 @@ def _accept_name_search_products(
     ASIN admission is truthy-only, matching _process_catalog_page's rule
     for the same reason: both functions read products from this same
     /1.0/catalog/products endpoint, which includes ISBN-keyed records
-    whose asin field is not a 10-char B-format ASIN (see client.py's
+    whose asin field is not a 10-char B-format ASIN (see libex_core/audible/_retry.py's
     ~84k-record note and _process_catalog_page's own comment) -- rejecting
     those here would be the same data loss the less-data-never-accepted
     invariant exists to stop. This is unlike _extract_row_asins, which
@@ -750,7 +750,7 @@ def _process_catalog_page(
         # Truthy-only, not is_valid_asin: catalog products include
         # ISBN-keyed records whose asin field is not a 10-char B-format
         # ASIN. Those are a real, already-known class of record (see
-        # client.py's ~84k-record note) and consumers already receive them
+        # libex_core/audible/_retry.py's ~84k-record note) and consumers already receive them
         # from this source -- rejecting them here would be exactly the
         # data loss the less-data-never-accepted invariant exists to stop.
         # _accept_name_search_products applies this same rule for the same

@@ -17,6 +17,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Core
+from libex_core.asin import is_valid_asin
 from libex_core.audible.client import as_audible_failure, upstream_status_of
 from libex_core.audible.series import fetch_series, fetch_series_book_asins, normalize_series
 from libex_core.exceptions import AudibleAPIException, NotFoundException
@@ -60,6 +61,12 @@ async def get_series(
             return cached
 
     try:
+        # A series ASIN taken from Audible's own relationships can be
+        # malformed; the core fetch rejects it with a ValueError, which the
+        # outage handling below would label an Audible failure. Audible
+        # answered such an id with no series behind it, a terminal not-found.
+        if not is_valid_asin(asin):
+            raise NotFoundException(f"Series not found: {asin}")
         start = time.monotonic()
         product = await fetch_series(audible_get, asin, region)
         series_took = round((time.monotonic() - start) * 1000, 2)
@@ -151,6 +158,10 @@ async def get_series_books(
             return cached
 
     try:
+        # Same screen as get_series: a malformed id is a terminal not-found,
+        # not an outage.
+        if not is_valid_asin(asin):
+            raise NotFoundException(f"No books found for series: {asin}")
         start = time.monotonic()
         asins = await fetch_series_book_asins(audible_get, asin, region)
         series_book_took = round((time.monotonic() - start) * 1000, 2)

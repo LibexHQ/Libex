@@ -11,6 +11,7 @@ the test and the shared truncation fixture only clears rows.
 """
 
 # Standard library
+import argparse
 import asyncio
 import os
 
@@ -23,15 +24,28 @@ from sqlalchemy.pool import NullPool
 
 # Local
 import scripts.region_keys as rk
-from app.db.models import Author, Book, Series, Track, author_book, book_genre, book_narrator, book_series, series_author
-from app.db.models import Genre, Narrator
+from app.db.models import (
+    Author,
+    Book,
+    Genre,
+    Narrator,
+    Series,
+    Track,
+    author_book,
+    book_genre,
+    book_narrator,
+    book_series,
+    series_author,
+)
 from scripts.region_keys import (
     EXIT_FAILED,
     EXIT_OK,
     EXIT_STOPPED,
     FINAL_COLUMNS,
     INDEXES,
+    ONLINE_INDEXES,
     REGION_COLUMNS,
+    WINDOW_INDEXES,
     FinalizeAbort,
     _Stop,
 )
@@ -164,17 +178,21 @@ async def test_backfill_copies_the_source_region_in_batches_and_is_idempotent(en
         assert await rk.backfill(engine, _Stop(), 2) == EXIT_OK
     for col in REGION_COLUMNS:
         assert await _scalar(engine, f"SELECT count(*) FROM {col.table} WHERE {col.column} IS NULL") == 0, col.label
-    assert await _scalar(
-        engine,
-        "SELECT count(*) FROM author_book ab JOIN books b ON b.asin = ab.book_asin WHERE ab.book_region <> b.region",
-    ) == 0
-    assert await _scalar(
-        engine,
-        "SELECT count(*) FROM book_series bs JOIN series s ON s.asin = bs.series_asin WHERE bs.series_region <> s.region",
-    ) == 0
-    assert await _scalar(
-        engine, "SELECT count(*) FROM tracks t JOIN books b ON b.asin = t.asin WHERE t.region <> b.region"
-    ) == 0
+        # every row carries its parent's region, not merely some region
+        mismatched = await _scalar(
+            engine,
+            f"SELECT count(*) FROM {col.table} t JOIN {col.source} p ON p.asin = t.{col.key} "
+            f"WHERE t.{col.column} IS DISTINCT FROM p.region",
+        )
+        assert mismatched == 0, col.label
+        joined = await _scalar(
+            engine,
+            f"SELECT count(*) FROM {col.table} t JOIN {col.source} p ON p.asin = t.{col.key}",
+        )
+        assert joined == await _scalar(engine, f"SELECT count(*) FROM {col.table}"), col.label
+    # the seed spans two regions, so a copy of the wrong parent would show
+    assert await _scalar(engine, "SELECT count(DISTINCT book_region) FROM author_book") == 2
+    assert await _scalar(engine, "SELECT count(DISTINCT series_region) FROM series_author") == 2
 
 
 async def test_backfill_is_resumable_after_a_stop(engine, seeded):
@@ -191,25 +209,28 @@ async def test_backfill_is_resumable_after_a_stop(engine, seeded):
 
 # --- index -------------------------------------------------------------------
 
-async def test_index_builds_valid_unique_indexes_and_is_idempotent(engine, seeded):
+async def test_index_builds_only_the_online_indexes_and_is_idempotent(engine, seeded):
     await rk.expand(engine, _Stop())
     for _ in range(2):
         assert await rk.index(engine, _Stop()) == EXIT_OK
     async with engine.connect() as conn:
-        for spec in INDEXES:
+        for spec in ONLINE_INDEXES:
             assert await rk._index_state(conn, spec.name) == (True, True), spec.name
+        for spec in WINDOW_INDEXES:
+            assert await rk._index_state(conn, spec.name) is None, spec.name
+    assert {s.name for s in WINDOW_INDEXES} == {"uq_books_asin_region", "uq_series_asin_region"}
 
 
 async def test_index_rebuilds_an_invalid_index(engine, seeded):
     await rk.expand(engine, _Stop())
     await rk.index(engine, _Stop())
     async with engine.begin() as conn:
-        await conn.execute(text("UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'uq_books_asin_region'::regclass"))
-        old = (await conn.execute(text("SELECT 'uq_books_asin_region'::regclass::oid"))).scalar_one()
+        await conn.execute(text("UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'uq_tracks_asin_region'::regclass"))
+        old = (await conn.execute(text("SELECT 'uq_tracks_asin_region'::regclass::oid"))).scalar_one()
     assert await rk.index(engine, _Stop()) == EXIT_OK
     async with engine.connect() as conn:
-        assert await rk._index_state(conn, "uq_books_asin_region") == (True, True)
-        new = (await conn.execute(text("SELECT 'uq_books_asin_region'::regclass::oid"))).scalar_one()
+        assert await rk._index_state(conn, "uq_tracks_asin_region") == (True, True)
+        new = (await conn.execute(text("SELECT 'uq_tracks_asin_region'::regclass::oid"))).scalar_one()
     assert new != old
 
 
@@ -226,8 +247,8 @@ async def test_verify_exit_codes(engine, seeded):
     assert await rk.verify(engine, pre_window=True) == EXIT_FAILED  # no indexes
     await rk.backfill(engine, stop, 2)
     await rk.index(engine, stop)
-    assert await rk.verify(engine, pre_window=True) == EXIT_OK
-    assert await rk.verify(engine) == EXIT_FAILED  # still nullable
+    assert await rk.verify(engine, pre_window=True) == EXIT_OK  # window indexes not required yet
+    assert await rk.verify(engine) == EXIT_FAILED  # still nullable, window indexes missing
     assert await rk.finalize(engine, stop, 2) == EXIT_OK
     assert await rk.verify(engine) == EXIT_OK
 
@@ -268,6 +289,9 @@ async def test_finalize_catches_up_constrains_and_leaves_nothing_behind(engine, 
             assert await rk._null_count(conn, col) == 0
     assert await _scalar(engine, "SELECT count(*) FROM pg_constraint WHERE conname LIKE 'chk\\_%'") == 0
     assert await _scalar(engine, "SELECT count(*) FROM author_book WHERE book_region IS NULL") == 0
+    async with engine.connect() as conn:
+        for spec in WINDOW_INDEXES:
+            assert await rk._index_state(conn, spec.name) == (True, True), spec.name
 
 
 async def test_finalize_is_rerunnable_after_a_partial_run(engine, seeded):
@@ -292,6 +316,40 @@ async def test_finalize_aborts_before_constraining_when_a_series_has_no_region(e
             assert await rk._column_info(conn, col.table, col.column) == "YES", col.label
 
 
+_ORPHANS = {
+    "author_book": "INSERT INTO author_book (author_id, book_asin) VALUES ({author}, 'B00ORPHAN')",
+    "book_narrator": "INSERT INTO book_narrator (narrator_name, book_asin) VALUES ('A Narrator', 'B00ORPHAN')",
+    "book_genre": "INSERT INTO book_genre (genre_asin, book_asin) VALUES ('G1', 'B00ORPHAN')",
+    "book_series.book_region": "INSERT INTO book_series (book_asin, series_asin) VALUES ('B00ORPHAN', 'B00RKSER1')",
+    "book_series.series_region": "INSERT INTO book_series (book_asin, series_asin) VALUES ('B00RK000', 'B00ORPHSER')",
+    "series_author": "INSERT INTO series_author (series_asin, author_id) VALUES ('B00ORPHSER', {author})",
+}
+
+
+@pytest.mark.parametrize("which", sorted(_ORPHANS))
+async def test_finalize_aborts_when_a_link_row_has_no_parent(engine, seeded, which):
+    await _full_cycle(engine)
+    async with engine.begin() as conn:
+        # Foreign keys would refuse an orphan; skipping them is how one exists.
+        await conn.execute(text("SET LOCAL session_replication_role = replica"))
+        await conn.execute(text(_ORPHANS[which].format(author=seeded)))
+    try:
+        with pytest.raises(FinalizeAbort, match="NULL region values remain"):
+            await rk.finalize(engine, _Stop(), 2)
+        async with engine.connect() as conn:
+            for col in FINAL_COLUMNS:
+                assert await rk._column_info(conn, col.table, col.column) == "YES", col.label
+            for spec in WINDOW_INDEXES:
+                assert await rk._index_state(conn, spec.name) is None, spec.name
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(text("SET LOCAL session_replication_role = replica"))
+            await conn.execute(text("DELETE FROM book_series WHERE book_asin = 'B00ORPHAN' OR series_asin = 'B00ORPHSER'"))
+            for table in ("author_book", "book_narrator", "book_genre"):
+                await conn.execute(text(f"DELETE FROM {table} WHERE book_asin = 'B00ORPHAN'"))
+            await conn.execute(text("DELETE FROM series_author WHERE series_asin = 'B00ORPHSER'"))
+
+
 async def test_finalize_aborts_when_row_counts_change(engine, seeded, monkeypatch):
     await _full_cycle(engine)
     real = rk._row_counts
@@ -307,6 +365,122 @@ async def test_finalize_aborts_when_row_counts_change(engine, seeded, monkeypatc
     monkeypatch.setattr(rk, "_row_counts", counts)
     with pytest.raises(FinalizeAbort, match="row counts changed"):
         await rk.finalize(engine, _Stop(), 2)
+
+
+# --- unfinalize --------------------------------------------------------------
+
+async def test_unfinalize_restores_what_a_2_1_x_writer_needs_and_finalize_can_rerun(engine, seeded, db_session):
+    await _full_cycle(engine)
+    assert await rk.finalize(engine, _Stop(), 2) == EXIT_OK
+    # a partial finalize's leftover CHECK must go too
+    async with engine.begin() as conn:
+        await conn.execute(text("ALTER TABLE tracks ALTER COLUMN region DROP NOT NULL"))
+        await conn.execute(
+            text("ALTER TABLE tracks ADD CONSTRAINT chk_tracks_region_not_null CHECK (region IS NOT NULL) NOT VALID")
+        )
+    assert await rk.unfinalize(engine, _Stop()) == EXIT_OK
+    assert await rk.unfinalize(engine, _Stop()) == EXIT_OK  # idempotent
+
+    async with engine.connect() as conn:
+        for col in FINAL_COLUMNS:
+            assert await rk._column_info(conn, col.table, col.column) == "YES", col.label
+            assert not await rk._constraint_exists(conn, col.table, col.check_name), col.label
+        for spec in WINDOW_INDEXES:
+            assert await rk._index_state(conn, spec.name) is None, spec.name
+        for spec in ONLINE_INDEXES:
+            assert await rk._index_state(conn, spec.name) == (True, True), spec.name
+    # the old writer's shapes work again: NULL link rows, a region-less series, a new track
+    await db_session.execute(insert(Book).values(asin="B00RKNEW0", title="n", region="us"))
+    await db_session.execute(insert(author_book).values(author_id=seeded, book_asin="B00RKNEW0"))
+    await db_session.execute(insert(Series).values(asin="B00RKSER9", title="s9"))
+    db_session.add(Track(asin="B00RKNEW0", chapters={"chapters": []}))
+    await db_session.commit()
+
+
+@pytest.mark.timeout(180)  # two full finalizes, each building indexes and 8 constraints
+async def test_unfinalize_then_finalize_round_trips(engine, seeded):
+    await _full_cycle(engine)
+    assert await rk.finalize(engine, _Stop(), 2) == EXIT_OK
+    assert await rk.unfinalize(engine, _Stop()) == EXIT_OK
+    assert await rk.finalize(engine, _Stop(), 2) == EXIT_OK
+    assert await rk.verify(engine) == EXIT_OK
+
+
+# --- the running application during the online phase -------------------------
+
+_OLD_UPSERT = (
+    "INSERT INTO books (asin, title, region, explicit, whisper_sync, has_pdf, is_listenable, "
+    "is_buyable, is_vvab, created_at, updated_at) "
+    "SELECT a, 'old writer', 'us', false, false, false, true, true, false, now(), now() "
+    "FROM unnest(CAST(:asins AS text[])) AS a "
+    "ON CONFLICT (asin) DO UPDATE SET title = EXCLUDED.title"
+)
+_RACERS = 24
+_ROUNDS = 60
+_PER_ROUND = 40
+
+
+async def _race_old_upserts(engine) -> list[BaseException]:
+    """Many connections upserting the same fresh asins at once, as 2.1.x does."""
+    start = asyncio.Event()
+
+    async def racer() -> list[BaseException]:
+        errors: list[BaseException] = []
+        async with engine.connect() as conn:
+            conn = await conn.execution_options(isolation_level="AUTOCOMMIT")
+            await start.wait()
+            for r in range(_ROUNDS):
+                asins = [f"B0R{r:03d}{i:04d}" for i in range(_PER_ROUND)]
+                try:
+                    await conn.execute(text(_OLD_UPSERT), {"asins": asins})
+                except Exception as exc:
+                    errors.append(exc)
+        return errors
+
+    tasks = [asyncio.create_task(racer()) for _ in range(_RACERS)]
+    await asyncio.sleep(0.5)  # every racer connected and parked
+    start.set()
+    found = [e for errs in await asyncio.gather(*tasks) for e in errs]
+    async with engine.begin() as conn:
+        await conn.execute(text("DELETE FROM books WHERE asin LIKE 'B0R%'"))
+    return found
+
+
+@pytest.mark.timeout(120)
+async def test_online_index_mode_leaves_the_old_upsert_error_free(engine, seeded):
+    await _full_cycle(engine)  # expand, backfill, index: everything before the window
+    assert await _race_old_upserts(engine) == []
+
+
+@pytest.mark.timeout(400)
+async def test_the_window_indexes_are_what_break_the_old_upsert(engine, seeded):
+    """Control: shows the race above can bite, so its clean result means something.
+
+    The failure needs two first inserts inside a window of microseconds, so a
+    single pass can miss; it retries and skips, rather than passing vacuously,
+    if the race never bites on this machine.
+    """
+    await _full_cycle(engine)
+    for spec in WINDOW_INDEXES:
+        await rk._build_index(engine, spec)
+    for _ in range(6):
+        if await _race_old_upserts(engine):
+            return
+    pytest.skip("the race did not bite on this machine; the error-free test is unproven here")
+
+
+# --- single run ----------------------------------------------------------------
+
+async def test_a_second_run_cannot_start_while_one_holds_the_lock(engine, seeded):
+    async with rk._single_run_lock(engine):
+        args = argparse.Namespace(mode="expand", batch_size=2, pre_window=False)
+        assert await rk._run(args, engine) == EXIT_FAILED
+    # nothing was added by the refused run
+    assert await _scalar(
+        engine, "SELECT count(*) FROM information_schema.columns WHERE table_name='tracks' AND column_name='region'"
+    ) == 0
+    async with rk._single_run_lock(engine):  # released once the holder is gone
+        pass
 
 
 

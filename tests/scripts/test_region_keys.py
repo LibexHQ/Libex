@@ -9,6 +9,7 @@ a real schema lives in tests/integration/test_region_keys.py.
 """
 
 # Standard library
+import contextlib
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -108,6 +109,116 @@ async def test_retry_gives_up_on_a_non_lock_error_at_once(monkeypatch):
     with pytest.raises(DBAPIError):
         await rk._retry("x", op, rk._Stop())
     assert calls["n"] == 1
+
+
+async def test_retry_retries_a_deadlock(monkeypatch):
+    monkeypatch.setattr(rk, "BACKOFF_BASE_SECONDS", 0)
+    calls = {"n": 0}
+
+    async def op():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _dbapi_error("40P01")
+        return "done"
+
+    assert await rk._retry("x", op, rk._Stop()) == "done"
+    assert calls["n"] == 2
+
+
+async def test_a_stop_during_backoff_raises_stop_requested_not_the_db_error(monkeypatch):
+    monkeypatch.setattr(rk, "BACKOFF_BASE_SECONDS", 0)
+    stop = rk._Stop()
+    calls = {"n": 0}
+
+    async def op():
+        calls["n"] += 1
+        stop.request()
+        raise _dbapi_error("55P03")
+
+    with pytest.raises(rk.StopRequested):
+        await rk._retry("x", op, stop)
+    assert calls["n"] == 1
+
+
+def _args(mode: str):
+    return SimpleNamespace(mode=mode, batch_size=1, pre_window=False)
+
+
+def _no_lock(monkeypatch):
+    @contextlib.asynccontextmanager
+    async def free(engine):
+        yield
+
+    monkeypatch.setattr(rk, "_single_run_lock", free)
+
+
+@pytest.fixture
+def engine():
+    eng = MagicMock()
+    eng.dispose = AsyncMock()
+    return eng
+
+
+async def test_run_exits_stopped_when_a_stop_lands_during_backoff(monkeypatch, engine):
+    _no_lock(monkeypatch)
+    monkeypatch.setattr(rk, "expand", AsyncMock(side_effect=rk.StopRequested("add x")))
+    assert await rk._run(_args("expand"), engine) == rk.EXIT_STOPPED
+    engine.dispose.assert_awaited()
+
+
+async def test_run_logs_type_and_sqlstate_never_the_error_text(monkeypatch, engine):
+    _no_lock(monkeypatch)
+    secret = "Key (asin)=(B0SECRET01) already exists"
+    err = DBAPIError("stmt", None, _FakeOrig("23505"))
+    err.args = (secret,)
+    monkeypatch.setattr(rk, "backfill", AsyncMock(side_effect=err))
+    logged: list[dict] = []
+    monkeypatch.setattr(rk.logger, "error", lambda msg, *a, extra=None, **k: logged.append({"msg": msg, **(extra or {})}))
+    assert await rk._run(_args("backfill"), engine) == rk.EXIT_FAILED
+    (entry,) = logged
+    assert entry["error_type"] == "DBAPIError"
+    assert entry["sqlstate"] == "23505"
+    assert "error" not in entry
+    assert secret not in repr(entry)
+
+
+async def test_run_refuses_when_another_run_holds_the_lock(monkeypatch, engine):
+    @contextlib.asynccontextmanager
+    async def held(engine):
+        raise rk.AlreadyRunning()
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(rk, "_single_run_lock", held)
+    expand = AsyncMock()
+    monkeypatch.setattr(rk, "expand", expand)
+    assert await rk._run(_args("expand"), engine) == rk.EXIT_FAILED
+    expand.assert_not_called()
+
+
+async def test_verify_takes_no_lock(monkeypatch, engine):
+    @contextlib.asynccontextmanager
+    async def boom(engine):
+        raise AssertionError("verify must not take the run lock")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(rk, "_single_run_lock", boom)
+    monkeypatch.setattr(rk, "verify", AsyncMock(return_value=rk.EXIT_OK))
+    assert await rk._run(_args("verify"), engine) == rk.EXIT_OK
+
+
+def test_unfinalize_refuses_without_the_writers_stopped_flag(monkeypatch):
+    monkeypatch.setattr(rk, "setup_logging", lambda: None)
+    run = AsyncMock()
+    monkeypatch.setattr(rk, "_run", run)
+    with pytest.raises(SystemExit) as exc:
+        rk.main(["unfinalize"])
+    assert exc.value.code == rk.EXIT_USAGE
+    run.assert_not_called()
+
+
+def test_the_two_books_and_series_indexes_are_the_window_indexes():
+    assert {s.name for s in rk.WINDOW_INDEXES} == {"uq_books_asin_region", "uq_series_asin_region"}
+    assert {s.name for s in rk.ONLINE_INDEXES} | {s.name for s in rk.WINDOW_INDEXES} == {s.name for s in rk.INDEXES}
 
 
 async def test_retry_is_bounded_on_a_persistent_lock_wait(monkeypatch):

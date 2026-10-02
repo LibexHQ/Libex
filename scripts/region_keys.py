@@ -4,10 +4,19 @@ Online phase of the region-aware key change.
 Books and series are identified by (asin, region), but the stored schema keys
 them on asin alone and the link tables point at asin alone. Widening that in
 one migration would mean rewriting every link row while the API is down, so
-the slow, data-proportional work is done here, ahead of time, against the
-running service, and the migration that ships afterwards is catalog-only.
-This script changes no application behaviour: every step is additive, and the
-old code keeps working on the expanded schema.
+the slow, data-proportional work is done here against the running service, and
+the schema revision that adopts the new keys has only catalog changes left to
+make. Every step before finalize is additive and changes no application
+behaviour: the 2.1.x application keeps running unmodified through expand,
+backfill and index.
+
+That guarantee stops at finalize. Finalize builds two unique indexes
+(uq_books_asin_region, uq_series_asin_region) and sets NOT NULL on every new
+column, and the 2.1.x writer cannot run against either: its upserts name
+ON CONFLICT (asin), and a unique index that is not the arbiter raises on a
+concurrent first insert instead of merging; and it inserts link rows, new
+tracks and region-less series with NULL regions. Finalize is therefore a
+one-way door for the running application, and unfinalize is the way back.
 
 RUN IT from the API image (it needs nothing but DATABASE_URL), one mode at a
 time:
@@ -17,6 +26,7 @@ time:
     python -m scripts.region_keys index
     python -m scripts.region_keys verify [--pre-window]
     python -m scripts.region_keys finalize --i-have-stopped-writers
+    python -m scripts.region_keys unfinalize --i-have-stopped-writers
 
 expand     ADD COLUMN IF NOT EXISTS, nullable, no default, type region_enum:
            book_region on author_book, book_narrator, book_genre and
@@ -31,54 +41,87 @@ backfill   Batched UPDATE..FROM books/series, keyset-paged on the asin column
            run simply finds the remaining NULLs on its next pass. Rows the old
            code inserts while this runs arrive with NULL and are picked up by
            the catch-up in finalize.
-index      CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS for every target
-           key (names in INDEXES below, which the schema revision that adopts
-           them must reuse). A concurrent build that fails leaves an INVALID
+index      CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS for the online
+           indexes: the six link-table keys and uq_tracks_asin_region (names
+           in INDEXES below, which the schema revision that adopts them must
+           reuse). The 2.1.x writer leaves the new columns NULL on those
+           tables, and NULLs never conflict, so these indexes cannot make an
+           old insert fail. A concurrent build that fails leaves an INVALID
            index that IF NOT EXISTS would then skip forever, so every index is
            checked in pg_index.indisvalid afterwards and an invalid one is
            dropped and rebuilt.
 verify     Read-only report: column presence, NULL counts, nullability, index
            validity, row counts. Exits 1 unless the database is ready for the
-           cut-over. --pre-window relaxes that to "columns exist and indexes
-           are valid": NULLs and nullability are only reported, because old
-           code is still inserting them.
+           cut-over. --pre-window relaxes that to "columns exist and the
+           online indexes are valid": NULLs, nullability and the two window
+           indexes are only reported, because old code is still inserting
+           NULLs and they are built inside finalize.
 finalize   MAINTENANCE WINDOW ONLY. Refuses to run without
            --i-have-stopped-writers: the API and every background writer must
            be stopped first, or the row-count and NULL assertions mean
-           nothing. Catch-up backfill, then per column CHECK (col IS NOT NULL)
+           nothing, and the two window indexes would break a live 2.1.x
+           writer. Order: catch-up backfill; abort if any NULL region remains;
+           CREATE UNIQUE INDEX CONCURRENTLY uq_books_asin_region and
+           uq_series_asin_region; then per column CHECK (col IS NOT NULL)
            NOT VALID -> VALIDATE -> SET NOT NULL -> drop the CHECK (the
            validated CHECK is what lets SET NOT NULL skip its own full scan),
            and the same for series.region. Per-table row counts must be equal
            before and after and no NULL may remain, or the run aborts loudly.
            No CHECK exists before this: a NOT VALID CHECK still rejects new
-           rows, and old code inserts NULL.
+           rows, and old code inserts NULL. The two indexes are built here
+           rather than in a separate writers-stopped mode because the window
+           already has writers stopped, so a second mode would add an
+           operator step and a second way to run them in the wrong order
+           without shortening the downtime; CONCURRENTLY is kept so readers
+           are not blocked while they build.
+unfinalize ROLLBACK ONLY. Also refuses without --i-have-stopped-writers. Drops
+           NOT NULL on exactly the columns finalize set (every column in
+           FINAL_COLUMNS, series.region included), drops any CHECK a partial
+           finalize left behind, and drops uq_books_asin_region and
+           uq_series_asin_region. The indexes must go: they are the reason a
+           rolled-back 2.1.x writer's ON CONFLICT (asin) upserts would raise
+           under concurrent first inserts. The columns, the backfilled
+           values, the link-table indexes and uq_tracks_asin_region stay
+           (harmless to 2.1.x), so finalize can be run again later. Idempotent.
+           It is only valid until the schema revision that adopts these
+           indexes has run; after that, roll back with that revision's
+           downgrade, and an index owned by a constraint makes this mode fail
+           rather than drop it.
 
-SIZING (hosted, measured by the operator 2026-10-02): book_genre 10.6M rows,
-author_book 2.5M, book_narrator 2.5M, tracks 2.0M, book_series 743k,
-series_author 300k; books 2.1M, series 170k. --batch-size counts asins, not
-rows, so a book_genre batch of 5000 is roughly 25k rows -- one commit each
-keeps every transaction short and lets autovacuum reclaim the dead tuples the
-UPDATEs leave. Each page is a keyset range scan on the leading asin column of
-an existing index (book_genre_index, book_author_index, book_narrator_index,
-book_series_index, series_author_index, the tracks primary key). The one
-exception is book_series.series_region: nothing leads with series_asin on that
-table, so each of its batches scans 743k rows; that is the smallest of the
-link tables and the only cost. Every step logs its elapsed seconds so a
-maintenance window can be timed from a rehearsal.
+SIZING (approximate magnitudes on the hosted instance): book_genre about 10M
+rows, author_book and book_narrator about 2.5M each, tracks about 2M,
+book_series about 750k, series_author about 300k; books about 2M, series about
+170k. --batch-size counts asins, not rows, so a book_genre batch of 5000 is
+roughly 25k rows -- one commit each keeps every transaction short and lets
+autovacuum reclaim the dead tuples the UPDATEs leave. Each page is a keyset
+range scan on the leading asin column of an existing index (book_genre_index,
+book_author_index, book_narrator_index, book_series_index, series_author_index,
+the tracks primary key). The one exception is book_series.series_region:
+nothing leads with series_asin on that table, so each of its batches scans the
+whole table; that is the smallest of the link tables and the only cost. Every
+step logs its elapsed seconds so a maintenance window can be timed from a
+rehearsal.
 
 Hosted Postgres only; the script refuses any other backend before opening a
 connection. It makes no Audible request and so carries no dedicated-exit
 guard.
 
+ONE RUN AT A TIME. Every mode except verify takes a session-level
+pg_try_advisory_lock before doing anything and holds it on a dedicated
+connection until it exits. A second run exits 1 with a message instead of
+starting, because two runs can drop each other's in-progress index build.
+
 STOPPING. SIGTERM/SIGINT set a flag consulted between batches and between
 statements; a batch in flight commits first, a CONCURRENTLY build already
 running is left to finish (cancelling it is exactly what leaves an invalid
-index). Every mode is safe to run again after a stop.
+index). A stop that arrives while a lock wait is backing off ends the run at
+once. Every mode is safe to run again after a stop.
 
 EXIT CODES.
 
     0   done (verify: ready).
-    1   failed, an assertion fired, or verify says not ready.
+    1   failed, an assertion fired, another run holds the lock, or verify says
+        not ready.
     2   unusable arguments, or not Postgres.
     3   stopped by a signal before finishing; run the same mode again.
 
@@ -94,10 +137,11 @@ ENVIRONMENT.
 # Standard library
 import argparse
 import asyncio
+import contextlib
 import signal
 import sys
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 
 # Third party
@@ -125,7 +169,14 @@ DEFAULT_BATCH_SIZE = 5000
 # again. The attempts and the waits between them bound how long a busy table
 # can hold a run up before it fails loudly.
 LOCK_TIMEOUT_MS = 3000
+# A backfill batch updates rows the live application may be writing. Waiting
+# for one of its row locks longer than this means the batch is stuck behind a
+# long transaction; it gives up, rolls back and retries instead of holding its
+# own transaction open (which would pin dead tuples and block autovacuum).
 BATCH_LOCK_TIMEOUT_MS = 10000
+# Bounds a runaway batch, such as a plan that stops using the asin index. The
+# whole batch rolls back and the failure surfaces, rather than one statement
+# running for an unbounded time inside a transaction.
 BATCH_STATEMENT_TIMEOUT_MS = 120000
 LOCK_ATTEMPTS = 8
 BACKOFF_BASE_SECONDS = 1.0
@@ -193,15 +244,20 @@ class IndexSpec:
     name: str
     table: str
     columns: tuple[str, ...]
+    # True when the 2.1.x writer cannot coexist with the index: books and
+    # series have a populated region, so (asin, region) is a real second
+    # unique key there and its ON CONFLICT (asin) upsert stops being safe.
+    # Those are built inside finalize, with writers stopped.
+    window: bool = False
 
 
 # These names are the contract with the revision and models that adopt the
-# indexes (PK/UNIQUE ... USING INDEX renames nothing it did not choose, but the
-# revision asserts on these names). Each widened pivot key is a superset of the
+# indexes: the revision asserts on them and builds its keys on top of these
+# indexes instead of building new ones. Each widened key is a superset of the
 # existing unique, so building it can never fail on existing data.
 INDEXES: tuple[IndexSpec, ...] = (
-    IndexSpec("uq_books_asin_region", "books", ("asin", "region")),
-    IndexSpec("uq_series_asin_region", "series", ("asin", "region")),
+    IndexSpec("uq_books_asin_region", "books", ("asin", "region"), window=True),
+    IndexSpec("uq_series_asin_region", "series", ("asin", "region"), window=True),
     IndexSpec("uq_tracks_asin_region", "tracks", ("asin", "region")),
     IndexSpec(
         "uq_author_book_region",
@@ -230,9 +286,23 @@ INDEXES: tuple[IndexSpec, ...] = (
     ),
 )
 
+ONLINE_INDEXES: tuple[IndexSpec, ...] = tuple(i for i in INDEXES if not i.window)
+WINDOW_INDEXES: tuple[IndexSpec, ...] = tuple(i for i in INDEXES if i.window)
+
+# Session advisory lock key held for the length of any mutating run.
+ADVISORY_LOCK_KEY = 0x52474B59
+
 
 class FinalizeAbort(Exception):
-    """An assertion in finalize failed; the database is not cut-over ready."""
+    """An assertion failed; the database is not in the state the mode needs."""
+
+
+class StopRequested(Exception):
+    """A stop signal arrived while a step was waiting to retry."""
+
+
+class AlreadyRunning(Exception):
+    """Another run holds the advisory lock."""
 
 
 # --- graceful stop -----------------------------------------------------------
@@ -303,7 +373,7 @@ async def _retry[T](label: str, op: Callable[[], Awaitable[T]], stop: _Stop) -> 
                 extra={"step": label, "attempt": attempt, "retry_in_s": delay},
             )
             if stop.requested:
-                raise
+                raise StopRequested(label) from exc
             await asyncio.sleep(delay)
     raise AssertionError("unreachable")
 
@@ -498,39 +568,46 @@ async def _ddl_concurrent(engine: AsyncEngine, label: str, sql: str) -> None:
     _log_elapsed(label, started)
 
 
+async def _build_index(engine: AsyncEngine, spec: IndexSpec) -> bool:
+    """Builds one unique index and checks it. False when it is unusable."""
+    async with engine.connect() as conn:
+        for col in spec.columns:
+            if await _column_info(conn, spec.table, col) is None:
+                logger.error(
+                    "RegionKeys: column missing, run expand first",
+                    extra={"index": spec.name, "column": f"{spec.table}.{col}"},
+                )
+                return False
+        state = await _index_state(conn, spec.name)
+    if state is not None and not state[0]:
+        logger.warning("RegionKeys: invalid index, dropping to rebuild", extra={"index": spec.name})
+        await _ddl_concurrent(engine, f"drop invalid {spec.name}", f"DROP INDEX CONCURRENTLY IF EXISTS {spec.name}")
+    await _ddl_concurrent(
+        engine,
+        f"build {spec.name}",
+        f"CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS {spec.name} "
+        f"ON {spec.table} ({', '.join(spec.columns)})",
+    )
+    async with engine.connect() as conn:
+        state = await _index_state(conn, spec.name)
+    if state is None or not state[0] or not state[1]:
+        logger.error(
+            "RegionKeys: index not valid and unique after build",
+            extra={"index": spec.name, "state": state},
+        )
+        return False
+    logger.info("RegionKeys: index valid", extra={"index": spec.name, "table": spec.table})
+    return True
+
+
 async def index(engine: AsyncEngine, stop: _Stop) -> int:
-    logger.info("RegionKeys: index starting", extra={"indexes": len(INDEXES)})
-    for spec in INDEXES:
+    logger.info("RegionKeys: index starting", extra={"indexes": len(ONLINE_INDEXES)})
+    for spec in ONLINE_INDEXES:
         if stop.requested:
             logger.info("RegionKeys: index stopped before finishing")
             return EXIT_STOPPED
-        async with engine.connect() as conn:
-            for col in spec.columns:
-                if await _column_info(conn, spec.table, col) is None:
-                    logger.error(
-                        "RegionKeys: column missing, run expand first",
-                        extra={"index": spec.name, "column": f"{spec.table}.{col}"},
-                    )
-                    return EXIT_FAILED
-            state = await _index_state(conn, spec.name)
-        if state is not None and not state[0]:
-            logger.warning("RegionKeys: invalid index, dropping to rebuild", extra={"index": spec.name})
-            await _ddl_concurrent(engine, f"drop invalid {spec.name}", f"DROP INDEX CONCURRENTLY IF EXISTS {spec.name}")
-        await _ddl_concurrent(
-            engine,
-            f"build {spec.name}",
-            f"CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS {spec.name} "
-            f"ON {spec.table} ({', '.join(spec.columns)})",
-        )
-        async with engine.connect() as conn:
-            state = await _index_state(conn, spec.name)
-        if state is None or not state[0] or not state[1]:
-            logger.error(
-                "RegionKeys: index not valid and unique after build",
-                extra={"index": spec.name, "state": state},
-            )
+        if not await _build_index(engine, spec):
             return EXIT_FAILED
-        logger.info("RegionKeys: index valid", extra={"index": spec.name, "table": spec.table})
     logger.info("RegionKeys: index complete")
     return EXIT_OK
 
@@ -560,6 +637,7 @@ async def verify(engine: AsyncEngine, pre_window: bool = False) -> int:
                     problems.append(f"{col.label} is still nullable")
         for spec in INDEXES:
             state = await _index_state(conn, spec.name)
+            required = not (pre_window and spec.window)
             logger.info(
                 "RegionKeys: verify index",
                 extra={
@@ -567,8 +645,11 @@ async def verify(engine: AsyncEngine, pre_window: bool = False) -> int:
                     "present": state is not None,
                     "valid": bool(state and state[0]),
                     "unique": bool(state and state[1]),
+                    "required": required,
                 },
             )
+            if not required:
+                continue
             if state is None:
                 problems.append(f"index {spec.name} is missing")
             elif not state[0]:
@@ -647,6 +728,15 @@ async def finalize(engine: AsyncEngine, stop: _Stop, batch_size: int = DEFAULT_B
             f"or series with no region); nothing was constrained: {stragglers}"
         )
 
+    # Before any NOT NULL: a failed build leaves the columns nullable, which
+    # is the state 2.1.x can still run against once the index is dropped.
+    for spec in WINDOW_INDEXES:
+        if stop.requested:
+            logger.info("RegionKeys: finalize stopped before finishing")
+            return EXIT_STOPPED
+        if not await _build_index(engine, spec):
+            raise FinalizeAbort(f"index {spec.name} could not be built")
+
     for col in FINAL_COLUMNS:
         if stop.requested:
             logger.info("RegionKeys: finalize stopped before finishing")
@@ -666,6 +756,45 @@ async def finalize(engine: AsyncEngine, stop: _Stop, batch_size: int = DEFAULT_B
                 raise FinalizeAbort(f"CHECK {col.check_name} was left behind")
     _log_elapsed("finalize (total)", started)
     logger.info("RegionKeys: finalize complete", extra=after)
+    return EXIT_OK
+
+
+# --- unfinalize --------------------------------------------------------------
+
+async def unfinalize(engine: AsyncEngine, stop: _Stop) -> int:
+    """Undoes finalize so a 2.1.x writer can run again. Writers must be stopped."""
+    started = time.monotonic()
+    logger.info("RegionKeys: unfinalize starting (writers must be stopped)")
+    for col in FINAL_COLUMNS:
+        if stop.requested:
+            logger.info("RegionKeys: unfinalize stopped before finishing")
+            return EXIT_STOPPED
+        async with engine.connect() as conn:
+            nullable = await _column_info(conn, col.table, col.column)
+        if nullable is None:
+            raise FinalizeAbort(f"{col.label} does not exist; nothing to roll back for it")
+        # A partial finalize can leave its NOT VALID CHECK, which still
+        # rejects the NULLs 2.1.x inserts.
+        await _ddl(
+            engine,
+            f"drop check {col.label}",
+            f"ALTER TABLE {col.table} DROP CONSTRAINT IF EXISTS {col.check_name}",
+            stop,
+        )
+        await _ddl(
+            engine,
+            f"drop not null {col.label}",
+            f"ALTER TABLE {col.table} ALTER COLUMN {col.column} DROP NOT NULL",
+            stop,
+        )
+        logger.info("RegionKeys: column is nullable again", extra={"column": col.label})
+    for spec in WINDOW_INDEXES:
+        if stop.requested:
+            logger.info("RegionKeys: unfinalize stopped before finishing")
+            return EXIT_STOPPED
+        await _ddl_concurrent(engine, f"drop {spec.name}", f"DROP INDEX CONCURRENTLY IF EXISTS {spec.name}")
+    _log_elapsed("unfinalize (total)", started)
+    logger.info("RegionKeys: unfinalize complete")
     return EXIT_OK
 
 
@@ -689,31 +818,66 @@ def _build_parser() -> argparse.ArgumentParser:
     p_fin = sub.add_parser("finalize", help="maintenance window only: make the columns NOT NULL")
     p_fin.add_argument("--i-have-stopped-writers", action="store_true", dest="writers_stopped")
     p_fin.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="asins per catch-up batch")
+
+    p_unfin = sub.add_parser(
+        "unfinalize", help="rollback only: undo finalize so the 2.1.x application can run again"
+    )
+    p_unfin.add_argument("--i-have-stopped-writers", action="store_true", dest="writers_stopped")
     return parser
+
+
+@contextlib.asynccontextmanager
+async def _single_run_lock(engine: AsyncEngine) -> AsyncIterator[None]:
+    """Holds a session advisory lock on its own connection for the whole run."""
+    async with engine.connect() as conn:
+        conn = await conn.execution_options(isolation_level="AUTOCOMMIT")
+        got = (await conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": ADVISORY_LOCK_KEY})).scalar_one()
+        if not got:
+            raise AlreadyRunning()
+        try:
+            yield
+        finally:
+            # Closing the connection would release it too; being explicit
+            # keeps the lifetime readable.
+            await conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": ADVISORY_LOCK_KEY})
+
+
+async def _dispatch(args: argparse.Namespace, engine: AsyncEngine, stop: _Stop) -> int:
+    if args.mode == "expand":
+        return await expand(engine, stop)
+    if args.mode == "backfill":
+        return await backfill(engine, stop, args.batch_size)
+    if args.mode == "index":
+        return await index(engine, stop)
+    if args.mode == "finalize":
+        return await finalize(engine, stop, args.batch_size)
+    if args.mode == "unfinalize":
+        return await unfinalize(engine, stop)
+    raise AssertionError(args.mode)
 
 
 async def _run(args: argparse.Namespace, engine: AsyncEngine) -> int:
     stop = _Stop()
     _install_signal_handlers(stop)
     try:
-        if args.mode == "expand":
-            return await expand(engine, stop)
-        if args.mode == "backfill":
-            return await backfill(engine, stop, args.batch_size)
-        if args.mode == "index":
-            return await index(engine, stop)
         if args.mode == "verify":
             return await verify(engine, args.pre_window)
-        if args.mode == "finalize":
-            return await finalize(engine, stop, args.batch_size)
-        raise AssertionError(args.mode)
+        async with _single_run_lock(engine):
+            return await _dispatch(args, engine, stop)
+    except AlreadyRunning:
+        logger.error("RegionKeys: another run holds the lock, not starting", extra={"mode": args.mode})
+        return EXIT_FAILED
+    except StopRequested as exc:
+        logger.info("RegionKeys: stopped while waiting to retry", extra={"mode": args.mode, "step": str(exc)})
+        return EXIT_STOPPED
     except FinalizeAbort as exc:
         logger.error("RegionKeys: ABORTED", extra={"mode": args.mode, "reason": str(exc)})
         return EXIT_FAILED
     except Exception as exc:
+        # Type and SQLSTATE only: a driver error's text can quote stored rows.
         logger.error(
             "RegionKeys: failed",
-            extra={"mode": args.mode, "error_type": type(exc).__name__, "error": str(exc)},
+            extra={"mode": args.mode, "error_type": type(exc).__name__, "sqlstate": _sqlstate(exc)},
         )
         return EXIT_FAILED
     finally:
@@ -730,8 +894,10 @@ def main(argv: list[str] | None = None) -> None:
 
     if getattr(args, "batch_size", 1) < 1:
         parser.error("--batch-size must be at least 1")
-    if args.mode == "finalize" and not args.writers_stopped:
-        logger.error("RegionKeys: finalize refused, --i-have-stopped-writers not given")
+    if args.mode in ("finalize", "unfinalize") and not args.writers_stopped:
+        logger.error(
+            "RegionKeys: refused, --i-have-stopped-writers not given", extra={"mode": args.mode}
+        )
         raise SystemExit(EXIT_USAGE)
 
     url = get_settings().database_url

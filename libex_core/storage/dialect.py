@@ -300,6 +300,13 @@ class DialectVariant(ColumnElement):
         self.type = default.type
 
     @property
+    def _anon_name_label(self):
+        # An unlabelled use of this expression (a RETURNING list, say) is
+        # named, and numbered, as the bare default would have been, so the
+        # Postgres statement stays identical to the one without the wrapper.
+        return self.default._anon_name_label
+
+    @property
     def _from_objects(self):
         # Without this a SELECT or WHERE using the expression would not see
         # the table its columns come from and leave it out of FROM.

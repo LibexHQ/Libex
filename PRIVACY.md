@@ -445,8 +445,8 @@ The library is built around preventing that from happening by accident:
   commands (books, chapters, series, authors, new releases, coming soon,
   categories, searches and narrators) send the ASINs, names, search terms and
   category ids you give them to Audible, as described above, and print
-  Audible's answer. When an author's list of books may not be whole,
-  `author books` and `author books-by-name` also print one line to standard
+  Audible's answer. When a list of books may not be whole, `author books`,
+  `author books-by-name` and `series books` also print one line to standard
   error naming the reasons, which come from a fixed list; `-q` leaves it
   out. A bulk lookup can read its list of ASINs from a file or standard
   input. That input is read once, is not kept, and its path is not
@@ -477,7 +477,7 @@ The library is built around preventing that from happening by accident:
 
   From the command-line tool:
   - a `libex-core` command fails (debug): a traceback;
-  - an author's list of books may not be whole (warning): the reasons, from a fixed list.
+  - an author's or a series' list of books may not be whole (warning): the reasons, from a fixed list.
 
   From the caller, these records take the region, the looked-up title, series
   or author ASIN, the names of searched fields, the length of quick-search

@@ -668,7 +668,7 @@ Differences you may hit:
 - Bulk `/book?asins=` returns `{books, notFound, placeholderRecords}` with `200`. AudiMeta returned a bare array, and `404` when it was empty.
 - `/book?asin=` (singular query parameter) is not supported and returns `422`.
 - `/podcast/{asin}` and `/ping` do not exist.
-- Libex's own errors (invalid ASIN, invalid region, not found, upstream failure, server error) return `{error, status_code}`. Request-validation errors (`422`) and unknown routes return FastAPI's `{detail}` instead. AudiMeta used `{message}` or `{errors: [...]}`.
+- Libex's own errors (invalid ASIN, invalid region, not found, upstream failure) return `{error, status_code, code}`; see Error codes under API Behavior. A server error (`500`) returns `{error, status_code}` with no `code`. Request-validation errors (`422`) and unknown routes return FastAPI's `{detail}` instead. AudiMeta used `{message}` or `{errors: [...]}`.
 - An invalid ASIN returns `404` and an invalid region `400`. AudiMeta returned `422` for both.
 - An empty author or series list returns `404`. AudiMeta returned `[]` with `200`.
 - Author books ignores `page` and `limit`.
@@ -723,7 +723,6 @@ None of this has shipped yet, and none of it comes with a date. It is where thin
 
 **In progress for the hosted API**
 
-- A machine-readable `code` on error responses, so clients can branch on it instead of parsing messages.
 - Honest completeness flags on author-by-name lookups, so a partial result says it is partial.
 - Audible outages reported as `503` with a `Retry-After` header instead of `404`. This changes a status code, so it will ship as a major version.
 

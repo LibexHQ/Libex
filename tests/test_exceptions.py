@@ -8,6 +8,7 @@ import pytest
 
 # Local
 from libex_core.exceptions import (
+    ErrorCode,
     LibexException,
     NotFoundException,
     AudibleAPIException,
@@ -117,3 +118,35 @@ def test_exceptions_are_subclass_of_libex_exception():
 def test_exceptions_are_subclass_of_exception():
     """LibexException inherits from Exception."""
     assert issubclass(LibexException, Exception)
+
+
+# ============================================================
+# ERROR CODE DEFAULTS AND OVERRIDES
+# ============================================================
+
+@pytest.mark.parametrize("build,expected", [
+    (lambda: LibexException("x"), ErrorCode.UPSTREAM_UNAVAILABLE),
+    (lambda: NotFoundException(), ErrorCode.NOT_ON_AUDIBLE),
+    (lambda: AudibleAPIException(), ErrorCode.UPSTREAM_UNAVAILABLE),
+    (lambda: CacheException(), ErrorCode.UPSTREAM_UNAVAILABLE),
+    (lambda: RegionException("zz"), ErrorCode.INVALID_REQUEST),
+], ids=["libex", "not_found", "audible_api", "cache", "region"])
+def test_each_exception_class_carries_its_default_code(build, expected):
+    assert build().code is expected
+
+
+@pytest.mark.parametrize("build", [
+    lambda code: LibexException("x", code=code),
+    lambda code: NotFoundException("x", code=code),
+    lambda code: AudibleAPIException("x", code=code),
+    lambda code: CacheException("x", code=code),
+    lambda code: RegionException("zz", code=code),
+], ids=["libex", "not_found", "audible_api", "cache", "region"])
+def test_per_raise_code_overrides_the_class_default(build):
+    assert build(ErrorCode.WITHHELD).code is ErrorCode.WITHHELD
+
+
+def test_override_does_not_leak_into_the_class_default():
+    NotFoundException("x", code=ErrorCode.NOT_IN_LIBEX)
+    assert NotFoundException().code is ErrorCode.NOT_ON_AUDIBLE
+

@@ -20,7 +20,12 @@ from fastapi.testclient import TestClient
 import app.main as main_module
 from app.core.config import get_settings
 from app.main import app
-from libex_core.exceptions import AudibleAPIException, ErrorCode, NotFoundException
+from libex_core.exceptions import (
+    AudibleAPIException,
+    CacheException,
+    ErrorCode,
+    NotFoundException,
+)
 from tests.api.test_books import _cache_route_product, _placeholder_audible_product
 
 ASIN = "B08G9PRS1K"
@@ -168,6 +173,32 @@ async def test_outage_and_genuine_absence_share_status_but_not_code(async_client
     assert outage.status_code == absent.status_code == 404
     assert outage.json()["code"] == "upstream_unavailable"
     assert absent.json()["code"] == "not_on_audible"
+
+
+@pytest.mark.asyncio
+async def test_raw_audible_api_exception_reaches_handler_as_upstream_unavailable(async_client):
+    """No outage_as_not_found wrap on /db routes: the exception reaches the
+    handler itself, which keeps its 502 and carries the class default code."""
+    with patch("app.api.routes.db.router.get_book_from_db", new_callable=AsyncMock) as mock:
+        mock.side_effect = AudibleAPIException("Audible unavailable")
+        response = await async_client.get(f"/db/book/{ASIN}")
+
+    assert response.status_code == 502
+    assert response.json() == {
+        "error": "Audible unavailable",
+        "status_code": 502,
+        "code": "upstream_unavailable",
+    }
+
+
+@pytest.mark.asyncio
+async def test_raw_cache_exception_reaches_handler_as_upstream_unavailable(async_client):
+    with patch("app.api.routes.db.router.get_book_from_db", new_callable=AsyncMock) as mock:
+        mock.side_effect = CacheException("cache down")
+        response = await async_client.get(f"/db/book/{ASIN}")
+
+    assert response.status_code == 500
+    assert response.json()["code"] == "upstream_unavailable"
 
 
 # ============================================================

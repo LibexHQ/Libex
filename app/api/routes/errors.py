@@ -1,8 +1,11 @@
 """
-OpenAPI model for the error body every failed request returns.
+OpenAPI model for the error body Libex's own exception handlers return.
 
 The body itself is built by the exception handlers in `app.main`; this class
-only documents it, so the schema in /docs matches what callers receive.
+only documents it, so the schema in /docs matches what those handlers send.
+It does not cover everything: FastAPI's own 422 validation errors and
+unknown-route 404s use its `{detail}` body, and an unhandled 500 carries no
+`code`.
 `error` and `status_code` are the shape AudiMeta clients already read, and
 `code` is the machine-readable reason beside them.
 """

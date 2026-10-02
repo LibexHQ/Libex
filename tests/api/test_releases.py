@@ -12,6 +12,9 @@ from unittest.mock import AsyncMock, patch
 # Third party
 import pytest
 
+# Local
+from libex_core.exceptions import AudibleAPIException
+
 
 # Flat node list as _ensure_genres returns it: parents have parent_id="",
 # leaves carry their parent's id.
@@ -363,3 +366,44 @@ async def test_coming_soon_invalid_category_rejected(async_client):
         assert "detail" in body
         assert "error" not in body
         mock.assert_not_awaited()
+
+
+# ============================================================
+# outage vs genuine empty
+# ============================================================
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path,service,message", [
+    pytest.param("/new-releases", "get_new_releases", "No new releases found", id="new_releases"),
+    pytest.param("/coming-soon", "get_coming_soon", "No upcoming releases found", id="coming_soon"),
+    pytest.param("/categories", "_ensure_genres", "No categories available", id="categories"),
+])
+async def test_outage_is_404_upstream_unavailable_with_the_routes_own_message(
+    async_client, path, service, message
+):
+    with patch(f"app.api.routes.releases.router.{service}", new_callable=AsyncMock) as mock:
+        mock.side_effect = AudibleAPIException("Audible genre taxonomy fetch failed")
+        response = await async_client.get(path)
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": message,
+        "status_code": 404,
+        "code": "upstream_unavailable",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path,service", [
+    pytest.param("/new-releases", "get_new_releases", id="new_releases"),
+    pytest.param("/coming-soon", "get_coming_soon", id="coming_soon"),
+    pytest.param("/categories", "_ensure_genres", id="categories"),
+])
+async def test_genuinely_empty_is_404_not_on_audible(async_client, path, service):
+    with patch(f"app.api.routes.releases.router.{service}", new_callable=AsyncMock) as mock:
+        mock.return_value = []
+        response = await async_client.get(path)
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "not_on_audible"
+

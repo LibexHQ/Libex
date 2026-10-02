@@ -26,7 +26,7 @@ from libex_core.storage.store import (
     StoreConnectionError,
     StoreMigrationError,
 )
-from libex_core.storage.upgrade import SchemaIntegrityError, upgrade_to_head
+from libex_core.storage.upgrade import SchemaIntegrityError, set_foreign_keys, upgrade_to_head
 
 
 def _url(path) -> str:
@@ -131,6 +131,31 @@ async def test_the_migration_runner_refuses_to_run_with_foreign_keys_on(db):
         finally:
             await connection.close()
     assert _counts(db) == (1, 1, 1)
+
+
+def _fake_connection(dialect: str, reads_back: int):
+    cursor = SimpleNamespace(
+        execute=lambda sql: None,
+        fetchone=lambda: (reads_back,),
+        close=lambda: None,
+    )
+    driver = SimpleNamespace(cursor=lambda: cursor)
+    return SimpleNamespace(
+        dialect=SimpleNamespace(name=dialect),
+        connection=SimpleNamespace(dbapi_connection=driver),
+    )
+
+
+def test_a_foreign_key_switch_that_does_not_take_is_an_error():
+    with pytest.raises(SchemaIntegrityError, match="could not be switched"):
+        set_foreign_keys(_fake_connection("sqlite", reads_back=1), False)
+    with pytest.raises(SchemaIntegrityError, match="could not be switched"):
+        set_foreign_keys(_fake_connection("sqlite", reads_back=0), True)
+    set_foreign_keys(_fake_connection("sqlite", reads_back=0), False)
+
+
+def test_the_foreign_key_switch_does_nothing_off_sqlite():
+    set_foreign_keys(SimpleNamespace(dialect=SimpleNamespace(name="postgresql")), False)
 
 
 # ------------------------------------------------------------

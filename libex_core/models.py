@@ -8,6 +8,10 @@ optionality and defaults follow AudiMeta's rather than what the underlying
 data would otherwise suggest. They carry no database, cache, or web-framework
 dependency of their own so the shape of a response can be reused anywhere
 this package is embedded, independent of how it is served.
+
+The Abs* shapes are the exception: they follow the Audiobookshelf
+custom-metadata-provider format, a deliberately partial one, and are not
+derived from AudiMeta.
 """
 
 # Standard library
@@ -50,6 +54,63 @@ class AuthorRefResponse(BaseModel):
     regions: list[str] = Field(default_factory=list)
     image: str | None = None
     updatedAt: str | None = None
+
+
+# ============================================================
+# ABS BOOK RESPONSE
+# ============================================================
+
+class AbsSeriesRef(BaseModel):
+    series: str | None = None
+    sequence: str | None = None
+
+
+class AbsBookResponse(BaseModel):
+    asin: str
+    title: str | None = None
+    subtitle: str | None = None
+    description: str | None = None
+    cover: str | None = None
+    publisher: str | None = None
+    publishedYear: str | None = None
+    isbn: str | None = None
+    language: str | None = None
+    duration: str | None = None
+    author: str | None = None
+    narrator: str | None = None
+    tags: list[str] | None = None
+    genres: list[str] | None = None
+    series: list[AbsSeriesRef] | None = None
+
+
+class AbsSearchResponse(BaseModel):
+    matches: list[AbsBookResponse]
+
+
+def to_abs_book(book: dict) -> AbsBookResponse:
+    """Converts a full BookResponse dict to AbsBookResponse format."""
+    authors = book.get("authors", [])
+    narrators = book.get("narrators", [])
+    genres = book.get("genres", [])
+    series = book.get("series", [])
+
+    return AbsBookResponse(
+        asin=book.get("asin", ""),
+        title=book.get("title"),
+        subtitle=book.get("subtitle"),
+        description=book.get("summary") or book.get("description"),
+        cover=book.get("imageUrl"),
+        publisher=book.get("publisher"),
+        publishedYear=book.get("releaseDate", "")[:4] if book.get("releaseDate") else None,
+        isbn=book.get("isbn"),
+        language=book.get("language"),
+        duration=str(book.get("lengthMinutes")) if book.get("lengthMinutes") else None,
+        author=", ".join(a.get("name", "") for a in authors if a.get("name")) or None,
+        narrator=", ".join(n.get("name", "") for n in narrators if n.get("name")) or None,
+        tags=[g.get("name") for g in genres if g.get("type") == "Tags" and g.get("name")] or None,
+        genres=[g.get("name") for g in genres if g.get("type") == "Genres" and g.get("name")] or None,
+        series=[AbsSeriesRef(series=s.get("name"), sequence=s.get("position")) for s in series] or None,
+    )
 
 
 # ============================================================

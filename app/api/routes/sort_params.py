@@ -1,32 +1,24 @@
 """
 Shared sort query-parameter types for list endpoints.
 
-The sort field enums are derived from the allow-lists in app.services.sorting,
-so the sortable surface is defined once and the OpenAPI docs show exactly what
-clients can sort on. Both the DB router and the live (Audible-backed) routers
+The sort field enums are derived from the allow-lists (libex_core.shaping for
+books, app.services.sorting for narrators), so the sortable surface is defined
+once and the OpenAPI docs show exactly what clients can sort on. Both the DB router and the live (Audible-backed) routers
 import these so the sort params look identical everywhere.
 """
 
 # Standard library
 from enum import Enum
 
+# Core
+from libex_core.shaping import BookSortField, SortOrder
+
 # Services
-from app.services.sorting import BOOK_SORT_FIELDS, NARRATOR_SORT_FIELDS
+from app.services.sorting import NARRATOR_SORT_FIELDS
 
-
-class SortOrder(str, Enum):
-    asc = "asc"
-    desc = "desc"
-
-
-# Built from the sort allow-lists so the enum members are exactly the
-# sortable field names — no drift between what's allowed and what's offered.
-BookSortField = Enum(
-    "BookSortField",
-    {field: field for field in BOOK_SORT_FIELDS},
-    type=str,
-)
-
+# SortOrder and BookSortField are defined in libex_core.shaping and re-exported
+# here so routers keep one import point.
+__all__ = ["BookSortField", "NarratorSortField", "SortOrder"]
 
 NarratorSortField = Enum(
     "NarratorSortField",

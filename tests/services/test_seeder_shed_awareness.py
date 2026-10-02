@@ -56,7 +56,7 @@ from libex_core.exceptions import AudibleAPIException, NotFoundException
 
 # Services
 from app.core.response_headers import REASON_DISCOVERY_INCOMPLETE, record_incomplete
-from app.services.audible.authors.catalog import (
+from app.services.audible.authors.by_name import (
     STOP_COMPLETED,
     STOP_DEADLINE,
     STOP_PAGE_CAP,

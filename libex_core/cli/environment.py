@@ -100,6 +100,22 @@ def default_database_path() -> Path:
     return base / "libex-core" / "libex.db"
 
 
+def _check_sqlite_url(value: str) -> None:
+    """A SQLite URL must name an absolute file. An empty database part is
+    SQLAlchemy's in-memory database, and a relative one would put the store
+    wherever the command happened to be run from."""
+    database = value.partition("://")[2]
+    if database.startswith("/"):
+        database = database[1:]
+    if database.lower() in ("", ":memory:"):
+        raise ConfigError(
+            f"{STORAGE_VARIABLE} cannot be an in-memory database: "
+            "nothing would outlive the command"
+        ) from None
+    if not os.path.isabs(database):
+        raise ConfigError(_STORAGE_INVALID) from None
+
+
 def _storage_target(raw: str) -> StorageTarget | None:
     value = raw.strip()
     lowered = value.lower()
@@ -109,12 +125,7 @@ def _storage_target(raw: str) -> StorageTarget | None:
         return StorageTarget(path=str(default_database_path()))
     if lowered.startswith(_URL_SCHEMES):
         if lowered.startswith("sqlite"):
-            rest = value.partition("://")[2]
-            if rest in ("", "/:memory:", ":memory:"):
-                raise ConfigError(
-                    f"{STORAGE_VARIABLE} cannot be an in-memory database: "
-                    "nothing would outlive the command"
-                ) from None
+            _check_sqlite_url(value)
         return StorageTarget(url=value)
     if os.path.isabs(value):
         return StorageTarget(path=value)

@@ -4,8 +4,8 @@ Imported lazily inside command handlers, so --help and completion never import
 httpx, pydantic or the storage libraries.
 """
 
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from typing import Any
 
 from libex_core.audible.client import LibexClient
@@ -46,6 +46,22 @@ async def client_session(config: Config) -> AsyncIterator[LibexClient]:
         yield client
 
 
+@contextmanager
+def filesystem_errors() -> Iterator[None]:
+    """Turns an operating-system failure while the store's file or directory is
+    touched into a fixed-text store error. Not chained: an OSError carries the
+    path, which says where someone's listening history is."""
+    try:
+        yield
+    except OSError:
+        raise store_state.StoreNotReady(store_state.FILESYSTEM) from None
+
+
+async def upgrade_store(store: Any) -> str:
+    with filesystem_errors():
+        return await store.upgrade()
+
+
 def build_store(config: Config) -> Any:
     """A LocalStore for the configured target. Opens no connection. Raises
     ConfigError when storage is off, and the library's own fixed-text errors
@@ -75,7 +91,8 @@ _STATE_NAMES = {
 
 async def schema_state(store: Any) -> tuple[str, str | None]:
     """(state name, stored revision) as `db status` reports them."""
-    state = await store.status()
+    with filesystem_errors():
+        state = await store.status()
     return _STATE_NAMES[state.state], state.revision
 
 
@@ -88,7 +105,8 @@ async def open_store(config: Config) -> AsyncIterator[Any]:
         name, _ = await schema_state(store)
         if name != store_state.OK:
             raise store_state.StoreNotReady(store_state.MESSAGES[name])
-        await store.open()
+        with filesystem_errors():
+            await store.open()
         yield store
     finally:
         await store.close()

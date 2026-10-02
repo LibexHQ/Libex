@@ -33,6 +33,11 @@ MESSAGES: dict[str, str] = {
     ),
 }
 
+FILESYSTEM = (
+    "the local store's file or directory could not be read, created or "
+    "written; check that its location exists and is writable by this user"
+)
+
 
 class StoreNotReady(Exception):
     """The store exists in configuration but cannot be used yet. Fixed text."""

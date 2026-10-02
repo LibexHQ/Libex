@@ -93,6 +93,9 @@ def test_the_word_sqlite_is_the_default_file(monkeypatch, tmp_path, value):
         "x.db",
         "~/x.db",
         "file:x.db",
+        "sqlite:///relative.db",
+        "sqlite+aiosqlite:///relative.db",
+        "sqlite:///dir/relative.db",
         "postgres://u:" + SECRET + "@h/d",
         "mysql://u:" + SECRET + "@h/d",
         "http://u:" + SECRET + "@h/d",
@@ -119,19 +122,10 @@ def test_anything_else_is_refused_with_the_fixed_message(monkeypatch, value):
         "sqlite:///:memory:",
         "sqlite+aiosqlite://",
         "sqlite+aiosqlite:///:memory:",
-        pytest.param(
-            "sqlite:///",
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="an empty database part is SQLAlchemy's in-memory database, "
-                "and the guard does not list it: db upgrade prints a revision, exits 0 "
-                "and keeps nothing",
-            ),
-        ),
-        pytest.param(
-            "sqlite+aiosqlite:///",
-            marks=pytest.mark.xfail(strict=True, reason="same as sqlite:///"),
-        ),
+        "sqlite:///",
+        "sqlite+aiosqlite:///",
+        "SQLITE:///:MEMORY:",
+        "sqlite+aiosqlite:///:Memory:",
     ],
 )
 def test_an_in_memory_database_is_refused_because_nothing_would_outlive_the_command(monkeypatch, value):
@@ -285,11 +279,6 @@ def test_a_path_in_a_directory_that_does_not_exist_stays_out_of_every_read_comma
     assert SECRET not in result.out + result.err
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="an absolute path whose directory cannot be made raises an unmapped "
-    "PermissionError: exit 1 rather than 5, and the -vv traceback prints the path",
-)
 @pytest.mark.parametrize("verbosity", [[], ["-vv"]])
 def test_a_directory_that_cannot_be_made_is_a_config_failure_that_keeps_the_path_out(run_cli, verbosity):
     result = run_cli([*verbosity, "db", "upgrade"], env={STORAGE_VARIABLE: "/nonexistent-dir-" + SECRET + "/x.db"})
@@ -312,3 +301,12 @@ def test_this_module_sees_the_platform_it_is_run_on():
     # The monkeypatched platform tests above are about branches, not this host.
     assert sys.platform == environment.sys.platform
     assert os.path.isabs(str(default_database_path()))
+
+
+@pytest.mark.parametrize("command", [["db", "upgrade"], ["db", "status"], ["db", "stats"]])
+def test_a_path_under_a_regular_file_is_a_config_failure_that_keeps_the_path_out(run_cli, tmp_path, command):
+    blocker = tmp_path / ("blocker-" + SECRET)
+    blocker.write_text("x")
+    result = run_cli(["-vv", *command], env={STORAGE_VARIABLE: str(blocker / "x.db")})
+    assert result.code == 5
+    assert SECRET not in result.out + result.err

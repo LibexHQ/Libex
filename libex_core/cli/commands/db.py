@@ -286,12 +286,12 @@ def run_upgrade(args: argparse.Namespace) -> int:
     from libex_core.cli.environment import load_config
     from libex_core.cli.exit_codes import ExitCode
     from libex_core.cli.output import emit_json
-    from libex_core.cli.session import build_store
+    from libex_core.cli.session import build_store, upgrade_store
 
     async def upgrade() -> str:
         store = build_store(load_config())
         try:
-            return await store.upgrade()
+            return await upgrade_store(store)
         finally:
             await store.close()
 

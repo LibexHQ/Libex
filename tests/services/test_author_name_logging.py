@@ -28,7 +28,7 @@ import pytest
 # Local
 from libex_core.exceptions import AudibleAPIException
 from app.services.audible.authors import get_author_books_by_name
-from app.services.audible.authors.catalog import fetch_author_books_by_name
+from app.services.audible.authors.by_name import fetch_author_books_by_name
 
 
 # Distinctive enough that a substring check cannot pass by accident, and
@@ -60,7 +60,7 @@ def _named(caplog, message):
 async def test_author_books_by_name_logs_the_lookup_never_the_name(caplog):
     with (
         patch(
-            "app.services.audible.authors.fetch_author_books_by_name",
+            "app.services.audible.authors.by_name.fetch_author_books_by_name",
             new_callable=AsyncMock,
         ) as mock_fetch,
         caplog.at_level(logging.INFO),
@@ -68,6 +68,7 @@ async def test_author_books_by_name_logs_the_lookup_never_the_name(caplog):
         mock_fetch.return_value = (["B08G9PRS1K", "B000APF21M"], 3)
         asins = await get_author_books_by_name(TYPED_NAME, "de", MagicMock())
 
+    mock_fetch.assert_awaited_once()
     assert asins == ["B08G9PRS1K", "B000APF21M"]
 
     records = _named(caplog, "Requested Audible Author Books By Name")
@@ -92,7 +93,7 @@ async def test_catalog_first_page_failure_warning_reports_where_not_who(caplog):
     """The by-name walk's failure path: the name is in scope there too."""
     with (
         patch(
-            "app.services.audible.authors.catalog._fetch_name_search_page",
+            "app.services.audible.authors.by_name._fetch_name_search_page",
             new_callable=AsyncMock,
         ) as mock_page,
         caplog.at_level(logging.INFO),
@@ -100,6 +101,7 @@ async def test_catalog_first_page_failure_warning_reports_where_not_who(caplog):
         mock_page.side_effect = RuntimeError("upstream exploded")
         with pytest.raises(AudibleAPIException):
             await fetch_author_books_by_name(TYPED_NAME, "jp")
+    mock_page.assert_awaited_once()
 
     records = _named(
         caplog,
@@ -127,7 +129,7 @@ async def test_no_log_record_of_the_whole_request_carries_the_typed_name(caplog,
     """
     with (
         patch(
-            "app.services.audible.authors.fetch_author_books_by_name",
+            "app.services.audible.authors.by_name.fetch_author_books_by_name",
             new_callable=AsyncMock,
         ) as mock_fetch,
         patch(

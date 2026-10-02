@@ -47,7 +47,7 @@ from app.core.response_headers import ResponseFacts
 
 # Services
 from app.services.audible.authors import fetch_author_books_by_name
-from app.services.audible.authors.catalog import NameWalkOutcome
+from app.services.audible.authors.by_name import NameWalkOutcome
 from app.services.audible.books import fetch_and_store_chapters, get_books_by_asins
 from app.services.db.persist_queue import PersistOutcome
 

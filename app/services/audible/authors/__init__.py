@@ -1,46 +1,32 @@
 """
 Audible authors service.
-Fetches author metadata directly from the Audible API.
+Fetches author metadata directly from the Audible API. The package's public
+names are re-exported from here: profile lookups and search from profile.py,
+the by-name walk from by_name.py, and get_author_books defined below.
 
 DESIGN PHILOSOPHY: Audible-first.
-Audible is the source of truth. get_author fetches a profile fresh or from
-cache and writes what Audible returns to the relational DB and the cache.
-get_author_books unions a live Audible discovery walk with what the DB
-already holds for that author, and caches the union only once the walk has
-actually finished -- a walk cut short by its own time budget is returned
-incomplete rather than cached partial, and is finished off the request
-instead.
+Audible is the source of truth. get_author_books unions a live Audible
+discovery walk with what the DB already holds for that author, and caches
+the union only once the walk has actually finished -- a walk cut short by
+its own time budget is returned incomplete rather than cached partial, and
+is finished off the request instead.
 """
 
 # Standard library
 import asyncio
 import time
-from datetime import datetime, timezone
-from typing import Any, NamedTuple
+from datetime import datetime
+from typing import NamedTuple
 
 # Third party
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Core
-from libex_core.audible.client import (
-    as_audible_failure,
-    author_books_concurrency,
-    upstream_status_of,
-    LOCALE_MAP,
-)
+from libex_core.audible.client import author_books_concurrency
 from libex_core.exceptions import AudibleAPIException, NotFoundException
-from libex_core.text import strip_html
 from app.core.logging import get_logger
-from app.core.response_headers import (
-    ResponseFacts,
-    SOURCE_AUDIBLE,
-    SOURCE_CACHE,
-    SOURCE_DB,
-    record_source,
-)
 
 # Services
-from app.services.audible import audible_get
 from app.services.audible.authors.screens import (
     _fetch_author_books_by_screen,
     _ScreenBooksResult,
@@ -50,10 +36,19 @@ from app.services.audible.authors.screens import (
 from app.services.audible.authors.catalog import (
     _fetch_author_books_by_catalog,
     _CatalogBooksResult,
+)
+from app.services.audible.authors.profile import (
+    _fetch_author_details,
+    _normalize_author,
+    get_author,
+    search_authors,
+)
+from app.services.audible.authors.by_name import (
     fetch_author_books_by_name,
+    get_author_books_by_name,
 )
 from app.services.cache import manager as cache
-from app.services.cache.manager import author_key, author_books_key
+from app.services.cache.manager import author_books_key
 from app.services.db.persist_queue import persist_author_background, persist_author_books_cache_background
 from app.services.db.reader import get_author_from_db, get_author_book_asins_from_db
 
@@ -64,13 +59,26 @@ from app.services.db.reader import get_author_from_db, get_author_book_asins_fro
 # module's own note on why the import is deferred rather than restructured.
 from app.services.audible.authors.completion import request_author_books_completion
 
+# The names the router and seeder import from this package. profile.py and
+# by_name.py own their definitions; listing them here marks the imports above
+# as the package's public surface rather than unused.
+__all__ = [
+    "AUTHOR_BOOKS_TIME_BUDGET_SECONDS",
+    "AuthorBooksResult",
+    "fetch_author_books_by_name",
+    "get_author",
+    "get_author_books",
+    "get_author_books_by_name",
+    "search_authors",
+]
+
 logger = get_logger()
 
 # Wall-clock budget across the whole author-books union in get_author_books
 # (one screens walk plus one name search). This bounds the work a single
 # request can do -- it is not a rate limit, counts nothing across requests,
 # keys on no client identity, and rejects nobody. Unlike SCREENS_MAX_PAGES /
-# SCREENS_MAX_ASINS (screens.py) and NAME_SEARCH_MAX_PAGES (catalog.py),
+# SCREENS_MAX_ASINS (screens.py) and NAME_SEARCH_MAX_PAGES (by_name.py),
 # this one DOES bind on a real, very prolific author's catalog before those
 # far-larger caps ever would -- at roughly 0.5s/page it cuts off around 1800
 # titles, well short of Conan Doyle's 4500 -- but a deadline-truncated walk
@@ -157,55 +165,6 @@ class AuthorBooksResult(NamedTuple):
 # before most of it ever reaches this map at all.
 _author_books_inflight: dict[tuple[str, str], asyncio.Task[AuthorBooksResult]] = {}
 
-# ============================================================
-# HELPERS
-# ============================================================
-
-def _generate_session_id() -> str:
-    """
-    Generates a random session ID matching AudiMeta's format.
-    Format: 000-XXXXXXX-XXXXXXX
-    """
-    import random
-
-    def random_digits() -> str:
-        return str(random.randint(0, 9999999)).zfill(7)
-
-    return f"000-{random_digits()}-{random_digits()}"
-
-
-def _normalize_author(data: dict, asin: str, region: str) -> dict[str, Any]:
-    contributor = data.get("contributor", {})
-    bio = contributor.get("bio")
-    return {
-        "id": None,
-        "asin": asin,
-        "name": contributor.get("name", "").replace("\t", "").strip(),
-        "description": strip_html(bio),
-        "image": contributor.get("profile_image_url"),
-        "region": region,
-        "regions": [region],
-        "genres": [],
-        "updatedAt": datetime.now(timezone.utc).isoformat(),
-    }
-
-
-# ============================================================
-# AUDIBLE REQUESTS
-# ============================================================
-
-
-async def _fetch_author_details(asin: str, region: str) -> dict[str, Any]:
-    """
-    Fetches author profile from Audible contributors endpoint.
-    Returns bio, image, and name.
-    """
-    path = f"/1.0/catalog/contributors/{asin}"
-    params = {
-        "locale": LOCALE_MAP.get(region, "en-US"),
-    }
-    return await audible_get(region, path, params)
-
 
 async def _resolve_author_name(
     asin: str,
@@ -241,103 +200,9 @@ async def _resolve_author_name(
 
     return None
 
-
 # ============================================================
 # PUBLIC API
 # ============================================================
-
-
-async def get_author(
-    asin: str,
-    region: str,
-    session: AsyncSession,
-    use_cache: bool = False,
-    *,
-    facts: ResponseFacts | None = None,
-) -> dict[str, Any]:
-    """
-    Fetches author profile by ASIN.
-    Audible-first, writes to DB, falls back to DB then cache.
-
-    Single-source by construction -- cache, then audible, then db, then
-    cache again, never more than one per call -- so facts takes exactly one
-    record_source per return path. get_author_books, which shares this
-    module, is deliberately not given the same treatment: it resolves to an
-    ASIN list unioned from up to four sources at once, not one dict a single
-    token could describe, and the books it names are attributed by whichever
-    call the route makes to get_books_by_asins afterward.
-    """
-    if use_cache:
-        cached = await cache.get(session, author_key(asin, region))
-        # Same reason as the two rollbacks in _walk_author_books below: a
-        # connection is held for work, not for a request. The read above
-        # autobegins a transaction on session, and a READ COMMITTED
-        # transaction advertises backend_xmin and can become the cluster's
-        # oldest xmin even when it has only ever read -- measured on
-        # PostgreSQL 16.14 -- holding the xmin horizon against autovacuum
-        # until it ends. Nothing between here and the contributors fetch
-        # below needs it open, and that fetch queues against the process-wide
-        # pool in libex_core/audible/_concurrency.py rather than going out immediately.
-        #
-        # Nothing after this point depends on transaction state established
-        # before it: cached is a plain already-materialized value, and the DB
-        # and cache reads in the failure branch each open their own
-        # transaction on their next statement, which SQLAlchemy re-acquires
-        # transparently.
-        await session.rollback()
-        if cached:
-            record_source(facts, SOURCE_CACHE)
-            return cached
-
-    try:
-        start = time.monotonic()
-        data = await _fetch_author_details(asin, region)
-        author_took = round((time.monotonic() - start) * 1000, 2)
-
-        if not data or data.get("contributor", {}).get("name") is None:
-            raise NotFoundException(f"Author not found: {asin}")
-
-        normalized = _normalize_author(data, asin, region)
-
-        # Persist to DB and cache in the background
-        persist_author_background(normalized, region)
-
-        logger.info("Requested Audible Author", extra={
-            "author_took": author_took,
-            "region": region,
-        })
-
-        record_source(facts, SOURCE_AUDIBLE)
-        return normalized
-
-    except NotFoundException:
-        raise
-    except Exception as e:
-        # Try DB first
-        db_result = await get_author_from_db(session, asin, region)
-        if db_result:
-            record_source(facts, SOURCE_DB)
-            return db_result
-
-        # Fall back to cache
-        cached = await cache.get(session, author_key(asin, region))
-        if cached:
-            record_source(facts, SOURCE_CACHE)
-            return cached
-
-        # Neither a stored copy nor a cached one exists -- that is silence,
-        # not a confirmed absence, so what reaches the caller has to say
-        # Audible could not be reached rather than that the author is not
-        # there.
-        logger.warning("Audible unavailable and no cached author data found", extra={
-            "author_asin": asin,
-            "region": region,
-            "error": str(e),
-            "upstream_status": upstream_status_of(e),
-        })
-        raise as_audible_failure(
-            e, "Audible unavailable and no cached author data found"
-        ) from e
 
 
 async def get_author_books(
@@ -352,7 +217,7 @@ async def get_author_books(
     four-source union this delegates to and does the actual fetching.
 
     use_cache=True checks the cache first and returns on a hit, same as
-    every other Audible-first service in this module. Both author-books
+    every other Audible-first service in this package. Both author-books
     routes now pass True, because the public default was flipped there --
     see the comment on get_books_by_author for why a defaulted-False read
     meant the cache served only callers who explicitly asked for it and no
@@ -951,130 +816,3 @@ async def _walk_author_books(
     })
 
     return AuthorBooksResult(asins, is_complete)
-
-
-async def get_author_books_by_name(
-    name: str,
-    region: str,
-    session: AsyncSession,
-    *,
-    facts: ResponseFacts | None = None,
-) -> list[str]:
-    """Fetches book ASINs by author name. A first-page failure raises
-    AudibleAPIException; a later-page failure returns what was gathered and
-    marks facts incomplete (REASON_DISCOVERY_INCOMPLETE)."""
-    try:
-        start = time.monotonic()
-        asins, pages_fetched = await fetch_author_books_by_name(name, region, facts=facts)
-        author_book_took = round((time.monotonic() - start) * 1000, 2)
-
-        if not asins:
-            raise NotFoundException(f"No books found for author name: {name}")
-
-        # Deliberately no "author_name" field: on this route the name is
-        # verbatim caller-authored text, not catalogue data resolved from an
-        # ASIN, and Libex records nothing that identifies a caller and nothing
-        # a caller typed. Nothing stands in for it -- unlike a search query,
-        # whose length correlates with how it performed, an author name's
-        # length explains nothing the page count below does not already.
-        logger.info("Requested Audible Author Books By Name", extra={
-            "author_book_num": len(asins),
-            "pages_fetched": pages_fetched,
-            "author_book_took": author_book_took,
-            "region": region,
-        })
-
-        return asins
-
-    except NotFoundException:
-        raise
-    except Exception as e:
-        # name is caller-authored and never logged -- see the "Deliberately
-        # no author_name field" note above, which applies here too.
-        logger.warning("Failed to fetch author books by name", extra={
-            "name_length": len(name),
-            "region": region,
-            "error": str(e),
-            "upstream_status": upstream_status_of(e),
-        })
-        raise as_audible_failure(e, "Failed to fetch author books by name") from e
-
-
-async def search_authors(
-    name: str,
-    region: str,
-    session: AsyncSession,
-) -> list[dict[str, Any]]:
-    """Searches for authors by name using Audible search suggestions."""
-    try:
-        start = time.monotonic()
-        path = "/1.0/searchsuggestions"
-        params = {
-            "keywords": name,
-            "key_strokes": name,
-            "site_variant": "android-mshop",
-            "session_id": _generate_session_id(),
-            "local_time": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
-            "surface": "Android",
-        }
-
-        data = await audible_get(region, path, params)
-        search_took = round((time.monotonic() - start) * 1000, 2)
-
-        asins: list[str] = []
-        for item in data.get("model", {}).get("items", []):
-            if item.get("view", {}).get("template") == "AuthorItemV2":
-                asin = item.get("model", {}).get("person_metadata", {}).get("asin")
-                if asin:
-                    asins.append(asin)
-
-        logger.info("Requested Audible Author Search", extra={
-            "search_took": search_took,
-            "region": region,
-        })
-
-        if not asins:
-            return []
-
-        authors = []
-        skipped_asins: list[str] = []
-        for asin in asins:
-            try:
-                author = await get_author(asin, region, session)
-                authors.append(author)
-            except NotFoundException:
-                continue
-            except AudibleAPIException:
-                # One suggested author being unreachable does not sink a
-                # search that already has other hits to show. get_author
-                # itself already logs the failure that produced this
-                # exception, so collecting the ASIN here and warning once
-                # below, after the loop, avoids a second warning per item
-                # on top of that.
-                skipped_asins.append(asin)
-                continue
-
-        if skipped_asins:
-            logger.warning(
-                "Author search: could not resolve one or more suggested authors, skipping",
-                extra={
-                    "region": region,
-                    "skipped_num": len(skipped_asins),
-                    "skipped_asins": skipped_asins,
-                },
-            )
-
-        return authors
-
-    except NotFoundException:
-        raise
-    except Exception as e:
-        # name is caller-authored and never logged -- see the "Deliberately
-        # no author_name field" note on get_author_books_by_name above.
-        logger.warning("Author search failed", extra={
-            "name_length": len(name),
-            "region": region,
-            "error": str(e),
-            "upstream_status": upstream_status_of(e),
-        })
-        raise as_audible_failure(e, "Author search failed") from e

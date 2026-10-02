@@ -39,15 +39,24 @@ def db(tmp_path):
     return tmp_path / "libex.db"
 
 
-def _caller_connect(path):
-    return aiosqlite.connect(path)
-
-
 @pytest.fixture(params=["managed", "caller"])
-def kw(request):
+def kw(request, db):
     """The keyword arguments that open a store the library connects, and one
-    the caller does: the foreign-key guarantees hold for both."""
-    return {} if request.param == "managed" else {"connect": _caller_connect}
+    the caller does: the foreign-key guarantees hold for both. In caller mode
+    the hook records each path it is given, and the fixture fails the test if
+    the hook never ran or was handed anything but the vetted path."""
+    if request.param == "managed":
+        yield {}
+        return
+    seen = []
+
+    def connect(path):
+        seen.append(path)
+        return aiosqlite.connect(path)
+
+    yield {"connect": connect}
+    assert seen, "the connect hook was never called"
+    assert set(seen) == {str(db)}
 
 
 def _counts(path) -> tuple[int, int, int]:

@@ -8,6 +8,7 @@ log line or `repr`.
 # Standard library
 import functools
 import logging
+import sqlite3
 import ssl
 
 # Third party
@@ -19,10 +20,10 @@ from sqlalchemy import text
 # Local
 from libex_core.storage import store as store_module
 from libex_core.storage.store import (
+    ForeignDatabase,
     LocalStore,
     StoreConfigError,
     StoreConnectionError,
-    _postgres_creator,
 )
 
 SENTINEL = "SENTINEL-p4ssw0rd"
@@ -55,12 +56,21 @@ class _Fake:
 async def test_without_a_hook_postgres_connects_with_the_hardened_parameters(monkeypatch, kwargs):
     fake = _Fake()
     monkeypatch.setattr(asyncpg, "connect", fake)
+    engine_options = {}
+    real_engine = store_module.create_async_engine
+
+    def capture(url, **options):
+        engine_options.update(options)
+        return real_engine(url, **options)
+
+    monkeypatch.setattr(store_module, "create_async_engine", capture)
     store = LocalStore("postgresql+asyncpg://u:pw@db.example:6543/d?ssl=require&application_name=app", **kwargs)
     try:
         assert store.connection_mode == "managed"
         assert "connection_mode='managed'" in repr(store)
-        # The creator the store built for its engine, driven directly.
-        await _postgres_creator(store._url)()
+        # The creator LocalStore handed its engine, not one built beside it.
+        assert "async_creator" in engine_options
+        await engine_options["async_creator"]()
     finally:
         await store.close()
     (call,) = fake.calls
@@ -281,11 +291,7 @@ async def test_a_symlink_is_refused_before_a_sqlite_hook_is_called(tmp_path):
 
 
 async def test_a_foreign_sqlite_database_is_refused_with_a_hook(tmp_path):
-    from libex_core.storage.store import ForeignDatabase
-
     path = tmp_path / "other.db"
-    import sqlite3
-
     with sqlite3.connect(path) as db:
         db.execute("CREATE TABLE books (id INTEGER)")
     store = LocalStore(_url(path), connect=lambda p: aiosqlite.connect(p))

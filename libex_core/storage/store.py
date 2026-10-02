@@ -21,7 +21,7 @@ verify the server, so it gives no protection against an active attacker on the
 path. On a network that is not trusted use `ssl=verify-full`.
 
 A caller who needs a connection this library cannot make (an SSH tunnel, IAM
-tokens, a vault-issued password, a pooler, an encrypted SQLite build) passes
+tokens, a vault-issued password, an encrypted SQLite build) passes
 `connect=` and supplies the connection itself. See `LocalStore` for what that
 hands over; the schema, migration and locking guarantees do not change.
 
@@ -42,6 +42,7 @@ the one place a connection string could be echoed back.
 # Standard library
 import asyncio
 import importlib.util
+import inspect
 import logging
 import os
 import sqlite3
@@ -296,6 +297,20 @@ def _hook_failure(stage: str, backend: str, name: str) -> StoreConnectionError:
     return StoreConnectionError(f"the connect hook {stage} for the {backend} database ({name})")
 
 
+async def _discard(connection) -> None:
+    """Closes a connection the hook returned that this library refuses, so it
+    is not left open. Best effort: whatever closing raises is ignored, since the
+    error worth reporting is the wrong type."""
+    try:
+        closed = getattr(connection, "close", None)
+        if callable(closed):
+            result = closed()
+            if inspect.isawaitable(result):
+                await result
+    except Exception:
+        pass
+
+
 def _caller_postgres_creator(connect: Callable[[], Awaitable]):
     """Wraps a caller's Postgres hook. Whatever the hook raises is reduced to
     its class name outside the `except`, so no chained context carries the
@@ -312,6 +327,7 @@ def _caller_postgres_creator(connect: Callable[[], Awaitable]):
         if failed is not None:
             raise _hook_failure("raised", "postgresql", failed)
         if not isinstance(connection, asyncpg.Connection):
+            await _discard(connection)
             raise _hook_failure("returned the wrong type", "postgresql", type(connection).__name__)
         return connection
 
@@ -335,6 +351,7 @@ def _caller_sqlite_creator(connect: Callable[[str], Awaitable], path: str):
             if failed is not None:
                 raise _hook_failure("raised", "sqlite", failed)
             if not isinstance(connection, aiosqlite.Connection):
+                await _discard(connection)
                 raise _hook_failure("returned the wrong type", "sqlite", type(connection).__name__)
             return connection
 
@@ -399,19 +416,30 @@ class LocalStore:
         With a `connect` hook the caller makes it. On Postgres the hook takes
         no argument and returns an awaited `asyncpg.Connection`, and the URL
         must be bare (`postgresql+asyncpg://`). On SQLite the hook is called
-        with the path this library has already checked (symlinks refused, a new
-        file created 0600, write-ahead logging set) and returns an
-        `aiosqlite.Connection`. Every schema, migration, locking and
-        foreign-key guarantee still applies to what the hook returns.
+        with the path this library has already checked (symlinks refused, and on
+        Linux and macOS a new file created readable by you only) and returns an
+        `aiosqlite.Connection`. Write-ahead logging is not set on the path
+        beforehand: `upgrade()` switches the file to it later, over connections
+        the hook returns. Every schema, migration, locking and foreign-key
+        guarantee still applies to what the hook returns.
 
         What the hook takes over is the caller's to get right: for Postgres the
         TLS mode and certificate verification, keeping `PG*` variables and
         `~/.pgpass` from being read, never resending a password in plain text
         after a failed encrypted attempt, `gsslib`, `krbsrvname` and
-        `server_settings`; for an encrypted SQLite build, any `PRAGMA key`.
+        `server_settings`; for an encrypted SQLite build, any `PRAGMA key`,
+        applied and verified (a read of `sqlite_master`) before returning, so
+        a wrong key fails inside the hook, where the connection can be closed.
         This library cannot manage or check any of it, and says so in the log.
         A hook that raises or returns the wrong type surfaces as
-        `StoreConnectionError` naming only the exception class."""
+        `StoreConnectionError` naming only the exception class; a connection
+        of the wrong type is closed first.
+
+        Close a store that has a hook, with `await store.close()` or
+        `async with`. SQLAlchemy marks the worker thread of a connection it
+        opens itself as a daemon, but cannot for one the hook returns, as the
+        thread has already started; a hook store never closed keeps the
+        interpreter from exiting."""
         require_storage()
         if connect is not None and not callable(connect):
             raise StoreConfigError("connect must be a callable that makes a connection")

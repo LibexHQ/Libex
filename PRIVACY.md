@@ -442,10 +442,14 @@ The library is built around preventing that from happening by accident:
   warning's fixed message is printed there, not the details listed with it.
   `-v` adds the informational lines, `-vv` adds tracebacks, and `-q` leaves
   only the error line. It sends none of this anywhere else. Its lookup
-  commands (books, chapters, series, searches and narrators) send the ASINs
-  and search terms you give them to Audible, as described above, and print
-  Audible's answer. A bulk lookup can read its list of ASINs from a file or
-  standard input. That input is read once, is not kept, and its path is not
+  commands (books, chapters, series, authors, new releases, coming soon,
+  categories, searches and narrators) send the ASINs, names, search terms and
+  category ids you give them to Audible, as described above, and print
+  Audible's answer. When an author's list of books may not be whole,
+  `author books` and `author books-by-name` also print one line to standard
+  error naming the reasons, which come from a fixed list; `-q` leaves it
+  out. A bulk lookup can read its list of ASINs from a file or standard
+  input. That input is read once, is not kept, and its path is not
   repeated in an error. `libex-core config` prints only whether a proxy is in
   use and the proxy's hostname, and makes no request. Neither the tool's
   output nor its error messages contain the proxy URL or the value of either
@@ -467,25 +471,27 @@ The library is built around preventing that from happening by accident:
   (extras, once a minute per reason), naming only the latest title.
 
   From the lookup functions:
-  - a completed lookup (info): region, how long Audible took and, except for a single chapters or series lookup, counts of what was asked for and what came back; for a search, the names of the fields searched, and for a quick search, the length of the text and how many parts a compound query was split into;
-  - a lookup Audible only partly answered (warning): region, counts, and the kind of error where one occurred, including how many identifiers were skipped for not being ASINs;
-  - Audible unavailable (warning, or error for a search): region and, except for a book lookup, the kind of error; for a chapters or series lookup, also Audible's status where there was one and the ASIN asked for.
+  - a completed lookup (info): region, how long Audible took and, for most lookups, counts of what was asked for and what came back; for a search, the names of the fields searched, and for a quick search, the length of the text and how many parts a compound query was split into; for an author's books by ASIN, the author ASIN and whether the list is whole; for new releases or coming soon, the number of days and the category id, if one was given;
+  - a lookup Audible only partly answered (warning): region, counts, and the kind of error where one occurred, including how many identifiers were skipped for not being ASINs; for an author's books by ASIN, also the author ASIN and the error message of each page that failed;
+  - Audible unavailable (warning, or error for a book search, a quick search, new releases or coming soon): region and, except for a book lookup, the kind of error; for a chapters, series or author lookup, also Audible's status where there was one and the ASIN asked for; for an author's books by ASIN, the author ASIN and the error message of each page that failed; for a search by name, the length of the name and Audible's status; for new releases, coming soon or categories, Audible's status and, for the first two, the category id, if one was given.
 
   From the command-line tool:
-  - a `libex-core` command fails (debug): a traceback.
+  - a `libex-core` command fails (debug): a traceback;
+  - an author's list of books may not be whole (warning): the reasons, from a fixed list.
 
   From the caller, these records take the region, the looked-up title, series
   or author ASIN, the names of searched fields, the length of quick-search
-  text and how many items were asked for. Search text, and the author name in
-  a search by name, are never logged: query parameters, where they would
+  text or of a name searched for, the number of days and category id asked
+  for, and how many items were asked for. Search text, and the name in any
+  search by name, are never logged: query parameters, where they would
   appear, are left out, and any ASIN, name or value not shaped like an ASIN or
   a short catalogue entry is logged as `REDACTED`. An error message is
   whatever the request function raised. The library's own client builds its
   messages from Audible's host and the API path, never the query string. An
   application that passes in a request function of its own decides what its
   messages contain. A title, series or author ASIN is still something someone
-  looked up or searched for, so these records are part of their reading
-  history.
+  looked up or searched for, and a category id is something they browsed, so
+  these records are part of their reading history.
 
 An application that includes the library still has to answer three questions
 for its own users. Does it connect directly or through a proxy, and if through

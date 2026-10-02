@@ -18,6 +18,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Third party
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 _CHILD_SCRIPT = """
@@ -97,4 +100,25 @@ def test_malformed_audible_proxy_url_still_raises_at_import(tmp_path):
     assert result.returncode != 0
     assert "ValueError" in result.stderr
     assert "proxy URL must use the http, https, socks5 or socks5h scheme" in result.stderr
+    assert "MODE:" not in result.stdout
+
+
+# ============================================================
+# SOCKS AUDIBLE_PROXY_URL -- refused as unsupported on the hosted service
+#
+# libex_core accepts SOCKS5 behind an optional extra the hosted image does not
+# install, so the hosted seam refuses it first, with fixed text that never
+# carries the value (which can hold credentials) and never points at the
+# extra.
+# ============================================================
+
+@pytest.mark.parametrize("scheme", ["socks5", "socks5h"])
+def test_socks_audible_proxy_url_is_refused_as_unsupported_on_hosted(tmp_path, scheme):
+    result = _run_with_proxy_url(tmp_path, f"{scheme}://user:SENTINEL-s3cr3t@libex-vpn:1080")
+
+    assert result.returncode != 0
+    assert "the hosted service supports http and https proxies only" in result.stderr
+    assert "socksio" not in result.stderr
+    assert "libex-core[socks]" not in result.stderr
+    assert "SENTINEL" not in result.stderr
     assert "MODE:" not in result.stdout

@@ -8,28 +8,28 @@ serves both layers:
 - DB endpoints use apply_sort, which sorts a SELECT via ORDER BY using the
   mapped column.
 - Live (Audible-backed) endpoints use sort_dicts, which sorts an already-built
-  list of response dicts by the field key — it only needs the allowed field
-  names, which are the same allow-list's keys.
+  list of response dicts by the field key (libex_core.shaping) — it only needs
+  the allowed field names, which are the same allow-list's keys.
 
 Keeping one allow-list per resource means the sortable surface is defined once,
 the field names match what the API returns, and clients can only sort on
 fields that make sense.
 """
 
-# Standard library
-from typing import Any
-
 # Third party
 from sqlalchemy import Select
+
+# Core
+from libex_core.shaping import BOOK_SORT_FIELDS as CORE_BOOK_SORT_FIELDS
+from libex_core.shaping import sort_dicts
 
 # Database
 from app.db.models import Book, Narrator
 
 # Allow-list for Book sorting: API field name -> sortable column.
-# Text-heavy fields (description, summary) are intentionally excluded.
-# Keys are the sortable field names (used by both DB and live sorting);
-# values are the DB columns (used only by apply_sort).
-BOOK_SORT_FIELDS = {
+# The field names come from libex_core.shaping (shared with live sorting);
+# only the column mapping is a database concern and stays here.
+_BOOK_SORT_COLUMNS = {
     "title": Book.title,
     "releaseDate": Book.release_date,
     "rating": Book.rating,
@@ -38,6 +38,7 @@ BOOK_SORT_FIELDS = {
     "publisher": Book.publisher,
     "updatedAt": Book.updated_at,
 }
+BOOK_SORT_FIELDS = {field: _BOOK_SORT_COLUMNS[field] for field in CORE_BOOK_SORT_FIELDS}
 
 # Allow-list for Narrator sorting. Only scalar fields that sort sensibly.
 # audiobooksProduced is excluded — it holds categorical buckets ("1 to 10",
@@ -80,33 +81,4 @@ def apply_sort(
     return stmt.order_by(column.asc().nulls_last())
 
 
-def sort_dicts(
-    items: list[dict[str, Any]],
-    sort: str | None,
-    order: str | None,
-    allowed: dict,
-) -> list[dict[str, Any]]:
-    """
-    Sorts an already-built list of response dicts (live Audible endpoints).
-
-    - sort: API field name; must be a key in `allowed`. If None or unknown, the
-      list is returned unchanged (preserving the order Audible returned).
-    - order: "asc" or "desc" (defaults to "asc").
-    - allowed: the resource's allow-list; only its keys (field names) are used.
-
-    Items missing the field, or with a None value, sort to the end regardless
-    of direction — mirroring nulls_last in the DB sorter — since None can't be
-    compared to real values.
-    """
-    if not sort or sort not in allowed:
-        return items
-
-    reverse = (order or "asc").lower() == "desc"
-
-    # Items missing the field or with None sort to the end in both directions,
-    # since None can't be compared to real values. Sort the present ones, then
-    # append the missing ones.
-    present = [i for i in items if i.get(sort) is not None]
-    missing = [i for i in items if i.get(sort) is None]
-    present.sort(key=lambda i: i.get(sort), reverse=reverse)
-    return present + missing
+__all__ = ["BOOK_SORT_FIELDS", "NARRATOR_SORT_FIELDS", "apply_sort", "sort_dicts"]

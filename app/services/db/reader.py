@@ -106,7 +106,8 @@ async def _get_series_positions_batch(
 
 
 def _book_to_dict(book: Book, series_positions: dict[str, str | None]) -> dict[str, Any]:
-    """Converts a Book ORM object to the same dict format as _normalize_product."""
+    """Converts a Book ORM object to the dict shape that
+    libex_core.audible.books.normalize_product produces."""
     release_date = None
     if book.release_date:
         try:

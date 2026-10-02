@@ -105,6 +105,7 @@ from app.db.models import Book
 from app.db.session import AsyncSessionFactory, engine
 
 # Core
+from libex_core.audible import _concurrency as audible_concurrency
 from libex_core.audible import client as audible_client
 from libex_core.exceptions import NotFoundException
 from app.core.logging import get_logger, setup_logging
@@ -764,18 +765,19 @@ def _raise_process_limits() -> None:
     Both are sized for the API process; neither constraint applies to a
     dedicated one-off container, so they're rebound here rather than made
     environment-driven in application code for a script that gets deleted
-    after one night. The asserts are the safety: the hosted LibexClient
-    instance and the module-level semaphore are both built lazily on first
+    after one night. The checks are the safety (explicit raises, so -O cannot strip
+    them): the hosted LibexClient instance and the module-level semaphore are both built lazily on first
     use, so a later caller would otherwise silently get the old limits.
 
-    AUDIBLE_CONCURRENCY_LIMIT and _AUDIBLE_POOL_LIMITS are rebound directly
-    on libex_core.audible.client, not on the hosted LibexClient instance:
-    both stayed module-level constants through the move to LibexClient, read
-    by module scope at use time rather than captured once per instance, so
-    rebinding them here still reaches every LibexClient this process ever
-    builds, hosted one included, with no per-instance plumbing needed.
+    AUDIBLE_CONCURRENCY_LIMIT is rebound on libex_core.audible._concurrency,
+    the module that owns the semaphore and reads the limit when it builds
+    it; rebinding the name client.py imported would change nothing the
+    semaphore sees. _AUDIBLE_POOL_LIMITS stays on libex_core.audible.client,
+    which still owns the pool. Both are module-level, read at use time
+    rather than captured per instance, so rebinding them here reaches every
+    LibexClient this process ever builds, hosted one included.
 
-    The first assert used to mean "no Audible client exists anywhere in this
+    The first check used to mean "no Audible client exists anywhere in this
     process" -- a single module-level client made that a whole-process fact.
     Now it means only "the one hosted instance this script knows about has
     not opened a live client yet": is_open is a property of that one
@@ -785,11 +787,14 @@ def _raise_process_limits() -> None:
     -- but the guarantee it gives has narrowed, and a reader relying on it
     for a broader claim would be relying on more than it now proves.
     """
-    assert not audible_service._hosted_client.is_open, "Audible client already built"
-    assert audible_client._audible_semaphore is None, "Audible semaphore already built"
-    assert persist_queue._bg_write_semaphore is None, "Persist semaphore already built"
+    if audible_service._hosted_client.is_open:
+        raise RuntimeError("Audible client already built")
+    if audible_concurrency._audible_semaphore is not None:
+        raise RuntimeError("Audible semaphore already built")
+    if persist_queue._bg_write_semaphore is not None:
+        raise RuntimeError("Persist semaphore already built")
 
-    audible_client.AUDIBLE_CONCURRENCY_LIMIT = CONCURRENCY_MAX
+    audible_concurrency.AUDIBLE_CONCURRENCY_LIMIT = CONCURRENCY_MAX
     audible_client._AUDIBLE_POOL_LIMITS = httpx.Limits(
         max_connections=CONCURRENCY_MAX,
         max_keepalive_connections=CONCURRENCY_MAX,

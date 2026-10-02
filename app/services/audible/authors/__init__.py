@@ -88,7 +88,7 @@ logger = get_logger()
 # all, which is what actually produced a live, measured production outage:
 # every one of 5 concurrent author lookups 504'd at exactly 30.1s, and even
 # a single uncontended prolific-author request (Christie) measured 28.22s
-# wall clock. The actual fix is client.py's AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT
+# wall clock. The actual fix is libex_core/audible/_concurrency.py's AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT
 # pool (entered below via author_books_concurrency) -- see that constant's
 # own docstring for the measurements: raising the effective in-flight limit
 # from 10 to 25-30 for this call path more than halved wall clock in the
@@ -146,8 +146,8 @@ class AuthorBooksResult(NamedTuple):
 # single popular author's key expiring can still produce one independent
 # walk per worker rather than the one walk this coalescing achieves within
 # a process. That is not free -- a walk is hundreds of upstream requests
-# (179 measured for Agatha Christie, 651 for Conan Doyle; see client.py's
-# AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT docstring), so the worst case
+# (179 measured for Agatha Christie, 651 for Conan Doyle; see libex_core/audible/_concurrency.py's
+# AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT comment), so the worst case
 # scales with the number of worker processes rather than staying at one.
 # Two things keep that from actually biting: expiry is staggered per
 # author -- each entry's TTL runs from its own walk finishing, not a
@@ -277,7 +277,7 @@ async def get_author(
         # PostgreSQL 16.14 -- holding the xmin horizon against autovacuum
         # until it ends. Nothing between here and the contributors fetch
         # below needs it open, and that fetch queues against the process-wide
-        # pool in client.py rather than going out immediately.
+        # pool in libex_core/audible/_concurrency.py rather than going out immediately.
         #
         # Nothing after this point depends on transaction state established
         # before it: cached is a plain already-materialized value, and the DB
@@ -557,7 +557,7 @@ async def _walk_author_books(
     # and wave 3) -- on the wider AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT pool
     # instead of the default one every other Audible caller (single book/
     # author/series lookups, the seeder) still uses. See that pool's own
-    # docstring in client.py for why this call path specifically gets it
+    # comment in libex_core/audible/_concurrency.py for why this call path specifically gets it
     # and the measurements behind the chosen limit.
     with author_books_concurrency():
         tasks = [_fetch_author_books_by_screen(asin, region, deadline=deadline)]

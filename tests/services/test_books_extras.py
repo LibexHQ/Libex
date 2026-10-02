@@ -31,21 +31,26 @@ what is asserted is which keys it holds and what they contain.
 import importlib.util
 import json
 import pathlib
+from unittest.mock import patch
 
 # Third party
 import pytest
 
 # Local
-from app.services.audible import books
-from app.services.audible.books import (
+from libex_core.audible import books
+from libex_core.audible.books import (
+    _REPRODUCED_KEYS,
+    _reproduce,
+    normalize_product as _normalize_product,
+)
+from libex_core.audible.extras import (
+    _EXTRAS_LOG_INTERVAL_SECONDS,
     _EXTRAS_MAX_BYTES,
     _EXTRAS_MAX_DEPTH,
-    _REPRODUCED_KEYS,
     _WITHHELD_DEPTH,
     _WITHHELD_SANITIZED,
     _WITHHELD_SIZE,
-    _normalize_product,
-    _reproduce,
+    _log_extras_incident,
 )
 from libex_core.audible.client import VALID_REGIONS
 
@@ -549,3 +554,64 @@ def test_the_podcast_strip_runs_in_every_region(region):
 
     assert book["extrasWithheld"]["relationships"] == {"episode": 3, "season": 1}
     assert book["audibleExtras"]["relationships"] == [relationships[4]]
+
+
+# ============================================================
+# WITHHOLDING INCIDENT LOG
+# ============================================================
+
+EXTRAS_LOGGER = "libex_core.audible.extras.logger"
+
+
+@pytest.fixture
+def fresh_incident_state():
+    with patch("libex_core.audible.extras._extras_incident_counts", {}), \
+         patch("libex_core.audible.extras._extras_incident_last_logged", {}):
+        yield
+
+
+def _incidents(mock_logger):
+    return [c for c in mock_logger.warning.call_args_list if c.args[0] == "Audible extras withheld"]
+
+
+def test_the_first_withholding_incident_is_logged_with_its_fields(fresh_incident_state):
+    with patch(EXTRAS_LOGGER) as mock_logger, patch("libex_core.audible.extras.time.monotonic", return_value=5.0):
+        _log_extras_incident("B08G9PRS1K", "us", _WITHHELD_SIZE, blob_bytes=70000)
+
+    (call,) = _incidents(mock_logger)
+    assert call.kwargs["extra"] == {
+        "asin": "B08G9PRS1K",
+        "region": "us",
+        "withheld_reason": _WITHHELD_SIZE,
+        "occurrences": 1,
+        "blob_bytes": 70000,
+    }
+
+
+def test_a_withholding_incident_logs_a_malformed_asin_as_redacted(fresh_incident_state):
+    with patch(EXTRAS_LOGGER) as mock_logger, patch("libex_core.audible.extras.time.monotonic", return_value=5.0):
+        _log_extras_incident("bad\nasin", "us", _WITHHELD_DEPTH)
+
+    (call,) = _incidents(mock_logger)
+    assert call.kwargs["extra"]["asin"] == "REDACTED"
+
+
+def test_repeat_incidents_are_windowed_per_reason_and_counted(fresh_incident_state):
+    with patch(EXTRAS_LOGGER) as mock_logger, \
+         patch("libex_core.audible.extras.time.monotonic") as clock:
+        clock.return_value = 100.0
+        _log_extras_incident("B08G9PRS1K", "us", _WITHHELD_SIZE)
+        clock.return_value = 100.0 + _EXTRAS_LOG_INTERVAL_SECONDS - 1
+        _log_extras_incident("B08G9PRS1K", "us", _WITHHELD_SIZE)
+        _log_extras_incident("B08G9PRS1K", "us", _WITHHELD_SIZE)
+        # A different reason has its own window and is not silenced by the flood.
+        _log_extras_incident("B08G9PRS1K", "us", _WITHHELD_DEPTH)
+        clock.return_value = 100.0 + _EXTRAS_LOG_INTERVAL_SECONDS
+        _log_extras_incident("B08G9PRS1K", "us", _WITHHELD_SIZE)
+
+    calls = _incidents(mock_logger)
+    assert [(c.kwargs["extra"]["withheld_reason"], c.kwargs["extra"]["occurrences"]) for c in calls] == [
+        (_WITHHELD_SIZE, 1),
+        (_WITHHELD_DEPTH, 1),
+        (_WITHHELD_SIZE, 3),
+    ]

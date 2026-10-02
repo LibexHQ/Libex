@@ -246,7 +246,7 @@ async def test_an_early_404_does_not_retire_a_title_before_release(db_session):
     measured on the live corpus while this was being written, and the number
     is deliberately not repeated here -- an undated point-in-time figure in a
     docstring ages into a falsehood that reads as fact."""
-    asin = "B00PREORDER"
+    asin = "B0PREORDER"
     # The stamp comes from the real clock, so the release date has to be
     # placed relative to it; a fixed date eventually falls behind the wall
     # clock and the ordering under test stops holding.

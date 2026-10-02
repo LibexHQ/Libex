@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 # Local
-from app.services.audible.series import _normalize_series
+from libex_core.audible.series import normalize_series as _normalize_series
 from libex_core.text import strip_html
 
 
@@ -57,42 +57,42 @@ def test_clean_description_returns_none_for_whitespace_only():
 
 def test_normalize_series_extracts_asin():
     """Normalized series includes ASIN."""
-    product = {"asin": "B000SERIES1", "title": "Dune", "publisher_summary": "A great series."}
+    product = {"asin": "B00SERIES1", "title": "Dune", "publisher_summary": "A great series."}
     result = _normalize_series(product, "us")
-    assert result["asin"] == "B000SERIES1"
+    assert result["asin"] == "B00SERIES1"
 
 
 def test_normalize_series_extracts_name():
-    """Normalized series includes name field matching AudiMeta SeriesDto."""
-    product = {"asin": "B000SERIES1", "title": "Dune Chronicles", "publisher_summary": None}
+    """Normalized series includes name field in the AudiMeta SeriesDto shape."""
+    product = {"asin": "B00SERIES1", "title": "Dune Chronicles", "publisher_summary": None}
     result = _normalize_series(product, "us")
     assert result["name"] == "Dune Chronicles"
 
 
 def test_normalize_series_sets_region():
     """Normalized series includes provided region."""
-    product = {"asin": "B000SERIES1", "title": "Dune", "publisher_summary": None}
+    product = {"asin": "B00SERIES1", "title": "Dune", "publisher_summary": None}
     result = _normalize_series(product, "uk")
     assert result["region"] == "uk"
 
 
 def test_normalize_series_cleans_description():
     """Normalized series description has HTML stripped."""
-    product = {"asin": "B000SERIES1", "title": "Dune", "publisher_summary": "<p>A great series.</p>"}
+    product = {"asin": "B00SERIES1", "title": "Dune", "publisher_summary": "<p>A great series.</p>"}
     result = _normalize_series(product, "us")
     assert result["description"] == "A great series."
 
 
 def test_normalize_series_description_none_when_missing():
     """Normalized series description is None when not provided."""
-    product = {"asin": "B000SERIES1", "title": "Dune", "publisher_summary": None}
+    product = {"asin": "B00SERIES1", "title": "Dune", "publisher_summary": None}
     result = _normalize_series(product, "us")
     assert result["description"] is None
 
 
 def test_normalize_series_returns_required_fields():
-    """Normalized series contains all required fields matching AudiMeta SeriesDto."""
-    product = {"asin": "B000SERIES1", "title": "Dune", "publisher_summary": None}
+    """Normalized series contains all required fields in the AudiMeta SeriesDto shape."""
+    product = {"asin": "B00SERIES1", "title": "Dune", "publisher_summary": None}
     result = _normalize_series(product, "us")
     for field in ["asin", "name", "description", "region"]:
         assert field in result, f"Missing field: {field}"
@@ -109,7 +109,7 @@ async def test_get_series_falls_back_to_db_when_audible_fails():
 
     mock_session = AsyncMock()
     db_series = {
-        "asin": "B000SERIES1", "name": "Dune Chronicles",
+        "asin": "B00SERIES1", "name": "Dune Chronicles",
         "description": "From DB", "region": "us",
         "position": None, "updatedAt": "2024-01-01T00:00:00+00:00",
     }
@@ -117,7 +117,7 @@ async def test_get_series_falls_back_to_db_when_audible_fails():
     with patch("app.services.audible.series.audible_get", side_effect=Exception("Audible down")), \
          patch("app.services.audible.series.get_series_from_db", new_callable=AsyncMock, return_value=db_series), \
          patch("app.services.audible.series.cache.get", return_value=None):
-        result = await get_series("B000SERIES1", "us", mock_session)
+        result = await get_series("B00SERIES1", "us", mock_session)
         assert result["name"] == "Dune Chronicles"
         assert result["description"] == "From DB"
 
@@ -129,7 +129,7 @@ async def test_get_series_falls_back_to_cache_when_db_empty():
 
     mock_session = AsyncMock()
     cached_series = {
-        "asin": "B000SERIES1", "name": "Dune Chronicles (cached)",
+        "asin": "B00SERIES1", "name": "Dune Chronicles (cached)",
         "description": None, "region": "us",
         "position": None, "updatedAt": None,
     }
@@ -137,7 +137,7 @@ async def test_get_series_falls_back_to_cache_when_db_empty():
     with patch("app.services.audible.series.audible_get", side_effect=Exception("Audible down")), \
          patch("app.services.audible.series.get_series_from_db", new_callable=AsyncMock, return_value=None), \
          patch("app.services.audible.series.cache.get", return_value=cached_series):
-        result = await get_series("B000SERIES1", "us", mock_session)
+        result = await get_series("B00SERIES1", "us", mock_session)
         assert result["name"] == "Dune Chronicles (cached)"
 
 
@@ -150,7 +150,7 @@ async def test_get_series_writes_to_db_on_success():
     mock_response = {
         "response_groups": ["product_attrs", "product_desc"],
         "product": {
-            "asin": "B000SERIES1",
+            "asin": "B00SERIES1",
             "title": "Dune Chronicles",
             "publisher_summary": "A great series.",
         }
@@ -159,7 +159,7 @@ async def test_get_series_writes_to_db_on_success():
     with patch("app.services.audible.series.audible_get", return_value=mock_response), \
          patch("app.services.audible.series.persist_series_background") as mock_persist, \
          patch("app.services.audible.series.cache.get", return_value=None):
-        await get_series("B000SERIES1", "us", mock_session)
+        await get_series("B00SERIES1", "us", mock_session)
         mock_persist.assert_called_once()
 
 
@@ -182,7 +182,7 @@ async def test_get_series_raises_audible_api_exception_when_nothing_backstops_it
          patch("app.services.audible.series.get_series_from_db", new_callable=AsyncMock, return_value=None), \
          patch("app.services.audible.series.cache.get", new=AsyncMock(return_value=None)):
         with pytest.raises(AudibleAPIException) as exc:
-            await get_series("B000SERIES1", "us", mock_session)
+            await get_series("B00SERIES1", "us", mock_session)
 
     assert exc.value.message == "Audible unavailable and no cached series data found"
     assert exc.value.upstream_status is None
@@ -216,12 +216,12 @@ async def test_get_series_logs_warning_before_raising(raised, expected_upstream_
          patch("app.services.audible.series.cache.get", new=AsyncMock(return_value=None)), \
          patch("app.services.audible.series.logger") as mock_logger:
         with pytest.raises(AudibleAPIException):
-            await get_series("B000SERIES1", "us", mock_session)
+            await get_series("B00SERIES1", "us", mock_session)
 
     mock_logger.warning.assert_called_once_with(
         "Audible unavailable and no cached series data found",
         extra={
-            "series_asin": "B000SERIES1",
+            "series_asin": "B00SERIES1",
             "region": "us",
             "error": str(exc),
             "upstream_status": expected_upstream_status,
@@ -239,7 +239,7 @@ async def test_get_series_books_raises_audible_api_exception_when_nothing_backst
     with patch("app.services.audible.series.audible_get", side_effect=RuntimeError("Audible down")), \
          patch("app.services.audible.series.cache.get", new=AsyncMock(return_value=None)):
         with pytest.raises(AudibleAPIException) as exc:
-            await get_series_books("B000SERIES1", "us", mock_session)
+            await get_series_books("B00SERIES1", "us", mock_session)
 
     assert exc.value.message == "Audible unavailable and no cached series books found"
     assert exc.value.upstream_status is None
@@ -272,12 +272,12 @@ async def test_get_series_books_logs_warning_before_raising(raised, expected_ups
          patch("app.services.audible.series.cache.get", new=AsyncMock(return_value=None)), \
          patch("app.services.audible.series.logger") as mock_logger:
         with pytest.raises(AudibleAPIException):
-            await get_series_books("B000SERIES1", "us", mock_session)
+            await get_series_books("B00SERIES1", "us", mock_session)
 
     mock_logger.warning.assert_called_once_with(
         "Audible unavailable and no cached series books found",
         extra={
-            "series_asin": "B000SERIES1",
+            "series_asin": "B00SERIES1",
             "region": "us",
             "error": str(exc),
             "upstream_status": expected_upstream_status,
@@ -362,7 +362,7 @@ async def test_search_series_skips_an_unreachable_related_series_and_keeps_the_r
 
     mock_session = AsyncMock()
     reachable = {
-        "asin": "B000SERIES2", "name": "Reachable Series",
+        "asin": "B00SERIES2", "name": "Reachable Series",
         "description": None, "region": "us", "position": None, "updatedAt": None,
     }
 
@@ -371,15 +371,15 @@ async def test_search_series_skips_an_unreachable_related_series_and_keeps_the_r
             {
                 "asin": "B08G9PRS1K",
                 "relationships": [
-                    {"relationship_type": "series", "asin": "B000SERIES1"},
-                    {"relationship_type": "series", "asin": "B000SERIES2"},
+                    {"relationship_type": "series", "asin": "B00SERIES1"},
+                    {"relationship_type": "series", "asin": "B00SERIES2"},
                 ],
             }
         ]
     }
 
     async def fake_get_series(asin, region, session):
-        if asin == "B000SERIES1":
+        if asin == "B00SERIES1":
             raise AudibleAPIException("Audible unavailable and no cached series data found")
         return reachable
 
@@ -395,7 +395,7 @@ async def test_search_series_skips_an_unreachable_related_series_and_keeps_the_r
         extra={
             "region": "us",
             "skipped_num": 1,
-            "skipped_asins": ["B000SERIES1"],
+            "skipped_asins": ["B00SERIES1"],
         },
     )
 
@@ -408,7 +408,7 @@ async def test_search_series_emits_no_summary_warning_when_nothing_was_skipped()
 
     mock_session = AsyncMock()
     reachable = {
-        "asin": "B000SERIES2", "name": "Reachable Series",
+        "asin": "B00SERIES2", "name": "Reachable Series",
         "description": None, "region": "us", "position": None, "updatedAt": None,
     }
     audible_product_response = {
@@ -416,7 +416,7 @@ async def test_search_series_emits_no_summary_warning_when_nothing_was_skipped()
             {
                 "asin": "B08G9PRS1K",
                 "relationships": [
-                    {"relationship_type": "series", "asin": "B000SERIES2"},
+                    {"relationship_type": "series", "asin": "B00SERIES2"},
                 ],
             }
         ]
@@ -439,7 +439,7 @@ async def test_search_series_includes_db_results():
 
     mock_session = AsyncMock()
     db_series = {
-        "asin": "B000SERIES2", "name": "Dune Expanded",
+        "asin": "B00SERIES2", "name": "Dune Expanded",
         "description": "From DB", "region": "us", "position": None,
         "updatedAt": "2024-01-01T00:00:00+00:00",
     }
@@ -449,14 +449,14 @@ async def test_search_series_includes_db_results():
             {
                 "asin": "B08G9PRS1K",
                 "relationships": [
-                    {"relationship_type": "series", "asin": "B000SERIES1"}
+                    {"relationship_type": "series", "asin": "B00SERIES1"}
                 ]
             }
         ]
     }
     series_detail_response = {
         "response_groups": ["product_attrs", "product_desc"],
-        "product": {"asin": "B000SERIES1", "title": "Dune Chronicles", "publisher_summary": None}
+        "product": {"asin": "B00SERIES1", "title": "Dune Chronicles", "publisher_summary": None}
     }
 
     with patch("app.services.audible.series.audible_get", side_effect=[audible_product_response, series_detail_response]), \
@@ -465,8 +465,8 @@ async def test_search_series_includes_db_results():
          patch("app.services.audible.series.cache.get", return_value=None):
         results = await search_series("Dune", "us", mock_session)
         asins = [r["asin"] for r in results]
-        assert "B000SERIES1" in asins
-        assert "B000SERIES2" in asins
+        assert "B00SERIES1" in asins
+        assert "B00SERIES2" in asins
 
 
 @pytest.mark.asyncio
@@ -476,7 +476,7 @@ async def test_search_series_deduplicates_audible_and_db_results():
 
     mock_session = AsyncMock()
     same_series = {
-        "asin": "B000SERIES1", "name": "Dune Chronicles",
+        "asin": "B00SERIES1", "name": "Dune Chronicles",
         "description": None, "region": "us", "position": None, "updatedAt": None,
     }
 
@@ -485,14 +485,14 @@ async def test_search_series_deduplicates_audible_and_db_results():
             {
                 "asin": "B08G9PRS1K",
                 "relationships": [
-                    {"relationship_type": "series", "asin": "B000SERIES1"}
+                    {"relationship_type": "series", "asin": "B00SERIES1"}
                 ]
             }
         ]
     }
     series_detail_response = {
         "response_groups": ["product_attrs", "product_desc"],
-        "product": {"asin": "B000SERIES1", "title": "Dune Chronicles", "publisher_summary": None}
+        "product": {"asin": "B00SERIES1", "title": "Dune Chronicles", "publisher_summary": None}
     }
 
     with patch("app.services.audible.series.audible_get", side_effect=[audible_product_response, series_detail_response]), \
@@ -501,4 +501,81 @@ async def test_search_series_deduplicates_audible_and_db_results():
          patch("app.services.audible.series.cache.get", return_value=None):
         results = await search_series("Dune", "us", mock_session)
         asins = [r["asin"] for r in results]
-        assert asins.count("B000SERIES1") == 1
+        assert asins.count("B00SERIES1") == 1
+
+# ============================================================
+# MALFORMED RELATIONSHIP ASIN -- a not-found, as it was on main, never an
+# outage. Audible answered an ASIN it could not resolve with a hollow
+# response that fetch_series turned into NotFoundException; the core fetch
+# now rejects a non-ASIN with ValueError before any request, and the hosted
+# get_series must not read that as Audible being unreachable.
+# ============================================================
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", ["B000SERIES1", "B0SERIES", "not-an-asin!"])
+async def test_get_series_malformed_asin_is_not_found_not_an_outage(bad):
+    from app.services.audible.series import get_series
+    from libex_core.exceptions import AudibleAPIException, NotFoundException
+
+    audible = AsyncMock()
+
+    with patch("app.services.audible.series.audible_get", new=audible), \
+         patch("app.services.audible.series.get_series_from_db", new_callable=AsyncMock, return_value=None), \
+         patch("app.services.audible.series.cache.get", new=AsyncMock(return_value=None)):
+        with pytest.raises(NotFoundException) as exc:
+            await get_series(bad, "us", AsyncMock())
+
+    assert not isinstance(exc.value, AudibleAPIException)
+    audible.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", ["B000SERIES1", "B0SERIES", "not-an-asin!"])
+async def test_get_series_books_malformed_asin_is_not_found_not_an_outage(bad):
+    from app.services.audible.series import get_series_books
+    from libex_core.exceptions import AudibleAPIException, NotFoundException
+
+    audible = AsyncMock()
+
+    with patch("app.services.audible.series.audible_get", new=audible), \
+         patch("app.services.audible.series.cache.get", new=AsyncMock(return_value=None)):
+        with pytest.raises(NotFoundException) as exc:
+            await get_series_books(bad, "us", AsyncMock())
+
+    assert not isinstance(exc.value, AudibleAPIException)
+    audible.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_search_series_skips_a_malformed_relationship_asin_without_counting_it_as_unreachable():
+    """A malformed series ASIN in a search hit's relationships is a
+    not-found: it is passed over like any other, and does not land in the
+    skipped (unreachable) ASINs a search warns about."""
+    from app.services.audible.series import search_series
+
+    good = "B0SERIES01"
+    bad = "B000SERIES1"
+
+    async def _get(region, path, params):
+        if path == "/1.0/catalog/products" and "title" in params:
+            return {"products": [{"relationships": [
+                {"relationship_type": "series", "asin": bad},
+                {"relationship_type": "series", "asin": good},
+            ]}]}
+        assert good in path, f"request for {path} must not be made"
+        return {
+            "response_groups": ["product_attrs", "product_desc"],
+            "product": {"asin": good, "title": "Real Series", "publisher_summary": None},
+        }
+
+    with patch("app.services.audible.series.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.series.get_series_from_db", new_callable=AsyncMock, return_value=None), \
+         patch("app.services.audible.series.search_series_from_db", new_callable=AsyncMock, return_value=[]), \
+         patch("app.services.audible.series.persist_series_background"), \
+         patch("app.services.audible.series.logger") as log, \
+         patch("app.services.audible.series.cache.get", new=AsyncMock(return_value=None)):
+        results = await search_series("Real", "us", AsyncMock())
+
+    assert [r["asin"] for r in results] == [good]
+    for call in log.warning.call_args_list:
+        assert "skipped_asins" not in (call.kwargs.get("extra") or {})

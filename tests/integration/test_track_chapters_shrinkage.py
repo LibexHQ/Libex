@@ -12,7 +12,7 @@ perfectly well-formed payload whose chapters list is empty. Written straight
 through, that erases a stored listing and nothing anywhere records that it
 happened.
 
-The empty payloads below are built by the real _normalize_chapters from
+The empty payloads below are built by the real normalize_chapters from
 exactly that chapter_info, rather than hand-written, so these test the shape
 production actually produces.
 
@@ -47,7 +47,7 @@ from sqlalchemy import insert, select
 # Local
 import app.db.session as db_session_module
 from app.db.models import Book, Track
-from app.services.audible.books import _normalize_chapters
+from libex_core.audible.chapters import normalize_chapters
 from app.services.db.writer import upsert_track
 from scripts.backfill_chapters import _store_chapters
 
@@ -62,7 +62,7 @@ WRITE_FAILED = "DB write failed for track"
 
 def _listing(count, runtime_ms=3_600_000):
     """A payload that really lists chapters, in the normalizer's own shape."""
-    return _normalize_chapters(
+    return normalize_chapters(
         {
             "content_metadata": {
                 "chapter_info": {
@@ -79,8 +79,7 @@ def _listing(count, runtime_ms=3_600_000):
                     ],
                 }
             }
-        },
-        ASIN,
+        }
     )
 
 
@@ -88,8 +87,8 @@ def _chapterless():
     """The payload the reported failure actually produces: Audible answers
     with a chapter_info carrying only a brand-intro duration, that passes the
     truthiness fall-through, and the normalizer turns it into this."""
-    return _normalize_chapters(
-        {"content_metadata": {"chapter_info": {"brandIntroDurationMs": 2000}}}, ASIN
+    return normalize_chapters(
+        {"content_metadata": {"chapter_info": {"brandIntroDurationMs": 2000}}}
     )
 
 

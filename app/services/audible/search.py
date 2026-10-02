@@ -11,20 +11,20 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Core
+from libex_core.audible.books import (
+    BOOK_RESPONSE_GROUPS,
+    IMAGE_SIZES,
+    filter_products,
+    normalize_product,
+    settle_flags_list,
+)
 from libex_core.audible.client import as_audible_failure
 from libex_core.exceptions import AudibleAPIException, NotFoundException
 from app.core.logging import get_logger
 
 # Services
 from app.services.audible import audible_get
-from app.services.audible.books import (
-    get_books_by_asins,
-    _normalize_product,
-    _filter_products,
-    _settle_flags_list,
-    BOOK_RESPONSE_GROUPS,
-    IMAGE_SIZES,
-)
+from app.services.audible.books import get_books_by_asins
 from app.services.db.persist_queue import persist_books_background
 from app.services.db.reader import search_books_from_db
 
@@ -89,7 +89,7 @@ async def search(
         data = await audible_get(region, "/1.0/catalog/products/", params)
         search_took = round((time.monotonic() - start) * 1000, 2)
 
-        products = _filter_products(data.get("products", []))
+        products = filter_products(data.get("products", []))
 
         # search_params carries the caller's own title/author/narrator text,
         # so only its keys are logged, never its values. Which fields a
@@ -106,18 +106,18 @@ async def search(
             return []
 
         # Normalize directly from search results — no re-fetch needed
-        normalized = [_normalize_product(p, region) for p in products]
+        normalized = [normalize_product(p, region) for p in products]
 
         # Persist to DB and cache in the background. Unsettled: the writer
-        # needs the tri-state flags None/True/False as _normalize_product
+        # needs the tri-state flags None/True/False as normalize_product
         # produced them (see _asserted_bool in writer.py), so this runs
-        # before _settle_flags_list below, on the pre-settle list.
+        # before settle_flags_list below, on the pre-settle list.
         persist_books_background(normalized, region)
 
         # filter_dicts (app/services/filtering.py) and BookResponse both run
         # on what this returns and neither tolerates a None flag -- settle
         # here, after the persist above got the tri-state it needs.
-        return _settle_flags_list(normalized)
+        return settle_flags_list(normalized)
 
     except NotFoundException:
         return []

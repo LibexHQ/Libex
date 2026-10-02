@@ -33,6 +33,8 @@ import httpx
 import pytest
 
 # Local
+import libex_core.audible._concurrency as concurrency_module
+import libex_core.audible._retry as retry_module
 import libex_core.audible.client as client_module
 from libex_core.audible.client import LibexClient, get_audible_url
 from libex_core.exceptions import AudibleAPIException, NotFoundException
@@ -470,12 +472,12 @@ async def test_get_refuses_when_aclose_lands_while_parked_on_the_semaphore_permi
     way -- the assertion below pins the phrase that is unique to
     _get_client's own message, proving which of the two actually surfaced.
     """
-    monkeypatch.setattr(client_module, "AUDIBLE_CONCURRENCY_LIMIT", 1)
-    monkeypatch.setattr(client_module, "_audible_semaphore", None)
-    monkeypatch.setattr(client_module, "_audible_semaphore_loop", None)
+    monkeypatch.setattr(concurrency_module, "AUDIBLE_CONCURRENCY_LIMIT", 1)
+    monkeypatch.setattr(concurrency_module, "_audible_semaphore", None)
+    monkeypatch.setattr(concurrency_module, "_audible_semaphore_loop", None)
 
     client = _client()
-    semaphore = client_module._get_audible_semaphore()
+    semaphore = concurrency_module._get_audible_semaphore()
     await semaphore.acquire()  # the only permit -- get() below must genuinely park on it
 
     task = asyncio.create_task(client.get("us", "/1.0/catalog/products"))
@@ -1557,7 +1559,7 @@ async def test_get_retry_after_is_capped():
          patch("asyncio.sleep", new=AsyncMock()) as mock_sleep:
         await client.get("us", "/1.0/catalog/products", {"page": 0})
 
-    mock_sleep.assert_awaited_once_with(client_module.AUDIBLE_RETRY_AFTER_CAP_SECONDS)
+    mock_sleep.assert_awaited_once_with(retry_module.AUDIBLE_RETRY_AFTER_CAP_SECONDS)
     await client.aclose()
 
 
@@ -1576,7 +1578,7 @@ async def test_get_backoff_used_when_no_retry_after_header():
          patch("random.uniform", return_value=0.0) as mock_uniform:
         await client.get("us", "/1.0/catalog/products", {"page": 0})
 
-    mock_uniform.assert_called_once_with(0, client_module.AUDIBLE_RETRY_BASE_SECONDS)
+    mock_uniform.assert_called_once_with(0, retry_module.AUDIBLE_RETRY_BASE_SECONDS)
     mock_sleep.assert_awaited_once_with(0.0)
     await client.aclose()
 
@@ -1590,9 +1592,9 @@ async def test_get_audible_semaphore_bounds_in_flight_requests(monkeypatch):
     """The semaphore actually bounds how many callers can hold it at once to
     AUDIBLE_CONCURRENCY_LIMIT -- proven by driving real concurrency past the
     limit and watching the observed peak never exceed it."""
-    monkeypatch.setattr(client_module, "AUDIBLE_CONCURRENCY_LIMIT", 2)
-    monkeypatch.setattr(client_module, "_audible_semaphore", None)
-    monkeypatch.setattr(client_module, "_audible_semaphore_loop", None)
+    monkeypatch.setattr(concurrency_module, "AUDIBLE_CONCURRENCY_LIMIT", 2)
+    monkeypatch.setattr(concurrency_module, "_audible_semaphore", None)
+    monkeypatch.setattr(concurrency_module, "_audible_semaphore_loop", None)
 
     in_flight = 0
     max_in_flight = 0
@@ -1600,7 +1602,7 @@ async def test_get_audible_semaphore_bounds_in_flight_requests(monkeypatch):
 
     async def worker():
         nonlocal in_flight, max_in_flight
-        async with client_module._get_audible_semaphore():
+        async with concurrency_module._get_audible_semaphore():
             async with lock:
                 in_flight += 1
                 max_in_flight = max(max_in_flight, in_flight)
@@ -1617,12 +1619,12 @@ def test_get_audible_semaphore_reuses_instance_within_same_running_loop():
     """A second call inside the same running event loop must return the
     exact same Semaphore instance, not a fresh one -- otherwise waiters from
     the first instance would never see permits released via the second."""
-    client_module._audible_semaphore = None
-    client_module._audible_semaphore_loop = None
+    concurrency_module._audible_semaphore = None
+    concurrency_module._audible_semaphore_loop = None
 
     async def get_two():
-        first = client_module._get_audible_semaphore()
-        second = client_module._get_audible_semaphore()
+        first = concurrency_module._get_audible_semaphore()
+        second = concurrency_module._get_audible_semaphore()
         return first, second
 
     loop = asyncio.new_event_loop()
@@ -1630,8 +1632,8 @@ def test_get_audible_semaphore_reuses_instance_within_same_running_loop():
         first, second = loop.run_until_complete(get_two())
     finally:
         loop.close()
-        client_module._audible_semaphore = None
-        client_module._audible_semaphore_loop = None
+        concurrency_module._audible_semaphore = None
+        concurrency_module._audible_semaphore_loop = None
 
     assert first is second
 
@@ -1641,11 +1643,11 @@ def test_get_audible_semaphore_rekeys_when_running_loop_changes():
     to a now-closed loop's waiter state -- this is exactly what makes the
     module safe under pytest's own function-scoped event loops, each of
     which is a 'new running loop' from this function's point of view."""
-    client_module._audible_semaphore = None
-    client_module._audible_semaphore_loop = None
+    concurrency_module._audible_semaphore = None
+    concurrency_module._audible_semaphore_loop = None
 
     async def get_sem():
-        return client_module._get_audible_semaphore()
+        return concurrency_module._get_audible_semaphore()
 
     loop1 = asyncio.new_event_loop()
     try:
@@ -1658,8 +1660,8 @@ def test_get_audible_semaphore_rekeys_when_running_loop_changes():
         sem2 = loop2.run_until_complete(get_sem())
     finally:
         loop2.close()
-        client_module._audible_semaphore = None
-        client_module._audible_semaphore_loop = None
+        concurrency_module._audible_semaphore = None
+        concurrency_module._audible_semaphore_loop = None
 
     assert sem1 is not sem2
 
@@ -1690,9 +1692,9 @@ def test_get_audible_semaphore_rekeys_when_running_loop_changes():
 
 @pytest.mark.asyncio
 async def test_two_instances_share_one_process_wide_request_budget(monkeypatch):
-    monkeypatch.setattr(client_module, "AUDIBLE_CONCURRENCY_LIMIT", 3)
-    monkeypatch.setattr(client_module, "_audible_semaphore", None)
-    monkeypatch.setattr(client_module, "_audible_semaphore_loop", None)
+    monkeypatch.setattr(concurrency_module, "AUDIBLE_CONCURRENCY_LIMIT", 3)
+    monkeypatch.setattr(concurrency_module, "_audible_semaphore", None)
+    monkeypatch.setattr(concurrency_module, "_audible_semaphore_loop", None)
 
     in_flight = 0
     peak = 0

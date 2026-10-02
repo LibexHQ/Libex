@@ -301,8 +301,9 @@ def _chaptered_wins(new_value, existing_col):
 
     The whole payload moves together, not just the list. A chapterless
     response reads as runtimeLengthMs 0 and brandIntroDurationMs 0 because
-    Audible omits those fields and _normalize_chapters supplies the zero, not
-    because Audible asserted one; writing them beside a retained list would
+    Audible omits those fields and normalize_chapters (libex_core.audible.
+    chapters) supplies the zero, not because Audible asserted one; writing
+    them beside a retained list would
     leave a row that disagrees with itself.
 
     When neither payload lists chapters the incoming one is taken, which means
@@ -658,7 +659,8 @@ async def upsert_author(session: AsyncSession, author: dict) -> int | None:
                         # replaced by another URL, never withdrawn to
                         # nothing, so a blank is a thin response rather than
                         # an assertion. No blank can reach these two author
-                        # writers today — _parse_authors builds every author
+                        # writers today — _parse_authors (libex_core.audible.
+                        # books) builds every author
                         # this path sees with image None — but that is a
                         # constant in another module, invisible from here
                         # and free to change, and upsert_author_profile
@@ -925,7 +927,8 @@ def _build_book_upsert():
             #                           enumerates any of the four, and no
             #                           live probe has established them.
             #   episode_number          Reaches this statement only through
-            #                           _normalize_product, which already
+            #                           normalize_product (libex_core.
+            #                           audible.books), which already
             #                           turns a falsy episode number into
             #                           None, so what a guard adds today is
             #                           the whitespace-only case alone.
@@ -990,7 +993,8 @@ def _build_book_upsert():
             # merge, and it is open.
             #
             # Open, but not unattended, and a reader deciding from this
-            # statement alone would not know that. _parse_plans has already
+            # statement alone would not know that. _parse_plans
+            # (libex_core.audible.books) has already
             # ruled on the same column from the other end: None for a
             # response carrying no plans key, [] only for an explicitly
             # empty one, and — the case that matters here — None again when

@@ -10,6 +10,20 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [2.1.0]
+
+Additive: new fields on the chapters and series responses, and one database migration. No existing field, status code or parameter changed.
+
+### Added
+- **Chapter responses now carry what Audible sends beyond the chapter list.** `GET /book/{asin}/chapters` (and its `/db` counterpart) gains `contentReference` and `contentUrl`, Audible's own content reference and content URL groups for the book, passed through as Audible sent them, and `audibleExtras`, which gathers every other key Audible sent with the chapter data under the level it arrived at (`response`, `contentMetadata`, `chapterInfo`). Each is `null` when Audible sent nothing for it, and a level inside `audibleExtras` appears only when it had something. The one thing left out is `response_groups`, which Audible echoes back from the request and which says nothing about the book.
+- **Sub-chapters now appear.** Where Audible nests chapters under a chapter, each chapter now carries them in its own `chapters` list, nested to whatever depth Audible sent. Until now they were dropped, so a book with parts and chapters inside the parts showed only the parts. A chapter also gains its own `audibleExtras` for any key on it that the existing fields do not cover. Both are `null` on a chapter where Audible sent neither, so a flat chapter list looks as it did.
+- **Series responses now carry `audibleExtras` and `extrasWithheld`.** They appear on `GET /series/{asin}`, on each result of the series search, and on the same series when it is served from Libex's own store. `audibleExtras` holds every key of Audible's series record beyond its ASIN, title and summary, built the way a book's is; `extrasWithheld` records anything that had to be left out of it and why. Both are `null` when there is nothing to carry.
+- **Series extras are stored, so they survive an Audible outage.** When Libex answers a series from its own copy because Audible cannot be reached, the extras come from what was stored on the last successful fetch. A series stored before this release has none until it is fetched again, and a series learned only through a book's relationships carries none until its own profile is fetched.
+
+### Changed
+- **Operators must run a database migration.** This release adds two columns to the series table (`audible_extras` and `extras_withheld`, both nullable). The container runs `alembic upgrade head` on start, so deploying the new image applies it; if the migration fails the app still starts, logs it, and the series routes will error when they read the missing columns, so check the startup log.
+- **Series search finds series the same way as before.** It still searches Audible by title and takes the first ten matches' series; only where that code lives has changed. Results are unchanged apart from the new fields above.
+
 ## [2.0.0]
 
 **MAJOR.** An Audible outage used to come back as a `404`, the same status as "this does not exist". It is now a `503`. That changes a status code callers could observe, so it is a breaking release, and the first MAJOR. Bulk `GET /book` also gains a `notFetched` list and narrows what `notFound` means, described below. Everything else in the published shape is unchanged or only added to.

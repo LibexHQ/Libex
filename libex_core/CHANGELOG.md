@@ -14,6 +14,18 @@ Entries below that predate publication are historical record for whoever
 embeds this package, not evidence that anyone consumed a given version at the
 time it was cut.
 
+## [0.13.0]
+
+### Added
+- **`normalize_chapters` keeps what Audible sends beyond the chapter list.** The result gains `contentReference` and `contentUrl` (Audible's `content_reference` and `content_url` groups, verbatim) and `audibleExtras`, which gathers every other key under `response`, `contentMetadata` and `chapterInfo`. Each key appears only when Audible sent something for it; `response_groups`, the echo of the request, is the one recorded omission. A chapter's own unreproduced keys ride in that chapter's `audibleExtras`.
+- **Nested sub-chapters are normalized and kept.** A chapter's `chapters` list, which Audible nests under it, was dropped before; each sub-chapter is now normalized the same way and carried in `chapters` on its chapter, to any depth. Absent when Audible sent none.
+- **`ChapterItem` gains `chapters` and `audibleExtras`, and `ChapterResponse` gains `contentReference`, `contentUrl` and `audibleExtras`.** All default to `None`, so code that builds either without them is unaffected.
+- **`normalize_series` keeps every product key beyond `asin`, `title` and `publisher_summary`** as `audibleExtras`, built the way a book's is, with `extrasWithheld` recording anything left out. Both appear only when there is something to say. `SeriesResponse` gains `audibleExtras` and `extrasWithheld`, defaulting to `None`.
+- **`fetch_series_search_asins(get, name, region)` searches Audible by title and returns the unique series ASINs on the matching products, in the order found.** It asks for 10 results, so it is not a complete walk. An empty list means no series was found and is not an error; the region is checked first (`RegionException`), and the name is sent to Audible as the title and is never logged or put in a raised message.
+
+### Changed
+- **The output of `normalize_chapters` and `normalize_series` is no longer limited to the previous keys.** A response that carried only the previously reproduced keys normalizes exactly as before; one that carried more now has the extra keys above. An embedder that compares the whole dictionary, or builds a model that forbids unknown fields, will see the difference.
+
 ## [0.9.0]
 
 ### Added

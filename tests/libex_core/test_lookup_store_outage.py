@@ -1,0 +1,682 @@
+"""
+libex_core.lookup with a LocalStore while Audible is unavailable: every answer
+the store gives is logged once under one message, is limited to the asked
+region, and keeps the order the caller asked for. Runs against a real SQLite
+store (a file, upgraded by the package's own migrations) and a stand-in `get`.
+"""
+
+# Standard library
+import logging
+
+# Third party
+import pytest
+import pytest_asyncio
+from sqlalchemy import text
+
+# Local
+from libex_core.exceptions import AudibleAPIException
+from libex_core.lookup import (
+    get_author,
+    get_author_books,
+    get_book,
+    get_books,
+    get_chapters,
+    get_series,
+    get_series_books,
+    quick_search,
+)
+from libex_core.lookup import _store as store_module
+from libex_core.lookup.books import hydrate_books
+from libex_core.storage.read import books as read_books
+from libex_core.storage.store import LocalStore
+from tests.libex_core._lookup_support import (
+    AUTHOR,
+    AUTHOR_NAME,
+    BOOKS,
+    SERIES,
+    asins,
+    fake_get,
+    outage_get,
+    product,
+)
+from tests.libex_core.test_lookup_store import (
+    ASIN,
+    CHAPTERS,
+    OTHER,
+    SERIES_RELATION,
+    batch_get,
+    chapter_get,
+)
+
+SHARED = "Answered from the store while Audible was unavailable"
+STANDARD_FIELDS = set(logging.makeLogRecord({}).__dict__) | {"message", "asctime", "taskName"}
+
+
+@pytest_asyncio.fixture
+async def store(tmp_path):
+    local = LocalStore(f"sqlite+aiosqlite:///{tmp_path / 'library.db'}")
+    await local.upgrade()
+    await local.open()
+    yield local
+    await local.close()
+
+
+def served_records(caplog):
+    return [r for r in caplog.records if r.getMessage() == SHARED]
+
+
+def fields_of(record):
+    return {k: v for k, v in record.__dict__.items() if k not in STANDARD_FIELDS}
+
+
+def one_served(caplog):
+    records = served_records(caplog)
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    return fields_of(records[0])
+
+
+def chunk_failing(first_asin):
+    """A get whose bulk request fails for the chunk starting at first_asin and
+    answers every other chunk, reversed, like Audible is free to."""
+    async def get(region, path, params=None, extra_headers=None):
+        wanted = params["asins"].split(",")
+        if wanted[0] == first_asin:
+            raise AudibleAPIException("boom", upstream_status=503)
+        return {"products": [product(a) for a in reversed(wanted)]}
+    return get
+
+
+async def member_list_down(region, path, params=None, extra_headers=None):
+    raise AudibleAPIException("boom", upstream_status=503)
+
+
+# Section: the shared warning, one site at a time
+
+async def test_a_series_answered_from_the_store_is_logged(store, caplog):
+    await get_series(fake_get, SERIES, store=store)
+    caplog.set_level(logging.WARNING, logger="libex")
+
+    await get_series(outage_get, SERIES, store=store)
+
+    assert one_served(caplog) == {"what": "series", "region": "us", "series_asin": SERIES}
+
+
+async def test_series_books_answered_from_the_stored_members_are_logged(store, caplog):
+    members = {
+        a: product(a, relationships=[{**SERIES_RELATION, "sequence": str(i + 1)}])
+        for i, a in enumerate(BOOKS)
+    }
+    await get_series_books(batch_get(**members), SERIES, store=store)
+    caplog.set_level(logging.WARNING, logger="libex")
+
+    await get_series_books(member_list_down, SERIES, store=store)
+
+    assert one_served(caplog) == {
+        "what": "series books", "region": "us", "series_asin": SERIES,
+        "stored_num": len(BOOKS),
+    }
+
+
+async def test_an_author_answered_from_the_store_is_logged(store, caplog):
+    await get_author(fake_get, AUTHOR, store=store)
+    caplog.set_level(logging.WARNING, logger="libex")
+
+    await get_author(outage_get, AUTHOR, store=store)
+
+    assert one_served(caplog) == {"what": "author", "region": "us", "author_asin": AUTHOR}
+
+
+async def test_chapters_answered_from_the_store_are_logged(store, caplog):
+    await get_book(batch_get(**{ASIN: product(ASIN)}), ASIN, store=store)
+    await get_chapters(chapter_get(CHAPTERS), ASIN, store=store)
+    caplog.set_level(logging.WARNING, logger="libex")
+
+    await get_chapters(outage_get, ASIN, store=store)
+
+    assert one_served(caplog) == {"what": "chapters", "region": "us", "asin": ASIN}
+
+
+async def test_a_failed_chunk_answered_from_the_store_is_logged_with_its_counts(store, caplog):
+    both = asins(50) + asins(55)[50:]
+    await get_books(batch_get(**{a: product(a) for a in both}), both, store=store)
+    caplog.set_level(logging.INFO, logger="libex")
+
+    await hydrate_books(chunk_failing(both[50]), both, "us", store=store)
+
+    assert one_served(caplog) == {
+        "what": "books, failed chunks", "region": "us", "stored_num": 5, "requested_num": 5,
+    }
+    requested = [r for r in caplog.records if r.getMessage() == "Requested books from Audible"]
+    assert requested[-1].from_store_asins == 5
+
+
+async def test_a_request_with_nothing_from_the_store_logs_none_and_counts_zero(store, caplog):
+    caplog.set_level(logging.INFO, logger="libex")
+
+    await hydrate_books(batch_get(**{ASIN: product(ASIN)}), [ASIN], "us", store=store)
+
+    assert served_records(caplog) == []
+    requested = [r for r in caplog.records if r.getMessage() == "Requested books from Audible"]
+    assert requested[0].from_store_asins == 0
+
+
+async def test_a_whole_request_outage_answered_from_the_store_is_logged(store, caplog):
+    await get_book(batch_get(**{ASIN: product(ASIN)}), ASIN, store=store)
+    caplog.set_level(logging.WARNING, logger="libex")
+
+    await get_books(outage_get, [ASIN, OTHER], store=store)
+
+    assert one_served(caplog) == {
+        "what": "books", "region": "us", "stored_num": 1, "requested_num": 2,
+    }
+    assert not [r for r in caplog.records if "Served books" in r.getMessage()]
+
+
+def compound_get(catalog):
+    async def get(region, path, params=None, extra_headers=None):
+        if "searchsuggestions" in path:
+            return {"model": {"items": []}}
+        return await catalog(region, path, params, extra_headers)
+    return get
+
+
+async def test_a_compound_quick_search_the_catalog_could_not_answer_is_logged(store, caplog):
+    await get_book(batch_get(**{ASIN: product(ASIN)}), ASIN, store=store)
+    caplog.set_level(logging.WARNING, logger="libex")
+    keywords = f"{AUTHOR_NAME} - Title {ASIN}"
+
+    await quick_search(compound_get(outage_get), keywords, store=store)
+
+    fields = one_served(caplog)
+    assert fields == {
+        "what": "book search", "region": "us", "stored_num": 1, "catalog_failed": True,
+    }
+    assert keywords not in repr(fields) and AUTHOR_NAME not in repr(fields)
+
+
+async def test_a_compound_quick_search_the_catalog_answered_empty_is_logged(store, caplog):
+    await get_book(batch_get(**{ASIN: product(ASIN)}), ASIN, store=store)
+    caplog.set_level(logging.WARNING, logger="libex")
+
+    async def empty_catalog(region, path, params=None, extra_headers=None):
+        return {"products": []}
+
+    found = await quick_search(
+        compound_get(empty_catalog), f"{AUTHOR_NAME} - Title {ASIN}", store=store
+    )
+
+    assert [b.asin for b in found] == [ASIN]
+    assert one_served(caplog) == {
+        "what": "book search", "region": "us", "stored_num": 1, "catalog_failed": False,
+    }
+
+
+# Section: from_store on the book list
+
+async def test_series_books_from_the_stored_members_say_so_on_the_list(store):
+    members = {
+        a: product(a, relationships=[{**SERIES_RELATION, "sequence": str(i + 1)}])
+        for i, a in enumerate(BOOKS)
+    }
+    live = await get_series_books(batch_get(**members), SERIES, store=store)
+    assert live.from_store == ()
+
+    stored = await get_series_books(member_list_down, SERIES, store=store)
+
+    assert stored.from_store == tuple(BOOKS)
+
+
+async def test_author_books_answered_from_the_store_for_a_failed_chunk_say_so(store, monkeypatch):
+    walked = asins(55)
+    await get_books(batch_get(**{a: product(a) for a in walked}), walked, store=store)
+
+    async def get(region, path, params=None, extra_headers=None):
+        if params and "asins" in params:
+            return await chunk_failing(walked[0])(region, path, params, extra_headers)
+        return await fake_get(region, path, params, extra_headers)
+
+    import libex_core.lookup.author_books as author_books
+
+    async def walk(*args, **kwargs):
+        return walked, True
+
+    monkeypatch.setattr(author_books, "_walk_author_books", walk)
+    result = await get_author_books(get, AUTHOR, store=store)
+
+    assert set(result.from_store) == set(walked[:50])
+    assert result.complete is True
+
+
+# Section: requested order
+
+async def test_books_for_a_failed_chunk_come_back_in_the_order_requested(store):
+    both = asins(55)
+    await get_books(batch_get(**{a: product(a) for a in both}), both, store=store)
+
+    got = await get_books(chunk_failing(both[0]), both, store=store)
+
+    assert [b.asin for b in got.books] == both
+
+
+async def test_series_books_for_a_failed_chunk_come_back_in_series_order(store):
+    members = asins(55)
+
+    async def get(region, path, params=None, extra_headers=None):
+        if path.endswith(SERIES):
+            return {"product": {"asin": SERIES, "title": "The Series", "relationships": [
+                {"relationship_to_product": "child", "relationship_type": "series",
+                 "asin": a, "sort": str(i + 1)}
+                for i, a in enumerate(members)
+            ]}}
+        return await chunk_failing(members[0])(region, path, params, extra_headers)
+
+    await get_books(batch_get(**{a: product(a) for a in members}), members, store=store)
+
+    got = await get_series_books(get, SERIES, store=store)
+
+    assert [b.asin for b in got.books] == members
+    assert set(got.from_store) == set(members[:50])
+
+
+async def test_with_nothing_from_the_store_the_order_is_the_one_audible_gave(store):
+    both = asins(5)
+
+    got = await get_books(chunk_failing("never"), both, store=store)
+
+    assert [b.asin for b in got.books] == list(reversed(both))
+
+
+# Section: the asked region
+
+async def test_a_book_stored_for_another_region_is_not_served_in_an_outage(store):
+    await get_book(batch_get(**{ASIN: product(ASIN)}), ASIN, region="us", store=store)
+
+    assert (await get_book(outage_get, ASIN, region="us", store=store)).asin == ASIN
+    with pytest.raises(AudibleAPIException):
+        await get_book(outage_get, ASIN, region="de", store=store)
+    with pytest.raises(AudibleAPIException):
+        await get_books(outage_get, [ASIN], region="de", store=store)
+
+
+async def test_a_failed_chunk_is_not_answered_from_another_regions_row(store):
+    every = asins(55)
+    tail = every[50:]
+    await get_books(batch_get(**{a: product(a) for a in tail}), tail, region="us", store=store)
+
+    mixed = await hydrate_books(chunk_failing(tail[0]), every, "de", store=store)
+
+    assert mixed.from_store == []
+    assert sorted(mixed.not_fetched) == sorted(tail)
+    assert sorted(b["asin"] for b in mixed.books) == sorted(every[:50])
+
+    same = await hydrate_books(chunk_failing(tail[0]), every, "us", store=store)
+    assert sorted(same.from_store) == sorted(tail)
+
+
+async def test_a_series_stored_for_another_region_is_not_served_nor_one_with_none(store):
+    await get_series(fake_get, SERIES, region="us", store=store)
+    with pytest.raises(AudibleAPIException):
+        await get_series(outage_get, SERIES, region="de", store=store)
+
+    from libex_core.storage import write
+    async with store.write() as session:
+        await write.write_series_profile(session, {"asin": "B0NOREG001", "name": "Regionless"})
+    assert await store_module.stored_series(store, "B0NOREG001", "de") is None
+    with pytest.raises(AudibleAPIException):
+        await get_series(outage_get, "B0NOREG001", region="de", store=store)
+    assert await store_module.stored_series(store, SERIES, "de") is None
+
+
+async def test_an_author_is_served_only_for_the_region_it_was_stored_in(store):
+    await get_author(fake_get, AUTHOR, region="de", store=store)
+
+    assert (await get_author(outage_get, AUTHOR, region="de", store=store)).name == AUTHOR_NAME
+    with pytest.raises(AudibleAPIException):
+        await get_author(outage_get, AUTHOR, region="us", store=store)
+
+
+async def test_chapters_follow_the_region_of_their_book(store):
+    await get_book(batch_get(**{ASIN: product(ASIN)}), ASIN, region="us", store=store)
+    await get_chapters(chapter_get(CHAPTERS), ASIN, region="us", store=store)
+
+    assert len((await get_chapters(outage_get, ASIN, region="us", store=store)).chapters) == 2
+    with pytest.raises(AudibleAPIException):
+        await get_chapters(outage_get, ASIN, region="de", store=store)
+
+
+async def test_series_books_stored_for_another_region_are_not_served(store):
+    members = {
+        a: product(a, relationships=[{**SERIES_RELATION, "sequence": str(i + 1)}])
+        for i, a in enumerate(BOOKS)
+    }
+    await get_series_books(batch_get(**members), SERIES, region="us", store=store)
+
+    with pytest.raises(AudibleAPIException):
+        await get_series_books(member_list_down, SERIES, region="de", store=store)
+
+
+async def test_the_quick_search_stored_leg_is_limited_to_the_region(store):
+    await get_book(batch_get(**{ASIN: product(ASIN)}), ASIN, region="us", store=store)
+    keywords = f"{AUTHOR_NAME} - Title {ASIN}"
+
+    assert [b.asin for b in await quick_search(compound_get(outage_get), keywords, store=store)] \
+        == [ASIN]
+    with pytest.raises(AudibleAPIException):
+        await quick_search(compound_get(outage_get), keywords, region="de", store=store)
+
+
+async def test_a_book_another_marketplace_stored_is_not_served_for_this_one(store):
+    # Rows are keyed by ASIN alone, so the row a de fetch merges onto is the
+    # one the us fetch made; it is never served for de, the live answer is.
+    await get_book(
+        batch_get(**{ASIN: product(ASIN, subtitle="Kept")}), ASIN, region="us", store=store
+    )
+
+    served = await get_book(
+        batch_get(**{ASIN: product(ASIN, subtitle="Aufgenommen")}),
+        ASIN, region="de", store=store,
+    )
+
+    assert served.region == "de"
+    assert served.subtitle == "Aufgenommen"
+
+
+async def test_a_series_another_marketplace_stored_is_not_served_for_this_one(store):
+    await get_series(fake_get, SERIES, region="us", store=store)
+
+    served = await get_series(fake_get, SERIES, region="de", store=store)
+
+    assert served.region == "de"
+
+
+async def test_chapters_are_not_written_onto_another_marketplaces_book(store, caplog):
+    await get_book(batch_get(**{ASIN: product(ASIN)}), ASIN, region="us", store=store)
+    caplog.set_level(logging.INFO, logger="libex")
+
+    served = await get_chapters(chapter_get(CHAPTERS), ASIN, region="de", store=store)
+
+    assert len(served.chapters) == 2
+    messages = [r.getMessage() for r in caplog.records]
+    assert "Chapters not stored: the book is stored for another marketplace" in messages
+    assert "Chapters not stored: the book is not in the store" not in messages
+    async with store.session() as session:
+        assert await read_books.get_track(session, ASIN) is None
+
+
+# Section: reads in chunks
+
+async def test_stored_books_are_read_in_chunks_of_the_read_size(store, monkeypatch):
+    wanted = asins(1201)
+    held = [wanted[0], wanted[600], wanted[1200]]
+    await get_books(batch_get(**{a: product(a) for a in held}), held, store=store)
+    calls = []
+    real = read_books.get_books
+
+    async def counting(session, chunk, *args, **kwargs):
+        calls.append(len(chunk))
+        return await real(session, chunk, *args, **kwargs)
+
+    monkeypatch.setattr(read_books, "get_books", counting)
+
+    got = await store_module.stored_books(store, wanted)
+
+    assert store_module.READ_CHUNK_SIZE == 500
+    assert calls == [500, 500, 201]
+    assert [b["asin"] for b in got] == held
+
+
+# Section: chapters of a book the store could not be read for
+
+async def test_a_failed_read_of_the_chapter_book_is_logged_and_writes_nothing(
+    store, monkeypatch, caplog
+):
+    await get_book(batch_get(**{ASIN: product(ASIN)}), ASIN, store=store)
+
+    async def broken(session, asin):
+        raise RuntimeError("secret detail")
+
+    monkeypatch.setattr(store_module, "_book_region", broken)
+    caplog.set_level(logging.INFO, logger="libex")
+
+    chapters = await get_chapters(chapter_get(CHAPTERS), ASIN, store=store)
+
+    assert len(chapters.chapters) == 2
+    failed = [r for r in caplog.records if r.getMessage() == "Store read failed"]
+    assert failed and failed[0].what == "chapter book" and failed[0].error_type == "RuntimeError"
+    assert "secret detail" not in caplog.text
+    assert not [r for r in caplog.records if r.getMessage().startswith("Chapters not stored")]
+    async with store.session() as session:
+        assert await read_books.get_track(session, ASIN) is None
+
+
+async def test_an_absent_chapter_book_keeps_its_own_message(store, caplog):
+    caplog.set_level(logging.INFO, logger="libex")
+
+    await get_chapters(chapter_get(CHAPTERS), ASIN, store=store)
+
+    assert [r for r in caplog.records
+            if r.getMessage() == "Chapters not stored: the book is not in the store"]
+    assert not [r for r in caplog.records if r.getMessage() == "Store read failed"]
+
+
+# Section: a row stored for another marketplace is never written through
+
+FOREIGN_SKIP = "Store write skipped: stored for another region"
+DE_SUMMARY = "A much longer German summary that would win the description merge outright."
+
+
+async def row_snapshot(store, table, key_column, key):
+    async with store.session() as session:
+        result = await session.execute(
+            text(f"SELECT * FROM {table} WHERE {key_column} = :k"), {"k": key}
+        )
+        return dict(result.mappings().one())
+
+
+async def link_count(store, asin):
+    async with store.session() as session:
+        result = await session.execute(
+            text("SELECT (SELECT count(*) FROM author_book WHERE book_asin = :a)"
+                 " + (SELECT count(*) FROM book_narrator WHERE book_asin = :a)"
+                 " + (SELECT count(*) FROM book_genre WHERE book_asin = :a)"
+                 " + (SELECT count(*) FROM book_series WHERE book_asin = :a)"),
+            {"a": asin},
+        )
+        return result.scalar_one()
+
+
+async def test_a_book_stored_for_another_region_is_left_byte_identical(store, caplog):
+    rel = [{**SERIES_RELATION}]
+    await get_book(batch_get(**{ASIN: product(ASIN, relationships=rel)}), ASIN,
+                   region="us", store=store)
+    before = await row_snapshot(store, "books", "asin", ASIN)
+    links_before = await link_count(store, ASIN)
+    assert links_before > 0
+    caplog.set_level(logging.INFO, logger="libex")
+
+    de_product = product(
+        ASIN, subtitle="Untertitel", publisher_summary=DE_SUMMARY,
+        authors=[{"asin": "B0DEAUTH01", "name": "Hans Test"}],
+    )
+    live = await get_book(batch_get(**{ASIN: de_product}), ASIN, region="de", store=store)
+
+    assert live.summary == DE_SUMMARY
+    assert live.subtitle == "Untertitel"
+    assert await row_snapshot(store, "books", "asin", ASIN) == before
+    assert await link_count(store, ASIN) == links_before
+    skipped = [r for r in caplog.records if r.getMessage() == FOREIGN_SKIP]
+    assert len(skipped) == 1
+    assert fields_of(skipped[0]) == {"what": "books", "region": "de", "skipped_num": 1}
+
+
+async def test_only_the_foreign_book_in_a_mixed_chunk_is_skipped(store, caplog):
+    await get_book(batch_get(**{ASIN: product(ASIN)}), ASIN, region="us", store=store)
+    await get_book(batch_get(**{OTHER: product(OTHER)}), OTHER, region="de", store=store)
+    before = await row_snapshot(store, "books", "asin", ASIN)
+    new = "B0SCR00099"
+    caplog.set_level(logging.INFO, logger="libex")
+
+    got = await get_books(
+        batch_get(**{
+            ASIN: product(ASIN, subtitle="Untertitel"),
+            OTHER: product(OTHER, subtitle="Now Known"),
+            new: product(new),
+        }),
+        [ASIN, OTHER, new], region="de", store=store,
+    )
+
+    assert [b.asin for b in got.books] == [ASIN, OTHER, new]
+    assert await row_snapshot(store, "books", "asin", ASIN) == before
+    assert (await row_snapshot(store, "books", "asin", OTHER))["region"] == "de"
+    assert (await row_snapshot(store, "books", "asin", OTHER))["subtitle"] == "Now Known"
+    new_row = await row_snapshot(store, "books", "asin", new)
+    assert new_row["region"] == "de"
+    skipped = [r for r in caplog.records if r.getMessage() == FOREIGN_SKIP]
+    assert [fields_of(r) for r in skipped] == [{"what": "books", "region": "de", "skipped_num": 1}]
+
+
+async def test_a_series_stored_for_another_region_is_left_byte_identical(store, caplog):
+    await get_series(fake_get, SERIES, region="us", store=store)
+    before = await row_snapshot(store, "series", "asin", SERIES)
+    caplog.set_level(logging.INFO, logger="libex")
+
+    async def de_series(region, path, params=None, extra_headers=None):
+        record = await fake_get(region, path, params, extra_headers)
+        record["product"]["title"] = "Die Serie"
+        record["product"]["publisher_summary"] = DE_SUMMARY
+        return record
+
+    live = await get_series(de_series, SERIES, region="de", store=store)
+
+    assert (live.name, live.region) == ("Die Serie", "de")
+    assert await row_snapshot(store, "series", "asin", SERIES) == before
+    skipped = [r for r in caplog.records if r.getMessage() == FOREIGN_SKIP]
+    assert [fields_of(r) for r in skipped] == [{"what": "series", "region": "de", "skipped_num": 1}]
+
+
+async def test_a_series_stored_with_no_region_is_not_written_through(store):
+    async with store.write() as session:
+        await session.execute(text(
+            "INSERT INTO series (asin, title, fetched_description, created_at, updated_at)"
+            " VALUES (:a, 'Old', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        ), {"a": SERIES})
+    before = await row_snapshot(store, "series", "asin", SERIES)
+
+    await get_series(fake_get, SERIES, region="us", store=store)
+
+    assert await row_snapshot(store, "series", "asin", SERIES) == before
+
+
+async def test_a_failed_region_read_fails_the_chunk_without_writing(store, monkeypatch, caplog):
+    async def broken(session, asins, region):
+        raise RuntimeError("secret detail")
+
+    monkeypatch.setattr(store_module, "_foreign_book_asins", broken)
+    caplog.set_level(logging.WARNING, logger="libex")
+
+    written, failed = await store_module.persist_books(
+        store, [{"asin": ASIN, "region": "us"}], "us"
+    )
+
+    assert (written, failed) == (set(), True)
+    failures = [r for r in caplog.records if r.getMessage() == "Store write failed, serving the live answer"]
+    assert len(failures) == 1 and failures[0].error_type == "RuntimeError"
+    assert "secret detail" not in caplog.text
+    assert await stored_asins(store) == []
+
+
+async def stored_asins(store):
+    async with store.session() as session:
+        return [r[0] for r in (await session.execute(text("SELECT asin FROM books"))).all()]
+
+
+async def series_links(store, asin):
+    async with store.session() as session:
+        result = await session.execute(
+            text("SELECT series_asin FROM book_series WHERE book_asin = :a ORDER BY series_asin"),
+            {"a": asin},
+        )
+        return [r[0] for r in result.all()]
+
+
+async def test_a_series_stored_for_another_region_is_not_touched_through_a_book(store, caplog):
+    await get_series(fake_get, SERIES, region="us", store=store)
+    before = await row_snapshot(store, "series", "asin", SERIES)
+    caplog.set_level(logging.INFO, logger="libex")
+
+    de_book = product(ASIN, relationships=[{**SERIES_RELATION, "title": "Die Serie (DE)"}])
+    live = await get_book(batch_get(**{ASIN: de_book}), ASIN, region="de", store=store)
+
+    assert live.asin == ASIN
+    assert await row_snapshot(store, "series", "asin", SERIES) == before
+    assert await series_links(store, ASIN) == []
+    assert (await row_snapshot(store, "books", "asin", ASIN))["region"] == "de"
+    skipped = [r for r in caplog.records if r.getMessage() == FOREIGN_SKIP]
+    assert [fields_of(r) for r in skipped] == [
+        {"what": "series link", "region": "de", "skipped_num": 1}
+    ]
+
+
+def series_of(book):
+    return [(e.asin, e.name, e.region, e.position) for e in book.series]
+
+
+async def test_a_book_is_served_the_series_link_left_out_of_its_write(store):
+    await get_series(fake_get, SERIES, region="us", store=store)
+    before = await row_snapshot(store, "series", "asin", SERIES)
+    own = "B0SERIES02"
+    de_book = product(ASIN, relationships=[
+        {**SERIES_RELATION, "title": "Die Serie (DE)"},
+        {**SERIES_RELATION, "asin": own, "title": "Meine Serie", "sequence": "2"},
+    ])
+    get = batch_get(**{ASIN: de_book})
+
+    served = await get_book(get, ASIN, region="de", store=store)
+    unstored = await get_book(get, ASIN, region="de")
+
+    assert (SERIES, "Die Serie (DE)", "de", "1") in series_of(served)
+    assert series_of(served) == series_of(unstored)
+    assert await series_links(store, ASIN) == [own]
+    assert await row_snapshot(store, "series", "asin", SERIES) == before
+
+
+async def test_books_are_served_the_series_link_left_out_of_their_write(store):
+    await get_series(fake_get, SERIES, region="us", store=store)
+    before = await row_snapshot(store, "series", "asin", SERIES)
+    de_book = product(ASIN, relationships=[{**SERIES_RELATION, "title": "Die Serie (DE)"}])
+    get = batch_get(**{ASIN: de_book, OTHER: product(OTHER)})
+
+    served = await get_books(get, [ASIN, OTHER], region="de", store=store)
+    unstored = await get_books(get, [ASIN, OTHER], region="de")
+
+    assert [series_of(b) for b in served.books] == [series_of(b) for b in unstored.books]
+    assert series_of(served.books[0]) == [(SERIES, "Die Serie (DE)", "de", "1")]
+    assert await series_links(store, ASIN) == []
+    assert await row_snapshot(store, "series", "asin", SERIES) == before
+
+
+async def test_only_the_foreign_series_of_a_book_is_left_out_of_the_write(store, caplog):
+    await get_series(fake_get, SERIES, region="us", store=store)
+    before = await row_snapshot(store, "series", "asin", SERIES)
+    own = "B0SERIES02"
+    caplog.set_level(logging.INFO, logger="libex")
+
+    de_book = product(ASIN, relationships=[
+        {**SERIES_RELATION, "title": "Die Serie (DE)"},
+        {**SERIES_RELATION, "asin": own, "title": "Meine Serie", "sequence": "2"},
+    ])
+    await get_book(batch_get(**{ASIN: de_book}), ASIN, region="de", store=store)
+
+    assert await row_snapshot(store, "series", "asin", SERIES) == before
+    assert await series_links(store, ASIN) == [own]
+    own_row = await row_snapshot(store, "series", "asin", own)
+    assert (own_row["region"], own_row["title"]) == ("de", "Meine Serie")
+    skipped = [r for r in caplog.records if r.getMessage() == FOREIGN_SKIP]
+    assert [fields_of(r)["skipped_num"] for r in skipped] == [1]
+
+    again = product(ASIN, relationships=[
+        {**SERIES_RELATION, "asin": own, "title": "Meine Serie", "sequence": "3"},
+    ])
+    await get_book(batch_get(**{ASIN: again}), ASIN, region="de", store=store)
+    assert await series_links(store, ASIN) == [own]

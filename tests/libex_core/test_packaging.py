@@ -48,10 +48,11 @@ _PACKAGE_FILES = {
 }
 
 # flit ships every non-bytecode file inside the package directory, so the
-# package's own changelog travels in the wheel. It is the only non-Python
-# file allowed to.
+# package's own changelog travels in the wheel, and so does the template the
+# storage migrations are written from. Those are the only non-Python files
+# allowed to.
 _PACKAGE_ALLOWED_SUFFIXES = {".py"}
-_PACKAGE_ALLOWED_NAMES = {"py.typed", "CHANGELOG.md"}
+_PACKAGE_ALLOWED_NAMES = {"py.typed", "CHANGELOG.md", "script.py.mako"}
 
 # The man page and completions are installed under the environment prefix by
 # flit's external-data, which puts them under the wheel's .data/data/ tree.
@@ -84,6 +85,7 @@ _WHEEL_METADATA_ALLOWED = {
 
 _SDIST_ROOT_ALLOWED = {
     f"{_SDIST_ROOT}/LICENSE",
+    f"{_SDIST_ROOT}/PYPI.md",
     f"{_SDIST_ROOT}/pyproject.toml",
     f"{_SDIST_ROOT}/PKG-INFO",
 }
@@ -284,6 +286,18 @@ def test_the_requirement_split_is_not_inert():
         _split_requirements(bad)
 
 
+def test_long_description_is_the_package_readme(built):
+    wheel, sdist = built
+    readme = (REPO_ROOT / "PYPI.md").read_text(encoding="utf-8")
+    meta = _metadata(wheel)
+    assert meta["Description-Content-Type"] == "text/markdown"
+    assert meta.get_payload().strip() == readme.strip()
+    with tarfile.open(sdist) as tf:
+        pkg_info = message_from_bytes(tf.extractfile(f"{_SDIST_ROOT}/PKG-INFO").read())
+    assert pkg_info["Description-Content-Type"] == "text/markdown"
+    assert pkg_info.get_payload().strip() == readme.strip()
+
+
 # ============================================================
 # DATA FILES -- the man page and completions, and nothing beside them
 # ============================================================
@@ -429,8 +443,13 @@ _ALLOWED_COMMANDS = {
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
 _CASE_ARM = re.compile(r"^\(?[A-Za-z0-9_\"*|-]*\)\s*")
 _ARITHMETIC = re.compile(r"\(\([^)]*\)\)")
+# A condition is one subcommand test, or a group word and then the command
+# inside it: `A; and B` or `A; and not B`, each a __fish_seen_subcommand_from
+# over plain words. No other builtin, no substitution, no third term.
+_WORDS = r"[a-z-]+(?: [a-z-]+)*"
+_SEEN = rf"__fish_seen_subcommand_from {_WORDS}"
 _FISH_CONDITION = re.compile(
-    r"-n ('__fish_seen_subcommand_from [a-z-]+'|__fish_use_subcommand)( |$)"
+    rf"-n ('{_SEEN}(?:; and (?:not )?{_SEEN})?'|__fish_use_subcommand)( |$)"
 )
 
 
@@ -535,6 +554,66 @@ def test_shipped_completions_are_checked_too(built, shell):
         ("fish", "libex-core config", "calls back into libex-core"),
         ("fish", "python3 -c 1", "fish line that is not a complete registration"),
         ("fish", "set x $HOME", "expands $HOME"),
+        (
+            "fish",
+            "complete -c libex-core -n '__fish_seen_subcommand_from book; and (id)' -a x",
+            "command substitution",
+        ),
+        (
+            "fish",
+            "complete -c libex-core -n '__fish_seen_subcommand_from book; and $(id)' -a x",
+            "command substitution",
+        ),
+        (
+            "fish",
+            "complete -c libex-core -n '__fish_seen_subcommand_from book; and eval x' -a x",
+            "fish condition",
+        ),
+        (
+            "fish",
+            "complete -c libex-core -n '__fish_seen_subcommand_from book; and test -f /etc/passwd' -a x",
+            "fish condition",
+        ),
+        (
+            "fish",
+            "complete -c libex-core -n '__fish_seen_subcommand_from book; and not test -f x' -a x",
+            "fish condition",
+        ),
+        (
+            "fish",
+            "complete -c libex-core -n '__fish_seen_subcommand_from search; and not __fish_seen_subcommand_from abs; and not __fish_seen_subcommand_from x' -l limit",
+            "fish condition",
+        ),
+        (
+            "fish",
+            "complete -c libex-core -n '__fish_seen_subcommand_from search; and not __fish_seen_subcommand_from abs || id' -l limit",
+            "fish condition",
+        ),
+        (
+            "fish",
+            "complete -c libex-core -n '__fish_seen_subcommand_from search; and not not __fish_seen_subcommand_from abs' -l limit",
+            "fish condition",
+        ),
+        (
+            "fish",
+            "complete -c libex-core -n '__fish_seen_subcommand_from book; or __fish_seen_subcommand_from get' -a x",
+            "fish condition",
+        ),
+        (
+            "fish",
+            "complete -c libex-core -n '__fish_seen_subcommand_from a; and __fish_seen_subcommand_from b; and __fish_seen_subcommand_from c' -a x",
+            "fish condition",
+        ),
+        (
+            "fish",
+            "complete -c libex-core -n '__fish_seen_subcommand_from book; and __fish_seen_subcommand_from get $x' -a x",
+            "fish condition",
+        ),
+        (
+            "fish",
+            "complete -c libex-core -n '__fish_seen_subcommand_from book; and __fish_seen_subcommand_from get' -a 'x' > /tmp/x",
+            "shell operator",
+        ),
     ],
 )
 def test_the_completion_check_catches_each_planted_form(shell, planted, expected):
@@ -543,3 +622,18 @@ def test_the_completion_check_catches_each_planted_form(shell, planted, expected
     text = _committed(_COMPLETIONS[shell]) + "\n" + planted + "\n"
     problems = _completion_problems(shell, text)
     assert any(expected in problem for problem in problems), problems
+
+
+@pytest.mark.parametrize(
+    ("shell", "planted", "problem"),
+    [
+        # Each is otherwise a well-formed registration, so the named check is
+        # the only thing that can flag it.
+        ("fish", "complete -c libex-core -n __fish_use_subcommand -a x -d 'eval'", "eval"),
+        ("fish", "complete -c libex-core -n __fish_use_subcommand -a x -d '$(id)'", "command substitution $("),
+        ("fish", "complete -c libex-core -n __fish_use_subcommand -a x -d '`id`'", "backtick"),
+    ],
+)
+def test_each_whole_script_check_flags_its_own_form_on_its_own(shell, planted, problem):
+    text = _committed(_COMPLETIONS[shell]) + "\n" + planted + "\n"
+    assert problem in _completion_problems(shell, text)

@@ -30,6 +30,15 @@ _EXPORTS = {
     "Narrator": "libex_core.storage.models",
     "Genre": "libex_core.storage.models",
     "Track": "libex_core.storage.models",
+    "LocalStore": "libex_core.storage.store",
+    "StoreError": "libex_core.storage.store",
+    "StoreConfigError": "libex_core.storage.store",
+    "StoreConnectionError": "libex_core.storage.store",
+    "StoreNotInitialised": "libex_core.storage.store",
+    "StoreOutdated": "libex_core.storage.store",
+    "ForeignDatabase": "libex_core.storage.store",
+    "StoreClosed": "libex_core.storage.store",
+    "StoreMigrationError": "libex_core.storage.store",
 }
 
 __all__ = ["StorageUnavailable", "require_storage", *_EXPORTS]

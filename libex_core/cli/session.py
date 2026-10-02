@@ -1,12 +1,15 @@
 """
-Building a LibexClient from the resolved configuration. Imported lazily inside
-command handlers, so --help and completion never import httpx and pydantic.
+Building a LibexClient and a LocalStore from the resolved configuration.
+Imported lazily inside command handlers, so --help and completion never import
+httpx, pydantic or the storage libraries.
 """
 
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
+from typing import Any
 
 from libex_core.audible.client import LibexClient
+from libex_core.cli import store_state
 from libex_core.cli.environment import (
     ALLOW_DIRECT_EGRESS_VARIABLE,
     PROXY_URL_VARIABLE,
@@ -41,3 +44,69 @@ def build_client(config: Config) -> LibexClient:
 async def client_session(config: Config) -> AsyncIterator[LibexClient]:
     async with build_client(config) as client:
         yield client
+
+
+@contextmanager
+def filesystem_errors() -> Iterator[None]:
+    """Turns an operating-system failure while the store's file or directory is
+    touched into a fixed-text store error. Not chained: an OSError carries the
+    path, which says where someone's listening history is."""
+    try:
+        yield
+    except OSError:
+        raise store_state.StoreNotReady(store_state.FILESYSTEM) from None
+
+
+async def upgrade_store(store: Any) -> str:
+    with filesystem_errors():
+        return await store.upgrade()
+
+
+def build_store(config: Config) -> Any:
+    """A LocalStore for the configured target. Opens no connection. Raises
+    ConfigError when storage is off, and the library's own fixed-text errors
+    when the extra is missing or the target is not acceptable."""
+    if config.storage is None:
+        raise ConfigError(store_state.STORAGE_OFF)
+    from libex_core.storage import LocalStore
+
+    target = config.storage
+    if target.path is not None:
+        from sqlalchemy.engine import URL
+
+        # A path is handed over as a URL's database part rather than spliced
+        # into text, so a ? or # in a directory name cannot be read as syntax.
+        return LocalStore(URL.create("sqlite+aiosqlite", database=target.path))
+    return LocalStore(target.url)
+
+
+_STATE_NAMES = {
+    "empty": store_state.NOT_INITIALISED,
+    "current": store_state.OK,
+    "behind": store_state.OUTDATED,
+    "ahead": store_state.AHEAD,
+    "foreign": store_state.FOREIGN,
+}
+
+
+async def schema_state(store: Any) -> tuple[str, str | None]:
+    """(state name, stored revision) as `db status` reports them."""
+    with filesystem_errors():
+        state = await store.status()
+    return _STATE_NAMES[state.state], state.revision
+
+
+@asynccontextmanager
+async def open_store(config: Config) -> AsyncIterator[Any]:
+    """An opened store, closed afterwards. Never upgrades: a store that is not
+    ready raises StoreNotReady naming the command that makes it so."""
+    store = build_store(config)
+    try:
+        name, _ = await schema_state(store)
+        if name != store_state.OK:
+            raise store_state.StoreNotReady(store_state.MESSAGES[name])
+        with filesystem_errors():
+            await store.open()
+        yield store
+    finally:
+        await store.close()

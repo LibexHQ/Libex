@@ -4,21 +4,45 @@ is fixed so `python -m libex_core` and the installed script show the same
 usage text and the generated man page and completions match both.
 """
 
-import argparse
-
 from libex_core import __version__
-from libex_core.cli._args import add_help_option, parser_options
-from libex_core.cli.commands import completion, config
-from libex_core.cli.environment import ALLOW_DIRECT_EGRESS_VARIABLE, PROXY_URL_VARIABLE
+from libex_core.cli._args import Parser, add_help_option, parser_options
+from libex_core.cli.commands import (
+    abs_search,
+    author,
+    book,
+    completion,
+    config,
+    db,
+    narrator,
+    releases,
+    search,
+    series,
+)
+from libex_core.cli.environment import (
+    ALLOW_DIRECT_EGRESS_VARIABLE,
+    PROXY_URL_VARIABLE,
+    STORAGE_VARIABLE,
+)
 
 PROG = "libex-core"
 
 # Fixed on purpose: commands are never discovered at run time.
-COMMANDS = (completion, config)
+COMMANDS = (
+    book,
+    series,
+    author,
+    search,
+    abs_search,
+    narrator,
+    releases,
+    db,
+    completion,
+    config,
+)
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+def build_parser() -> Parser:
+    parser = Parser(
         prog=PROG,
         add_help=False,
         description=(
@@ -28,7 +52,9 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             f"Environment: {PROXY_URL_VARIABLE} sets the proxy requests go "
             f"through, and {ALLOW_DIRECT_EGRESS_VARIABLE}=1 permits sending "
-            "them from this machine's own address when there is none."
+            "them from this machine's own address when there is none. "
+            f"{STORAGE_VARIABLE} turns on the local store that the db "
+            "commands read and lookups keep their results in."
         ),
         **parser_options(),
     )

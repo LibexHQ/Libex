@@ -13,6 +13,8 @@ dependencies.
 # Standard library
 import re
 
+__all__ = ["is_valid_asin", "normalise_asin"]
+
 ASIN_PATTERN = re.compile(r'^[A-Z0-9]{10}$')
 
 

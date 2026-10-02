@@ -76,6 +76,8 @@ from libex_core.exceptions import AudibleAPIException, NotFoundException, Region
 # logger directly instead.
 logger = logging.getLogger("libex")
 
+__all__ = ["AudibleGet", "LibexClient"]
+
 # ============================================================
 # REGION MAPS
 # ============================================================

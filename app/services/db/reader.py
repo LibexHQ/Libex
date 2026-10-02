@@ -4,1512 +4,208 @@ Reads from relational tables and reconstructs full response dicts.
 
 Used as fallback when Audible is unavailable.
 Returns the same dict format as the Audible services.
+
+The reads themselves live in libex_core.storage.read and raise on failure.
+What is hosted here is the policy around them: a failed read is logged without
+caller text and answered with an empty value, so a database blip never becomes
+a 500 on a route that can fall back to Audible. Every function keeps the name
+and signature it has always had.
 """
 
 # Standard library
+import functools
+import inspect
 from datetime import datetime, timedelta, timezone
-from typing import Any, NamedTuple
+from typing import NamedTuple
 
 # Third party
-from sqlalchemy import Float, case, cast, func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 # Database
-from app.db.models import Book, Author, Narrator, Series, Track, Genre, CatalogGenre, author_book, book_narrator, book_series
+from app.db.models import CatalogGenre
 
 # Services
-from libex_core.audible.client import REGION_MAP
 from app.services.cache import manager as cache
-from app.services.sorting import apply_sort, BOOK_SORT_FIELDS, NARRATOR_SORT_FIELDS
-from app.services.db.filtering import apply_book_filters, apply_narrator_filters
 from app.services.db.writer import _failure_fields
 
 # Core
 from app.core.logging import get_logger
+from libex_core.storage.read import books as _books
+from libex_core.storage.read import people as _people
+from libex_core.storage.read import series as _series
+from libex_core.storage.read.shapes import (
+    audible_link as _audible_link,
+    book_to_dict as _book_to_dict,
+    narrator_to_dict as _narrator_to_dict,
+    series_positions as _get_series_positions,
+    series_positions_batch as _get_series_positions_batch,
+    utc_z as _utc_z,
+)
+from libex_core.storage.read.stats import count_stored
 
 logger = get_logger()
 
+# The underscore names are not public; they stay importable because the shape
+# tests and the parity checks reach for them under these names.
+__all__ = [
+    "DbStatsResult",
+    "STATS_CACHE_TTL_SECONDS",
+    "get_author_book_asins_from_db",
+    "get_author_books_from_db",
+    "get_author_from_db",
+    "get_book_from_db",
+    "get_books_by_plan_from_db",
+    "get_books_by_sku_from_db",
+    "get_books_from_db",
+    "get_coming_soon_from_db",
+    "get_db_stats",
+    "get_distinct_genres_from_db",
+    "get_distinct_plans_from_db",
+    "get_narrator_books_from_db",
+    "get_new_releases_from_db",
+    "get_series_books_from_db",
+    "get_series_from_db",
+    "get_stored_genres",
+    "get_track_from_db",
+    "get_vvab_books_from_db",
+    "search_books_from_db",
+    "search_narrators_from_db",
+    "search_series_from_db",
+    "_audible_link",
+    "_book_to_dict",
+    "_get_series_positions",
+    "_get_series_positions_batch",
+    "_narrator_to_dict",
+    "_utc_z",
+]
+
 
 # ============================================================
-# HELPERS
+# SWALLOW-AND-LOG
 # ============================================================
 
-def _audible_link(asin: str, region: str) -> str:
-    tld = REGION_MAP.get(region, ".com")
-    return f"https://audible{tld}/pd/{asin}"
-
-
-def _utc_z(value: datetime | None) -> str | None:
+def _guarded(message, fallback, log=(), failure=_failure_fields):
     """
-    Renders a stored timestamp the way Audible sent it: UTC, ISO 8601, with a
-    literal trailing Z.
+    Wraps a core read so a failure is logged and answered with `fallback()`.
 
-    isoformat() on its own writes the offset as +00:00. That is the same
-    instant and a different string, and the difference matters for this one
-    field: on the live path publicationDatetime is passed through from
-    Audible untouched, so a caller comparing the two surfaces is comparing
-    bytes. Every value observed carries seconds resolution and no sub-second
-    component, so this reproduces exactly what Audible sent.
-
-    A value out of a timestamptz column always carries a zone. One built by
-    hand does not, and is read as UTC rather than as the host's local zone,
-    which is what astimezone would otherwise assume.
+    `log` names the arguments that may appear in the log line, alongside
+    `failure(e)`. Nothing else the caller passed is logged: search and filter
+    text arrives from the query string and stays out, and failure fields never
+    render the exception's own text. The core function's own signature and
+    docstring carry through, so callers see the same function they always did.
     """
-    if value is None:
-        return None
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    def decorate(core):
+        signature = inspect.signature(core)
 
+        @functools.wraps(core)
+        async def wrapper(session, *args, **kwargs):
+            call = core(session, *args, **kwargs)
+            try:
+                return await call
+            except Exception as e:
+                bound = signature.bind(session, *args, **kwargs).arguments
+                extra = {name: bound[name] for name in log if name in bound}
+                logger.warning(message, extra={**extra, **failure(e)})
+                return fallback()
 
-async def _get_series_positions(session: AsyncSession, book_asin: str) -> dict[str, str | None]:
-    """Returns {series_asin: position} for a book."""
-    result = await session.execute(
-        select(book_series.c.series_asin, book_series.c.position)
-        .where(book_series.c.book_asin == book_asin)
-    )
-    return {row[0]: row[1] for row in result.fetchall()}
-
-
-async def _get_series_positions_batch(
-    session: AsyncSession, book_asins: list[str]
-) -> dict[str, dict[str, str | None]]:
-    """Returns {book_asin: {series_asin: position}} for many books at once.
-
-    The batched form of _get_series_positions, for callers holding many books at
-    once: one round trip for the batch instead of one per book. A book with
-    no series rows is simply absent from the outer dict, so callers substitute
-    an empty dict — exactly what _get_series_positions returns for that book.
-    """
-    positions: dict[str, dict[str, str | None]] = {}
-    if not book_asins:
-        return positions
-
-    # Postgres caps a single statement at 32767 bind parameters, so the IN list
-    # is chunked at the size the seeder already uses for the same reason. An
-    # author's stored catalogue can run to thousands of books and the caller
-    # below applies no LIMIT, so the list is not bounded by a page size.
-    for i in range(0, len(book_asins), 5000):
-        chunk = book_asins[i:i + 5000]
-        result = await session.execute(
-            select(
-                book_series.c.book_asin,
-                book_series.c.series_asin,
-                book_series.c.position,
-            )
-            .where(book_series.c.book_asin.in_(chunk))
+        wrapper.__doc__ = (
+            (core.__doc__ or "").rstrip()
+            + "\n\n    A failed read is logged and answered with "
+            + repr(fallback())
+            + ".\n    "
         )
-        for book_asin, series_asin, position in result.fetchall():
-            positions.setdefault(book_asin, {})[series_asin] = position
-    return positions
+        return wrapper
+
+    return decorate
 
 
-def _book_to_dict(book: Book, series_positions: dict[str, str | None]) -> dict[str, Any]:
-    """Converts a Book ORM object to the dict shape that
-    libex_core.audible.books.normalize_product produces."""
-    release_date = None
-    if book.release_date:
-        try:
-            release_date = book.release_date.isoformat()
-        except Exception:
-            pass
+def _author_failure(e: BaseException) -> dict:
+    return {"error_type": type(e).__name__, "error": str(e)}
 
-    authors = [
-        {
-            "id": a.id,
-            "asin": a.asin,
-            "name": a.name,
-            "region": a.region,
-            "regions": [a.region],
-            "image": a.image,
-            "updatedAt": a.updated_at.isoformat() if a.updated_at else None,
-        }
-        for a in (book.authors or [])
-    ]
 
-    narrators = [
-        {
-            "name": n.name,
-            "updatedAt": n.updated_at.isoformat() if n.updated_at else None,
-        }
-        for n in (book.narrators or [])
-    ]
-
-    genres = [
-        {
-            "asin": g.asin,
-            "name": g.name,
-            "type": g.type,
-            "betterType": g.type.lower().rstrip("s"),
-            "updatedAt": g.updated_at.isoformat() if g.updated_at else None,
-        }
-        for g in (book.genres or [])
-    ]
-
-    series = [
-        {
-            "asin": s.asin,
-            "name": s.title,
-            "position": series_positions.get(s.asin),
-            "region": s.region,
-            "updatedAt": s.updated_at.isoformat() if s.updated_at else None,
-        }
-        for s in (book.series or [])
-    ]
-
-    content_type = book.content_type
-    is_podcast = content_type and content_type.lower() == "podcast"
-
-    result: dict[str, Any] = {
-        "asin": book.asin,
-        "title": book.title,
-        "subtitle": book.subtitle,
-        "description": book.description,
-        "summary": book.summary,
-        "region": book.region,
-        "regions": [book.region],
-        "publisher": book.publisher,
-        "copyright": book.copyright,
-        "isbn": book.isbn,
-        "language": book.language,
-        "rating": book.rating,
-        "bookFormat": book.book_format,
-        "releaseDate": release_date,
-        "explicit": book.explicit,
-        "hasPdf": book.has_pdf,
-        "whisperSync": book.whisper_sync,
-        "imageUrl": book.image,
-        "lengthMinutes": book.length_minutes,
-        "link": _audible_link(book.asin, book.region),
-        "contentType": content_type,
-        "contentDeliveryType": book.content_delivery_type,
-        "episodeNumber": book.episode_number if is_podcast else None,
-        "episodeType": book.episode_type if is_podcast else None,
-        "sku": book.sku,
-        "skuGroup": book.sku_group,
-        "isListenable": book.is_listenable,
-        "isAvailable": book.is_buyable,
-        "isBuyable": book.is_buyable,
-        "isVvab": book.is_vvab,
-        # The column is nullable, but the response contract is a list and always
-        # has been. A stored NULL reaching the model raises ResponseValidationError,
-        # which surfaces as a dropped connection rather than a 5xx.
-        "plans": book.plans or [],
-        "numRatings": book.num_ratings,
-        "numReviews": book.num_reviews,
-        "publicationName": book.publication_name,
-        "publicationDatetime": _utc_z(book.publication_datetime),
-        "extendedProductDescription": book.extended_product_description,
-        "productState": book.product_state,
-        # Emitted as stored, NULL included, and unlike plans above it is not
-        # coalesced to an empty container. The two columns look alike and the
-        # contracts are opposite. plans is a list on the wire with no null
-        # variant, so a stored NULL has to become []. audibleExtras is
-        # tri-state on the wire as well as in the column: the live path emits
-        # null when the blob was dropped whole and {} when Audible genuinely
-        # sent nothing extra, so null is a value this field is already
-        # defined to carry. Substituting {} here would assert that Audible
-        # was asked and answered empty for every row no response has written
-        # since the column was added.
-        "audibleExtras": book.audible_extras,
-        "updatedAt": book.updated_at.isoformat() if book.updated_at else None,
-        "authors": authors,
-        "narrators": narrators,
-        "genres": genres,
-        "series": series,
-    }
-
-    # Present only when the stored record holds something, matching the live
-    # path, which omits the key rather than sending an empty record. Omitted
-    # from this dict, not from the response -- BookResponse declares the
-    # field and supplies it as null when it is absent here, so the wire
-    # carries it either way. Silence here is the absence of any withholding
-    # ever recorded against the row, so a row written before the column
-    # existed reads the same as one whose every fetch came through complete.
-    #
-    # What it carries when present is an accumulation rather than a snapshot:
-    # per kind of withholding, the record left by the most recent fetch that
-    # withheld that kind, over the same span of fetches audibleExtras above
-    # it covers. That is what lets the two be read together, and it is also
-    # why neither of them answers "what is missing from the blob right now".
-    # The extras_withheld merge in libex_core.storage.write.statements sets out
-    # why the column has that shape.
-    if book.extras_withheld:
-        result["extrasWithheld"] = book.extras_withheld
-    return result
+def _error_type_only(e: BaseException) -> dict:
+    return {"error_type": type(e).__name__}
 
 
 # ============================================================
 # BOOK READERS
 # ============================================================
 
-async def get_book_from_db(session: AsyncSession, asin: str) -> dict[str, Any] | None:
-    """Fetches a single book from the DB with all relationships."""
-    try:
-        result = await session.execute(
-            select(Book)
-            .where(Book.asin == asin)
-            .options(
-                selectinload(Book.authors),
-                selectinload(Book.narrators),
-                selectinload(Book.genres),
-                selectinload(Book.series),
-            )
-        )
-        book = result.scalar_one_or_none()
-        if not book:
-            return None
-
-        positions = await _get_series_positions(session, asin)
-        return _book_to_dict(book, positions)
-    except Exception as e:
-        logger.warning(
-            "DB read failed for book",
-            extra={"asin": asin, **_failure_fields(e)},
-        )
-        return None
-
-
-async def get_books_from_db(session: AsyncSession, asins: list[str]) -> list[dict[str, Any]]:
-    """Fetches multiple books from the DB with all relationships."""
-    try:
-        result = await session.execute(
-            select(Book)
-            .where(Book.asin.in_(asins))
-            .options(
-                selectinload(Book.authors),
-                selectinload(Book.narrators),
-                selectinload(Book.genres),
-                selectinload(Book.series),
-            )
-        )
-        books = result.scalars().all()
-        results = []
-        for book in books:
-            positions = await _get_series_positions(session, book.asin)
-            results.append(_book_to_dict(book, positions))
-        return results
-    except Exception as e:
-        logger.warning(
-            "DB read failed for books",
-            extra={"asins": asins, **_failure_fields(e)},
-        )
-        return []
-
-async def search_books_from_db(
-    session: AsyncSession,
-    title: str | None = None,
-    subtitle: str | None = None,
-    region: str | None = None,
-    description: str | None = None,
-    summary: str | None = None,
-    publisher: str | None = None,
-    copyright: str | None = None,
-    isbn: str | None = None,
-    author_name: str | None = None,
-    series_name: str | None = None,
-    language: str | None = None,
-    rating_better_than: float | None = None,
-    rating_worse_than: float | None = None,
-    longer_than: int | None = None,
-    shorter_than: int | None = None,
-    explicit: bool | None = None,
-    whisper_sync: bool | None = None,
-    has_pdf: bool | None = None,
-    book_format: str | None = None,
-    content_type: str | None = None,
-    content_delivery_type: str | None = None,
-    is_listenable: bool | None = None,
-    is_buyable: bool | None = None,
-    is_vvab: bool | None = None,
-    plan_name: str | None = None,
-    genre: str | None = None,
-    category: str | None = None,
-    sort: str | None = None,
-    order: str | None = None,
-    limit: int = 20,
-    page: int = 1,
-) -> list[dict[str, Any]]:
-    """Searches books in the DB by filter parameters with pagination."""
-    try:
-        stmt = (
-            select(Book)
-            .options(
-                selectinload(Book.authors),
-                selectinload(Book.narrators),
-                selectinload(Book.genres),
-                selectinload(Book.series),
-            )
-        )
-
-        stmt = apply_book_filters(
-            stmt,
-            title=title,
-            subtitle=subtitle,
-            region=region,
-            description=description,
-            summary=summary,
-            publisher=publisher,
-            copyright=copyright,
-            isbn=isbn,
-            author_name=author_name,
-            series_name=series_name,
-            language=language,
-            rating_better_than=rating_better_than,
-            rating_worse_than=rating_worse_than,
-            longer_than=longer_than,
-            shorter_than=shorter_than,
-            explicit=explicit,
-            whisper_sync=whisper_sync,
-            has_pdf=has_pdf,
-            book_format=book_format,
-            content_type=content_type,
-            content_delivery_type=content_delivery_type,
-            is_listenable=is_listenable,
-            is_buyable=is_buyable,
-            is_vvab=is_vvab,
-            plan_name=plan_name,
-            genre=genre,
-            category=category,
-        )
-
-        stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
-
-        stmt = stmt.limit(limit).offset((page - 1) * limit)
-
-        result = await session.execute(stmt)
-        books = result.scalars().all()
-
-        results = []
-        for book in books:
-            positions = await _get_series_positions(session, book.asin)
-            results.append(_book_to_dict(book, positions))
-        return results
-    except Exception as e:
-        logger.warning("DB search failed for books", extra={**_failure_fields(e)})
-        return []
-
-async def get_books_by_sku_from_db(session: AsyncSession, sku_group: str) -> list[dict[str, Any]]:
-    """Fetches all books with a matching sku_group from the DB."""
-    try:
-        result = await session.execute(
-            select(Book)
-            .where(Book.sku_group == sku_group)
-            .options(
-                selectinload(Book.authors),
-                selectinload(Book.narrators),
-                selectinload(Book.genres),
-                selectinload(Book.series),
-            )
-        )
-        books = result.scalars().all()
-        results = []
-        for book in books:
-            positions = await _get_series_positions(session, book.asin)
-            results.append(_book_to_dict(book, positions))
-        return results
-    except Exception as e:
-        logger.warning(
-            "DB read failed for sku_group",
-            extra={"sku_group": sku_group, **_failure_fields(e)},
-        )
-        return []
-
-
-async def get_distinct_plans_from_db(session: AsyncSession) -> list[str]:
-    """Returns a sorted list of all distinct plan names across stored books."""
-    try:
-        result = await session.execute(
-            select(
-                func.jsonb_array_elements_text(Book.plans).label("plan_name")
-            )
-            .where(Book.plans.isnot(None))
-            .distinct()
-        )
-        plans = sorted([row[0] for row in result.fetchall()])
-        return plans
-    except Exception as e:
-        logger.warning("DB read failed for distinct plans", extra={**_failure_fields(e)})
-        return []
-
-
-async def get_distinct_genres_from_db(
-    session: AsyncSession,
-    search: str | None = None,
-) -> list[str]:
-    """Returns a sorted list of all distinct genre and tag names.
-
-    Optional `search` filters the list by partial, case-insensitive match —
-    useful for finding the exact category name to feed the genre filter.
-    """
-    try:
-        stmt = select(Genre.name).distinct()
-        if search:
-            stmt = stmt.where(Genre.name.ilike(f"%{search}%"))
-        result = await session.execute(stmt)
-        names = sorted({row[0] for row in result.fetchall()})
-        return names
-    except Exception as e:
-        # search is caller-supplied filter text and stays out of the log for
-        # the same reason the narrator and series name searches below do: it
-        # is not in this message, and _failure_fields(e) never renders the
-        # exception's own text either.
-        logger.warning("DB read failed for distinct genres", extra={**_failure_fields(e)})
-        return []
-
-
-async def get_books_by_plan_from_db(
-    session: AsyncSession,
-    plan_name: str,
-    title: str | None = None,
-    subtitle: str | None = None,
-    region: str | None = None,
-    description: str | None = None,
-    summary: str | None = None,
-    publisher: str | None = None,
-    copyright: str | None = None,
-    isbn: str | None = None,
-    author_name: str | None = None,
-    series_name: str | None = None,
-    language: str | None = None,
-    rating_better_than: float | None = None,
-    rating_worse_than: float | None = None,
-    longer_than: int | None = None,
-    shorter_than: int | None = None,
-    explicit: bool | None = None,
-    whisper_sync: bool | None = None,
-    has_pdf: bool | None = None,
-    book_format: str | None = None,
-    content_type: str | None = None,
-    content_delivery_type: str | None = None,
-    is_listenable: bool | None = None,
-    is_buyable: bool | None = None,
-    is_vvab: bool | None = None,
-    genre: str | None = None,
-    category: str | None = None,
-    sort: str | None = None,
-    order: str | None = None,
-    limit: int = 20,
-    page: int = 1,
-) -> list[dict[str, Any]]:
-    """Fetches all books containing a specific plan name."""
-    try:
-        stmt = (
-            select(Book)
-            .where(Book.plans.contains([plan_name]))
-            .options(
-                selectinload(Book.authors),
-                selectinload(Book.narrators),
-                selectinload(Book.genres),
-                selectinload(Book.series),
-            )
-        )
-        stmt = apply_book_filters(
-            stmt,
-            title=title,
-            subtitle=subtitle,
-            region=region,
-            description=description,
-            summary=summary,
-            publisher=publisher,
-            copyright=copyright,
-            isbn=isbn,
-            author_name=author_name,
-            series_name=series_name,
-            language=language,
-            rating_better_than=rating_better_than,
-            rating_worse_than=rating_worse_than,
-            longer_than=longer_than,
-            shorter_than=shorter_than,
-            explicit=explicit,
-            whisper_sync=whisper_sync,
-            has_pdf=has_pdf,
-            book_format=book_format,
-            content_type=content_type,
-            content_delivery_type=content_delivery_type,
-            is_listenable=is_listenable,
-            is_buyable=is_buyable,
-            is_vvab=is_vvab,
-            genre=genre,
-            category=category,
-        )
-        stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
-        stmt = stmt.limit(limit).offset((page - 1) * limit)
-        result = await session.execute(stmt)
-        books = result.scalars().all()
-        results = []
-        for book in books:
-            positions = await _get_series_positions(session, book.asin)
-            results.append(_book_to_dict(book, positions))
-        return results
-    except Exception as e:
-        logger.warning(
-            "DB read failed for plan",
-            extra={"plan_name": plan_name, **_failure_fields(e)},
-        )
-        return []
-
-
-async def get_vvab_books_from_db(
-    session: AsyncSession,
-    title: str | None = None,
-    subtitle: str | None = None,
-    region: str | None = None,
-    description: str | None = None,
-    summary: str | None = None,
-    publisher: str | None = None,
-    copyright: str | None = None,
-    isbn: str | None = None,
-    author_name: str | None = None,
-    series_name: str | None = None,
-    language: str | None = None,
-    rating_better_than: float | None = None,
-    rating_worse_than: float | None = None,
-    longer_than: int | None = None,
-    shorter_than: int | None = None,
-    explicit: bool | None = None,
-    whisper_sync: bool | None = None,
-    has_pdf: bool | None = None,
-    book_format: str | None = None,
-    content_type: str | None = None,
-    content_delivery_type: str | None = None,
-    is_listenable: bool | None = None,
-    is_buyable: bool | None = None,
-    plan_name: str | None = None,
-    genre: str | None = None,
-    category: str | None = None,
-    sort: str | None = None,
-    order: str | None = None,
-    limit: int = 20,
-    page: int = 1,
-) -> list[dict[str, Any]]:
-    """Fetches all virtual voice audiobooks (AI-narrated) from the local DB."""
-    try:
-        stmt = (
-            select(Book)
-            .where(Book.is_vvab.is_(True))
-            .options(
-                selectinload(Book.authors),
-                selectinload(Book.narrators),
-                selectinload(Book.genres),
-                selectinload(Book.series),
-            )
-        )
-        stmt = apply_book_filters(
-            stmt,
-            title=title,
-            subtitle=subtitle,
-            region=region,
-            description=description,
-            summary=summary,
-            publisher=publisher,
-            copyright=copyright,
-            isbn=isbn,
-            author_name=author_name,
-            series_name=series_name,
-            language=language,
-            rating_better_than=rating_better_than,
-            rating_worse_than=rating_worse_than,
-            longer_than=longer_than,
-            shorter_than=shorter_than,
-            explicit=explicit,
-            whisper_sync=whisper_sync,
-            has_pdf=has_pdf,
-            book_format=book_format,
-            content_type=content_type,
-            content_delivery_type=content_delivery_type,
-            is_listenable=is_listenable,
-            is_buyable=is_buyable,
-            plan_name=plan_name,
-            genre=genre,
-            category=category,
-        )
-        stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
-        stmt = stmt.limit(limit).offset((page - 1) * limit)
-        result = await session.execute(stmt)
-        books = result.scalars().all()
-        results = []
-        for book in books:
-            positions = await _get_series_positions(session, book.asin)
-            results.append(_book_to_dict(book, positions))
-        return results
-    except Exception as e:
-        logger.warning("DB read failed for VVAB books", extra={**_failure_fields(e)})
-        return []
-
-
-async def get_new_releases_from_db(
-    session: AsyncSession,
-    days: int = 30,
-    title: str | None = None,
-    subtitle: str | None = None,
-    region: str | None = None,
-    description: str | None = None,
-    summary: str | None = None,
-    publisher: str | None = None,
-    copyright: str | None = None,
-    isbn: str | None = None,
-    author_name: str | None = None,
-    series_name: str | None = None,
-    language: str | None = None,
-    rating_better_than: float | None = None,
-    rating_worse_than: float | None = None,
-    longer_than: int | None = None,
-    shorter_than: int | None = None,
-    explicit: bool | None = None,
-    whisper_sync: bool | None = None,
-    has_pdf: bool | None = None,
-    book_format: str | None = None,
-    content_type: str | None = None,
-    content_delivery_type: str | None = None,
-    is_listenable: bool | None = None,
-    is_buyable: bool | None = None,
-    is_vvab: bool | None = None,
-    plan_name: str | None = None,
-    genre: str | None = None,
-    category: str | None = None,
-    sort: str | None = None,
-    order: str | None = None,
-    limit: int = 20,
-    page: int = 1,
-) -> list[dict[str, Any]]:
-    """
-    Fetches books released within the last `days`, newest first by default.
-
-    The window is release_date between (now - days) and now — already-released
-    books only, so far-future pre-orders are excluded. Defaults to releaseDate
-    descending; passing an explicit sort field overrides that.
-    """
-    try:
-        now = datetime.now(timezone.utc)
-        window_start = now - timedelta(days=days)
-        stmt = (
-            select(Book)
-            .where(
-                Book.release_date.isnot(None),
-                Book.release_date >= window_start,
-                Book.release_date <= now,
-            )
-            .options(
-                selectinload(Book.authors),
-                selectinload(Book.narrators),
-                selectinload(Book.genres),
-                selectinload(Book.series),
-            )
-        )
-        stmt = apply_book_filters(
-            stmt,
-            title=title,
-            subtitle=subtitle,
-            region=region,
-            description=description,
-            summary=summary,
-            publisher=publisher,
-            copyright=copyright,
-            isbn=isbn,
-            author_name=author_name,
-            series_name=series_name,
-            language=language,
-            rating_better_than=rating_better_than,
-            rating_worse_than=rating_worse_than,
-            longer_than=longer_than,
-            shorter_than=shorter_than,
-            explicit=explicit,
-            whisper_sync=whisper_sync,
-            has_pdf=has_pdf,
-            book_format=book_format,
-            content_type=content_type,
-            content_delivery_type=content_delivery_type,
-            is_listenable=is_listenable,
-            is_buyable=is_buyable,
-            is_vvab=is_vvab,
-            plan_name=plan_name,
-            genre=genre,
-            category=category,
-        )
-        if sort:
-            stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
-        else:
-            stmt = stmt.order_by(Book.release_date.desc().nulls_last())
-        stmt = stmt.limit(limit).offset((page - 1) * limit)
-        result = await session.execute(stmt)
-        books = result.scalars().all()
-        results = []
-        for book in books:
-            positions = await _get_series_positions(session, book.asin)
-            results.append(_book_to_dict(book, positions))
-        return results
-    except Exception as e:
-        logger.warning("DB read failed for new releases", extra={**_failure_fields(e)})
-        return []
-
-
-async def get_coming_soon_from_db(
-    session: AsyncSession,
-    days: int = 30,
-    title: str | None = None,
-    subtitle: str | None = None,
-    region: str | None = None,
-    description: str | None = None,
-    summary: str | None = None,
-    publisher: str | None = None,
-    copyright: str | None = None,
-    isbn: str | None = None,
-    author_name: str | None = None,
-    series_name: str | None = None,
-    language: str | None = None,
-    rating_better_than: float | None = None,
-    rating_worse_than: float | None = None,
-    longer_than: int | None = None,
-    shorter_than: int | None = None,
-    explicit: bool | None = None,
-    whisper_sync: bool | None = None,
-    has_pdf: bool | None = None,
-    book_format: str | None = None,
-    content_type: str | None = None,
-    content_delivery_type: str | None = None,
-    is_listenable: bool | None = None,
-    is_buyable: bool | None = None,
-    is_vvab: bool | None = None,
-    plan_name: str | None = None,
-    genre: str | None = None,
-    category: str | None = None,
-    sort: str | None = None,
-    order: str | None = None,
-    limit: int = 20,
-    page: int = 1,
-) -> list[dict[str, Any]]:
-    """
-    Fetches upcoming books releasing within the next `days`, soonest first.
-
-    The window is release_date between now and (now + days) — future releases
-    only. The upper bound also excludes Audible's "no date yet" placeholder
-    (year 2200) and other far-future junk, since nothing that distant falls
-    inside a real window. Defaults to releaseDate ascending; passing an
-    explicit sort field overrides that.
-    """
-    try:
-        now = datetime.now(timezone.utc)
-        window_end = now + timedelta(days=days)
-        stmt = (
-            select(Book)
-            .where(
-                Book.release_date.isnot(None),
-                Book.release_date > now,
-                Book.release_date <= window_end,
-            )
-            .options(
-                selectinload(Book.authors),
-                selectinload(Book.narrators),
-                selectinload(Book.genres),
-                selectinload(Book.series),
-            )
-        )
-        stmt = apply_book_filters(
-            stmt,
-            title=title,
-            subtitle=subtitle,
-            region=region,
-            description=description,
-            summary=summary,
-            publisher=publisher,
-            copyright=copyright,
-            isbn=isbn,
-            author_name=author_name,
-            series_name=series_name,
-            language=language,
-            rating_better_than=rating_better_than,
-            rating_worse_than=rating_worse_than,
-            longer_than=longer_than,
-            shorter_than=shorter_than,
-            explicit=explicit,
-            whisper_sync=whisper_sync,
-            has_pdf=has_pdf,
-            book_format=book_format,
-            content_type=content_type,
-            content_delivery_type=content_delivery_type,
-            is_listenable=is_listenable,
-            is_buyable=is_buyable,
-            is_vvab=is_vvab,
-            plan_name=plan_name,
-            genre=genre,
-            category=category,
-        )
-        if sort:
-            stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
-        else:
-            stmt = stmt.order_by(Book.release_date.asc().nulls_last())
-        stmt = stmt.limit(limit).offset((page - 1) * limit)
-        result = await session.execute(stmt)
-        books = result.scalars().all()
-        results = []
-        for book in books:
-            positions = await _get_series_positions(session, book.asin)
-            results.append(_book_to_dict(book, positions))
-        return results
-    except Exception as e:
-        logger.warning("DB read failed for coming soon", extra={**_failure_fields(e)})
-        return []
-
-# ============================================================
-# AUTHOR READER
-# ============================================================
-
-async def get_author_from_db(session: AsyncSession, asin: str, region: str) -> dict[str, Any] | None:
-    """Fetches an author from the DB with genres.
-
-    The unique constraint on the authors table covers (asin, region, name), not
-    just (asin, region) — a fresh spelling of an existing author's name inserts
-    a second row instead of updating the first, so more than one row can match
-    here. Every matching row is fetched, ordered by id both in the query and
-    again defensively on the fetched rows (so the merge below is deterministic
-    regardless of what order rows come back in), then merged. Identity and
-    content are selected independently of each other:
-
-    - id, name and region come from the oldest row. This is a stability choice,
-      not a content comparison — oldest-id is also the convention
-      libex_core.storage.write.entities.upsert_author uses to converge concurrent writers, but only for its own,
-      narrower case: same-name rows still missing an asin, racing to claim
-      one. That path never runs for what this function merges — a non-null
-      asin under a *different* name spelling — which upsert_author's exact
-      three-column match misses, falling through to a plain insert of a new
-      row instead of converging on the old one. That gap is exactly why these
-      duplicates exist; the oldest-id choice here is this function's own
-      answer to it, not a convergence the writer already provides.
-    - description is the longest trimmed value across every candidate, in the
-      spirit of libex_core.storage.merge.longer_wins — a whitespace-only value
-      measures as absent — independently of which row supplies identity above.
-      Not a literal match: longer_wins trims only the incoming side, and its
-      trim strips the Unicode White_Space set (BLANK_CHARS) while Python's
-      .strip() strips its own whitespace definition, and this trims every
-      candidate. Neither difference can make the result poorer, only
-      occasionally more willing to treat a candidate as absent.
-    - image is the first candidate, in id order, with a real, non-blank value
-      — using the same absent test as description (a whitespace-only or empty
-      image is exactly as absent as a whitespace-only description) but not
-      its length ranking: two real URLs are not compared against each other,
-      the earlier one simply wins. Falls back to the base row's own (possibly
-      absent) value if no candidate has one, which is also what keeps a
-      single-row read byte-identical to returning that row's raw field.
-    - updatedAt is the max across every candidate, not the base row's own —
-      description or image can come from a newer sibling, and a caller doing
-      incremental sync on updatedAt must still see that the record changed.
-    - genres are unioned across every candidate row, deduplicated by asin.
-
-    What this guarantees: description, image and genres are never poorer than
-    any single stored row — description is always the longest available,
-    genres are always a superset (equal when every row carries the same
-    genres, or there is only one row), and image is never null when any row
-    holds one. What it does not guarantee: that the surfaced id/name was
-    drawn from whichever row happened to supply the winning description or
-    image — identity and content are chosen on separate criteria.
-    """
-    try:
-        result = await session.execute(
-            select(Author)
-            .where(Author.asin == asin, Author.region == region)
-            .options(selectinload(Author.genres))
-            .order_by(Author.id)
-        )
-        authors = sorted(result.scalars().all(), key=lambda a: a.id)
-        if not authors:
-            return None
-
-        if len(authors) > 1:
-            logger.warning(
-                "Multiple author rows found for asin/region, merging into one read",
-                extra={
-                    "asin": asin,
-                    "region": region,
-                    "row_count": len(authors),
-                },
-            )
-
-        base = authors[0]
-
-        def _measured_length(value: str | None) -> int:
-            """Trimmed length, floored to -1 for absent — same idea as
-            merge.longer_wins' absent-sentinel, applied to whichever text is
-            being ranked (description or image)."""
-            stripped = value.strip() if value else ""
-            return len(stripped) if stripped else -1
-
-        description = base.description
-        best_length = _measured_length(description)
-        for a in authors[1:]:
-            length = _measured_length(a.description)
-            if length > best_length:
-                description = a.description
-                best_length = length
-
-        image = next(
-            (a.image for a in authors if _measured_length(a.image) >= 0),
-            base.image,
-        )
-
-        # Defensive against a stored null slipping through despite the column
-        # being NOT NULL on every write path today: the `if a.updated_at`
-        # filter drops None candidates before max() ever sees them, so an
-        # all-None input leaves the generator empty rather than raising
-        # TypeError on a bad comparison — but max() on an empty iterable
-        # raises ValueError unless a default is given. `default=None` is
-        # what closes that, and it would otherwise be swallowed by the
-        # blanket except below into a silent whole-author None —
-        # reintroducing the invisible-failure mode this function exists to
-        # close.
-        updated_at = max((a.updated_at for a in authors if a.updated_at), default=None)
-
-        genres_by_asin: dict[str, Any] = {}
-        for a in authors:
-            for g in (a.genres or []):
-                genres_by_asin.setdefault(g.asin, g)
-
-        genres = [
-            {
-                "asin": g.asin,
-                "name": g.name,
-                "type": g.type,
-                "betterType": g.type.lower().rstrip("s"),
-                "updatedAt": g.updated_at.isoformat() if g.updated_at else None,
-            }
-            for g in genres_by_asin.values()
-        ]
-
-        return {
-            "id": base.id,
-            "asin": base.asin,
-            "name": base.name,
-            "description": description,
-            "image": image,
-            "region": base.region,
-            "regions": [base.region],
-            "genres": genres,
-            "updatedAt": updated_at.isoformat() if updated_at else None,
-        }
-    except Exception as e:
-        logger.warning(
-            "DB read failed for author",
-            extra={
-                "asin": asin,
-                "region": region,
-                "error_type": type(e).__name__,
-                "error": str(e),
-            },
-        )
-        return None
-
-
-async def get_author_book_asins_from_db(
-    session: AsyncSession, author_asin: str, region: str
-) -> list[str] | None:
-    """
-    Fetches only the book ASINs for an author from the DB — a single-column
-    projection with no relationship loading, for callers that only need the
-    ASIN list (e.g. as a merge input) and would otherwise pay for the fully
-    hydrated rows from get_author_books_from_db and discard everything but
-    the asin. ASINs are returned exactly as stored, uppercase or not; the
-    caller is responsible for canonicalizing case at its merge site.
-
-    Returns `None` if the read itself failed, distinct from an empty list,
-    which means the author genuinely has no stored books — a caller feeding
-    this into an authoritative write must not treat the two as the same
-    thing.
-    """
-    try:
-        result = await session.execute(
-            select(Book.asin)
-            .join(author_book, author_book.c.book_asin == Book.asin)
-            .join(Author, Author.id == author_book.c.author_id)
-            .where(Author.asin == author_asin, Author.region == region)
-            .distinct()
-        )
-        return [row[0] for row in result.fetchall()]
-    except Exception as e:
-        logger.warning(
-            "DB read failed for author book asins",
-            extra={
-                "author_asin": author_asin,
-                "region": region,
-                "error_type": type(e).__name__,
-            },
-        )
-        return None
-
-
-async def get_author_books_from_db(
-    session: AsyncSession,
-    author_asin: str,
-    region: str,
-    title: str | None = None,
-    subtitle: str | None = None,
-    book_region: str | None = None,
-    description: str | None = None,
-    summary: str | None = None,
-    publisher: str | None = None,
-    copyright: str | None = None,
-    isbn: str | None = None,
-    series_name: str | None = None,
-    language: str | None = None,
-    rating_better_than: float | None = None,
-    rating_worse_than: float | None = None,
-    longer_than: int | None = None,
-    shorter_than: int | None = None,
-    explicit: bool | None = None,
-    whisper_sync: bool | None = None,
-    has_pdf: bool | None = None,
-    book_format: str | None = None,
-    content_type: str | None = None,
-    content_delivery_type: str | None = None,
-    is_listenable: bool | None = None,
-    is_buyable: bool | None = None,
-    is_vvab: bool | None = None,
-    plan_name: str | None = None,
-    genre: str | None = None,
-    category: str | None = None,
-    sort: str | None = None,
-    order: str | None = None,
-) -> list[dict[str, Any]]:
-    """Fetches all books for an author from the DB."""
-    try:
-        stmt = (
-            select(Book)
-            .join(author_book, author_book.c.book_asin == Book.asin)
-            .join(Author, Author.id == author_book.c.author_id)
-            .where(Author.asin == author_asin, Author.region == region)
-            .options(
-                selectinload(Book.authors),
-                selectinload(Book.narrators),
-                selectinload(Book.genres),
-                selectinload(Book.series),
-            )
-            .distinct()
-        )
-        stmt = apply_book_filters(
-            stmt,
-            title=title,
-            subtitle=subtitle,
-            region=book_region,
-            description=description,
-            summary=summary,
-            publisher=publisher,
-            copyright=copyright,
-            isbn=isbn,
-            series_name=series_name,
-            language=language,
-            rating_better_than=rating_better_than,
-            rating_worse_than=rating_worse_than,
-            longer_than=longer_than,
-            shorter_than=shorter_than,
-            explicit=explicit,
-            whisper_sync=whisper_sync,
-            has_pdf=has_pdf,
-            book_format=book_format,
-            content_type=content_type,
-            content_delivery_type=content_delivery_type,
-            is_listenable=is_listenable,
-            is_buyable=is_buyable,
-            is_vvab=is_vvab,
-            plan_name=plan_name,
-            genre=genre,
-            category=category,
-        )
-        stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
-        result = await session.execute(stmt)
-        books = result.scalars().all()
-        # This read has no LIMIT — the result is the author's entire stored
-        # catalogue, which for a prolific author is thousands of rows. Series
-        # positions are fetched for all of them in one statement rather than
-        # one per book; the ordering apply_sort established above is untouched.
-        positions_by_asin = await _get_series_positions_batch(
-            session, [book.asin for book in books]
-        )
-        results = []
-        for book in books:
-            positions = positions_by_asin.get(book.asin, {})
-            results.append(_book_to_dict(book, positions))
-        return results
-    except Exception as e:
-        logger.warning(
-            "DB read failed for author books",
-            extra={"author_asin": author_asin, **_failure_fields(e)},
-        )
-        return []
+get_book_from_db = _guarded("DB read failed for book", lambda: None, ("asin",))(_books.get_book)
+get_books_from_db = _guarded("DB read failed for books", list, ("asins",))(_books.get_books)
+search_books_from_db = _guarded("DB search failed for books", list)(_books.search_books)
+get_books_by_sku_from_db = _guarded(
+    "DB read failed for sku_group", list, ("sku_group",)
+)(_books.get_books_by_sku)
+get_distinct_plans_from_db = _guarded(
+    "DB read failed for distinct plans", list
+)(_books.distinct_plans)
+# search is caller-supplied filter text and stays out of the log: it is not in
+# the message, and _failure_fields(e) never renders the exception's own text.
+get_distinct_genres_from_db = _guarded(
+    "DB read failed for distinct genres", list
+)(_books.distinct_genres)
+get_books_by_plan_from_db = _guarded(
+    "DB read failed for plan", list, ("plan_name",)
+)(_books.get_books_by_plan)
+get_vvab_books_from_db = _guarded("DB read failed for VVAB books", list)(_books.get_vvab_books)
+get_new_releases_from_db = _guarded(
+    "DB read failed for new releases", list
+)(_books.get_new_releases)
+get_coming_soon_from_db = _guarded(
+    "DB read failed for coming soon", list
+)(_books.get_coming_soon)
+get_track_from_db = _guarded("DB read failed for track", lambda: None, ("asin",))(_books.get_track)
 
 
 # ============================================================
-# NARRATOR READER
+# AUTHOR AND NARRATOR READERS
 # ============================================================
 
-def _narrator_to_dict(n) -> dict[str, Any]:
-    """Converts a Narrator model to a response dict with attribution."""
-    result = {
-        "name": n.name,
-        "description": n.description,
-        "image": n.image,
-        "website": n.website,
-        "wikipediaUrl": n.wikipedia_url,
-        "languages": n.languages,
-        "accents": n.accents,
-        "gender": n.gender,
-        "genresNarrated": n.genres_narrated,
-        "audiobooksProduced": n.audiobooks_produced,
-        "culturalHeritage": n.cultural_heritage,
-        "publishers": n.publishers,
-        "socialLinks": n.social_links,
-        "audioSamples": n.audio_samples,
-        "source": n.source,
-        "sourceUrl": n.source_url,
-        "sourceUpdatedAt": n.source_updated_at.isoformat() if n.source_updated_at else None,
-        "attribution": None,
-        "updatedAt": n.updated_at.isoformat() if n.updated_at else None,
-    }
-    if n.source and n.source_updated_at:
-        date_str = n.source_updated_at.strftime("%B %Y")
-        result["attribution"] = f"Profile data provided by {n.source}, retrieved {date_str}"
-    return result
-
-async def search_narrators_from_db(
-    session: AsyncSession,
-    name: str,
-    gender: str | None = None,
-    language: str | None = None,
-    audiobooks_produced: str | None = None,
-    source: str | None = None,
-    cultural_heritage: str | None = None,
-    sort: str | None = None,
-    order: str | None = None,
-    limit: int = 20,
-    page: int = 1,
-) -> list[dict[str, Any]]:
-    """Searches narrators by name (case-insensitive partial match)."""
-    try:
-        stmt = select(Narrator).where(Narrator.name.ilike(f"%{name}%"))
-        stmt = apply_narrator_filters(
-            stmt,
-            gender=gender,
-            language=language,
-            audiobooks_produced=audiobooks_produced,
-            source=source,
-            cultural_heritage=cultural_heritage,
-        )
-        stmt = apply_sort(stmt, sort, order, NARRATOR_SORT_FIELDS)
-        stmt = stmt.limit(limit).offset((page - 1) * limit)
-        result = await session.execute(stmt)
-        narrators = result.scalars().all()
-        return [_narrator_to_dict(n) for n in narrators]
-    except Exception as e:
-        # The searched-for name is the caller's own text and is never written
-        # to a log -- neither in this message, which omits it, nor in the
-        # extra fields below, which carry only _failure_fields(e) (error type
-        # and SQLSTATE, never the exception's own rendered text). The name is
-        # also a bound parameter of the statement above, and hide_parameters
-        # on the engine (see app/db/session.py) keeps a StatementError from
-        # rendering it either, so the name stays out twice over. The operation
-        # is still named here, so the failure remains attributable to this
-        # endpoint.
-        logger.warning("DB read failed for narrator search", extra={**_failure_fields(e)})
-        return []
-
-
-async def get_narrator_books_from_db(
-    session: AsyncSession,
-    name: str,
-    title: str | None = None,
-    subtitle: str | None = None,
-    region: str | None = None,
-    description: str | None = None,
-    summary: str | None = None,
-    publisher: str | None = None,
-    copyright: str | None = None,
-    isbn: str | None = None,
-    author_name: str | None = None,
-    series_name: str | None = None,
-    language: str | None = None,
-    rating_better_than: float | None = None,
-    rating_worse_than: float | None = None,
-    longer_than: int | None = None,
-    shorter_than: int | None = None,
-    explicit: bool | None = None,
-    whisper_sync: bool | None = None,
-    has_pdf: bool | None = None,
-    book_format: str | None = None,
-    content_type: str | None = None,
-    content_delivery_type: str | None = None,
-    is_listenable: bool | None = None,
-    is_buyable: bool | None = None,
-    is_vvab: bool | None = None,
-    plan_name: str | None = None,
-    genre: str | None = None,
-    category: str | None = None,
-    sort: str | None = None,
-    order: str | None = None,
-    limit: int = 20,
-    page: int = 1,
-) -> list[dict[str, Any]]:
-    """Fetches all books by a narrator name from the local DB."""
-    try:
-        stmt = (
-            select(Book)
-            .join(book_narrator, Book.asin == book_narrator.c.book_asin)
-            .where(book_narrator.c.narrator_name == name)
-            .options(
-                selectinload(Book.authors),
-                selectinload(Book.narrators),
-                selectinload(Book.genres),
-                selectinload(Book.series),
-            )
-        )
-        stmt = apply_book_filters(
-            stmt,
-            title=title,
-            subtitle=subtitle,
-            region=region,
-            description=description,
-            summary=summary,
-            publisher=publisher,
-            copyright=copyright,
-            isbn=isbn,
-            author_name=author_name,
-            series_name=series_name,
-            language=language,
-            rating_better_than=rating_better_than,
-            rating_worse_than=rating_worse_than,
-            longer_than=longer_than,
-            shorter_than=shorter_than,
-            explicit=explicit,
-            whisper_sync=whisper_sync,
-            has_pdf=has_pdf,
-            book_format=book_format,
-            content_type=content_type,
-            content_delivery_type=content_delivery_type,
-            is_listenable=is_listenable,
-            is_buyable=is_buyable,
-            is_vvab=is_vvab,
-            plan_name=plan_name,
-            genre=genre,
-            category=category,
-        )
-        stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
-        stmt = stmt.limit(limit).offset((page - 1) * limit)
-        result = await session.execute(stmt)
-        books = result.scalars().all()
-        results = []
-        for book in books:
-            positions = await _get_series_positions(session, book.asin)
-            results.append(_book_to_dict(book, positions))
-        return results
-    except Exception as e:
-        # Narrator name and every book filter applied above arrive from the
-        # query string, and all of them stay out of the log for the same
-        # reason as the narrator search above: absent from this message, and
-        # kept out of the extra fields too, since _failure_fields(e) never
-        # renders the exception's own text.
-        logger.warning("DB read failed for narrator books", extra={**_failure_fields(e)})
-        return []
+get_author_from_db = _guarded(
+    "DB read failed for author", lambda: None, ("asin", "region"), _author_failure
+)(_people.get_author)
+# None, not [], on failure: a caller feeding this into an authoritative write
+# must be able to tell a failed read from an author with no stored books.
+get_author_book_asins_from_db = _guarded(
+    "DB read failed for author book asins",
+    lambda: None,
+    ("author_asin", "region"),
+    _error_type_only,
+)(_people.get_author_book_asins)
+get_author_books_from_db = _guarded(
+    "DB read failed for author books", list, ("author_asin",)
+)(_people.get_author_books)
+# The searched-for name and every book filter arrive from the query string and
+# are never written to a log: absent from the message, and from the extra
+# fields, which carry only _failure_fields(e). The name is also a bound
+# parameter, and hide_parameters on the engine (see app/db/session.py) keeps a
+# StatementError from rendering it either, so it stays out twice over.
+search_narrators_from_db = _guarded(
+    "DB read failed for narrator search", list
+)(_people.search_narrators)
+get_narrator_books_from_db = _guarded(
+    "DB read failed for narrator books", list
+)(_people.get_narrator_books)
 
 
 # ============================================================
 # SERIES READER
 # ============================================================
 
-async def get_series_from_db(session: AsyncSession, asin: str) -> dict[str, Any] | None:
-    """Fetches a series from the DB."""
-    try:
-        result = await session.execute(
-            select(Series).where(Series.asin == asin)
-        )
-        series = result.scalar_one_or_none()
-        if not series:
-            return None
-
-        return {
-            "asin": series.asin,
-            "name": series.title,
-            "description": series.description,
-            "region": series.region,
-            "position": None,
-            "updatedAt": series.updated_at.isoformat() if series.updated_at else None,
-            "audibleExtras": series.audible_extras,
-            "extrasWithheld": series.extras_withheld,
-        }
-    except Exception as e:
-        logger.warning(
-            "DB read failed for series",
-            extra={"asin": asin, **_failure_fields(e)},
-        )
-        return None
-
-
-async def search_series_from_db(session: AsyncSession, name: str) -> list[dict[str, Any]]:
-    """Searches for series by name in the DB."""
-    try:
-        result = await session.execute(
-            select(Series)
-            .where(Series.title.ilike(f"%{name}%"))
-            .limit(10)
-        )
-        series_list = result.scalars().all()
-        return [
-            {
-                "asin": s.asin,
-                "name": s.title,
-                "description": s.description,
-                "region": s.region,
-                "position": None,
-                "updatedAt": s.updated_at.isoformat() if s.updated_at else None,
-                "audibleExtras": s.audible_extras,
-                "extrasWithheld": s.extras_withheld,
-            }
-            for s in series_list
-        ]
-    except Exception as e:
-        # Series name is caller-supplied search text and is not logged: it is
-        # not in this message, and _failure_fields(e) never renders the
-        # exception's own text, so it can't smuggle the bound parameter in
-        # either. Which name was searched for matters less than knowing that
-        # this lookup is the one that failed.
-        logger.warning("DB search failed for series", extra={**_failure_fields(e)})
-        return []
-
-
-async def get_series_books_from_db(
-    session: AsyncSession,
-    series_asin: str,
-    title: str | None = None,
-    subtitle: str | None = None,
-    region: str | None = None,
-    description: str | None = None,
-    summary: str | None = None,
-    publisher: str | None = None,
-    copyright: str | None = None,
-    isbn: str | None = None,
-    author_name: str | None = None,
-    language: str | None = None,
-    rating_better_than: float | None = None,
-    rating_worse_than: float | None = None,
-    longer_than: int | None = None,
-    shorter_than: int | None = None,
-    explicit: bool | None = None,
-    whisper_sync: bool | None = None,
-    has_pdf: bool | None = None,
-    book_format: str | None = None,
-    content_type: str | None = None,
-    content_delivery_type: str | None = None,
-    is_listenable: bool | None = None,
-    is_buyable: bool | None = None,
-    is_vvab: bool | None = None,
-    plan_name: str | None = None,
-    genre: str | None = None,
-    category: str | None = None,
-    sort: str | None = None,
-    order: str | None = None,
-) -> list[dict[str, Any]]:
-    """Fetches all books in a series from the DB.
-
-    Defaults to series position order. Position is a String column but commonly
-    holds numeric values ("1", "2", "10", "1.5"). Plain string ordering sorts
-    "10" before "2", so numeric positions are cast to Float for ordering.
-    Non-numeric positions ("1-3", "Book 1", null) fall to the end in stable
-    string order.
-
-    Passing an explicit sort field overrides the position ordering.
-    """
-    try:
-        stmt = (
-            select(Book)
-            .join(book_series, book_series.c.book_asin == Book.asin)
-            .where(book_series.c.series_asin == series_asin)
-            .options(
-                selectinload(Book.authors),
-                selectinload(Book.narrators),
-                selectinload(Book.genres),
-                selectinload(Book.series),
-            )
-        )
-        stmt = apply_book_filters(
-            stmt,
-            title=title,
-            subtitle=subtitle,
-            region=region,
-            description=description,
-            summary=summary,
-            publisher=publisher,
-            copyright=copyright,
-            isbn=isbn,
-            author_name=author_name,
-            language=language,
-            rating_better_than=rating_better_than,
-            rating_worse_than=rating_worse_than,
-            longer_than=longer_than,
-            shorter_than=shorter_than,
-            explicit=explicit,
-            whisper_sync=whisper_sync,
-            has_pdf=has_pdf,
-            book_format=book_format,
-            content_type=content_type,
-            content_delivery_type=content_delivery_type,
-            is_listenable=is_listenable,
-            is_buyable=is_buyable,
-            is_vvab=is_vvab,
-            plan_name=plan_name,
-            genre=genre,
-            category=category,
-        )
-        if sort:
-            stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
-        else:
-            stmt = stmt.order_by(
-                case(
-                    (
-                        book_series.c.position.op("~")(r"^\d+(\.\d+)?$"),
-                        cast(book_series.c.position, Float),
-                    ),
-                    else_=None,
-                ).asc().nulls_last(),
-                book_series.c.position.asc(),
-            )
-        result = await session.execute(stmt)
-        books = result.scalars().all()
-        results = []
-        for book in books:
-            positions = await _get_series_positions(session, book.asin)
-            results.append(_book_to_dict(book, positions))
-        return results
-    except Exception as e:
-        logger.warning(
-            "DB read failed for series books",
-            extra={"series_asin": series_asin, **_failure_fields(e)},
-        )
-        return []
-
-
-# ============================================================
-# TRACK READER
-# ============================================================
-
-async def get_track_from_db(session: AsyncSession, asin: str) -> dict[str, Any] | None:
-    """Fetches chapter data for a book from the DB."""
-    try:
-        result = await session.execute(
-            select(Track).where(Track.asin == asin)
-        )
-        track = result.scalar_one_or_none()
-        if not track:
-            return None
-        return track.chapters
-    except Exception as e:
-        logger.warning(
-            "DB read failed for track",
-            extra={"asin": asin, **_failure_fields(e)},
-        )
-        return None
+get_series_from_db = _guarded("DB read failed for series", lambda: None, ("asin",))(_series.get_series)
+# Series name is caller-supplied search text and is not logged, for the same
+# reason as the narrator reads above.
+search_series_from_db = _guarded("DB search failed for series", list)(_series.search_series)
+get_series_books_from_db = _guarded(
+    "DB read failed for series books", list, ("series_asin",)
+)(_series.get_series_books)
 
 
 # ============================================================
 # STATS READER
 # ============================================================
-
 
 # Public, unauthenticated, and hit continuously on every README render -- the
 # counters there are /db/stats/badge SVGs (app/api/routes/db/badge.py) drawn
@@ -1562,6 +258,7 @@ class DbStatsResult(NamedTuple):
     """
     stats: dict[str, int]
     cache_expires_at: datetime | None
+
 
 
 async def get_db_stats(
@@ -1652,40 +349,7 @@ async def get_db_stats(
         await session.rollback()
 
     try:
-        books_stmt = select(func.count()).select_from(Book)
-        authors_stmt = select(func.count()).select_from(Author)
-        series_stmt = select(func.count()).select_from(Series)
-        chapters_stmt = select(func.count()).select_from(Track)
-
-        if region is not None:
-            books_stmt = books_stmt.where(Book.region == region)
-            authors_stmt = authors_stmt.where(Author.region == region)
-            series_stmt = series_stmt.where(Series.region == region)
-            chapters_stmt = (
-                chapters_stmt
-                .join(Book, Book.asin == Track.asin)
-                .where(Book.region == region)
-            )
-
-        books = await session.execute(books_stmt)
-        authors = await session.execute(authors_stmt)
-        narrators = await session.execute(select(func.count()).select_from(Narrator))
-        series = await session.execute(series_stmt)
-        books_with_chapters = await session.execute(chapters_stmt)
-
-        stats = {
-            "books": books.scalar_one(),
-            "authors": authors.scalar_one(),
-            "narrators": narrators.scalar_one(),
-            "series": series.scalar_one(),
-            "booksWithChapters": books_with_chapters.scalar_one(),
-        }
-
-        if region is not None:
-            series_region_unknown = await session.execute(
-                select(func.count()).select_from(Series).where(Series.region.is_(None))
-            )
-            stats["seriesRegionUnknown"] = series_region_unknown.scalar_one()
+        stats = await count_stored(session, region)
     except Exception as e:
         logger.warning("DB read failed for stats", extra={"region": region, **_failure_fields(e)})
         await session.rollback()

@@ -30,6 +30,7 @@ import app.db.models as app_models
 import libex_core.storage as storage
 from app.db.base import Base as app_base
 from libex_core.storage import models as core_models
+from libex_core.storage import store as store_module
 from libex_core.storage.base import Base
 from libex_core.storage.types import JSONDocument, UTCDateTime, _as_utc
 
@@ -52,6 +53,15 @@ _EXPORTS = {
     "Narrator": core_models.Narrator,
     "Genre": core_models.Genre,
     "Track": core_models.Track,
+    "LocalStore": store_module.LocalStore,
+    "StoreError": store_module.StoreError,
+    "StoreConfigError": store_module.StoreConfigError,
+    "StoreConnectionError": store_module.StoreConnectionError,
+    "StoreNotInitialised": store_module.StoreNotInitialised,
+    "StoreOutdated": store_module.StoreOutdated,
+    "ForeignDatabase": store_module.ForeignDatabase,
+    "StoreClosed": store_module.StoreClosed,
+    "StoreMigrationError": store_module.StoreMigrationError,
 }
 
 

@@ -196,3 +196,35 @@ def test_readme_image_paths_exist_on_disk():
 
     missing = [path for path in referenced if not (_REPO_ROOT / path).is_file()]
     assert missing == [], f"README references images that do not exist: {missing}"
+
+
+def test_description_sections_are_collapsed_and_render_their_markdown(client):
+    """
+    The long sections of `info.description` are click-to-open <details>
+    blocks. The structure fails silently: an unclosed block swallows every
+    section after it, and a <summary> not followed by a blank line turns the
+    markdown inside (the header table, the code spans) into literal text.
+    Neither shows up as an error, only as a worse docs page.
+    """
+    description = client.get("/openapi.json").json()["info"]["description"]
+
+    assert description.count("<details>") == 4
+    assert description.count("</details>") == 4
+
+    for title in (
+        "Response headers",
+        "What a response actually tells you",
+        "Audible outages",
+        "Caching",
+    ):
+        assert f"<summary><strong>{title}</strong></summary>\n\n" in description
+
+    # Opened in order, closed in order: depth never goes negative and ends at 0.
+    depth = 0
+    for tag in re.findall(r"</?details>", description):
+        depth += 1 if tag == "<details>" else -1
+        assert depth >= 0
+    assert depth == 0
+
+    # Collapsed by default: no block is rendered open.
+    assert "<details open" not in description

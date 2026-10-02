@@ -23,6 +23,7 @@ validated ASIN in its uppercase form.
 import asyncio
 import logging
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -44,10 +45,12 @@ from libex_core.audible.chapters import (
 from libex_core.audible.client import (
     AudibleGet,
     as_audible_failure,
+    author_books_concurrency,
     upstream_status_of,
     validate_region,
 )
 from libex_core.exceptions import ErrorCode, NotFoundException
+from libex_core.lookup._shaping import check_shaping, shape_books
 from libex_core.models import BookResponse, BulkBookResponse, ChapterResponse
 
 logger = logging.getLogger("libex")
@@ -73,16 +76,35 @@ class Hydration:
     confirmed it has no record of, plus any identifier that is not ASIN-shaped
     (given as it arrived; it never reached Audible). placeholders holds ASINs
     Audible answered with a placeholder record. not_fetched holds ASINs whose
-    request failed, so nothing is known about them.
+    request failed, so nothing is known about them. deadline_abandoned is the
+    part of not_fetched whose request was cut off because the caller's
+    deadline arrived rather than because it failed.
     """
 
     books: list[dict[str, Any]] = field(default_factory=list)
     not_found: list[str] = field(default_factory=list)
     placeholders: list[str] = field(default_factory=list)
     not_fetched: list[str] = field(default_factory=list)
+    deadline_abandoned: list[str] = field(default_factory=list)
 
 
-async def hydrate_books(get: AudibleGet, asins: list[str], region: str) -> Hydration:
+class _HydrationDeadlineExceeded(Exception):
+    """One hydration request abandoned because the caller's deadline arrived.
+
+    An Exception rather than a CancelledError, which is a BaseException and
+    would skip the failed-request accounting: an abandoned request's ASINs
+    must land in not_fetched like any other request that gave no answer.
+    """
+
+
+async def hydrate_books(
+    get: AudibleGet,
+    asins: list[str],
+    region: str,
+    *,
+    deadline: float | None = None,
+    high_concurrency: bool = False,
+) -> Hydration:
     """
     Turns a list of ASINs into books, 50 to a request, all requests at once.
 
@@ -99,6 +121,12 @@ async def hydrate_books(get: AudibleGet, asins: list[str], region: str) -> Hydra
     produced a servable book, nothing can be told apart from an outage, so the
     call raises AudibleAPIException carrying the first failure's upstream
     status, even if another chunk confirmed some ASINs absent.
+
+    deadline, when given, is an absolute time.monotonic() bound: requests still
+    in flight when it arrives are cancelled, the ones that already answered are
+    kept, and the cancelled ones' ASINs are reported in not_fetched and
+    deadline_abandoned. high_concurrency draws the requests from the wider pool
+    reserved for an author's whole catalogue.
 
     Raises NotFoundException for an empty list, RegionException for a region
     that is not one of the eleven, and AudibleAPIException as above.
@@ -137,17 +165,48 @@ async def hydrate_books(get: AudibleGet, asins: list[str], region: str) -> Hydra
 
     try:
         start = time.monotonic()
-        # return_exceptions so one failed chunk cannot discard the chunks that
-        # came back; results line up with chunks by index. The client's own
-        # process-wide bound is the throttle, so nothing here caps the fan-out.
-        results = await asyncio.gather(
-            *(fetch_products(get, chunk, region) for chunk in chunks),
-            return_exceptions=True,
-        )
+        # One failed chunk must not discard the chunks that came back, so the
+        # requests are waited on rather than gathered: those that answered are
+        # kept and, when a deadline arrives, those still in flight are
+        # cancelled and counted as unanswered. Results line up with chunks by
+        # index. The client's own process-wide bound is the throttle, so
+        # nothing here caps the fan-out.
+        pool_context = author_books_concurrency() if high_concurrency else nullcontext()
+        with pool_context:
+            tasks = [
+                asyncio.ensure_future(fetch_products(get, chunk, region))
+                for chunk in chunks
+            ]
+            timeout = None if deadline is None else max(0.0, deadline - time.monotonic())
+            try:
+                if tasks:
+                    _, pending = await asyncio.wait(tasks, timeout=timeout)
+                    for task in pending:
+                        task.cancel()
+                    if pending:
+                        await asyncio.gather(*pending, return_exceptions=True)
+                        logger.warning("Hydration deadline reached, chunks abandoned", extra={
+                            "abandoned_chunks": len(pending),
+                            "total_chunks": len(chunks),
+                            "region": region,
+                        })
+            finally:
+                # An outer cancellation unwinds out of the wait above and would
+                # otherwise leave the fan-out running with nobody holding it.
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+            results: list[Any] = []
+            for task in tasks:
+                if task.cancelled():
+                    results.append(_HydrationDeadlineExceeded())
+                else:
+                    results.append(task.exception() or task.result())
         requested_took = round((time.monotonic() - start) * 1000, 2)
 
         all_products: list[dict[str, Any]] = []
         failed: list[str] = []
+        abandoned: list[str] = []
         errors: list[Exception] = []
 
         for idx, (chunk, result) in enumerate(zip(chunks, results)):
@@ -161,6 +220,8 @@ async def hydrate_books(get: AudibleGet, asins: list[str], region: str) -> Hydra
             if isinstance(result, Exception):
                 failed.extend(chunk)
                 errors.append(result)
+                if isinstance(result, _HydrationDeadlineExceeded):
+                    abandoned.extend(chunk)
                 logger.warning("Hydration chunk failed", extra={
                     "chunk_index": idx + 1,
                     "chunk_count": len(chunks),
@@ -215,6 +276,7 @@ async def hydrate_books(get: AudibleGet, asins: list[str], region: str) -> Hydra
             not_found=not_found,
             placeholders=placeholders,
             not_fetched=failed,
+            deadline_abandoned=abandoned,
         )
 
     except NotFoundException:
@@ -259,7 +321,13 @@ async def get_book(get: AudibleGet, asin: str, *, region: str = "us") -> BookRes
 
 
 async def get_books(
-    get: AudibleGet, asins: list[str], *, region: str = "us"
+    get: AudibleGet,
+    asins: list[str],
+    *,
+    region: str = "us",
+    filters: dict[str, Any] | None = None,
+    sort: str | None = None,
+    order: str = "asc",
 ) -> BulkBookResponse:
     """
     Fetches up to 1000 books by ASIN.
@@ -276,9 +344,16 @@ async def get_books(
     then notFetched. notFound is a confirmed absence on Audible; notFetched is
     an outage kept Libex from finding out, and a retry may resolve it.
 
+    filters, sort and order shape books only, as on the hosted route: they are
+    applied after notFound, placeholderRecords and notFetched are worked out, so
+    a book that was found but filtered out is not reported missing. See
+    libex_core.shaping for the filter names and sortable fields; a name or
+    value outside them is ValueError, before anything is sent.
+
     Raises AudibleAPIException when a request failed and no book came back at
     all, and RegionException for an unknown region.
     """
+    check_shaping(filters, sort, order)
     asin_list = [
         a.strip()
         for entry in asins
@@ -307,8 +382,10 @@ async def get_books(
         {normalise_asin(a) for a in hydration.not_fetched} - found - placeholder_set
     )
 
+    shaped = shape_books(hydration.books, filters, sort, order)
+
     return BulkBookResponse(
-        books=[BookResponse(**book) for book in hydration.books],
+        books=[BookResponse(**book) for book in shaped],
         notFound=[
             a for a in asin_list
             if normalise_asin(a) not in found

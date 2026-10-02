@@ -1,5 +1,6 @@
 """
-Looking a series up by ASIN: its own record, and the books in it.
+Looking a series up: by ASIN its own record and the books in it, and by name
+the series whose books match.
 
 Like the book lookups beside it, these are the hosted routes' live path
 without the cache, the database backstop or persistence: an outage is
@@ -10,6 +11,7 @@ Nothing here reads the environment.
 # Standard library
 import logging
 import time
+from typing import Any
 
 # Core
 from libex_core.audible.client import (
@@ -19,11 +21,14 @@ from libex_core.audible.client import (
     validate_region,
 )
 from libex_core.audible.series import fetch_series, fetch_series_book_asins, normalize_series
-from libex_core.exceptions import NotFoundException
+from libex_core.exceptions import AudibleAPIException, NotFoundException
+from libex_core.lookup._shaping import check_shaping, shape_books
 from libex_core.lookup.books import _OUTAGE_MESSAGE, _canonical_asin, hydrate_books
 from libex_core.models import BookResponse, SeriesResponse
 
 logger = logging.getLogger("libex")
+
+_SERIES_SEARCH_PATH = "/1.0/catalog/products"
 
 
 async def get_series(get: AudibleGet, asin: str, *, region: str = "us") -> SeriesResponse:
@@ -62,7 +67,13 @@ async def get_series(get: AudibleGet, asin: str, *, region: str = "us") -> Serie
 
 
 async def get_series_books(
-    get: AudibleGet, asin: str, *, region: str = "us"
+    get: AudibleGet,
+    asin: str,
+    *,
+    region: str = "us",
+    filters: dict[str, Any] | None = None,
+    sort: str | None = None,
+    order: str = "asc",
 ) -> list[BookResponse]:
     """
     Fetches the full books in a series.
@@ -71,7 +82,12 @@ async def get_series_books(
     bulk lookup. The books come back in the order Audible returned them. A
     member that is not ASIN-shaped, or that Audible has no record of, is left
     out; the bulk lookup is where such ASINs are reported. An empty list is
-    possible when none of the members resolves.
+    possible when none of the members resolves, or when filters leave none.
+
+    filters, sort and order are applied as on the hosted route: the books keep
+    series order unless a sort is given, which overrides it. See
+    libex_core.shaping for the filter names and sortable fields; a name or
+    value outside them is ValueError, before anything is sent.
 
     Raises NotFoundException (code invalid_request) for a value that is not an
     ASIN, NotFoundException when the series has no members, AudibleAPIException
@@ -80,6 +96,7 @@ async def get_series_books(
     """
     canonical = _canonical_asin(asin)
     region = validate_region(region)
+    check_shaping(filters, sort, order)
     try:
         start = time.monotonic()
         asins = await fetch_series_book_asins(get, canonical, region)
@@ -101,5 +118,92 @@ async def get_series_books(
         })
         raise as_audible_failure(e, _OUTAGE_MESSAGE) from e
 
+    if not asins:
+        raise NotFoundException("No books found for series")
     hydration = await hydrate_books(get, asins, region)
-    return [BookResponse(**book) for book in hydration.books]
+    return [BookResponse(**book) for book in shape_books(hydration.books, filters, sort, order)]
+
+
+async def search_series(
+    get: AudibleGet, name: str, *, region: str = "us"
+) -> list[SeriesResponse]:
+    """
+    Searches for series by name.
+
+    Audible has no series search, so this looks up the first ten catalog
+    products titled with the name, takes the series their relationships name
+    (each once, in the order found) and fetches each series' own record. A
+    series Audible has no record of is left out, and one that could not be
+    fetched is left out with a warning, as the hosted route does, since
+    the others are still worth returning.
+
+    The name goes to Audible as given and is never logged or repeated in a
+    message. Raises NotFoundException when no series was found,
+    AudibleAPIException when the search failed, or when series were found
+    and every one of them failed to fetch (an empty list there would pass
+    an outage off as a confirmed absence), and RegionException for an unknown
+    region.
+    """
+    region = validate_region(region)
+    try:
+        start = time.monotonic()
+        data = await get(region, _SERIES_SEARCH_PATH, {
+            "title": name,
+            "response_groups": "relationships",
+            "num_results": 10,
+        })
+        products = data.get("products", [])
+
+        seen_asins: set[str] = set()
+        series_asins: list[str] = []
+        for product in products:
+            for rel in product.get("relationships", []):
+                if rel.get("relationship_type") == "series":
+                    series_asin = rel.get("asin")
+                    if series_asin and series_asin not in seen_asins:
+                        seen_asins.add(series_asin)
+                        series_asins.append(series_asin)
+
+        results: list[SeriesResponse] = []
+        skipped_num = 0
+        for series_asin in series_asins:
+            try:
+                results.append(await get_series(get, series_asin, region=region))
+            except NotFoundException:
+                continue
+            except AudibleAPIException:
+                # get_series already logged the failure; one warning for the
+                # lot follows the loop.
+                skipped_num += 1
+                continue
+
+        if skipped_num:
+            logger.warning(
+                "Series search: could not resolve one or more related series, skipping",
+                extra={"region": region, "skipped_num": skipped_num},
+            )
+
+        search_took = round((time.monotonic() - start) * 1000, 2)
+
+        if not results:
+            if skipped_num:
+                raise AudibleAPIException("Series search failed")
+            raise NotFoundException("No series found")
+
+        logger.info("Searched Audible for series", extra={
+            "series_result_num": len(results),
+            "search_took": search_took,
+            "region": region,
+        })
+        return results
+
+    except NotFoundException:
+        raise
+    except Exception as e:
+        logger.warning("Series search failed", extra={
+            "name_length": len(name),
+            "region": region,
+            "error_type": type(e).__name__,
+            "upstream_status": upstream_status_of(e),
+        })
+        raise as_audible_failure(e, "Series search failed") from e

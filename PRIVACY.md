@@ -377,8 +377,9 @@ What the software does as shipped:
 
 `libex_core` is the part of Libex that runs inside another application. It
 fetches from Audible in that application's own process, with no Libex server
-involved. **It has not been published** to PyPI or any other package index, so
-this section describes the source as it stands, ahead of any release. The
+involved. It is published on PyPI as `libex-core`. This section describes the
+source as it currently stands; releases are listed in
+`libex_core/CHANGELOG.md`, and an older release may differ from it. The
 behaviour described is in `libex_core/audible/client.py`, with the logging of
 individual titles in `libex_core/audible/books.py` and
 `libex_core/audible/extras.py`, searching in `libex_core/audible/search.py`,

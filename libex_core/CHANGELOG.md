@@ -8,11 +8,10 @@ discipline into the MINOR slot rather than relying on SemVer's 0.x carve-out:
 while pre-1.0, MINOR carries any breaking change, and PATCH is reserved for
 fixes that have no effect on the package's public surface.
 
-`libex_core` is not published to PyPI. It is packaged for it as the
-`libex-core` distribution, and any first publish is a 0.x release.
-Entries below that predate publication are historical record for whoever
-embeds this package, not evidence that anyone consumed a given version at the
-time it was cut.
+`libex_core` is published on PyPI as the `libex-core` distribution. 0.20.0 is
+the first published version. Entries for earlier versions record changes made
+before publication: they are historical record for whoever embeds this package,
+not evidence that anyone consumed a given version at the time it was cut.
 
 ## [0.20.0]
 

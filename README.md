@@ -262,6 +262,19 @@ networks:
 
 ---
 
+## Run It Locally
+
+`libex-core` is the same Audible lookups as a Python package and a command-line tool, with no server involved: books, chapters, series, authors, narrators, search and new releases, in all eleven regions, with an optional local database.
+
+```bash
+pip install libex-core
+libex-core book get ASIN --region us
+```
+
+Requests leave from your own machine, so it asks you to choose a proxy or direct connection before it sends anything. Setup, commands, exit codes and the local store are on the [PyPI page](https://pypi.org/project/libex-core/) ([source](PYPI.md)).
+
+---
+
 ## Logging & Privacy
 
 **Libex does not record who calls it.** No IP address is logged — not in full,
@@ -723,15 +736,9 @@ If you deployed Libex before the VPN requirement and the backup/backfill/refresh
 
 None of this has shipped yet, and none of it comes with a date. It is where things are headed.
 
-**Planned**
-
-- `libex-core`, an installable Python package (on PyPI) with the Audible client, books, chapters, series, search and authors, and a command-line tool.
-
 **Later**
 
-- Releases and categories in the package.
 - A documentation site.
-- Optional local storage.
 
 ---
 

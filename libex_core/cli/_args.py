@@ -8,6 +8,35 @@ from collections.abc import Callable
 from typing import Any
 
 
+class Parser(argparse.ArgumentParser):
+    """An ArgumentParser whose refusals never repeat what was typed.
+
+    argparse quotes the offending value for a bad choice and lists every
+    argument it did not recognise, which would put a mistyped secret on the
+    screen and into any log of it. The messages here are fixed text. Command
+    parsers are built from this class too, because add_subparsers builds its
+    children from the type of the parser it hangs off."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        # Flags are an exact contract: no abbreviations, so no ambiguity
+        # error that would repeat what was typed.
+        kwargs["allow_abbrev"] = False
+        super().__init__(*args, **kwargs)
+
+    def _check_value(self, action: argparse.Action, value: Any) -> None:
+        if action.choices is not None and value not in action.choices:
+            options = ", ".join(str(choice) for choice in action.choices)
+            raise argparse.ArgumentError(
+                action, f"invalid choice (choose from {options})"
+            )
+
+    def parse_args(self, args: Any = None, namespace: Any = None) -> Any:
+        parsed, extras = self.parse_known_args(args, namespace)
+        if extras:
+            self.error("unrecognized arguments")
+        return parsed
+
+
 def parser_options() -> dict[str, Any]:
     """Python 3.14 colors argparse output on a terminal unless told not to."""
     if sys.version_info >= (3, 14):

@@ -4,10 +4,8 @@ is fixed so `python -m libex_core` and the installed script show the same
 usage text and the generated man page and completions match both.
 """
 
-import argparse
-
 from libex_core import __version__
-from libex_core.cli._args import add_help_option, parser_options
+from libex_core.cli._args import Parser, add_help_option, parser_options
 from libex_core.cli.commands import (
     abs_search,
     author,
@@ -37,8 +35,8 @@ COMMANDS = (
 )
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+def build_parser() -> Parser:
+    parser = Parser(
         prog=PROG,
         add_help=False,
         description=(

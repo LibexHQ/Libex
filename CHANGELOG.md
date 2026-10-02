@@ -10,6 +10,20 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [2.1.2]
+
+No endpoint, parameter, response shape, field or status code moved, and the application behaves exactly as before. This release adds an operator script and nothing else; there is no database migration.
+
+### Added
+- **An operator script prepares the database for region-aware keys, ahead of 2.2.0.** Books and series are identified by ASIN and region, but the stored link tables point at the ASIN alone. 2.2.0 widens that, and `scripts/region_keys.py` does the slow, data-proportional part first, against the running service, so the 2.2.0 migration does not have to rewrite every link row while the API is down. Run it from the API image, one mode at a time, with `python -m scripts.region_keys <mode>`:
+  - `expand` adds nullable region columns to the link tables (`author_book`, `book_narrator`, `book_genre`, `book_series`, `series_author`) and to `tracks`. It waits for its lock under a timeout and retries, so it does not queue behind a long reader and stall other queries.
+  - `backfill` fills those columns in batches, one commit per batch. It is safe to stop and run again: what is left to do is read from the data, not from a saved position. Rows the running app inserts meanwhile arrive without a region and are picked up later by `finalize`.
+  - `index` builds the region-aware unique indexes without blocking writes, checks each is valid afterwards, and rebuilds one that a failed build left invalid.
+  - `verify` is a read-only readiness report and exits `1` unless the database is ready. `--pre-window` relaxes that to columns present and indexes valid.
+  - `finalize` is for the maintenance window only and refuses to run without `--i-have-stopped-writers`. It catches up the backfill, makes the columns `NOT NULL`, and aborts if any row count changed or any NULL remains.
+  - The script only works on Postgres and exits `2` on any other database. It exits `3` if stopped by a signal. Until `finalize` runs, nothing in the app depends on the new columns.
+  - An operator who does not run it sees no difference from this release.
+
 ## [2.1.1]
 
 Only the text of the API description on `/docs` and `/redoc` changed. No endpoint, parameter, response shape, field or status code moved.

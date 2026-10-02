@@ -14,6 +14,16 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.types import TypeDecorator
 
 
+def _as_utc(value):
+    """UTC-aware form of a datetime; anything else passes through unchanged,
+    as a plain DateTime column would let the driver take it."""
+    if not isinstance(value, datetime):
+        return value
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 class UTCDateTime(TypeDecorator):
     """A timestamp that is always a UTC-aware datetime in Python.
 
@@ -30,23 +40,16 @@ class UTCDateTime(TypeDecorator):
     impl = DateTime(timezone=True)
     cache_ok = True
 
-    def process_bind_param(self, value: datetime | None, dialect) -> datetime | None:
-        if value is None:
-            return None
-        if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
-        return value.astimezone(timezone.utc)
+    def process_bind_param(self, value, dialect):
+        return _as_utc(value)
 
-    def process_result_value(self, value: datetime | None, dialect) -> datetime | None:
-        if value is None:
-            return None
-        if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
-        return value.astimezone(timezone.utc)
+    def process_result_value(self, value, dialect):
+        return _as_utc(value)
 
 
 # JSONB on Postgres, exactly as the hosted schema has it. On SQLite it is JSON
-# stored as text, and a Python None binds as SQL NULL rather than the JSON
-# value 'null', so "no value" reads back as None either way and a NULL check
-# in a query still means what it means on Postgres.
+# stored as text with none_as_null=True. The two differ for a bare Python None:
+# Postgres binds it as the JSON value 'null' (the JSONB variant is plain), while
+# SQLite stores SQL NULL. Writers that want "no value" to be SQL NULL on both
+# must bind None explicitly with none_as_null, as the hosted writer does.
 JSONDocument = JSONB().with_variant(JSON(none_as_null=True), "sqlite")

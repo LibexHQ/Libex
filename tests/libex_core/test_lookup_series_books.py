@@ -9,6 +9,7 @@ with. Nothing touches a network.
 """
 
 # Standard library
+import asyncio
 import time
 
 # Third party
@@ -121,8 +122,6 @@ async def test_a_filter_does_not_hide_a_real_shortfall():
 @pytest.mark.parametrize("path", [f"/series/books/{SERIES}", f"/series/{SERIES}/books"],
                          ids=["primary", "legacy"])
 def test_a_whole_series_says_so_the_same_way_as_the_route(hosted, path, region):
-    import asyncio
-
     resp = hosted(fake_get, path, {"region": region})
     result = asyncio.run(L.get_series_books(fake_get, SERIES, region=region))
     assert resp.status_code == 200
@@ -135,8 +134,6 @@ def test_a_whole_series_says_so_the_same_way_as_the_route(hosted, path, region):
 def test_a_series_with_a_missing_book_reports_the_same_reasons_as_the_route(
     hosted, region, monkeypatch
 ):
-    import asyncio
-
     gone = "B0SCR00002"
     monkeypatch.setattr(
         support, "CATALOGUE", {k: v for k, v in support.CATALOGUE.items() if k != gone}
@@ -153,8 +150,6 @@ def test_a_series_with_a_missing_book_reports_the_same_reasons_as_the_route(
 def test_a_filter_does_not_change_what_the_route_or_the_lookup_says(
     hosted, region, monkeypatch
 ):
-    import asyncio
-
     monkeypatch.setattr(
         support, "CATALOGUE", {k: v for k, v in support.CATALOGUE.items() if k != "B0SCR00002"}
     )

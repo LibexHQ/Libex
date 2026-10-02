@@ -80,14 +80,16 @@ _NOT_FOUND_MESSAGE = "No books found for author"
 @dataclass(frozen=True)
 class BookList:
     """
-    An author's books and whether the list is whole.
+    A list of books and whether it is whole. Returned by the author-books
+    lookups and by get_series_books.
 
     books are the full books, filtered and sorted as asked. complete is False
     when discovery stopped before confirming it had every ASIN, or when fewer
-    books came back than ASINs were found; both are judged before filtering,
-    since a filter legitimately shortens the list and says nothing about the
-    fetch. incomplete_reasons names why, in INCOMPLETE_REASONS order, and is
-    empty exactly when complete is True.
+    books came back than ASINs were found; for a series the member list is a
+    single request, so only the second can apply. Both are judged before
+    filtering, since a filter legitimately shortens the list and says nothing
+    about the fetch. incomplete_reasons names why, in INCOMPLETE_REASONS order,
+    and is empty exactly when complete is True.
     """
 
     books: list[BookResponse] = field(default_factory=list)

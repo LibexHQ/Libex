@@ -798,12 +798,17 @@ async def fetch_and_store_chapters(
     Coordinates with the standalone backfill via chapters_checked_at: neither
     path re-fetches what the other has already marked, on the same terms.
     """
+    # A value that is not ASIN-shaped never resolves: Audible would have
+    # answered it with a 404, so it is marked rather than retried every pass.
+    # Screened here, not by catching ValueError, because a malformed body on a
+    # 200 also raises ValueError (JSONDecodeError) and that is transient.
+    if not is_valid_asin(asin):
+        await _mark_chapters_checked(session, asin)
+        return "not_found"
+
     try:
         data = await fetch_chapter_metadata(audible_get, asin, region)
-    except (NotFoundException, ValueError):
-        # ValueError is the core's refusal of a value that is not an ASIN:
-        # Audible would have answered such an id with a 404, and an id that
-        # never resolves must be marked, not retried on every pass.
+    except NotFoundException:
         await _mark_chapters_checked(session, asin)
         return "not_found"
     except Exception as e:

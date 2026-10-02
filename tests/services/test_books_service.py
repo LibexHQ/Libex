@@ -5,6 +5,7 @@ Tests normalization and helper functions without hitting Audible.
 
 # Standard library
 import asyncio
+import json
 import time
 from unittest.mock import AsyncMock, patch
 
@@ -2543,3 +2544,24 @@ async def test_fetch_and_store_chapters_malformed_asin_is_marked_checked_as_not_
     audible.assert_not_awaited()
     mark.assert_awaited_once()
     assert mark.await_args.args[1] == bad
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "exc",
+    [json.JSONDecodeError("Expecting value", "<html>", 0), ValueError("bad body")],
+)
+async def test_fetch_and_store_chapters_bad_body_is_error_and_not_marked(exc):
+    """A malformed body on a 200 raises ValueError (JSONDecodeError is a
+    subclass). That is transient, not a 404: "error", and not marked checked
+    so a later pass retries it."""
+    from app.services.audible.books import fetch_and_store_chapters
+
+    mark = AsyncMock()
+
+    with patch("app.services.audible.books.audible_get", side_effect=exc), \
+         patch("app.services.audible.books._mark_chapters_checked", new=mark):
+        outcome = await fetch_and_store_chapters("B08G9PRS1K", "us", AsyncMock())
+
+    assert outcome == "error"
+    mark.assert_not_awaited()

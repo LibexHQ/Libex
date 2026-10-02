@@ -85,6 +85,7 @@ _WHEEL_METADATA_ALLOWED = {
 
 _SDIST_ROOT_ALLOWED = {
     f"{_SDIST_ROOT}/LICENSE",
+    f"{_SDIST_ROOT}/PYPI.md",
     f"{_SDIST_ROOT}/pyproject.toml",
     f"{_SDIST_ROOT}/PKG-INFO",
 }
@@ -214,12 +215,28 @@ def test_metadata_name_and_python_floor(built):
     assert "Typing :: Typed" in meta.get_all("Classifier")
 
 
+def _runtime_requirements(meta):
+    return {r for r in meta.get_all("Requires-Dist") if "extra ==" not in r}
+
+
 def test_runtime_dependencies_are_exactly_the_two(built):
     wheel, sdist = built
-    assert set(_metadata(wheel).get_all("Requires-Dist")) == _EXPECTED_REQUIRES_DIST
+    assert _runtime_requirements(_metadata(wheel)) == _EXPECTED_REQUIRES_DIST
     with tarfile.open(sdist) as tf:
         pkg_info = message_from_bytes(tf.extractfile(f"{_SDIST_ROOT}/PKG-INFO").read())
-    assert set(pkg_info.get_all("Requires-Dist")) == _EXPECTED_REQUIRES_DIST
+    assert _runtime_requirements(pkg_info) == _EXPECTED_REQUIRES_DIST
+
+
+def test_long_description_is_the_package_readme(built):
+    wheel, sdist = built
+    readme = (REPO_ROOT / "PYPI.md").read_text(encoding="utf-8")
+    meta = _metadata(wheel)
+    assert meta["Description-Content-Type"] == "text/markdown"
+    assert meta.get_payload().strip() == readme.strip()
+    with tarfile.open(sdist) as tf:
+        pkg_info = message_from_bytes(tf.extractfile(f"{_SDIST_ROOT}/PKG-INFO").read())
+    assert pkg_info["Description-Content-Type"] == "text/markdown"
+    assert pkg_info.get_payload().strip() == readme.strip()
 
 
 # ============================================================

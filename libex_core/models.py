@@ -20,6 +20,26 @@ from typing import Any
 # Third party
 from pydantic import BaseModel, Field
 
+__all__ = [
+    "AbsBookResponse",
+    "AbsSearchResponse",
+    "AbsSeriesRef",
+    "AuthorRefResponse",
+    "AuthorResponse",
+    "BookResponse",
+    "BulkBookResponse",
+    "CategoryAncestor",
+    "CategoryNode",
+    "ChapterItem",
+    "ChapterResponse",
+    "FlatCategoryNode",
+    "GenreResponse",
+    "NarratorResponse",
+    "SeriesRefResponse",
+    "SeriesResponse",
+    "to_abs_book",
+]
+
 
 # ============================================================
 # NESTED OBJECT SCHEMAS

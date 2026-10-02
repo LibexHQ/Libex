@@ -4,6 +4,15 @@ Custom exceptions for Libex.
 
 from enum import StrEnum
 
+__all__ = [
+    "AudibleAPIException",
+    "CacheException",
+    "ErrorCode",
+    "LibexException",
+    "NotFoundException",
+    "RegionException",
+]
+
 
 class ErrorCode(StrEnum):
     """Machine-readable reason carried in the error envelope's `code` field.

@@ -96,4 +96,3 @@ def test_an_unknown_ssl_mode_is_refused_without_quoting_it():
     with pytest.raises(StoreConfigError) as caught:
         LocalStore(BASE + "?ssl=hunter2")
     assert "hunter2" not in str(caught.value)
-

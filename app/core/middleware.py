@@ -26,7 +26,7 @@ from libex_core.asin import is_valid_asin, normalise_asin
 from libex_core.audible.client import validate_region
 from app.core.logging import get_logger
 from libex_core.log_safety import is_safe_log_value
-from libex_core.exceptions import NotFoundException, RegionException
+from libex_core.exceptions import ErrorCode, NotFoundException, RegionException
 from app.core.migration_notice import MigrationNotice, MIGRATION_HEADER_NAMES, is_new_host_request
 from app.core.response_headers import (
     HEADER_COMPLETE,
@@ -63,7 +63,9 @@ def valid_asin(description: str) -> Callable[[str], str]:
         if not is_valid_asin(asin):
             # The rejected value is echoed exactly as it arrived, uppercased
             # or not, because it is the caller's own input being reported back.
-            raise NotFoundException(f"Invalid ASIN format: {asin}")
+            raise NotFoundException(
+                f"Invalid ASIN format: {asin}", code=ErrorCode.INVALID_REQUEST
+            )
         return normalise_asin(asin)
 
     return dependency

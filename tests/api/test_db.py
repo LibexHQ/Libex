@@ -298,7 +298,7 @@ async def test_get_db_stats_invalid_region_returns_400_same_shape_as_categories(
     assert stats_response.status_code == 400
     assert stats_response.status_code == categories_response.status_code
     assert stats_response.json() == categories_response.json()
-    assert stats_response.json() == {"error": "Invalid region: zz", "status_code": 400}
+    assert stats_response.json() == {"error": "Invalid region: zz", "status_code": 400, "code": "invalid_request"}
 
 
 @pytest.mark.asyncio

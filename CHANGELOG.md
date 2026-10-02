@@ -10,12 +10,35 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
-## [Unreleased]
+## [1.28.1]
 
 No endpoint, parameter, response shape, field or status code moved. The code that fetches and normalizes Audible book, chapter and series records now lives in the embeddable core library; the output is unchanged.
 
 ### Changed
 - **The malformed-author-ASIN warning no longer logs unsafe values verbatim.** Until now it wrote three fields raw: the book's ASIN, the malformed author ASIN and the author's name, all straight from Audible's response. Now the book's ASIN is logged as `REDACTED` unless it is a well-formed ASIN, and the malformed author ASIN and the author name are logged as-is only if they are short catalogue text (letters, numbers, punctuation and spaces in any script, no `;` or `=`, at most 64 characters), otherwise `REDACTED`. The other warnings that name an ASIN from an Audible response log it as `REDACTED` unless it is well-formed. This affects only what operators see in logs.
+
+## [1.28.0]
+
+### Added
+- **`GET /author/books?name=` now says when its list is incomplete.** The response is still `200` with the bare list of books, but it now carries `X-Libex-Complete`. It is `false` when the walk through Audible's results stopped before it could confirm it reached the end (a later page failed, Libex hit its page cap, or Audible's results stopped advancing at about 500), or when fewer books came back with full details than the walk found. In either case `X-Libex-Incomplete-Reason` gives the reason (`discovery-incomplete` for the walk, or the hydration reason for the details), and `Cache-Control: no-store` is set so no cache holds the short list for everyone. `X-Libex-Complete` is `true` only when the walk finished and every book it found came back with full details. Before, a walk cut short returned the truncated list with nothing to tell you it was truncated.
+
+### Fixed
+- **An Audible outage on the first page of a by-name lookup is now reported as an outage, not as an author with no books.** The route previously treated a failed first page as an empty catalogue. It still answers `404` on this route, with the upstream failure's message rather than a "no books found" one, and the error body now carries `code: "upstream_unavailable"`, so it can be told apart from an author Audible has no books for. A failure on a later page is not an error: it ends the walk and the books gathered so far are returned, marked incomplete as described above.
+- **The background seeder no longer marks an author as done after a walk that stopped on a temporary failure.** A failed page leaves the author to be retried next cycle, so the rest of their catalogue is not skipped for good. An author whose walk ended at Audible's result plateau or the page cap is still marked done, since a retry would stop in the same place.
+
+## [1.27.0]
+
+### Added
+- **Every error response now carries a `code` field saying why the request failed.** The body keeps `error` and `status_code` exactly as before and gains `code` beside them, so a client that reads only the old two fields sees no difference. Status codes are unchanged, including 404 for an invalid ASIN and 400 for an invalid region. The values are `not_in_libex` (Libex's own store has no record: the `/db` routes and `/book/sku`), `not_on_audible` (Audible has no record), `withheld` (Audible answered but Libex deliberately does not return it), `upstream_unavailable` (Libex could not find out right now; try again later) and `invalid_request` (a malformed ASIN, region or parameter).
+- **A single `GET /book/{asin}` for an ASIN Audible answered with only a placeholder record now returns `code: "withheld"`.** It is still a 404, as before. Until now it was indistinguishable from an ASIN Audible has never heard of.
+- **An Audible outage that surfaces as a 404 now returns `code: "upstream_unavailable"`.** Those 404s used to read the same as a genuine miss. The status is unchanged; the code is what tells them apart.
+- **The OpenAPI schema now documents the error body and its `code` values** on the routes that return it.
+
+### Fixed
+- **`GET /new-releases` and `GET /coming-soon` no longer turn a successful Audible scan into a 404 when Libex's own storage step fails.** If the scan found books but saving them or caching the result failed, the endpoints used to return nothing, which surfaced as "No new releases found" or "No upcoming releases found". They now log the failure and return the books that were found. A failed scan itself is still a 404, now with `code: "upstream_unavailable"`; a scan that genuinely finds nothing is still a 404 with `code: "not_on_audible"`.
+- **`GET /categories` no longer returns an empty or wrongly labelled result around a failed taxonomy fetch.** When Audible cannot be reached and nothing is stored for the region, the 404 now carries `code: "upstream_unavailable"`. When Audible answers but saving the taxonomy fails and nothing is stored, the freshly fetched categories are returned instead of a 404. Where categories are already stored, they are served as before.
+
+FastAPI's own validation (422) and unknown-route (`detail`) bodies are unchanged and carry no `code`. Neither does the body of an unhandled 500.
 
 ## [1.26.1]
 

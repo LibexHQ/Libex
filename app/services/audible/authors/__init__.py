@@ -957,11 +957,15 @@ async def get_author_books_by_name(
     name: str,
     region: str,
     session: AsyncSession,
+    *,
+    facts: ResponseFacts | None = None,
 ) -> list[str]:
-    """Fetches book ASINs by author name."""
+    """Fetches book ASINs by author name. A first-page failure raises
+    AudibleAPIException; a later-page failure returns what was gathered and
+    marks facts incomplete (REASON_DISCOVERY_INCOMPLETE)."""
     try:
         start = time.monotonic()
-        asins, pages_fetched = await fetch_author_books_by_name(name, region)
+        asins, pages_fetched = await fetch_author_books_by_name(name, region, facts=facts)
         author_book_took = round((time.monotonic() - start) * 1000, 2)
 
         if not asins:

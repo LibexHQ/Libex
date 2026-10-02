@@ -15,7 +15,13 @@ from dataclasses import dataclass
 from typing import Any
 
 # Core
+from libex_core.audible.client import as_audible_failure
 from app.core.logging import get_logger
+from app.core.response_headers import (
+    REASON_DISCOVERY_INCOMPLETE,
+    ResponseFacts,
+    record_incomplete,
+)
 
 # Services
 from app.services.audible import audible_get
@@ -36,6 +42,29 @@ NAME_SEARCH_MAX_PAGES = 5000
 
 
 _NAME_SEARCH_PAGE_SIZE = 50
+
+# How a by-name walk ended. Only page-failed and deadline are transient -- the same walk
+# run again could get further -- so a caller deciding whether to retry reads
+# NameWalkOutcome.transient rather than the kind itself. A plateau and the
+# page cap are deterministic: they stop at the same place every time.
+STOP_COMPLETED = "completed"
+STOP_PLATEAU = "plateau"
+STOP_PAGE_CAP = "page-cap"
+STOP_PAGE_FAILED = "page-failed"
+STOP_DEADLINE = "deadline"
+_TRANSIENT_STOPS = frozenset({STOP_PAGE_FAILED, STOP_DEADLINE})
+
+
+@dataclass
+class NameWalkOutcome:
+    """Out-param a caller may pass to the by-name walk to learn how it
+    ended. stop is None until the walk finishes."""
+
+    stop: str | None = None
+
+    @property
+    def transient(self) -> bool:
+        return self.stop in _TRANSIENT_STOPS
 
 
 async def _fetch_name_search_page(name: str, region: str, page: int) -> dict:
@@ -94,6 +123,9 @@ async def _fetch_author_books_by_name_detailed(
     region: str,
     deadline: float | None = None,
     concurrency: int = 1,
+    *,
+    facts: ResponseFacts | None = None,
+    outcome: NameWalkOutcome | None = None,
 ) -> tuple[list[str], int, bool]:
     """
     Fetches book ASINs by author name using the standard catalog endpoint,
@@ -169,7 +201,11 @@ async def _fetch_author_books_by_name_detailed(
     or a page-fetch failure. A caller relying on this list as exhaustive
     needs to know the difference, not just that a list came back.
 
-    A failure fetching one page ends the walk but keeps every ASIN already
+    A failure fetching page 0 raises AudibleAPIException: with nothing
+    harvested yet, an empty list would be indistinguishable from an author
+    with no books, and an outage must never read as an empty catalog.
+
+    A failure fetching any later page ends the walk but keeps every ASIN already
     harvested from pages before it -- specifically, the result is
     truncated at the last successfully processed page in ascending index
     order (pages later in the same batch that happened to complete are
@@ -177,6 +213,15 @@ async def _fetch_author_books_by_name_detailed(
     hole" guarantee that mirrors the per-page resilience
     _fetch_author_books_by_screen already has. The failing page's index
     and error are logged.
+
+    facts, when given, is marked incomplete (REASON_DISCOVERY_INCOMPLETE)
+    whenever the walk stops short of a confirmed end -- a later-page failure,
+    the deadline, the page cap or a detected repeat -- so a caller holding
+    the same ResponseFacts can tell a truncated list from a whole one.
+
+    outcome, when given, has its stop set to one of the STOP_* kinds, so a
+    caller can tell a transient stop (page failure, deadline) from a
+    deterministic one (plateau, page cap) that a rerun would repeat.
 
     deadline, when given, is an absolute time.monotonic() bound checked
     once before dispatching each batch; once passed the walk stops without
@@ -194,12 +239,14 @@ async def _fetch_author_books_by_name_detailed(
     seen: set[str] = set()
     seen_page_signatures: set[tuple[str | None, ...]] = set()
     pages_fetched = 0
-    completed = False
     total_results: int | None = None
     next_page = 0
+    # Falls through to the page cap if the loop runs out without a break.
+    stop_kind = STOP_PAGE_CAP
 
     while next_page <= NAME_SEARCH_MAX_PAGES:
         if deadline is not None and time.monotonic() >= deadline:
+            stop_kind = STOP_DEADLINE
             break
 
         if total_results is not None:
@@ -207,7 +254,7 @@ async def _fetch_author_books_by_name_detailed(
                 (total_results - 1) // _NAME_SEARCH_PAGE_SIZE, NAME_SEARCH_MAX_PAGES
             )
             if next_page > last_known_page:
-                completed = True
+                stop_kind = STOP_COMPLETED
                 break
             batch_size = min(concurrency, last_known_page - next_page + 1)
         elif next_page == 0:
@@ -232,6 +279,21 @@ async def _fetch_author_books_by_name_detailed(
         stop = False
         for page, result in zip(batch_pages, results):
             if isinstance(result, BaseException):
+                if page == 0:
+                    # Nothing harvested yet: report the outage instead of
+                    # returning an empty list that reads as "no books".
+                    logger.warning(
+                        "Audible Author Books by-name first page fetch failed",
+                        extra={
+                            "region": region,
+                            "error": f"{type(result).__name__}: {result}",
+                        },
+                    )
+                    if isinstance(result, Exception):
+                        raise as_audible_failure(
+                            result, "Audible author books by name unavailable"
+                        ) from result
+                    raise result
                 # No "author_name" field here either: this walk is reached
                 # both from the seeder, where name is a stored catalogue
                 # value, and from the by-name route, where it is whatever a
@@ -247,6 +309,7 @@ async def _fetch_author_books_by_name_detailed(
                         "error": f"{type(result).__name__}: {result}",
                     },
                 )
+                stop_kind = STOP_PAGE_FAILED
                 stop = True
                 break
 
@@ -259,7 +322,7 @@ async def _fetch_author_books_by_name_detailed(
 
             products = data.get("products", [])
             if not products:
-                completed = True
+                stop_kind = STOP_COMPLETED
                 stop = True
                 break
 
@@ -267,8 +330,9 @@ async def _fetch_author_books_by_name_detailed(
             if page_signature in seen_page_signatures:
                 # A repeat is this walk noticing its own plateau, not
                 # upstream confirming nothing further remains -- see the
-                # docstring above. completed stays False so a caller can
+                # docstring above. The walk stays incomplete so a caller can
                 # tell this apart from a genuine short/empty-page end.
+                stop_kind = STOP_PLATEAU
                 stop = True
                 break
             seen_page_signatures.add(page_signature)
@@ -276,7 +340,7 @@ async def _fetch_author_books_by_name_detailed(
             _accept_name_search_products(products, name, seen, asins)
 
             if len(products) < _NAME_SEARCH_PAGE_SIZE:
-                completed = True
+                stop_kind = STOP_COMPLETED
                 stop = True
                 break
 
@@ -285,6 +349,23 @@ async def _fetch_author_books_by_name_detailed(
 
         next_page = batch_pages[-1] + 1
 
+    completed = stop_kind == STOP_COMPLETED
+    if outcome is not None:
+        outcome.stop = stop_kind
+    if not completed:
+        record_incomplete(facts, REASON_DISCOVERY_INCOMPLETE)
+        # One summary for every early stop, including the ones (deadline,
+        # plateau, page cap) that log nothing else. Never the name.
+        logger.info(
+            "Audible Author Books by-name walk ended before a confirmed end",
+            extra={
+                "region": region,
+                "stop": stop_kind,
+                "pages_fetched": pages_fetched,
+                "asins_collected": len(asins),
+            },
+        )
+
     return asins, pages_fetched, completed
 
 
@@ -292,6 +373,9 @@ async def fetch_author_books_by_name(
     name: str,
     region: str,
     deadline: float | None = None,
+    *,
+    facts: ResponseFacts | None = None,
+    outcome: NameWalkOutcome | None = None,
 ) -> tuple[list[str], int]:
     """
     Fetches book ASINs by author name using the standard catalog endpoint.
@@ -315,9 +399,13 @@ async def fetch_author_books_by_name(
     deadline, when given, is an absolute time.monotonic() bound checked
     once before dispatching each batch; once passed the walk stops and
     returns what it has.
+
+    A page-0 failure raises AudibleAPIException. facts, when given, is marked
+    incomplete if the walk stopped short of a confirmed end, and outcome, when
+    given, reports how it stopped (see NameWalkOutcome).
     """
     asins, pages_fetched, _ = await _fetch_author_books_by_name_detailed(
-        name, region, deadline=deadline
+        name, region, deadline=deadline, facts=facts, outcome=outcome
     )
     return asins, pages_fetched
 

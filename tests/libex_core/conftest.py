@@ -53,3 +53,14 @@ def run_cli(monkeypatch, capsysbinary):
         return CliResult(int(code), captured.out, captured.err)
 
     return run
+
+
+@pytest.fixture
+def hosted(client):
+    """ask(get, path, params): a hosted route answered from `get` alone. The
+    imports are inside so the tests here that never ask a route do not load
+    the application."""
+    from tests.libex_core._hosted_support import hosted_asker
+
+    with hosted_asker(client) as ask:
+        yield ask

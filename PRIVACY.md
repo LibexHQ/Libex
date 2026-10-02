@@ -382,8 +382,10 @@ this section describes the source as it stands, ahead of any release. The
 behaviour described is in `libex_core/audible/client.py`, with the logging of
 individual titles in `libex_core/audible/books.py` and
 `libex_core/audible/extras.py`, searching in `libex_core/audible/search.py`,
-reading a local store in `libex_core/storage/read/`, and the command-line tool
-in `libex_core/cli/`.
+author lookups in `libex_core/audible/authors/`, browsing new releases,
+coming soon and categories in `libex_core/audible/releases.py`, the lookup
+functions in `libex_core/lookup/`, the optional storage in
+`libex_core/storage/`, and the command-line tool in `libex_core/cli/`.
 
 If you are using an application that contains this library, that
 application's privacy policy is the one that applies to you. This section
@@ -392,8 +394,9 @@ covers only the part that belongs to Libex.
 **Why it differs from the hosted service.** The public instance reaches Audible
 from one address, shared by everyone who calls it. An embedded copy runs on
 each user's own device. Without a proxy, Audible sees that device's address
-together with the titles it looks up and the words searched for, which
-amounts to part of someone's reading history tied to their home connection.
+together with the titles it looks up, the words searched for and the
+categories browsed, which amounts to part of someone's reading history tied
+to their home connection.
 The library is built around preventing that from happening by accident:
 
 - **It won't connect until someone decides how.** The client is created as
@@ -424,12 +427,40 @@ The library is built around preventing that from happening by accident:
 - **No telemetry.** It has no analytics, usage reporting, version check, crash
   reporting or any other call home. It cannot import the Axiom client, and a
   test fails if that ever changes.
-- **No storage.** It writes no files, opens no database and keeps no cache.
-  Nothing about a lookup outlasts the call that made it. An optional local
-  record of titles already seen has been considered but not built. If it is
-  ever added, this section will change with it. Its store readers only read
-  a database that the application has opened itself and passes in, and they
-  change nothing in it.
+- **Nothing is stored unless the application asks.** Looking something up
+  writes no files, opens no database and keeps no cache, so on its own nothing
+  about a lookup outlasts the call that made it. The library also has an
+  optional storage part, `libex_core.storage`, installed separately as the
+  `storage` extra, which can keep what was fetched in a SQLite file or a
+  PostgreSQL database. It does nothing until the application gives it a
+  database's address, and the application decides where that database is and
+  what goes into it. The command-line tool does not use it. What it stores is
+  Audible's catalogue data, the same kind the public instance's database
+  holds, with no field about the person who looked it up. On someone's own
+  device, though, the titles stored are the titles looked up, and each stored
+  row records when it was first written and last updated, so a local store is
+  part of that person's reading history, with dates. The database address,
+  and any password in it, is never logged or repeated in an error.
+  - **A SQLite file** is created only when the application runs the store's
+    upgrade step. On Linux and macOS a new file is created readable and
+    writable only by the user running the application. If the folder the
+    file goes in is missing, that folder is created so only that user can
+    open it, but any missing folders above it get the system's usual
+    permissions. A file that already exists is left as it is, with a warning
+    if other users have access to it. The file is not encrypted, so anything that can read it as that user
+    can read what is in it.
+  - **The set-up turns on write-ahead logging** for a SQLite file. Recent
+    writes are kept in a second file beside the database, ending in `-wal`,
+    with an index file ending in `-shm`, until they are moved into the main
+    file. SQLite normally does that and removes both files when the last
+    connection closes cleanly, and gives them the same permissions as the
+    database file. That is SQLite's behaviour rather than Libex's code.
+    Deleting only the main file can leave recent writes behind.
+  - **For a PostgreSQL database**, the store connects to the address the
+    application gives it. If that address leaves out a password or a TLS
+    setting, the database driver, asyncpg, can fill it in from the standard
+    `PG*` environment variables or a `.pgpass` file. That is the driver's
+    behaviour, not something the library's own code does.
 - **The `libex-core` command reads two environment variables.** The
   command-line tool that comes with the library takes its proxy from
   `LIBEX_CORE_PROXY_URL` and its permission to connect directly from
@@ -437,37 +468,70 @@ The library is built around preventing that from happening by accident:
   on a command line, where other programs on the machine can read it. Nothing
   else in the library reads the environment, and a test fails if that
   changes. The tool prints results as JSON to standard output. Errors, and
-  the library's warnings listed below, go to standard error. `-vv` adds
-  tracebacks, and `-q` leaves only the error line. It sends none of this
-  anywhere else. It has no lookup commands yet: `libex-core config` prints
-  only whether a proxy is in use and the proxy's hostname, and makes no
-  request. Neither its output nor its error messages contain the proxy URL or
-  the value of either variable.
+  the library's warnings listed below, go to standard error. Only each
+  warning's message is printed there, not the details listed with it.
+  `-v` adds the informational lines, `-vv` adds tracebacks, and `-q` leaves
+  only the error line. It sends none of this anywhere else. Its lookup
+  commands (books, chapters, series, authors and their books, searches,
+  narrators, new releases, coming soon and categories) send the ASINs, names,
+  search terms and category IDs you give them to Audible, as described above,
+  and print Audible's answer. A bulk lookup can read its list of ASINs from a
+  file or standard input. That input is read once, is not kept, and its path
+  is not repeated in an error. `libex-core config` prints only whether a proxy is in
+  use and the proxy's hostname, and makes no request. Neither the tool's
+  output nor its error messages contain the proxy URL or the value of either
+  variable.
 - **Its logs go where the application sends them.** It writes to the standard
   Python logger named `libex`, so its records end up wherever the host
   application's logging is configured to send them. From fetching and
   reading Audible's answers:
   - closing a stale connection fails (debug): a traceback;
-  - request throttled or degraded by Audible: status, region, API path (with the ASIN for a single-title lookup), pool, attempt count, the wait Audible asked for;
+  - request throttled or degraded by Audible: status, region, API path (with the ASIN when one title, series or author is looked up), pool, attempt count, the wait Audible asked for;
   - malformed author ASIN: title ASIN, region, the malformed value, the author's name;
   - unreadable subscription plans: title ASIN, a count;
-  - extra data cleaned up or held back: title ASIN, region, the reason, a count and, if oversized, its size; none of the data itself.
+  - extra data cleaned up or held back: title ASIN, region, the reason, a count and, if oversized, its size; none of the data itself;
+  - an author's book list from Audible's author page ended without a confirmed end: author ASIN, region, why it stopped, pages fetched, books found, Audible's own count, how much was cut off, and the error message if a page failed;
+  - a search for an author's books by name lost its first page: region, the error message. Never the name;
+  - a search for an author's books by name lost a later page: region, the page number, books found so far, the error message. Never the name.
 
   The subscription-plan and extra-data records log at most once a minute
   (extras, once a minute per reason), naming only the latest title.
 
-  From reading a local store, which happens only when an application reads
-  data it has stored:
-  - more than one stored row found for an author (warning): author ASIN, region, the number of rows.
+  From the lookup functions:
+  - a completed lookup (info): region, how long Audible took and, except for a single chapters, series or author lookup, counts of what was asked for and what came back; for a search, the names of the fields searched; for a quick search, the length of the text and how many parts a compound query was split into; for an author's books, the author ASIN and how each of the two ways of finding them went; for new releases and coming soon, the number of days and the category ID asked for;
+  - a lookup Audible only partly answered (warning, or info for an author's books by name that stopped before a confirmed end): region, counts, and the kind of error where one occurred, including how many identifiers were skipped for not being ASINs; for an author's books, also the author ASIN and the error messages from the parts that failed;
+  - Audible unavailable (warning, or error for a search for books or a new releases or coming soon scan): region; except for a book lookup, the kind of error; except for a book lookup or a search for books, Audible's status where there was one; for a chapters, series, author or author's books lookup, the ASIN asked for, and for an author's books, the error messages from the parts that failed; for a search for a series or an author, or for an author's books by name, the length of the name; for new releases and coming soon, the category ID.
 
-  Only the region and the looked-up ASIN come from the caller: query
-  parameters, where search text would appear, are left out, and in the
-  records from Audible's answers any ASIN, name or value not shaped like an
-  ASIN or a short catalogue entry is logged as `REDACTED`. The local-store
-  record logs its author ASIN and region without that check, but only once
-  both have matched rows already in the store. A title or author ASIN is
-  still something someone looked up or searched for, so these records are
-  part of their reading history.
+  From reading and writing a local store, which happens only when an application uses the storage part:
+  - an existing SQLite file that other users have access to (warning): the file's name, not its folder;
+  - more than one stored row found for an author (warning): author ASIN, region, the number of rows;
+  - unreadable publication date while storing a title (warning): title ASIN and the kind of value, not the value.
+
+  Running the store's upgrade step also lets Alembic, the migration tool it uses, write lines under its own logger, `alembic`, naming the schema changes it applies. Those lines are Alembic's and contain nothing about lookups.
+
+  From the command-line tool:
+  - a `libex-core` command fails (debug): a traceback;
+  - an author's book list may be incomplete (warning): the reasons, which come from a fixed list.
+
+  From the caller, these records take the region, the looked-up title, series
+  or author ASIN, the names of searched fields, the length of quick-search
+  text or of a searched name, the number of days and the category ID
+  browsed, and how many items were asked for. Search text, and any name
+  searched for, are never logged: query parameters, where they would appear,
+  are left out, a looked-up ASIN is logged only once it has been checked to
+  be one, and in the records from Audible's answers any ASIN, name or value
+  not shaped like an ASIN or a short catalogue entry is logged as
+  `REDACTED`. The local-store records skip that check. The author-row record
+  logs its author ASIN and region only once both have matched rows already
+  in the store, and the publication-date record takes its title ASIN from the
+  data the application is storing. An error message is whatever the request
+  function raised. The library's own client builds its messages from
+  Audible's host, the API path (which holds the ASIN when one title, series
+  or author is looked up) and the network library's own error text, never the
+  query string. An application that passes in a request function of its own
+  decides what its messages contain. A title, series or author ASIN, or a
+  category browsed, is still something someone looked up or searched for, so
+  these records are part of their reading history.
 
 An application that includes the library still has to answer three questions
 for its own users. Does it connect directly or through a proxy, and if through

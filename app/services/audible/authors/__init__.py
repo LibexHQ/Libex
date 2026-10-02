@@ -22,24 +22,23 @@ from typing import NamedTuple
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Core
+from libex_core.asin import is_valid_asin
+from libex_core.audible.authors.catalog import CatalogBooksResult
+from libex_core.audible.authors.profile import normalize_author
+from libex_core.audible.authors.screens import (
+    ScreenBooksResult,
+    SCREENS_REASON_PLATEAU_TRUNCATED,
+    SCREENS_BROKEN_REASONS,
+)
 from libex_core.audible.client import author_books_concurrency
 from libex_core.exceptions import AudibleAPIException, NotFoundException
 from app.core.logging import get_logger
 
 # Services
-from app.services.audible.authors.screens import (
-    _fetch_author_books_by_screen,
-    _ScreenBooksResult,
-    SCREENS_REASON_PLATEAU_TRUNCATED,
-    SCREENS_BROKEN_REASONS,
-)
-from app.services.audible.authors.catalog import (
-    _fetch_author_books_by_catalog,
-    _CatalogBooksResult,
-)
+from app.services.audible.authors.screens import _fetch_author_books_by_screen
+from app.services.audible.authors.catalog import _fetch_author_books_by_catalog
 from app.services.audible.authors.profile import (
     _fetch_author_details,
-    _normalize_author,
     get_author,
     search_authors,
 )
@@ -78,7 +77,8 @@ logger = get_logger()
 # (one screens walk plus one name search). This bounds the work a single
 # request can do -- it is not a rate limit, counts nothing across requests,
 # keys on no client identity, and rejects nobody. Unlike SCREENS_MAX_PAGES /
-# SCREENS_MAX_ASINS (screens.py) and NAME_SEARCH_MAX_PAGES (by_name.py),
+# SCREENS_MAX_ASINS (libex_core/audible/authors/screens.py) and
+# NAME_SEARCH_MAX_PAGES (libex_core/audible/authors/by_name.py),
 # this one DOES bind on a real, very prolific author's catalog before those
 # far-larger caps ever would -- at roughly 0.5s/page it cuts off around 1800
 # titles, well short of Conan Doyle's 4500 -- but a deadline-truncated walk
@@ -87,8 +87,8 @@ logger = get_logger()
 # the COMPLETE result is what gets stored, so it costs latency on the prolific
 # tail, not silent, permanent data loss the way the old page/ASIN caps did.
 # That's a deliberate latency/completeness tradeoff, not an oversight, and
-# changing it is a separate decision from the caps in screens.py and
-# catalog.py.
+# changing it is a separate decision from the caps in
+# libex_core/audible/authors.
 #
 # This alone is not what keeps a live author-books request under the
 # fronting proxy's timeout -- it only ever bounded discovery, and hydration
@@ -187,6 +187,12 @@ async def _resolve_author_name(
     if db_author and db_author.get("name"):
         return db_author["name"]
 
+    # Not an ASIN means no author by that ASIN: the same terminal None a
+    # 404 gives, never an error the caller would read as name resolution
+    # failing.
+    if not is_valid_asin(asin):
+        return None
+
     try:
         data = await _fetch_author_details(asin, region)
     except NotFoundException:
@@ -194,7 +200,7 @@ async def _resolve_author_name(
 
     name = data.get("contributor", {}).get("name", "").replace("\t", "").strip()
     if name:
-        normalized = _normalize_author(data, asin, region)
+        normalized = normalize_author(data, asin, region)
         persist_author_background(normalized, region)
         return name
 
@@ -433,7 +439,7 @@ async def _walk_author_books(
         outcomes = await asyncio.gather(*tasks, return_exceptions=True)
 
     screen_outcome = outcomes[0]
-    screen_result: _ScreenBooksResult | None = None
+    screen_result: ScreenBooksResult | None = None
     screen_error: str | None = None
     if isinstance(screen_outcome, BaseException):
         screen_error = f"{type(screen_outcome).__name__}: {screen_outcome}"
@@ -441,7 +447,7 @@ async def _walk_author_books(
         screen_result = screen_outcome
     screen_asins = screen_result.asins if screen_result is not None else []
 
-    catalog_result: _CatalogBooksResult | None = None
+    catalog_result: CatalogBooksResult | None = None
     catalog_error: str | None = None
     if author_name:
         catalog_outcome = outcomes[1]
@@ -458,7 +464,7 @@ async def _walk_author_books(
     # is the signal that actually reflects that -- it also covers those
     # swallowed failures and catalog_result.slicing_incomplete (the walk
     # decided it needed to slice by category but couldn't fully act on
-    # that -- see _CatalogBooksResult's own docstring) -- but deliberately
+    # that -- see CatalogBooksResult's own docstring) -- but deliberately
     # does NOT treat catalog_result.sliced on its own as degraded: a
     # prolific author's baseline windows saturating their own
     # CATALOG_RESULT_CEILING and needing category slicing is the walk
@@ -645,7 +651,7 @@ async def _walk_author_books(
     # DB backstop is unioned in on every request regardless of what screens
     # did -- screens plateauing is the designed handoff to those other two
     # sources, not evidence anything is missing. So this checks
-    # SCREENS_BROKEN_REASONS (see screens.py, which also carries the
+    # SCREENS_BROKEN_REASONS (see libex_core/audible/authors/screens.py, which also carries the
     # reasoning for every reason's inclusion or exclusion) rather than
     # requiring termination_reason == SCREENS_REASON_COMPLETED the way
     # SCREENS_CLEAN_REASONS does for that module's own, different, question
@@ -735,7 +741,7 @@ async def _walk_author_books(
         # worth slicing by (its baseline plateaued or over-claimed
         # total_results) but found literally nothing to slice with, which
         # for an author this large points at something broken upstream
-        # (see _CatalogBooksResult's own docstring for why hitting
+        # (see CatalogBooksResult's own docstring for why hitting
         # CATALOG_MAX_CANDIDATE_CATEGORIES alone does NOT set this) -- so
         # it's called out on its own, separate from the generic
         # degraded-path warning below, which only fires on an outright

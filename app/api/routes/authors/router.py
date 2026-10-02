@@ -18,7 +18,6 @@ from app.db.session import get_session
 # Routes
 from app.api.routes.errors import ERROR_RESPONSES
 from app.api.routes.audible_outage import outage_as_unavailable
-from app.api.routes.authors.schemas import AuthorResponse
 from app.api.routes.cache_param import CacheAuthorBooksParam, CacheStandardParam, apply_cache_control
 from app.api.routes.facts_headers import (
     COMPLETE_ONLY_RESPONSE_HEADERS,
@@ -45,7 +44,7 @@ from app.services.filtering import filter_dicts
 # Core
 from app.core.middleware import valid_asin, valid_region
 from libex_core.exceptions import NotFoundException
-from libex_core.models import BookResponse
+from libex_core.models import AuthorResponse, BookResponse
 from app.core.response_headers import HEADER_COMPLETE, ResponseFacts
 
 router = APIRouter(prefix="/author", tags=["Authors"])

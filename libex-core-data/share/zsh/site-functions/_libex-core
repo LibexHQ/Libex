@@ -17,6 +17,14 @@ _libex-core() {
         command)
             local -a commands
             commands=(
+                'book:look up books and chapters'
+                'series:look up a series'
+                'author:look up an author'
+                'search:search the catalog'
+                'quick-search:search by keywords through suggestions'
+                'abs:search in the Audiobookshelf provider shape'
+                'narrator:look up books by narrator'
+                'releases:look up new and upcoming releases'
                 'completion:print a shell completion script'
                 'config:show how requests would leave this machine'
             )
@@ -24,6 +32,281 @@ _libex-core() {
             ;;
         args)
             case ${line[1]} in
+                book)
+                    case ${line[2]} in
+                        get)
+                            _arguments \
+                                '(- *)'{-h,--help}'[show this help message and exit]' \
+                                '--region[the Audible marketplace to ask, default us]:region:(us uk ca au de fr it es jp in br)' \
+                                '1:command:(get)' \
+                                '2:ASIN:'
+                            ;;
+                        bulk)
+                            _arguments \
+                                '(- *)'{-h,--help}'[show this help message and exit]' \
+                                '--file[read more ASINs from this file, or from standard input when it is -]' \
+                                '--region[the Audible marketplace to ask, default us]:region:(us uk ca au de fr it es jp in br)' \
+                                '--language[Filter by language - exact match]' \
+                                '--book-format[Filter by book format - e.g. unabridged]' \
+                                '--explicit[Filter by explicit]:explicit:(true false)' \
+                                '--whisper-sync[Filter by Whispersync availability]:whisper-sync:(true false)' \
+                                '--has-pdf[Filter by PDF companion availability]:has-pdf:(true false)' \
+                                '--is-vvab[Filter by VVAB - virtual voice audiobook status]:is-vvab:(true false)' \
+                                '--plan-name[Filter by Audible plan name - e.g. US Minerva]' \
+                                '--rating-better-than[Minimum rating]' \
+                                '--rating-worse-than[Maximum rating]' \
+                                '--longer-than[Minimum length in minutes]' \
+                                '--shorter-than[Maximum length in minutes]' \
+                                '--genre[Filter by genre or tag name - partial match, e.g. fantasy]' \
+                                '--sort[sort the books by this field, default is the order they were found in]:sort:(title releaseDate rating lengthMinutes language publisher updatedAt)' \
+                                '--order[the direction of --sort, default asc]:order:(asc desc)' \
+                                '1:command:(bulk)' \
+                                '2:ASIN:'
+                            ;;
+                        chapters)
+                            _arguments \
+                                '(- *)'{-h,--help}'[show this help message and exit]' \
+                                '--region[the Audible marketplace to ask, default us]:region:(us uk ca au de fr it es jp in br)' \
+                                '1:command:(chapters)' \
+                                '2:ASIN:'
+                            ;;
+                        *)
+                            _arguments \
+                                '1:command:(get bulk chapters)'
+                            ;;
+                    esac
+                    ;;
+                series)
+                    case ${line[2]} in
+                        get)
+                            _arguments \
+                                '(- *)'{-h,--help}'[show this help message and exit]' \
+                                '--region[the Audible marketplace to ask, default us]:region:(us uk ca au de fr it es jp in br)' \
+                                '1:command:(get)' \
+                                '2:ASIN:'
+                            ;;
+                        books)
+                            _arguments \
+                                '(- *)'{-h,--help}'[show this help message and exit]' \
+                                '--region[the Audible marketplace to ask, default us]:region:(us uk ca au de fr it es jp in br)' \
+                                '--language[Filter by language - exact match]' \
+                                '--book-format[Filter by book format - e.g. unabridged]' \
+                                '--explicit[Filter by explicit]:explicit:(true false)' \
+                                '--whisper-sync[Filter by Whispersync availability]:whisper-sync:(true false)' \
+                                '--has-pdf[Filter by PDF companion availability]:has-pdf:(true false)' \
+                                '--is-vvab[Filter by VVAB - virtual voice audiobook status]:is-vvab:(true false)' \
+                                '--plan-name[Filter by Audible plan name - e.g. US Minerva]' \
+                                '--rating-better-than[Minimum rating]' \
+                                '--rating-worse-than[Maximum rating]' \
+                                '--longer-than[Minimum length in minutes]' \
+                                '--shorter-than[Maximum length in minutes]' \
+                                '--genre[Filter by genre or tag name - partial match, e.g. fantasy]' \
+                                '--sort[sort the books by this field, default is the order they were found in]:sort:(title releaseDate rating lengthMinutes language publisher updatedAt)' \
+                                '--order[the direction of --sort, default asc]:order:(asc desc)' \
+                                '1:command:(books)' \
+                                '2:ASIN:'
+                            ;;
+                        search)
+                            _arguments \
+                                '(- *)'{-h,--help}'[show this help message and exit]' \
+                                '--region[the Audible marketplace to ask, default us]:region:(us uk ca au de fr it es jp in br)' \
+                                '1:command:(search)' \
+                                '2:NAME:'
+                            ;;
+                        *)
+                            _arguments \
+                                '1:command:(get books search)'
+                            ;;
+                    esac
+                    ;;
+                author)
+                    case ${line[2]} in
+                        get)
+                            _arguments \
+                                '(- *)'{-h,--help}'[show this help message and exit]' \
+                                '--region[the Audible marketplace to ask, default us]:region:(us uk ca au de fr it es jp in br)' \
+                                '1:command:(get)' \
+                                '2:ASIN:'
+                            ;;
+                        search)
+                            _arguments \
+                                '(- *)'{-h,--help}'[show this help message and exit]' \
+                                '--region[the Audible marketplace to ask, default us]:region:(us uk ca au de fr it es jp in br)' \
+                                '1:command:(search)' \
+                                '2:NAME:'
+                            ;;
+                        books)
+                            _arguments \
+                                '(- *)'{-h,--help}'[show this help message and exit]' \
+                                '--region[the Audible marketplace to ask, default us]:region:(us uk ca au de fr it es jp in br)' \
+                                '--language[Filter by language - exact match]' \
+                                '--book-format[Filter by book format - e.g. unabridged]' \
+                                '--explicit[Filter by explicit]:explicit:(true false)' \
+                                '--whisper-sync[Filter by Whispersync availability]:whisper-sync:(true false)' \
+                                '--has-pdf[Filter by PDF companion availability]:has-pdf:(true false)' \
+                                '--is-vvab[Filter by VVAB - virtual voice audiobook status]:is-vvab:(true false)' \
+                                '--plan-name[Filter by Audible plan name - e.g. US Minerva]' \
+                                '--rating-better-than[Minimum rating]' \
+                                '--rating-worse-than[Maximum rating]' \
+                                '--longer-than[Minimum length in minutes]' \
+                                '--shorter-than[Maximum length in minutes]' \
+                                '--genre[Filter by genre or tag name - partial match, e.g. fantasy]' \
+                                '--sort[sort the books by this field, default is the order they were found in]:sort:(title releaseDate rating lengthMinutes language publisher updatedAt)' \
+                                '--order[the direction of --sort, default asc]:order:(asc desc)' \
+                                '1:command:(books)' \
+                                '2:ASIN:'
+                            ;;
+                        books-by-name)
+                            _arguments \
+                                '(- *)'{-h,--help}'[show this help message and exit]' \
+                                '--region[the Audible marketplace to ask, default us]:region:(us uk ca au de fr it es jp in br)' \
+                                '--language[Filter by language - exact match]' \
+                                '--book-format[Filter by book format - e.g. unabridged]' \
+                                '--explicit[Filter by explicit]:explicit:(true false)' \
+                                '--whisper-sync[Filter by Whispersync availability]:whisper-sync:(true false)' \
+                                '--has-pdf[Filter by PDF companion availability]:has-pdf:(true false)' \
+                                '--is-vvab[Filter by VVAB - virtual voice audiobook status]:is-vvab:(true false)' \
+                                '--plan-name[Filter by Audible plan name - e.g. US Minerva]' \
+                                '--rating-better-than[Minimum rating]' \
+                                '--rating-worse-than[Maximum rating]' \
+                                '--longer-than[Minimum length in minutes]' \
+                                '--shorter-than[Maximum length in minutes]' \
+                                '--genre[Filter by genre or tag name - partial match, e.g. fantasy]' \
+                                '--sort[sort the books by this field, default is the order they were found in]:sort:(title releaseDate rating lengthMinutes language publisher updatedAt)' \
+                                '--order[the direction of --sort, default asc]:order:(asc desc)' \
+                                '1:command:(books-by-name)' \
+                                '2:NAME:'
+                            ;;
+                        *)
+                            _arguments \
+                                '1:command:(get search books books-by-name)'
+                            ;;
+                    esac
+                    ;;
+                search)
+                    _arguments \
+                        '(- *)'{-h,--help}'[show this help message and exit]' \
+                        '--title[words in the title]' \
+                        '--author[name of the author]' \
+                        '--narrator[name of the narrator]' \
+                        '--publisher[name of the publisher]' \
+                        '--keywords[keywords to match anywhere]' \
+                        '--query[stands in for the title when none is given]' \
+                        '--sort-by[the sort order, using the name Audible gives it]' \
+                        '--limit[results per page, 1 to 50, default 10]' \
+                        '--page[page of results to return, counting from 0 to 9, default 0]' \
+                        '--region[the Audible marketplace to ask, default us]:region:(us uk ca au de fr it es jp in br)'
+                    ;;
+                quick-search)
+                    _arguments \
+                        '(- *)'{-h,--help}'[show this help message and exit]' \
+                        '--region[the Audible marketplace to ask, default us]:region:(us uk ca au de fr it es jp in br)' \
+                        '1:KEYWORDS:'
+                    ;;
+                abs)
+                    case ${line[2]} in
+                        search)
+                            _arguments \
+                                '(- *)'{-h,--help}'[show this help message and exit]' \
+                                '--title[words in the title]' \
+                                '--query[stands in for the title]' \
+                                '--author[name of the author]' \
+                                '--keywords[keywords to match anywhere]' \
+                                '--region[the Audible marketplace to ask, default us]:region:(us uk ca au de fr it es jp in br)' \
+                                '1:command:(search)'
+                            ;;
+                        quick-search)
+                            _arguments \
+                                '(- *)'{-h,--help}'[show this help message and exit]' \
+                                '--keywords[the words to search for]' \
+                                '--query[the words to search for when no keywords are given]' \
+                                '--title[the words to search for when neither is given]' \
+                                '--region[the Audible marketplace to ask, default us]:region:(us uk ca au de fr it es jp in br)' \
+                                '1:command:(quick-search)'
+                            ;;
+                        *)
+                            _arguments \
+                                '1:command:(search quick-search)'
+                            ;;
+                    esac
+                    ;;
+                narrator)
+                    case ${line[2]} in
+                        books)
+                            _arguments \
+                                '(- *)'{-h,--help}'[show this help message and exit]' \
+                                '--limit[results per page, 1 to 50, default 10]' \
+                                '--page[page of results to return, counting from 0 to 9, default 0]' \
+                                '--region[the Audible marketplace to ask, default us]:region:(us uk ca au de fr it es jp in br)' \
+                                '1:command:(books)' \
+                                '2:NAME:'
+                            ;;
+                        *)
+                            _arguments \
+                                '1:command:(books)'
+                            ;;
+                    esac
+                    ;;
+                releases)
+                    case ${line[2]} in
+                        new)
+                            _arguments \
+                                '(- *)'{-h,--help}'[show this help message and exit]' \
+                                '--days[how many days back to look, default 30]:days:(30 60 90 120 240 365)' \
+                                '--category[only this category, by the id that releases categories prints. Without one the scan is a live sample, not the whole catalog]' \
+                                '--region[the Audible marketplace to ask, default us]:region:(us uk ca au de fr it es jp in br)' \
+                                '--language[Filter by language - exact match]' \
+                                '--book-format[Filter by book format - e.g. unabridged]' \
+                                '--explicit[Filter by explicit]:explicit:(true false)' \
+                                '--whisper-sync[Filter by Whispersync availability]:whisper-sync:(true false)' \
+                                '--has-pdf[Filter by PDF companion availability]:has-pdf:(true false)' \
+                                '--is-vvab[Filter by VVAB - virtual voice audiobook status]:is-vvab:(true false)' \
+                                '--plan-name[Filter by Audible plan name - e.g. US Minerva]' \
+                                '--rating-better-than[Minimum rating]' \
+                                '--rating-worse-than[Maximum rating]' \
+                                '--longer-than[Minimum length in minutes]' \
+                                '--shorter-than[Maximum length in minutes]' \
+                                '--genre[Filter by genre or tag name - partial match, e.g. fantasy]' \
+                                '--sort[sort the books by this field, default is the order they were found in]:sort:(title releaseDate rating lengthMinutes language publisher updatedAt)' \
+                                '--order[the direction of --sort, default desc]:order:(asc desc)' \
+                                '1:command:(new)'
+                            ;;
+                        coming-soon)
+                            _arguments \
+                                '(- *)'{-h,--help}'[show this help message and exit]' \
+                                '--days[how many days ahead to look, default 30]:days:(30 60 90 120 240 365)' \
+                                '--category[only this category, by the id that releases categories prints. Without one the scan is a live sample, not the whole catalog]' \
+                                '--region[the Audible marketplace to ask, default us]:region:(us uk ca au de fr it es jp in br)' \
+                                '--language[Filter by language - exact match]' \
+                                '--book-format[Filter by book format - e.g. unabridged]' \
+                                '--explicit[Filter by explicit]:explicit:(true false)' \
+                                '--whisper-sync[Filter by Whispersync availability]:whisper-sync:(true false)' \
+                                '--has-pdf[Filter by PDF companion availability]:has-pdf:(true false)' \
+                                '--is-vvab[Filter by VVAB - virtual voice audiobook status]:is-vvab:(true false)' \
+                                '--plan-name[Filter by Audible plan name - e.g. US Minerva]' \
+                                '--rating-better-than[Minimum rating]' \
+                                '--rating-worse-than[Maximum rating]' \
+                                '--longer-than[Minimum length in minutes]' \
+                                '--shorter-than[Maximum length in minutes]' \
+                                '--genre[Filter by genre or tag name - partial match, e.g. fantasy]' \
+                                '--sort[sort the books by this field, default is the order they were found in]:sort:(title releaseDate rating lengthMinutes language publisher updatedAt)' \
+                                '--order[the direction of --sort, default asc]:order:(asc desc)' \
+                                '1:command:(coming-soon)'
+                            ;;
+                        categories)
+                            _arguments \
+                                '(- *)'{-h,--help}'[show this help message and exit]' \
+                                '--flat[a flat list, each node carrying its ancestors, instead of a tree]' \
+                                '--depth[how many levels to return, 1 is the top level only, default all]' \
+                                '--region[the Audible marketplace to ask, default us]:region:(us uk ca au de fr it es jp in br)' \
+                                '1:command:(categories)'
+                            ;;
+                        *)
+                            _arguments \
+                                '1:command:(new coming-soon categories)'
+                            ;;
+                    esac
+                    ;;
                 completion)
                     _arguments \
                         '(- *)'{-h,--help}'[show this help message and exit]' \

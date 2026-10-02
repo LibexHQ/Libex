@@ -161,12 +161,12 @@ async def search_series(
             "response_groups": "relationships",
             "num_results": 10,
         })
-        products = data.get("products") or []
+        products = data.get("products", [])
 
         seen_asins: set[str] = set()
         series_asins: list[str] = []
         for product in products:
-            for rel in product.get("relationships") or []:
+            for rel in product.get("relationships", []):
                 if rel.get("relationship_type") == "series":
                     series_asin = rel.get("asin")
                     if series_asin and series_asin not in seen_asins:

@@ -52,7 +52,7 @@ async def get_author(get: AudibleGet, asin: str, *, region: str = "us") -> Autho
         data = await fetch_author_profile(get, canonical, region)
         author_took = round((time.monotonic() - start) * 1000, 2)
 
-        if not data or (data.get("contributor") or {}).get("name") is None:
+        if not data or data.get("contributor", {}).get("name") is None:
             raise NotFoundException("Author not found")
 
         normalized = normalize_author(data, canonical, region)

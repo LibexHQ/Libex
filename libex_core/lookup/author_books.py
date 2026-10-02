@@ -6,7 +6,7 @@ without the cache, the database backstop, background completion or
 persistence. Hosted tells a caller whether the list it got is whole in a
 response header, X-Libex-Complete, with the reasons in X-Libex-Incomplete-Reason
 on the by-name route; a library caller has no headers, so each lookup returns
-an BookList carrying the same facts: complete, and incomplete_reasons drawn
+a BookList carrying the same facts: complete, and incomplete_reasons drawn
 from the same vocabulary. A list that is not complete is still returned, since
 what was gathered is worth having; a caller that needs the whole catalogue
 retries or reads complete first.
@@ -144,7 +144,7 @@ async def _resolve_author_name(get: AudibleGet, asin: str, region: str) -> str |
         data = await fetch_author_profile(get, asin, region)
     except NotFoundException:
         return None
-    name = ((data.get("contributor") or {}).get("name") or "").replace("\t", "").strip()
+    name = (data.get("contributor", {}).get("name") or "").replace("\t", "").strip()
     return name or None
 
 

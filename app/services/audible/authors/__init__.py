@@ -5,11 +5,11 @@ names are re-exported from here: profile lookups and search from profile.py,
 the by-name walk from by_name.py, and get_author_books defined below.
 
 DESIGN PHILOSOPHY: Audible-first.
-Audible is the source of truth. get_author_books unions a live Audible discovery walk with what the DB
-already holds for that author, and caches the union only once the walk has
-actually finished -- a walk cut short by its own time budget is returned
-incomplete rather than cached partial, and is finished off the request
-instead.
+Audible is the source of truth. get_author_books unions a live Audible
+discovery walk with what the DB already holds for that author, and caches
+the union only once the walk has actually finished -- a walk cut short by
+its own time budget is returned incomplete rather than cached partial, and
+is finished off the request instead.
 """
 
 # Standard library
@@ -217,7 +217,7 @@ async def get_author_books(
     four-source union this delegates to and does the actual fetching.
 
     use_cache=True checks the cache first and returns on a hit, same as
-    every other Audible-first service in this module. Both author-books
+    every other Audible-first service in this package. Both author-books
     routes now pass True, because the public default was flipped there --
     see the comment on get_books_by_author for why a defaulted-False read
     meant the cache served only callers who explicitly asked for it and no

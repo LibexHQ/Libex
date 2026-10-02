@@ -6,10 +6,13 @@ endpoint and searches authors by name through Audible search suggestions.
 DESIGN PHILOSOPHY: Audible-first.
 Audible is the source of truth. get_author fetches a profile fresh or from
 cache and writes what Audible returns to the relational DB and the cache.
-The author-books walks live in the package __init__ and in catalog.py.
+The author-books walks live elsewhere in the package: get_author_books
+in __init__.py, the ASIN-attributed catalog walk in catalog.py, the by-name
+walk in by_name.py and the screens walk in screens.py.
 """
 
 # Standard library
+import random
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -49,8 +52,6 @@ def _generate_session_id() -> str:
     Generates a random session ID matching AudiMeta's format.
     Format: 000-XXXXXXX-XXXXXXX
     """
-    import random
-
     def random_digits() -> str:
         return str(random.randint(0, 9999999)).zfill(7)
 
@@ -109,17 +110,18 @@ async def get_author(
 
     Single-source by construction -- cache, then audible, then db, then
     cache again, never more than one per call -- so facts takes exactly one
-    record_source per return path. get_author_books, which shares this
-    module, is deliberately not given the same treatment: it resolves to an
-    ASIN list unioned from up to four sources at once, not one dict a single
-    token could describe, and the books it names are attributed by whichever
+    record_source per return path. get_author_books, which lives in the
+    package __init__, is deliberately not given the same treatment: it
+    resolves to an ASIN list unioned from up to four sources at once, not
+    one dict a single token could describe, and the books it names are attributed by whichever
     call the route makes to get_books_by_asins afterward.
     """
     if use_cache:
         cached = await cache.get(session, author_key(asin, region))
-        # Same reason as the two rollbacks in _walk_author_books below: a
-        # connection is held for work, not for a request. The read above
-        # autobegins a transaction on session, and a READ COMMITTED
+        # Same reason as the two rollbacks in _walk_author_books (in
+        # authors/__init__.py): a connection is held for work, not for a
+        # request. The read above autobegins a transaction on session, and a
+        # READ COMMITTED
         # transaction advertises backend_xmin and can become the cluster's
         # oldest xmin even when it has only ever read -- measured on
         # PostgreSQL 16.14 -- holding the xmin horizon against autovacuum
@@ -258,7 +260,7 @@ async def search_authors(
         raise
     except Exception as e:
         # name is caller-authored and never logged -- see the "Deliberately
-        # no author_name field" note on get_author_books_by_name above.
+        # no author_name field" note on get_author_books_by_name in by_name.py.
         logger.warning("Author search failed", extra={
             "name_length": len(name),
             "region": region,

@@ -200,8 +200,8 @@ async def _fetch_author_books_by_name_detailed(
     this walk noticing its own plateau, not upstream confirming nothing
     remains, the same distinction the screens walk's
     SCREENS_REASON_PLATEAU_TRUNCATED draws against SCREENS_REASON_COMPLETED
-    (see that constant). It is also False for the page cap, the deadline,
-    or a page-fetch failure. A caller relying on this list as exhaustive
+    (both defined in screens.py). It is also False for the page cap, the
+    deadline, or a page-fetch failure. A caller relying on this list as exhaustive
     needs to know the difference, not just that a list came back.
 
     A failure fetching page 0 raises AudibleAPIException: with nothing

@@ -118,9 +118,8 @@ CATALOG_PAGE_SIZE = 50
 # -- it returns HTTP 200 with the prior page's content repeating
 # indefinitely. This bounds pages requested per window (unfiltered sort or
 # category+sort pair alike -- see _pages_needed_for) rather than trusting
-# total_results past it, the same principle by_name.py's
-# total_results-vs-repeated-signature check applies to the single-sort
-# walk (by_name.py).
+# total_results past it, the same principle the total_results-vs-repeated-
+# signature check applies to the single-sort walk in by_name.py.
 CATALOG_RESULT_CEILING = 500
 
 # A window (Phase 1's unfiltered sorts, a Phase 3 probe, or a Phase 4

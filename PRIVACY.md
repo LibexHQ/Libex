@@ -446,7 +446,8 @@ The library is built around preventing that from happening by accident:
   `storage` extra, which can keep what was fetched in a SQLite file or a
   PostgreSQL database through `LocalStore`. Nothing in the library opens a
   store by itself: it does nothing until the application gives it a
-  database's address, and the application decides where that database is.
+  database's address, or a way of connecting to one, and the application
+  decides where that database is.
   When the application passes that store to a lookup, the lookup writes what
   Audible returned into it (books, chapter lists, and series and author
   profiles) and returns the stored copy. A book or series already stored for
@@ -475,9 +476,10 @@ The library is built around preventing that from happening by accident:
     missing, that folder is created so only that user can open it (0700),
     but any missing folders above it get the system's usual permissions. A
     file that already exists is left as it is, with a warning, each time
-    the store checks it, if other users have access to it. The file is not
-    encrypted, so anything that can read it as that user can read what is in
-    it.
+    the store checks it, if other users have access to it. Libex does not
+    encrypt the file, so unless the application opens it with an encrypted
+    SQLite build (below), anything that can read it as that user can read
+    what is in it.
   - **The set-up turns on write-ahead logging** for a SQLite file. Recent
     writes are kept in a second file beside the database, ending in `-wal`,
     with an index file ending in `-shm`, until they are moved into the main
@@ -485,7 +487,8 @@ The library is built around preventing that from happening by accident:
     connection closes cleanly, and gives them the same permissions as the
     database file. That is SQLite's behaviour rather than Libex's code.
     Deleting only the main file can leave recent writes behind.
-  - **For a PostgreSQL database**, the store connects to the address the
+  - **For a PostgreSQL database**, unless the application makes the
+    connection itself (below), the store connects to the address the
     application gives it, and refuses one that leaves out the host, the user
     or the database name. Its connection settings come from that address
     alone: it reads no `PG*` environment variable, no `~/.pgpass`, no
@@ -507,6 +510,26 @@ The library is built around preventing that from happening by accident:
     leads to the unencrypted attempt. `allow` tries unencrypted first and
     encrypts only if the server turns that down, and `disable` never
     encrypts.
+  - **An application can make the connection itself.** `LocalStore` takes an
+    optional `connect` function for a connection the library can't make, such
+    as one through a tunnel or with a short-lived password. When it is used,
+    the two points above no longer describe what happens: the library doesn't
+    choose the PostgreSQL server, the login, the encryption or the certificate
+    check, and can't see or check what the application chose. Unless the
+    application prevents it, the PostgreSQL driver fills in anything left out
+    from `PG*` environment variables, `~/.pgpass`, a PostgreSQL service file
+    and the certificate and key files under `~/.postgresql`, and writes the
+    connection's encryption keys to a file if `SSLKEYLOGFILE` is set. The
+    address given to the store must then be the bare `postgresql+asyncpg://`,
+    so no password is held in it. For SQLite, the library still refuses a symbolic link and
+    creates a new file as described above, then hands that file's path to the
+    application's function, which opens it; an application can use this to
+    open an encrypted SQLite file, and in that case the file is encrypted
+    however that application set it up, not by Libex. If the function fails,
+    the error names only the kind of failure, never its message, which could
+    contain a password. Either way the store logs one line saying the
+    application supplies its connections, with nothing about where or as whom
+    they connect.
   - **It refuses a database it didn't create.** A database with tables but
     none of this library's migration records, a hosted Libex database
     included, is refused and left untouched. Only the explicit upgrade step

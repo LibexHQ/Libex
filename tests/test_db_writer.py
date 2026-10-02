@@ -1038,7 +1038,7 @@ def _track_upsert_sql(payload=None):
     result = MagicMock()
     result.scalar = MagicMock(return_value=0)
     session = _session(result)
-    asyncio.run(upsert_track(session, "B0TRACKSQL", payload or {"chapters": []}))
+    asyncio.run(upsert_track(session, "B0TRACKSQL", payload or {"chapters": []}, region="us"))
     return session.execute.call_args_list[0].args[0].compile()
 
 

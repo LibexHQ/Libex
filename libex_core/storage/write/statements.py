@@ -72,15 +72,14 @@ def _build_series_upsert(insert):
         created_at=bindparam("created_at"),
         updated_at=bindparam("updated_at"),
     )
+    # The conflict target is (asin, region): a series ASIN returned by another
+    # marketplace is its own row, never a merge into this one. Region is in the
+    # key, so it is never in the update either.
     return stmt.on_conflict_do_update(
-        index_elements=["asin"],
+        index_elements=["asin", "region"],
         set_={
             "title": merge.coalesce(bindparam("title"), Series.title),
             "description": merge.longer_wins(bindparam("description"), Series.description),
-            # Region is never updated: a series row belongs to the marketplace
-            # that first wrote it, and excluded.region here would let any other
-            # region's response move it.
-            "region": Series.region,
             "fetched_description": Series.fetched_description | stmt.excluded.fetched_description,
             # Merged exactly as a book's are; extras_union carries why. A
             # series that arrives through a book's relationships binds both
@@ -134,8 +133,10 @@ def _build_book_upsert(insert):
     - created_at is written on insert and absent from the update. Deriving the
       update from the insert's columns adds excluded.created_at and resets
       every book's real creation time on its next write, silently.
-    - region updates to itself. A book ASIN belongs to one marketplace, and
-      excluded.region would let a response fetched for another region move it.
+    - region is in the conflict target and never in the update. A book is
+      identified by (asin, region), so a response fetched for another region
+      conflicts with nothing and lands as that region's own row; it can never
+      move an existing one.
     - title falls back to '' on insert (the column is NOT NULL) but to the
       stored title on update, so a response that omits it cannot blank one
       that is already stored. The update reads that bind through answered,
@@ -202,7 +203,7 @@ def _build_book_upsert(insert):
         updated_at=bindparam("updated_at"),
     )
     return stmt.on_conflict_do_update(
-        index_elements=["asin"],
+        index_elements=["asin", "region"],
         set_={
             # Sixteen text columns merge on answered-versus-blank rather
             # than on NULL alone. Audible has no vocabulary for retracting
@@ -258,7 +259,6 @@ def _build_book_upsert(insert):
             #                           the defect the other thirteen had.
             "title": merge.answered(bindparam("title"), Book.title),
             "subtitle": merge.answered(stmt.excluded.subtitle, Book.subtitle),
-            "region": Book.region,
             "description": merge.longer_wins(bindparam("description"), Book.description),
             "summary": merge.longer_wins(bindparam("summary"), Book.summary),
             "publisher": merge.answered(stmt.excluded.publisher, Book.publisher),
@@ -439,7 +439,10 @@ def _build_pivot_insert(insert, table, *columns):
 
     Every pivot Libex writes is a link that may already exist and must never
     be removed, so DO NOTHING is the whole merge rule and there is nothing to
-    parameterise beyond the row itself.
+    parameterise beyond the row itself. A link to a book or series carries
+    that record's region, and the unique key includes it: without that, the
+    second marketplace's link to the same ASIN would be the conflict this
+    ignores, and would be dropped without a trace.
     """
     return insert(table).values(
         **{column: bindparam(column) for column in columns}
@@ -455,11 +458,13 @@ def _build_book_series_upsert(insert):
     """
     stmt = insert(book_series).values(
         book_asin=bindparam("book_asin"),
+        book_region=bindparam("book_region"),
         series_asin=bindparam("series_asin"),
+        series_region=bindparam("series_region"),
         position=bindparam("position"),
     )
     return stmt.on_conflict_do_update(
-        index_elements=["book_asin", "series_asin"],
+        index_elements=["book_asin", "book_region", "series_asin", "series_region"],
         set_={"position": merge.coalesce(stmt.excluded.position, book_series.c.position)},
     )
 
@@ -473,9 +478,17 @@ def statements_for(dialect: str) -> Statements:
         series_upsert=_build_series_upsert(insert),
         genre_insert=_build_pivot_insert(insert, Genre, "asin", "name", "type", "created_at", "updated_at"),
         narrator_insert=_build_pivot_insert(insert, Narrator, "name", "created_at", "updated_at"),
-        book_genre_insert=_build_pivot_insert(insert, book_genre, "book_asin", "genre_asin"),
-        book_narrator_insert=_build_pivot_insert(insert, book_narrator, "book_asin", "narrator_name"),
-        author_book_insert=_build_pivot_insert(insert, author_book, "author_id", "book_asin"),
-        series_author_insert=_build_pivot_insert(insert, series_author, "series_asin", "author_id"),
+        book_genre_insert=_build_pivot_insert(
+            insert, book_genre, "book_asin", "book_region", "genre_asin"
+        ),
+        book_narrator_insert=_build_pivot_insert(
+            insert, book_narrator, "book_asin", "book_region", "narrator_name"
+        ),
+        author_book_insert=_build_pivot_insert(
+            insert, author_book, "author_id", "book_asin", "book_region"
+        ),
+        series_author_insert=_build_pivot_insert(
+            insert, series_author, "series_asin", "series_region", "author_id"
+        ),
         book_series_upsert=_build_book_series_upsert(insert),
     )

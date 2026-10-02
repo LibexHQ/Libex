@@ -432,10 +432,10 @@ def test_stats_counts_the_whole_store(db):
     }
 
 
-def test_stats_scoped_to_a_region_counts_that_region_and_the_series_with_none(db):
+def test_stats_scoped_to_a_region_counts_that_region_and_no_series_without_one(db):
     assert ok(db("db", "stats", "--region", "us")) == {
-        "books": 12, "authors": 3, "narrators": 4, "series": 3,
-        "booksWithChapters": 1, "region": "us", "seriesRegionUnknown": 1,
+        "books": 12, "authors": 3, "narrators": 4, "series": 4,
+        "booksWithChapters": 1, "region": "us", "seriesRegionUnknown": 0,
     }
     assert ok(db("db", "stats", "--region", "de"))["books"] == 1
 

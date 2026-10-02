@@ -131,8 +131,9 @@ async def upsert_author(session: AsyncSession, author: dict) -> int | None:
 
 async def _resolve_author_ids(
     session: AsyncSession, books: list[dict]
-) -> dict[str, list[int]]:
-    """Resolves every book's authors to DB ids, once per distinct author."""
+) -> dict[tuple[str, str | None], list[int]]:
+    """Resolves every book's authors to DB ids, once per distinct author,
+    keyed by the book's (asin, region)."""
     return await _books.resolve_author_ids(
         session, books, dialect=_DIALECT, conflict_errors=_CONFLICT_ERRORS
     )
@@ -214,9 +215,13 @@ async def upsert_book(session: AsyncSession, data: dict) -> None:
 # TRACK WRITER
 # ============================================================
 
-async def upsert_track(session: AsyncSession, asin: str, chapters_data: dict) -> None:
+async def upsert_track(
+    session: AsyncSession, asin: str, chapters_data: dict, *, region: str
+) -> None:
     """
     Upserts chapter data for a book, keeping the richer of the two payloads.
+    The listing belongs to the book's record in `region`; there is no default,
+    because a listing filed under the wrong marketplace is a silent error.
 
     The merge is decided in the SET clause of one statement, against the row
     as postgresql has it locked — see libex_core.storage.write.entities.
@@ -226,7 +231,7 @@ async def upsert_track(session: AsyncSession, asin: str, chapters_data: dict) ->
     """
     try:
         stored_count = await _entities.write_track(
-            session, asin, chapters_data, dialect=_DIALECT
+            session, asin, chapters_data, region=region, dialect=_DIALECT
         )
         await session.commit()
 
@@ -239,7 +244,7 @@ async def upsert_track(session: AsyncSession, asin: str, chapters_data: dict) ->
                 extra={"asin": asin, "stored_chapters": stored_count},
             )
         else:
-            logger.info(f"DB write: track {asin}")
+            logger.info(f"DB write: track {asin} ({region})")
 
     except Exception as e:
         logger.warning(

@@ -69,6 +69,8 @@ async def test_series_books_sorted_numerically(db_session):
         await db_session.execute(
             insert(book_series).values(
                 book_asin=asin,
+                book_region="us",
+                series_region="us",
                 series_asin=SERIES_ASIN,
                 position=position,
             )

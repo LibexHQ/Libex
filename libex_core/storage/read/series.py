@@ -13,16 +13,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from libex_core.storage.filtering import apply_book_filters
 from libex_core.storage.models import Book, Series, book_series
 from libex_core.storage.read._compat import AscNullsLast, ILike, NumericPosition
+from libex_core.storage.read._regions import first_stored_order, only_first_stored
 from libex_core.storage.read.shapes import BOOK_RELATIONS, hydrate_books
 from libex_core.storage.sorting import BOOK_SORT_FIELDS, apply_sort
 
 
-async def get_series(session: AsyncSession, asin: str) -> dict[str, Any] | None:
-    """Fetches a series from the DB."""
-    result = await session.execute(
-        select(Series).where(Series.asin == asin)
-    )
-    series = result.scalar_one_or_none()
+async def get_series(
+    session: AsyncSession, asin: str, *, region: str | None = None
+) -> dict[str, Any] | None:
+    """Fetches a series from the DB.
+
+    A series is identified by (asin, region). With a region, that marketplace's
+    record or None; without one, the first-stored record of the ASIN.
+    """
+    stmt = select(Series).where(Series.asin == asin)
+    if region is not None:
+        stmt = stmt.where(Series.region == region)
+    result = await session.execute(stmt.order_by(*first_stored_order(Series)).limit(1))
+    series = result.scalar_one_or_none()  # LIMIT 1: at most one row, however many regions
     if not series:
         return None
 
@@ -38,13 +46,17 @@ async def get_series(session: AsyncSession, asin: str) -> dict[str, Any] | None:
     }
 
 
-async def search_series(session: AsyncSession, name: str) -> list[dict[str, Any]]:
-    """Searches for series by name in the DB."""
-    result = await session.execute(
-        select(Series)
-        .where(ILike(Series.title, f"%{name}%"))
-        .limit(10)
-    )
+async def search_series(
+    session: AsyncSession, name: str, *, region: str | None = None
+) -> list[dict[str, Any]]:
+    """Searches for series by name in the DB: one record per ASIN, the
+    requested region's or, without one, the first-stored."""
+    stmt = select(Series).where(ILike(Series.title, f"%{name}%"))
+    if region is not None:
+        stmt = stmt.where(Series.region == region)
+    else:
+        stmt = only_first_stored(stmt, Series)
+    result = await session.execute(stmt.order_by(*first_stored_order(Series)).limit(10))
     series_list = result.scalars().all()
     return [
         {
@@ -106,9 +118,11 @@ async def get_series_books(
     """
     stmt = (
         select(Book)
-        .join(book_series, book_series.c.book_asin == Book.asin)
+        .join(
+            book_series,
+            (book_series.c.book_asin == Book.asin) & (book_series.c.book_region == Book.region),
+        )
         .where(book_series.c.series_asin == series_asin)
-        .options(*BOOK_RELATIONS)
     )
     stmt = apply_book_filters(
         stmt,
@@ -139,6 +153,9 @@ async def get_series_books(
         genre=genre,
         category=category,
     )
+    if region is None:
+        stmt = only_first_stored(stmt)
+    stmt = stmt.options(*BOOK_RELATIONS)
     if sort:
         stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
     else:

@@ -141,7 +141,7 @@ async def seed(session, *, odd_plans: bool = True) -> None:
     session.add_all([
         Series(asin="S000000001", title="Quest Saga", region="us", description="saga",
                audible_extras={"x": 1}, created_at=STAMP, updated_at=STAMP),
-        Series(asin="S000000002", title="Quest Spinoffs", region=None,
+        Series(asin="S000000002", title="Quest Spinoffs", region="us",
                created_at=STAMP, updated_at=STAMP),
         Series(asin="S000000003", title="Ordering Series", region="us",
                created_at=STAMP, updated_at=STAMP),
@@ -149,26 +149,34 @@ async def seed(session, *, odd_plans: bool = True) -> None:
                created_at=STAMP, updated_at=STAMP),
     ])
     await session.flush()
-    session.add(Track(asin="B000000001", chapters={"chapters": [{"title": "One"}], "n": 1},
+    session.add(Track(asin="B000000001", region="us",
+                      chapters={"chapters": [{"title": "One"}], "n": 1},
                       created_at=STAMP, updated_at=STAMP))
+    # Links carry the region of the book they point at; every book here is
+    # "us" unless it was seeded with another.
+    region = {"B000000003": "de", "B000000004": "uk", "B000000005": "fr"}
+
+    def _of(asin):
+        return region.get(asin, "us")
+
     await session.execute(insert(author_book), [
-        {"author_id": 1, "book_asin": "B000000001"}, {"author_id": 2, "book_asin": "B000000001"},
-        {"author_id": 2, "book_asin": "B000000002"}, {"author_id": 3, "book_asin": "B000000002"},
-        {"author_id": 3, "book_asin": "B000000003"}, {"author_id": 4, "book_asin": "B000000005"},
+        {"author_id": a, "book_asin": b, "book_region": _of(b)}
+        for a, b in [(1, "B000000001"), (2, "B000000001"), (2, "B000000002"),
+                     (3, "B000000002"), (3, "B000000003"), (4, "B000000005")]
     ])
     await session.execute(insert(author_genre), [
         {"author_id": 1, "genre_asin": "G1"}, {"author_id": 2, "genre_asin": "G1"},
         {"author_id": 2, "genre_asin": "G3"},
     ])
     await session.execute(insert(book_narrator), [
-        {"narrator_name": "Nina Voice", "book_asin": "B000000001"},
-        {"narrator_name": "Nina Voice", "book_asin": "B000000002"},
-        {"narrator_name": "Oscar Reader", "book_asin": "B000000002"},
-        {"narrator_name": "Émile Lecteur", "book_asin": "B000000005"},
+        {"narrator_name": n, "book_asin": b, "book_region": _of(b)}
+        for n, b in [("Nina Voice", "B000000001"), ("Nina Voice", "B000000002"),
+                     ("Oscar Reader", "B000000002"), ("Émile Lecteur", "B000000005")]
     ])
     await session.execute(insert(book_genre), [
-        {"book_asin": "B000000001", "genre_asin": "G1"}, {"book_asin": "B000000001", "genre_asin": "G3"},
-        {"book_asin": "B000000002", "genre_asin": "G2"}, {"book_asin": "B000000003", "genre_asin": "G4"},
+        {"book_asin": b, "book_region": _of(b), "genre_asin": g}
+        for b, g in [("B000000001", "G1"), ("B000000001", "G3"),
+                     ("B000000002", "G2"), ("B000000003", "G4")]
     ])
     positions = [
         ("B000000001", "S000000001", "1"), ("B000000002", "S000000001", "2"),
@@ -183,8 +191,11 @@ async def seed(session, *, odd_plans: bool = True) -> None:
         ("B000000011", "S000000004", "٣"), ("B000000012", "S000000004", "1\n"),
         ("B000000003", "S000000002", "1"),
     ]
+    series_region = {"S000000002": "us"}
     await session.execute(insert(book_series), [
-        {"book_asin": b, "series_asin": s, "position": p} for b, s, p in positions
+        {"book_asin": b, "book_region": _of(b), "series_asin": s,
+         "series_region": series_region.get(s, "us"), "position": p}
+        for b, s, p in positions
     ])
     await session.commit()
 

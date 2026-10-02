@@ -53,7 +53,15 @@ from scripts.backfill_chapters import _store_chapters
 
 ASIN = "B0CHAPTERS"
 
-WRITERS = [upsert_track, _store_chapters]
+
+
+async def _service(session, asin, payload):
+    return await upsert_track(session, asin, payload, region="us")
+
+
+# _store_chapters (scripts/backfill_chapters.py) still writes tracks by asin
+# alone; it is the background-jobs lane's to teach the region.
+WRITERS = [_service, _store_chapters]
 WRITER_IDS = ["service", "backfill"]
 
 SUPPRESSED = "Kept stored chapters over an empty response"

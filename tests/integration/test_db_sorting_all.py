@@ -92,8 +92,8 @@ async def test_narrator_books_sort_by_release_date_asc(db_session):
     await db_session.execute(insert(Narrator).values(name="Test Narrator", created_at=NOW, updated_at=NOW))
     await _book(db_session, "B00NARRBK01", "First", 2018)
     await _book(db_session, "B00NARRBK02", "Second", 2022)
-    await db_session.execute(insert(book_narrator).values(book_asin="B00NARRBK01", narrator_name="Test Narrator"))
-    await db_session.execute(insert(book_narrator).values(book_asin="B00NARRBK02", narrator_name="Test Narrator"))
+    await db_session.execute(insert(book_narrator).values(book_region="us", book_asin="B00NARRBK01", narrator_name="Test Narrator"))
+    await db_session.execute(insert(book_narrator).values(book_region="us", book_asin="B00NARRBK02", narrator_name="Test Narrator"))
     await db_session.commit()
 
     books = await get_narrator_books_from_db(
@@ -115,8 +115,8 @@ async def test_author_books_sort_by_title_desc(db_session):
     await _book(db_session, "B00AUTHBK01", "Alpha", 2020)
     await _book(db_session, "B00AUTHBK02", "Beta", 2021)
     aid = (await db_session.execute(select(Author.id).where(Author.asin == "B00AUTHOR01"))).scalar_one()
-    await db_session.execute(insert(author_book).values(author_id=aid, book_asin="B00AUTHBK01"))
-    await db_session.execute(insert(author_book).values(author_id=aid, book_asin="B00AUTHBK02"))
+    await db_session.execute(insert(author_book).values(book_region="us", author_id=aid, book_asin="B00AUTHBK01"))
+    await db_session.execute(insert(author_book).values(book_region="us", author_id=aid, book_asin="B00AUTHBK02"))
     await db_session.commit()
 
     books = await get_author_books_from_db(
@@ -152,8 +152,8 @@ async def test_series_books_default_is_position(db_session):
     await db_session.execute(insert(Series).values(asin="B00SERIES01", title="A Series", region="us", created_at=NOW, updated_at=NOW))
     await _book(db_session, "B00SERBK001", "Charlie", 2020)
     await _book(db_session, "B00SERBK002", "Alpha", 2021)
-    await db_session.execute(insert(book_series).values(book_asin="B00SERBK001", series_asin="B00SERIES01", position="1"))
-    await db_session.execute(insert(book_series).values(book_asin="B00SERBK002", series_asin="B00SERIES01", position="2"))
+    await db_session.execute(insert(book_series).values(book_region="us", series_region="us", book_asin="B00SERBK001", series_asin="B00SERIES01", position="1"))
+    await db_session.execute(insert(book_series).values(book_region="us", series_region="us", book_asin="B00SERBK002", series_asin="B00SERIES01", position="2"))
     await db_session.commit()
 
     # No sort: position order (book 1 first, even though its title sorts later)
@@ -167,8 +167,8 @@ async def test_series_books_sort_overrides_position(db_session):
     await db_session.execute(insert(Series).values(asin="B00SERIES02", title="B Series", region="us", created_at=NOW, updated_at=NOW))
     await _book(db_session, "B00SERBK003", "Charlie", 2020)
     await _book(db_session, "B00SERBK004", "Alpha", 2021)
-    await db_session.execute(insert(book_series).values(book_asin="B00SERBK003", series_asin="B00SERIES02", position="1"))
-    await db_session.execute(insert(book_series).values(book_asin="B00SERBK004", series_asin="B00SERIES02", position="2"))
+    await db_session.execute(insert(book_series).values(book_region="us", series_region="us", book_asin="B00SERBK003", series_asin="B00SERIES02", position="1"))
+    await db_session.execute(insert(book_series).values(book_region="us", series_region="us", book_asin="B00SERBK004", series_asin="B00SERIES02", position="2"))
     await db_session.commit()
 
     # Sort by title: Alpha (position 2) comes before Charlie (position 1)

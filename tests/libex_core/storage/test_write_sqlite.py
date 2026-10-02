@@ -52,7 +52,10 @@ async def test_the_corpus_is_stored_and_a_thin_refresh_costs_nothing(factory):
     assert thin["book_narrator"] == rich["book_narrator"]
     assert thin["book_series"] == rich["book_series"]
     cases.assert_nothing_shrank(thin, phases["as_sent"])  # pivots and rows only ever grow
-    assert len(phases["as_sent"]["books"]) == len(rich["books"]) + 2
+    # The fixtures as sent keep their own ASINs; two of them share one across
+    # regions, and each region is its own book.
+    distinct = {(b["asin"], b["region"]) for b in cases.fixture_books()}
+    assert len(phases["as_sent"]["books"]) == len(rich["books"]) + len(distinct)
 
 
 async def test_a_thin_response_leaves_every_guarded_column_as_it_was(factory):

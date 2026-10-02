@@ -95,16 +95,16 @@ async def test_upgrade_on_a_fresh_file_creates_the_schema(db):
         await store.close()
 
 
-async def test_the_head_is_the_one_revision_the_package_ships(upgraded):
+async def test_the_head_is_one_of_the_revisions_the_package_ships(upgraded):
     versions = REPO_ROOT / "libex_core" / "storage" / "migrations" / "versions"
     names = sorted(p.name for p in versions.glob("*.py"))
-    assert len(names) == 1
+    assert len(names) == 2
     store = LocalStore(_url(upgraded))
     try:
         state = await store.status()
     finally:
         await store.close()
-    assert names[0].startswith(state.revision + "_")
+    assert any(n.startswith(state.revision + "_") for n in names)
     assert len(state.revision) == 12 and int(state.revision, 16) >= 0
 
 
@@ -284,13 +284,16 @@ async def test_the_initial_revision_does_reverse_when_run_by_hand(upgraded):
     """Not something the store does; the chain is reversible all the same."""
     from alembic import command
 
-    from libex_core.storage.upgrade import _config
+    from libex_core.storage.upgrade import _config, set_foreign_keys
 
     conn = sqlite3.connect(upgraded)
     conn.close()
     store = LocalStore(_url(upgraded))
     try:
         async with store._engine.connect() as connection:
+            # The newer revision rebuilds tables, which needs foreign keys off,
+            # as the store's own upgrade arranges.
+            await connection.run_sync(lambda c: set_foreign_keys(c, False))
             await connection.run_sync(lambda c: command.downgrade(_config(c), "base"))
             await connection.commit()
     finally:
@@ -349,10 +352,12 @@ async def test_a_value_outside_an_enum_is_refused_on_sqlite(upgraded):
                 await session.execute(text(
                     "INSERT INTO genres (asin, name, type, created_at, updated_at) "
                     "VALUES ('G000000001', 'g', 'Other', '2026-01-01', '2026-01-01')"))
-        async with store.write() as session:  # a nullable enum column takes NULL
-            await session.execute(text(
-                "INSERT INTO series (asin, title, region, fetched_description, created_at, updated_at) "
-                "VALUES ('S000000001', 's', NULL, 0, '2026-01-01', '2026-01-01')"))
+        with pytest.raises(IntegrityError):  # a series is keyed by its region
+            async with store.write() as session:
+                await session.execute(text(
+                    "INSERT INTO series (asin, title, region, fetched_description, created_at, updated_at) "
+                    "VALUES ('S000000001', 's', NULL, 0, '2026-01-01', '2026-01-01')"))
+        async with store.write() as session:
             await session.execute(text(
                 "INSERT INTO genres (asin, name, type, created_at, updated_at) "
                 "VALUES ('G000000002', 'g', 'Tags', '2026-01-01', '2026-01-01')"))

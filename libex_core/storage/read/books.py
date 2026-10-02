@@ -8,13 +8,18 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 # Third party
-from sqlalchemy import func, select, text
+from sqlalchemy import Text, cast, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Local
 from libex_core.storage.filtering import apply_book_filters
 from libex_core.storage.models import Book, Genre, Track
 from libex_core.storage.read._compat import ILike, JsonListContains, dialect_name
+from libex_core.storage.read._regions import (
+    IN_CHUNK,
+    first_stored_order,
+    only_first_stored,
+)
 from libex_core.storage.read.shapes import (
     BOOK_RELATIONS,
     book_to_dict,
@@ -24,29 +29,41 @@ from libex_core.storage.read.shapes import (
 from libex_core.storage.sorting import BOOK_SORT_FIELDS, apply_sort
 
 
-async def get_book(session: AsyncSession, asin: str) -> dict[str, Any] | None:
-    """Fetches a single book from the DB with all relationships."""
-    result = await session.execute(
-        select(Book)
-        .where(Book.asin == asin)
-        .options(*BOOK_RELATIONS)
-    )
-    book = result.scalar_one_or_none()
+async def get_book(
+    session: AsyncSession, asin: str, *, region: str | None = None
+) -> dict[str, Any] | None:
+    """Fetches a single book from the DB with all relationships.
+
+    A book is identified by (asin, region). With a region, that marketplace's
+    record or None; without one, the first-stored record of the ASIN.
+    """
+    stmt = select(Book).where(Book.asin == asin)
+    if region is not None:
+        stmt = stmt.where(Book.region == region)
+    stmt = stmt.order_by(*first_stored_order(Book)).limit(1).options(*BOOK_RELATIONS)
+    result = await session.execute(stmt)
+    book = result.scalar_one_or_none()  # LIMIT 1: at most one row, however many regions
     if not book:
         return None
 
-    positions = await series_positions(session, asin)
+    positions = await series_positions(session, asin, region=book.region)
     return book_to_dict(book, positions)
 
 
-async def get_books(session: AsyncSession, asins: list[str]) -> list[dict[str, Any]]:
-    """Fetches multiple books from the DB with all relationships."""
-    result = await session.execute(
-        select(Book)
-        .where(Book.asin.in_(asins))
-        .options(*BOOK_RELATIONS)
-    )
-    books = result.scalars().all()
+async def get_books(
+    session: AsyncSession, asins: list[str], *, region: str | None = None
+) -> list[dict[str, Any]]:
+    """Fetches multiple books from the DB with all relationships, one record
+    per ASIN: the requested region's, or without one the first-stored."""
+    books = []
+    for i in range(0, len(asins), IN_CHUNK):
+        stmt = select(Book).where(Book.asin.in_(asins[i:i + IN_CHUNK]))
+        if region is not None:
+            stmt = stmt.where(Book.region == region)
+        else:
+            stmt = only_first_stored(stmt)
+        result = await session.execute(stmt.options(*BOOK_RELATIONS))
+        books.extend(result.scalars().all())
     return await hydrate_books(session, books)
 
 
@@ -85,10 +102,7 @@ async def search_books(
     page: int = 1,
 ) -> list[dict[str, Any]]:
     """Searches books in the DB by filter parameters with pagination."""
-    stmt = (
-        select(Book)
-        .options(*BOOK_RELATIONS)
-    )
+    stmt = select(Book)
 
     stmt = apply_book_filters(
         stmt,
@@ -120,6 +134,9 @@ async def search_books(
         genre=genre,
         category=category,
     )
+    if region is None:
+        stmt = only_first_stored(stmt)
+    stmt = stmt.options(*BOOK_RELATIONS)
 
     stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
 
@@ -132,10 +149,16 @@ async def search_books(
 
 
 async def get_books_by_sku(session: AsyncSession, sku_group: str) -> list[dict[str, Any]]:
-    """Fetches all books with a matching sku_group from the DB."""
+    """Fetches all books with a matching sku_group from the DB.
+
+    Every stored region's record is returned, ordered by region then ASIN: a
+    sku group is the set of variants of one product, and the marketplaces
+    holding a variant are part of what the caller is asking for.
+    """
     result = await session.execute(
         select(Book)
         .where(Book.sku_group == sku_group)
+        .order_by(cast(Book.region, Text).asc(), Book.asin.asc())
         .options(*BOOK_RELATIONS)
     )
     books = result.scalars().all()
@@ -226,11 +249,7 @@ async def get_books_by_plan(
     page: int = 1,
 ) -> list[dict[str, Any]]:
     """Fetches all books containing a specific plan name."""
-    stmt = (
-        select(Book)
-        .where(JsonListContains(Book.plans, plan_name))
-        .options(*BOOK_RELATIONS)
-    )
+    stmt = select(Book).where(JsonListContains(Book.plans, plan_name))
     stmt = apply_book_filters(
         stmt,
         title=title,
@@ -260,6 +279,9 @@ async def get_books_by_plan(
         genre=genre,
         category=category,
     )
+    if region is None:
+        stmt = only_first_stored(stmt)
+    stmt = stmt.options(*BOOK_RELATIONS)
     stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
     stmt = stmt.limit(limit).offset((page - 1) * limit)
     result = await session.execute(stmt)
@@ -301,11 +323,7 @@ async def get_vvab_books(
     page: int = 1,
 ) -> list[dict[str, Any]]:
     """Fetches all virtual voice audiobooks (AI-narrated) from the local DB."""
-    stmt = (
-        select(Book)
-        .where(Book.is_vvab.is_(True))
-        .options(*BOOK_RELATIONS)
-    )
+    stmt = select(Book).where(Book.is_vvab.is_(True))
     stmt = apply_book_filters(
         stmt,
         title=title,
@@ -335,6 +353,9 @@ async def get_vvab_books(
         genre=genre,
         category=category,
     )
+    if region is None:
+        stmt = only_first_stored(stmt)
+    stmt = stmt.options(*BOOK_RELATIONS)
     stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
     stmt = stmt.limit(limit).offset((page - 1) * limit)
     result = await session.execute(stmt)
@@ -393,7 +414,6 @@ async def get_new_releases(
             Book.release_date >= window_start,
             Book.release_date <= now,
         )
-        .options(*BOOK_RELATIONS)
     )
     stmt = apply_book_filters(
         stmt,
@@ -425,6 +445,9 @@ async def get_new_releases(
         genre=genre,
         category=category,
     )
+    if region is None:
+        stmt = only_first_stored(stmt)
+    stmt = stmt.options(*BOOK_RELATIONS)
     if sort:
         stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
     else:
@@ -488,7 +511,6 @@ async def get_coming_soon(
             Book.release_date > now,
             Book.release_date <= window_end,
         )
-        .options(*BOOK_RELATIONS)
     )
     stmt = apply_book_filters(
         stmt,
@@ -520,6 +542,9 @@ async def get_coming_soon(
         genre=genre,
         category=category,
     )
+    if region is None:
+        stmt = only_first_stored(stmt)
+    stmt = stmt.options(*BOOK_RELATIONS)
     if sort:
         stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
     else:
@@ -530,12 +555,21 @@ async def get_coming_soon(
     return await hydrate_books(session, books)
 
 
-async def get_track(session: AsyncSession, asin: str) -> dict[str, Any] | None:
-    """Fetches chapter data for a book from the DB."""
-    result = await session.execute(
-        select(Track).where(Track.asin == asin)
-    )
-    track = result.scalar_one_or_none()
+async def get_track(
+    session: AsyncSession, asin: str, *, region: str | None = None
+) -> dict[str, Any] | None:
+    """Fetches chapter data for a book from the DB.
+
+    The listing belongs to one marketplace's record of the book. With a
+    region, that listing or None; without one, the first-stored listing of the
+    ASIN.
+    """
+    stmt = select(Track).where(Track.asin == asin)
+    if region is not None:
+        stmt = stmt.where(Track.region == region)
+    stmt = stmt.order_by(*first_stored_order(Track)).limit(1)
+    result = await session.execute(stmt)
+    track = result.scalar_one_or_none()  # LIMIT 1: at most one row, however many regions
     if not track:
         return None
     return track.chapters

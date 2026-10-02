@@ -95,19 +95,30 @@ async def dump(factory) -> dict:
     return out
 
 
-async def stored_book(factory, asin: str) -> Book | None:
+async def stored_book(factory, asin: str, region: str | None = None) -> Book | None:
+    """The stored book; without a region, the one row of an ASIN stored in a
+    single region (two regions' rows raise, because the caller named neither)."""
     async with factory() as session:
-        return (await session.execute(select(Book).where(Book.asin == asin))).scalar_one_or_none()
+        stmt = select(Book).where(Book.asin == asin)
+        if region is not None:
+            stmt = stmt.where(Book.region == region)
+        return (await session.execute(stmt)).scalar_one_or_none()
 
 
-async def stored_track(factory, asin: str) -> Track | None:
+async def stored_track(factory, asin: str, region: str | None = None) -> Track | None:
     async with factory() as session:
-        return (await session.execute(select(Track).where(Track.asin == asin))).scalar_one_or_none()
+        stmt = select(Track).where(Track.asin == asin)
+        if region is not None:
+            stmt = stmt.where(Track.region == region)
+        return (await session.execute(stmt)).scalar_one_or_none()
 
 
-async def stored_series(factory, asin: str) -> Series | None:
+async def stored_series(factory, asin: str, region: str | None = None) -> Series | None:
     async with factory() as session:
-        return (await session.execute(select(Series).where(Series.asin == asin))).scalar_one_or_none()
+        stmt = select(Series).where(Series.asin == asin)
+        if region is not None:
+            stmt = stmt.where(Series.region == region)
+        return (await session.execute(stmt)).scalar_one_or_none()
 
 
 async def stored_authors(factory, name: str) -> list[Author]:
@@ -201,14 +212,14 @@ async def track_phases(factory) -> dict:
     empty = seam.normalize_chapters(golden_cases.chapter_cases()["empty"][0], "B0TRACK001")
     await write(factory, [{"asin": "B0TRACK001", "title": "t", "region": "us"}])
     async with unit(factory) as session:
-        phases["full_count"] = await write_track(session, "B0TRACK001", full)
+        phases["full_count"] = await write_track(session, "B0TRACK001", full, region="us")
     phases["full"] = await dump(factory)
     async with unit(factory) as session:
-        phases["empty_count"] = await write_track(session, "B0TRACK001", empty)
+        phases["empty_count"] = await write_track(session, "B0TRACK001", empty, region="us")
     phases["after_empty"] = await dump(factory)
     shrunk = {**full, "chapters": full["chapters"][:1]}
     async with unit(factory) as session:
-        phases["shrunk_count"] = await write_track(session, "B0TRACK001", shrunk)
+        phases["shrunk_count"] = await write_track(session, "B0TRACK001", shrunk, region="us")
     phases["after_shrunk"] = await dump(factory)
     return phases
 
@@ -233,7 +244,7 @@ async def profile_phases(factory) -> dict:
             "description": "Short.", "image": "", "genres": [],
         })
         await write_series_profile(session, {
-            "asin": "B0SERIES99", "name": "Profiled Series", "region": "uk",
+            "asin": "B0SERIES99", "name": "Profiled Series", "region": "us",
             "description": "Short.", "audibleExtras": {"a": {"x": 1}},
         })
     phases["profiles_thin"] = await dump(factory)
@@ -361,22 +372,31 @@ async def case_plans_null_keeps_and_empty_is_an_answer(factory):
     assert (await stored_book(factory, "B0FOCUS010")).plans == []
 
 
-async def case_region_and_created_at_never_move(factory):
+async def case_a_second_region_is_its_own_book_and_nothing_moves(factory):
     await write(factory, [mk("B0FOCUS011", region="us")])
-    first = await stored_book(factory, "B0FOCUS011")
+    first = await stored_book(factory, "B0FOCUS011", "us")
     await write(factory, [mk("B0FOCUS011", region="uk", title="Second")])
-    second = await stored_book(factory, "B0FOCUS011")
-    assert second.region == "us"
-    assert second.created_at == first.created_at
-    assert second.updated_at >= first.updated_at
+    untouched = await stored_book(factory, "B0FOCUS011", "us")
+    second = await stored_book(factory, "B0FOCUS011", "uk")
+    assert (untouched.title, untouched.created_at, untouched.updated_at) == (
+        first.title, first.created_at, first.updated_at,
+    )
+    assert second.title == "Second"
+    await write(factory, [mk("B0FOCUS011", region="us", title="Third")])
+    third = await stored_book(factory, "B0FOCUS011", "us")
+    assert third.created_at == first.created_at
+    assert third.updated_at >= first.updated_at
 
 
 async def case_series_position_and_description(factory):
     series = {"asin": "B0SERIES01", "name": "Ser", "position": "2", "description": "a longer series description", "region": "us"}
     await write(factory, [mk("B0FOCUS012", series=[series])])
-    await write(factory, [mk("B0FOCUS012", series=[{**series, "position": None, "description": "short", "region": "uk"}])])
+    await write(factory, [mk("B0FOCUS012", series=[{**series, "position": None, "description": "short", "region": "us"}])])
     state = await dump(factory)
-    assert state["book_series"] == [{"book_asin": "B0FOCUS012", "series_asin": "B0SERIES01", "position": "2"}]
+    assert state["book_series"] == [{
+        "book_asin": "B0FOCUS012", "book_region": "us", "series_asin": "B0SERIES01",
+        "series_region": "us", "position": "2",
+    }]
     stored = await stored_series(factory, "B0SERIES01")
     assert stored.description == "a longer series description" and stored.region == "us"
     await write(factory, [mk("B0FOCUS012", series=[{**series, "position": "3"}])])
@@ -431,24 +451,24 @@ async def case_chapters_keep_the_richer_payload(factory):
     three = {"runtimeLengthMs": 30, "chapters": [{"title": str(n), "startOffsetMs": n} for n in range(3)]}
     await write(factory, [mk("B0TRACK002")])
     async with unit(factory) as session:
-        assert await write_track(session, "B0TRACK002", three) == 3
+        assert await write_track(session, "B0TRACK002", region="us", chapters_data=three) == 3
     async with unit(factory) as session:
-        assert await write_track(session, "B0TRACK002", {"runtimeLengthMs": 0, "chapters": []}) == 3
+        assert await write_track(session, "B0TRACK002", region="us", chapters_data={"runtimeLengthMs": 0, "chapters": []}) == 3
     async with unit(factory) as session:
-        assert await write_track(session, "B0TRACK002", {}) == 3
+        assert await write_track(session, "B0TRACK002", region="us", chapters_data={}) == 3
     async with unit(factory) as session:
-        assert await write_track(session, "B0TRACK002", {"chapters": "not a list"}) == 3
+        assert await write_track(session, "B0TRACK002", region="us", chapters_data={"chapters": "not a list"}) == 3
     assert (await stored_track(factory, "B0TRACK002")).chapters == three
     one = {"runtimeLengthMs": 10, "chapters": [{"title": "only", "startOffsetMs": 0}]}
     async with unit(factory) as session:
-        assert await write_track(session, "B0TRACK002", one) == 1
+        assert await write_track(session, "B0TRACK002", region="us", chapters_data=one) == 1
     assert (await stored_track(factory, "B0TRACK002")).chapters == one
 
 
 async def case_a_track_with_no_chapters_is_stored_as_sent(factory):
     await write(factory, [mk("B0TRACK003")])
     async with unit(factory) as session:
-        assert await write_track(session, "B0TRACK003", {"runtimeLengthMs": 5, "chapters": []}) == 0
+        assert await write_track(session, "B0TRACK003", region="us", chapters_data={"runtimeLengthMs": 5, "chapters": []}) == 0
     assert (await stored_track(factory, "B0TRACK003")).chapters == {"runtimeLengthMs": 5, "chapters": []}
 
 
@@ -482,7 +502,7 @@ FOCUSED = [
     case_silence_is_not_an_answer_for_booleans_and_numbers,
     case_insert_defaults_for_silent_booleans,
     case_plans_null_keeps_and_empty_is_an_answer,
-    case_region_and_created_at_never_move,
+    case_a_second_region_is_its_own_book_and_nothing_moves,
     case_series_position_and_description,
     case_position_sorts_as_text_so_it_must_be_kept_as_sent,
     case_duplicate_asin_in_one_chunk_merges_in_order,
@@ -508,8 +528,9 @@ def assert_nothing_shrank(before: dict, after: dict) -> None:
     after, apart from the columns a later response legitimately grew: extras
     only gain keys, and nothing is removed from any table."""
     assert set(after) == set(before)
-    keys = {"books": ("asin",), "authors": ("asin", "region", "name"), "series": ("asin",),
-            "narrators": ("name",), "genres": ("asin",), "tracks": ("asin",)}
+    keys = {"books": ("asin", "region"), "authors": ("asin", "region", "name"),
+            "series": ("asin", "region"), "narrators": ("name",), "genres": ("asin",),
+            "tracks": ("asin", "region")}
     for table, rows in before.items():
         if table in keys:
             old, new = _by_key(rows, *keys[table]), _by_key(after[table], *keys[table])

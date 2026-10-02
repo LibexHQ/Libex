@@ -40,7 +40,7 @@ GOLDEN = Path(__file__).resolve().parent / "golden_postgres_ddl.json"
 TABLES = [
     "books", "authors", "series", "narrators", "genres", "tracks",
     "author_book", "book_narrator", "book_series", "book_genre",
-    "author_genre", "series_author",
+    "author_genre", "series_author", "walk_results",
 ]
 
 _EXPORTS = {

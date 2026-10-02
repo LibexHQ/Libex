@@ -111,7 +111,8 @@ async def write_series_profile(
 ) -> str | None:
     """
     Writes a full series profile fetched from the series endpoint, returning
-    the series asin, or None when the profile carries no asin or no name.
+    the series asin, or None when the profile carries no asin, no name or no
+    region.
 
     Writes through the same statement the book path writes series with, so the
     two cannot drift apart on how a description or a region merges. All this
@@ -124,8 +125,11 @@ async def write_series_profile(
     if not asin or not name:
         return None
 
+    params = series_params(data, utc_now())
+    if params is None:
+        return None
     statements = statements_for(dialect or dialect_of(session))
-    await session.execute(statements.series_upsert, [series_params(data, utc_now())])
+    await session.execute(statements.series_upsert, [params])
     return asin
 
 
@@ -396,11 +400,17 @@ async def write_track(
     asin: str,
     chapters_data: dict,
     *,
+    region: str,
     dialect: str | None = None,
 ) -> int:
     """
     Writes chapter data for a book, keeping the richer of the two payloads, and
     returns how many chapters the row holds afterwards.
+
+    The listing belongs to one marketplace's record of the book: (asin, region)
+    is the key and the foreign key to books. region is required, with no
+    default, so a caller that has not been taught it fails here rather than
+    writing a listing under the wrong marketplace.
 
     The merge is decided in the SET clause rather than by reading the row
     first: several fetch paths can be refreshing the same ASIN at once, and a
@@ -421,12 +431,13 @@ async def write_track(
     insert = insert_for(dialect or dialect_of(session))
     stmt = insert(Track).values(
         asin=asin,
+        region=region,
         chapters=chapters_data,
         created_at=utc_now(),
         updated_at=utc_now(),
     )
     stmt = stmt.on_conflict_do_update(
-        index_elements=["asin"],
+        index_elements=["asin", "region"],
         set_={
             "chapters": merge.chaptered_wins(stmt.excluded.chapters, Track.chapters),
             "updated_at": utc_now(),

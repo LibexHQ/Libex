@@ -259,8 +259,7 @@ _STATS_REFRESH_AHEAD_SECONDS = 150
 # Hard ceiling on one pass, serving two different failures with one number.
 #
 # Nothing else bounds a pass: statement_timeout is 30s (app/db/session.py),
-# an entry costs six or seven statements on the refresh path -- five counts,
-# a sixth for seriesRegionUnknown when the entry is region-scoped, and the
+# an entry costs seven statements on the refresh path -- six counts and the
 # cache upsert, with the cache read skipped because refresh=True
 # (services/db/reader.py) -- and up to twelve entries are possible, so a
 # degraded-but-alive database yields a pass measured in

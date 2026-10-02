@@ -14,10 +14,12 @@ from datetime import datetime, timezone
 # Third party
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Column,
     Double,
     Enum,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -46,10 +48,12 @@ REGION_ENUM = Enum(
 class Book(Base):
     __tablename__ = "books"
 
+    # A book is identified by (asin, region): the same ASIN can be a different
+    # marketplace's record, and each region keeps its own row.
     asin: Mapped[str] = mapped_column(String(12), primary_key=True)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     subtitle: Mapped[str | None] = mapped_column(Text, nullable=True)
-    region: Mapped[str] = mapped_column(REGION_ENUM, nullable=False)
+    region: Mapped[str] = mapped_column(REGION_ENUM, primary_key=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     publisher: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -101,13 +105,9 @@ class Book(Base):
     #
     # A populated blob is an accumulation rather than one response's
     # remainder. Each write unions its keys in, so the blob spans every
-    # response that has written the row -- and because the row keys on asin
-    # alone, while region records whichever marketplace wrote it first, that
-    # span crosses marketplaces whenever more than one returns the same ASIN.
-    # Keys are never removed either. So a key sitting here was not
-    # necessarily sent by the most recent response, or by the marketplace
-    # named in region, and the blob is not a snapshot of what Audible would
-    # say now. libex_core.storage.merge.extras_union carries why it is merged that way,
+    # response that has written the row. Keys are never removed either. So a
+    # key sitting here was not necessarily sent by the most recent response,
+    # and the blob is not a snapshot of what Audible would say now. libex_core.storage.merge.extras_union carries why it is merged that way,
     # and the limits of that merge.
     #
     # The blob is large enough to be toasted, so reading it is a detoast per
@@ -139,6 +139,11 @@ class Book(Base):
     # shape.
     extras_withheld: Mapped[dict | None] = mapped_column(JSONDocument, nullable=True)
     chapters_checked_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    # When Audible last confirmed this record, and its chapter listing (a
+    # stored listing or a legitimate empty answer alike). NULL means never
+    # confirmed. Nothing reads or writes them yet.
+    confirmed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    chapters_confirmed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime(),
         default=lambda: datetime.now(timezone.utc),
@@ -167,7 +172,6 @@ class Book(Base):
     track: Mapped["Track | None"] = relationship("Track", back_populates="book", uselist=False)
 
     __table_args__ = (
-        Index("books_asin_index", "asin"),
         # Covering index for region-scoped stats: booksWithChapters joins
         # tracks to books on asin under a region filter, and a bare
         # books(region) still forces a heap fetch for that join. Leading
@@ -217,6 +221,9 @@ class Author(Base):
     image: Mapped[str | None] = mapped_column(Text, nullable=True)
     fetched_description: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     last_seeded_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    # When Audible last confirmed this record. NULL means never confirmed.
+    # Nothing reads or writes it yet.
+    confirmed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime(),
         default=lambda: datetime.now(timezone.utc),
@@ -271,12 +278,17 @@ class Author(Base):
 class Series(Base):
     __tablename__ = "series"
 
+    # Identified by (asin, region), like a book: a series ASIN seen in two
+    # marketplaces is two records.
     asin: Mapped[str] = mapped_column(String(12), primary_key=True)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    region: Mapped[str | None] = mapped_column(REGION_ENUM, nullable=True)
+    region: Mapped[str] = mapped_column(REGION_ENUM, primary_key=True)
     fetched_description: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     last_seeded_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    # When Audible last confirmed this record. NULL means never confirmed.
+    # Nothing reads or writes it yet.
+    confirmed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     # The series product's keys beyond asin, title and publisher_summary, and
     # the record of anything left out of them. Same meaning, NULL semantics and
     # merge as the books columns of the same names; libex_core.storage.merge.extras_union
@@ -306,10 +318,8 @@ class Series(Base):
     )
 
     __table_args__ = (
-        Index("series_asin_index", "asin"),
-        # Region-scoped series count. region is nullable, but a btree
-        # indexes NULLs, so this also covers the seriesRegionUnknown scan
-        # (WHERE region IS NULL) without a separate partial index.
+        # Region-scoped series count. The primary key leads with asin, so a
+        # region-only filter needs its own index.
         Index("series_region_index", "region"),
     )
 
@@ -405,14 +415,14 @@ class Genre(Base):
 class Track(Base):
     __tablename__ = "tracks"
 
-    # tracks_pkey on asin is what lets the booksWithChapters join run
-    # index-only, and as on books that holds only while the visibility map
+    # tracks_pkey on (asin, region) is what lets the booksWithChapters join
+    # run index-only, and as on books that holds only while the visibility map
     # marks the scanned pages all-visible. c7a4e9f13b02 lowers this table's
     # autovacuum vacuum scale factors for that reason; the reasoning lives
-    # on Book.__table_args__.
-    asin: Mapped[str] = mapped_column(
-        String(12), ForeignKey("books.asin", ondelete="CASCADE"), primary_key=True
-    )
+    # on Book.__table_args__. The pair is also the foreign key to the book:
+    # a chapter listing belongs to one marketplace's record.
+    asin: Mapped[str] = mapped_column(String(12), primary_key=True)
+    region: Mapped[str] = mapped_column(REGION_ENUM, primary_key=True)
     chapters: Mapped[dict] = mapped_column(JSONDocument, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime(),
@@ -429,6 +439,12 @@ class Track(Base):
     # Relationships
     book: Mapped["Book"] = relationship("Book", back_populates="track")
 
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["asin", "region"], ["books.asin", "books.region"], ondelete="CASCADE"
+        ),
+    )
+
     def __repr__(self) -> str:
         return f"<Track asin={self.asin}>"
 
@@ -440,38 +456,57 @@ author_book = Table(
     "author_book",
     Base.metadata,
     Column("author_id", Integer, ForeignKey("authors.id", ondelete="CASCADE"), nullable=False),
-    Column("book_asin", String(12), ForeignKey("books.asin", ondelete="CASCADE"), nullable=False),
+    Column("book_asin", String(12), nullable=False),
+    Column("book_region", REGION_ENUM, nullable=False),
+    ForeignKeyConstraint(
+        ["book_asin", "book_region"], ["books.asin", "books.region"], ondelete="CASCADE"
+    ),
     Index("book_author_index", "book_asin", "author_id"),
-    UniqueConstraint("author_id", "book_asin", name="uq_author_book"),
+    UniqueConstraint("author_id", "book_asin", "book_region", name="uq_author_book"),
 )
 
 book_narrator = Table(
     "book_narrator",
     Base.metadata,
     Column("narrator_name", Text, ForeignKey("narrators.name", ondelete="CASCADE"), nullable=False),
-    Column("book_asin", String(12), ForeignKey("books.asin", ondelete="CASCADE"), nullable=False),
-    Index("book_narrator_index", "book_asin", "narrator_name"),
-    UniqueConstraint("book_asin", "narrator_name", name="uq_book_narrator"),
+    Column("book_asin", String(12), nullable=False),
+    Column("book_region", REGION_ENUM, nullable=False),
+    ForeignKeyConstraint(
+        ["book_asin", "book_region"], ["books.asin", "books.region"], ondelete="CASCADE"
+    ),
+    UniqueConstraint("book_asin", "book_region", "narrator_name", name="uq_book_narrator"),
 )
 
 book_series = Table(
     "book_series",
     Base.metadata,
-    Column("book_asin", String(12), ForeignKey("books.asin", ondelete="CASCADE"), nullable=False),
-    Column("series_asin", String(12), ForeignKey("series.asin", ondelete="CASCADE"), nullable=False),
+    Column("book_asin", String(12), nullable=False),
+    Column("book_region", REGION_ENUM, nullable=False),
+    Column("series_asin", String(12), nullable=False),
+    Column("series_region", REGION_ENUM, nullable=False),
     Column("position", String(100), nullable=True),
-    Index("book_series_index", "book_asin", "series_asin"),
-    UniqueConstraint("book_asin", "series_asin", name="uq_book_series"),
+    ForeignKeyConstraint(
+        ["book_asin", "book_region"], ["books.asin", "books.region"], ondelete="CASCADE"
+    ),
+    ForeignKeyConstraint(
+        ["series_asin", "series_region"], ["series.asin", "series.region"], ondelete="CASCADE"
+    ),
+    UniqueConstraint(
+        "book_asin", "book_region", "series_asin", "series_region", name="uq_book_series"
+    ),
 )
 
 book_genre = Table(
     "book_genre",
     Base.metadata,
-    Column("book_asin", String(12), ForeignKey("books.asin", ondelete="CASCADE"), nullable=False),
+    Column("book_asin", String(12), nullable=False),
+    Column("book_region", REGION_ENUM, nullable=False),
     Column("genre_asin", String(12), ForeignKey("genres.asin", ondelete="CASCADE"), nullable=False),
-    Index("book_genre_index", "book_asin", "genre_asin"),
+    ForeignKeyConstraint(
+        ["book_asin", "book_region"], ["books.asin", "books.region"], ondelete="CASCADE"
+    ),
     Index("genre_book_index", "genre_asin", "book_asin"),
-    UniqueConstraint("book_asin", "genre_asin", name="uq_book_genre"),
+    UniqueConstraint("book_asin", "book_region", "genre_asin", name="uq_book_genre"),
 )
 
 author_genre = Table(
@@ -487,12 +522,48 @@ author_genre = Table(
 series_author = Table(
     "series_author",
     Base.metadata,
-    Column("series_asin", String(12), ForeignKey("series.asin", ondelete="CASCADE"), nullable=False),
+    Column("series_asin", String(12), nullable=False),
+    Column("series_region", REGION_ENUM, nullable=False),
     Column("author_id", Integer, ForeignKey("authors.id", ondelete="CASCADE"), nullable=False),
-    UniqueConstraint("series_asin", "author_id", name="uq_series_author"),
-    Index("series_author_index", "series_asin", "author_id"),
+    ForeignKeyConstraint(
+        ["series_asin", "series_region"], ["series.asin", "series.region"], ondelete="CASCADE"
+    ),
+    UniqueConstraint("series_asin", "series_region", "author_id", name="uq_series_author"),
     Index("author_series_index", "author_id", "series_asin"),
 )
+
+
+# ============================================================
+# WALK RESULTS
+# ============================================================
+
+class WalkResult(Base):
+    """What one author or series walk returned, kept apart from the catalog.
+
+    An author's catalog is per marketplace and the author ASIN is not, so the
+    key carries the region as well as the ASIN. There is no foreign key: a
+    walk keys by the author's or series' own ASIN, which may name a record
+    this store does not hold.
+    """
+
+    __tablename__ = "walk_results"
+
+    kind: Mapped[str] = mapped_column(String(20), primary_key=True)
+    asin: Mapped[str] = mapped_column(String(12), primary_key=True)
+    region: Mapped[str] = mapped_column(REGION_ENUM, primary_key=True)
+    complete: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    incomplete_reasons: Mapped[list] = mapped_column(JSONDocument, nullable=False)
+    book_asins: Mapped[list] = mapped_column(JSONDocument, nullable=False)
+    confirmed_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('author_books', 'series_books')", name="ck_walk_results_kind"
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<WalkResult kind={self.kind} asin={self.asin} region={self.region}>"
 
 
 # The tables this module defines, which are the ones the package's own
@@ -501,5 +572,5 @@ series_author = Table(
 CORE_TABLES = frozenset({
     "books", "authors", "series", "narrators", "genres", "tracks",
     "author_book", "book_narrator", "book_series", "book_genre",
-    "author_genre", "series_author",
+    "author_genre", "series_author", "walk_results",
 })

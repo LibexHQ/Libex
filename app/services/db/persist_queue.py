@@ -760,7 +760,7 @@ def persist_track_background(asin: str, chapters_data: dict, region: str) -> Non
         async with _get_bg_write_semaphore():
             try:
                 async with _BackgroundSession() as session:
-                    await upsert_track(session, asin, chapters_data)
+                    await upsert_track(session, asin, chapters_data, region=region)
                     await cache.set(session, chapters_key(asin, region), chapters_data)
             except Exception as e:
                 logger.warning(

@@ -589,3 +589,56 @@ async def test_a_failed_region_read_fails_the_chunk_without_writing(store, monke
 async def stored_asins(store):
     async with store.session() as session:
         return [r[0] for r in (await session.execute(text("SELECT asin FROM books"))).all()]
+
+
+async def series_links(store, asin):
+    async with store.session() as session:
+        result = await session.execute(
+            text("SELECT series_asin FROM book_series WHERE book_asin = :a ORDER BY series_asin"),
+            {"a": asin},
+        )
+        return [r[0] for r in result.all()]
+
+
+async def test_a_series_stored_for_another_region_is_not_touched_through_a_book(store, caplog):
+    await get_series(fake_get, SERIES, region="us", store=store)
+    before = await row_snapshot(store, "series", "asin", SERIES)
+    caplog.set_level(logging.INFO, logger="libex")
+
+    de_book = product(ASIN, relationships=[{**SERIES_RELATION, "title": "Die Serie (DE)"}])
+    live = await get_book(batch_get(**{ASIN: de_book}), ASIN, region="de", store=store)
+
+    assert live.asin == ASIN
+    assert await row_snapshot(store, "series", "asin", SERIES) == before
+    assert await series_links(store, ASIN) == []
+    assert (await row_snapshot(store, "books", "asin", ASIN))["region"] == "de"
+    skipped = [r for r in caplog.records if r.getMessage() == FOREIGN_SKIP]
+    assert [fields_of(r) for r in skipped] == [
+        {"what": "series link", "region": "de", "skipped_num": 1}
+    ]
+
+
+async def test_only_the_foreign_series_of_a_book_is_left_out_of_the_write(store, caplog):
+    await get_series(fake_get, SERIES, region="us", store=store)
+    before = await row_snapshot(store, "series", "asin", SERIES)
+    own = "B0SERIES02"
+    caplog.set_level(logging.INFO, logger="libex")
+
+    de_book = product(ASIN, relationships=[
+        {**SERIES_RELATION, "title": "Die Serie (DE)"},
+        {**SERIES_RELATION, "asin": own, "title": "Meine Serie", "sequence": "2"},
+    ])
+    await get_book(batch_get(**{ASIN: de_book}), ASIN, region="de", store=store)
+
+    assert await row_snapshot(store, "series", "asin", SERIES) == before
+    assert await series_links(store, ASIN) == [own]
+    own_row = await row_snapshot(store, "series", "asin", own)
+    assert (own_row["region"], own_row["title"]) == ("de", "Meine Serie")
+    skipped = [r for r in caplog.records if r.getMessage() == FOREIGN_SKIP]
+    assert [fields_of(r)["skipped_num"] for r in skipped] == [1]
+
+    again = product(ASIN, relationships=[
+        {**SERIES_RELATION, "asin": own, "title": "Meine Serie", "sequence": "3"},
+    ])
+    await get_book(batch_get(**{ASIN: again}), ASIN, region="de", store=store)
+    assert await series_links(store, ASIN) == [own]

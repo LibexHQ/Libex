@@ -66,7 +66,7 @@ SERIES_BEFORE = {
     "updatedAt": None,
 }
 
-NEW_CHAPTER_KEYS = ("contentReference", "contentUrl", "audibleExtras")
+NEW_CHAPTER_KEYS = ("contentReference", "contentUrl", "audibleExtras", "extrasWithheld")
 NEW_SERIES_KEYS = ("audibleExtras", "extrasWithheld")
 
 
@@ -125,6 +125,7 @@ async def test_chapters_body_carries_the_new_keys_as_null_when_audible_sent_none
     body = (await _get_chapters(client, CHAPTERS_RAW)).json()
     for key in NEW_CHAPTER_KEYS:
         assert key in body and body[key] is None
+    assert body["extrasWithheld"] is None
     for c in body["chapters"]:
         assert c["chapters"] is None and c["audibleExtras"] is None
 
@@ -153,6 +154,25 @@ async def test_chapters_body_surfaces_what_audible_sent(client):
     assert sub["title"] == "Sub A" and sub["audibleExtras"] == {"tag": "t"}
     assert sub["chapters"] is None
     assert _without(body, NEW_CHAPTER_KEYS)["isAccurate"] is True
+
+
+async def test_chapters_body_with_a_nul_payload_is_200_cleaned_and_recorded(client):
+    raw = json.loads(json.dumps(CHAPTERS_RAW))
+    raw["content_metadata"]["chapter_info"]["chapters"][0]["title"] = "Open\x00ing"
+    raw["content_metadata"]["content_reference"] = {"ac\x00r": "CR\x00!"}
+    persisted = MagicMock()
+    with (
+        patch("app.services.audible.books.audible_get", AsyncMock(return_value=raw)),
+        patch("app.services.audible.books.persist_track_background", persisted),
+    ):
+        response = await client.get(f"/book/{CHAPTER_ASIN}/chapters")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["chapters"][0]["title"] == "Opening"
+    assert body["contentReference"] == {"acr": "CR!"}
+    assert body["extrasWithheld"] == {"sanitized": {"nulCharacters": 3}}
+    stored_payload = persisted.call_args.args[1]
+    assert "\\u0000" not in json.dumps(stored_payload)
 
 
 # ============================================================

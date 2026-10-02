@@ -17,30 +17,96 @@ _libex_core() {
             if (( COMP_CWORD == ci + 1 )); then
                 candidates=(get bulk chapters)
             else
-                candidates=()
+                case "${COMP_WORDS[ci + 1]}" in
+                    get)
+                        case "${COMP_WORDS[COMP_CWORD - 1]}" in
+                            --region) candidates=(us uk ca au de fr it es jp in br) ;;
+                            *) candidates=(-h --help --region) ;;
+                        esac
+                        ;;
+                    bulk)
+                        case "${COMP_WORDS[COMP_CWORD - 1]}" in
+                            --region) candidates=(us uk ca au de fr it es jp in br) ;;
+                            *) candidates=(-h --help --file --region) ;;
+                        esac
+                        ;;
+                    chapters)
+                        case "${COMP_WORDS[COMP_CWORD - 1]}" in
+                            --region) candidates=(us uk ca au de fr it es jp in br) ;;
+                            *) candidates=(-h --help --region) ;;
+                        esac
+                        ;;
+                    *) candidates=() ;;
+                esac
             fi
             ;;
         series)
             if (( COMP_CWORD == ci + 1 )); then
                 candidates=(get books)
             else
-                candidates=()
+                case "${COMP_WORDS[ci + 1]}" in
+                    get)
+                        case "${COMP_WORDS[COMP_CWORD - 1]}" in
+                            --region) candidates=(us uk ca au de fr it es jp in br) ;;
+                            *) candidates=(-h --help --region) ;;
+                        esac
+                        ;;
+                    books)
+                        case "${COMP_WORDS[COMP_CWORD - 1]}" in
+                            --region) candidates=(us uk ca au de fr it es jp in br) ;;
+                            *) candidates=(-h --help --region) ;;
+                        esac
+                        ;;
+                    *) candidates=() ;;
+                esac
             fi
             ;;
-        search) candidates=(-h --help --title --author --narrator --publisher --keywords --query --sort-by --limit --page --region) ;;
-        quick-search) candidates=(-h --help --region) ;;
+        search)
+            case "${COMP_WORDS[COMP_CWORD - 1]}" in
+                --region) candidates=(us uk ca au de fr it es jp in br) ;;
+                *) candidates=(-h --help --title --author --narrator --publisher --keywords --query --sort-by --limit --page --region) ;;
+            esac
+            ;;
+        quick-search)
+            case "${COMP_WORDS[COMP_CWORD - 1]}" in
+                --region) candidates=(us uk ca au de fr it es jp in br) ;;
+                *) candidates=(-h --help --region) ;;
+            esac
+            ;;
         abs)
             if (( COMP_CWORD == ci + 1 )); then
                 candidates=(search quick-search)
             else
-                candidates=()
+                case "${COMP_WORDS[ci + 1]}" in
+                    search)
+                        case "${COMP_WORDS[COMP_CWORD - 1]}" in
+                            --region) candidates=(us uk ca au de fr it es jp in br) ;;
+                            *) candidates=(-h --help --title --query --author --keywords --region) ;;
+                        esac
+                        ;;
+                    quick-search)
+                        case "${COMP_WORDS[COMP_CWORD - 1]}" in
+                            --region) candidates=(us uk ca au de fr it es jp in br) ;;
+                            *) candidates=(-h --help --keywords --query --title --region) ;;
+                        esac
+                        ;;
+                    *) candidates=() ;;
+                esac
             fi
             ;;
         narrator)
             if (( COMP_CWORD == ci + 1 )); then
                 candidates=(books)
             else
-                candidates=()
+                case "${COMP_WORDS[ci + 1]}" in
+                    books)
+                        case "${COMP_WORDS[COMP_CWORD - 1]}" in
+                            --region) candidates=(us uk ca au de fr it es jp in br) ;;
+                            *) candidates=(-h --help --limit --page --region) ;;
+                        esac
+                        ;;
+                    *) candidates=() ;;
+                esac
             fi
             ;;
         completion)

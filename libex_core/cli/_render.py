@@ -18,7 +18,7 @@ import argparse
 import re
 import sys
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from libex_core.cli.environment import VARIABLES
@@ -49,6 +49,7 @@ class _Option:
     flags: tuple[str, ...]
     help: str
     exits: bool
+    choices: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,10 @@ class _Command:
     description: str
     options: tuple[_Option, ...]
     positionals: tuple[_Positional, ...]
+    # The commands a group holds, each read the same way, to any depth. A
+    # command with children has no options or positionals of its own beyond
+    # the word that picks a child.
+    children: tuple["_Command", ...] = ()
 
 
 @dataclass(frozen=True)
@@ -98,6 +103,7 @@ def _read_parser(parser: argparse.ArgumentParser) -> tuple[
                     # help and version stop parsing; they are the only
                     # actions whose default is argparse.SUPPRESS.
                     exits=action.default is argparse.SUPPRESS,
+                    choices=tuple(action.choices or ()),
                 )
             )
         else:
@@ -112,51 +118,52 @@ def _read_parser(parser: argparse.ArgumentParser) -> tuple[
 
 
 def _read_command(name: str, summary: str, sub: argparse.ArgumentParser) -> _Command:
-    options, positionals, _, _ = _read_parser(sub)
+    options, positionals, nested, nested_summaries = _read_parser(sub)
+    children = tuple(
+        _read_command(child_name, nested_summaries.get(child_name, ""), child)
+        for child_name, child in nested.items()
+    )
+    if children:
+        options = ()
+        positionals = (
+            _Positional(
+                name="command",
+                help="the command to run",
+                choices=tuple(child.name for child in children),
+            ),
+        )
     return _Command(
         name=name,
         summary=summary,
         description=sub.description or "",
         options=options,
         positionals=positionals,
+        children=children,
     )
+
+
+def _documented(command: _Command, prefix: str = "") -> list[_Command]:
+    """Every command that does something, under its full name; a group is
+    only the way to reach the commands it holds."""
+    full = f"{prefix}{command.name}"
+    if not command.children:
+        return [replace(command, name=full)]
+    found: list[_Command] = []
+    for child in command.children:
+        found += _documented(child, f"{full} ")
+    return found
 
 
 def _read_spec(parser: argparse.ArgumentParser) -> _Spec:
     options, _, subparsers, summaries = _read_parser(parser)
-    commands = []
-    documented = []
-    for name, sub in subparsers.items():
-        _, _, nested, nested_summaries = _read_parser(sub)
-        if not nested:
-            command = _read_command(name, summaries.get(name, ""), sub)
-            commands.append(command)
-            documented.append(command)
-            continue
-        commands.append(
-            _Command(
-                name=name,
-                summary=summaries.get(name, ""),
-                description=sub.description or "",
-                options=(),
-                positionals=(
-                    _Positional(
-                        name="command",
-                        help="the command to run",
-                        choices=tuple(nested),
-                    ),
-                ),
-            )
-        )
-        for nested_name, leaf in nested.items():
-            documented.append(
-                _read_command(
-                    f"{name} {nested_name}", nested_summaries.get(nested_name, ""), leaf
-                )
-            )
-    return _Spec(
-        parser.description or "", options, tuple(commands), tuple(documented)
+    commands = tuple(
+        _read_command(name, summaries.get(name, ""), sub)
+        for name, sub in subparsers.items()
     )
+    documented: list[_Command] = []
+    for command in commands:
+        documented += _documented(command)
+    return _Spec(parser.description or "", options, commands, tuple(documented))
 
 
 def _word(value: str) -> str:
@@ -193,10 +200,10 @@ def _man_option(option: _Option) -> list[str]:
 
 def _man_command(command: _Command) -> list[str]:
     usage = " ".join(
-        [f"\\fB{_roff(PROG)} {command.name}\\fR"]
+        [f"\\fB{_roff(f'{PROG} {command.name}')}\\fR"]
         + [f"\\fI{_roff(p.name)}\\fR" for p in command.positionals]
     )
-    lines = [f".SS {command.name}", usage, ".PP", _roff(command.description)]
+    lines = [f".SS {_roff(command.name)}", usage, ".PP", _roff(command.description)]
     for positional in command.positionals:
         text = positional.help
         if positional.choices:
@@ -212,7 +219,7 @@ def man_page(parser: argparse.ArgumentParser) -> str:
     first_sentence = spec.description.split(". ")[0].rstrip(".")
     name_summary = first_sentence[:1].lower() + first_sentence[1:]
     lines = [
-        f'.TH LIBEX\\-CORE 1 "" "{PROG}" "User Commands"',
+        f'.TH LIBEX\\-CORE 1 "" "{_roff(PROG)}" "User Commands"',
         ".SH NAME",
         f"{_roff(PROG)} \\- {_roff(name_summary)}",
         ".SH SYNOPSIS",
@@ -248,26 +255,76 @@ def _flag_words(options: tuple[_Option, ...]) -> list[str]:
     return [_word(flag) for option in options for flag in option.flags]
 
 
+def _words(values: tuple[str, ...]) -> str:
+    return " ".join(_word(value) for value in values)
+
+
+def _first_choices(command: _Command) -> tuple[str, ...]:
+    return command.positionals[0].choices if command.positionals else ()
+
+
+# ------------------------------------------------------------
+# bash
+# ------------------------------------------------------------
+
+def _bash_assign(command: _Command, words: list[str], indent: str) -> list[str]:
+    """Set candidates; a flag that takes one of a fixed set of values offers
+    that set when it is the word just typed."""
+    valued = [o for o in command.options if o.choices]
+    if not valued:
+        return [f"{indent}candidates=({' '.join(words)})"]
+    lines = [f'{indent}case "${{COMP_WORDS[COMP_CWORD - 1]}}" in']
+    for option in valued:
+        flags = "|".join(_word(flag) for flag in option.flags)
+        lines.append(f"{indent}    {flags}) candidates=({_words(option.choices)}) ;;")
+    lines.append(f"{indent}    *) candidates=({' '.join(words)}) ;;")
+    lines.append(f"{indent}esac")
+    return lines
+
+
+def _bash_body(command: _Command, depth: int, indent: str) -> list[str]:
+    """Candidates for a command whose own name is the word at ci + depth - 1."""
+    if command.children:
+        names = _words(tuple(child.name for child in command.children))
+        lines = [
+            f"{indent}if (( COMP_CWORD == ci + {depth} )); then",
+            f"{indent}    candidates=({names})",
+            f"{indent}else",
+            f'{indent}    case "${{COMP_WORDS[ci + {depth}]}}" in',
+        ]
+        for child in command.children:
+            lines += _bash_branch(child, depth + 1, f"{indent}        ")
+        lines += [
+            f"{indent}        *) candidates=() ;;",
+            f"{indent}    esac",
+            f"{indent}fi",
+        ]
+        return lines
+    flags = _flag_words(command.options)
+    choices = [_word(c) for c in _first_choices(command)]
+    if not choices:
+        return _bash_assign(command, flags, indent)
+    return [
+        f"{indent}if (( COMP_CWORD == ci + {depth} )); then",
+        *_bash_assign(command, flags + choices, f"{indent}    "),
+        f"{indent}else",
+        *_bash_assign(command, flags, f"{indent}    "),
+        f"{indent}fi",
+    ]
+
+
+def _bash_branch(command: _Command, depth: int, indent: str) -> list[str]:
+    body = _bash_body(command, depth, indent + "    ")
+    if len(body) == 1:
+        return [f"{indent}{_word(command.name)}) {body[0].strip()} ;;"]
+    return [f"{indent}{_word(command.name)})", *body, f"{indent}    ;;"]
+
+
 def _bash(spec: _Spec) -> str:
     top = _flag_words(spec.options) + [_word(c.name) for c in spec.commands]
-    branches = []
+    branches: list[str] = []
     for command in spec.commands:
-        flags = _flag_words(command.options)
-        choices = [_word(c) for p in command.positionals[:1] for c in p.choices]
-        if choices:
-            branches.append(
-                f"        {_word(command.name)})\n"
-                f"            if (( COMP_CWORD == ci + 1 )); then\n"
-                f"                candidates=({' '.join(flags + choices)})\n"
-                f"            else\n"
-                f"                candidates=({' '.join(flags)})\n"
-                f"            fi\n"
-                f"            ;;"
-            )
-        else:
-            branches.append(
-                f"        {_word(command.name)}) candidates=({' '.join(flags)}) ;;"
-            )
+        branches += _bash_branch(command, 1, "        ")
     return (
         f"# bash completion for {PROG}, {_GENERATED}\n"
         "_libex_core() {\n"
@@ -299,14 +356,68 @@ def _bash(spec: _Spec) -> str:
     )
 
 
+# ------------------------------------------------------------
+# zsh
+# ------------------------------------------------------------
+
 def _zsh_option(option: _Option) -> str:
     text = _description(option.help)
     flags = [_word(flag) for flag in option.flags]
     prefix = "(- *)" if option.exits else ""
+    value = (
+        f":{_word(flags[-1].lstrip('-'))}:({_words(option.choices)})"
+        if option.choices
+        else ""
+    )
     if len(flags) == 1:
-        return f"'{prefix}{flags[0]}[{text}]'"
+        return f"'{prefix}{flags[0]}[{text}]{value}'"
     leading = f"'{prefix}'" if prefix else ""
-    return f"{leading}{{{','.join(flags)}}}'[{text}]'"
+    return f"{leading}{{{','.join(flags)}}}'[{text}]{value}'"
+
+
+def _zsh_arguments(
+    command: _Command, indent: str, lead: tuple[str, ...] = ()
+) -> list[str]:
+    """_arguments counts positions from the word after the first, which under a
+    group is the command's own name, so the words that led here are described
+    as positions of their own and the command's positionals follow them."""
+    specs = [_zsh_option(o) for o in command.options]
+    for index, word in enumerate(lead, start=1):
+        specs.append(f"'{index}:command:({_word(word)})'")
+    for index, positional in enumerate(command.positionals, start=len(lead) + 1):
+        choices = _words(positional.choices)
+        specs.append(
+            f"'{index}:{_word(positional.name)}:({choices})'"
+            if choices
+            else f"'{index}:{_word(positional.name)}:'"
+        )
+    lines = [f"{indent}_arguments \\"]
+    lines += [f"{indent}    {spec} \\" for spec in specs[:-1]]
+    lines.append(f"{indent}    {specs[-1]}")
+    return lines
+
+
+def _zsh_branch(
+    command: _Command, depth: int, indent: str, lead: tuple[str, ...] = ()
+) -> list[str]:
+    """A case arm for a command whose name is line[depth]; lead holds the
+    names of the commands between it and the top, excluding the first."""
+    lines = [f"{indent}{_word(command.name)})"]
+    inner = f"{indent}    "
+    if command.children:
+        lines.append(f"{inner}case ${{line[{depth + 1}]}} in")
+        for child in command.children:
+            lines += _zsh_branch(
+                child, depth + 1, f"{inner}    ", (*lead, child.name)
+            )
+        lines.append(f"{inner}    *)")
+        lines += _zsh_arguments(command, f"{inner}        ")
+        lines.append(f"{inner}        ;;")
+        lines.append(f"{inner}esac")
+    else:
+        lines += _zsh_arguments(command, inner, lead)
+    lines.append(f"{inner};;")
+    return lines
 
 
 def _zsh(spec: _Spec) -> str:
@@ -315,23 +426,9 @@ def _zsh(spec: _Spec) -> str:
         f"                '{_word(c.name)}:{_description(c.summary)}'\n"
         for c in spec.commands
     )
-    cases = []
+    cases: list[str] = []
     for command in spec.commands:
-        specs = [_zsh_option(o) for o in command.options]
-        for index, positional in enumerate(command.positionals, start=1):
-            choices = " ".join(_word(c) for c in positional.choices)
-            specs.append(
-                f"'{index}:{_word(positional.name)}:({choices})'"
-                if choices
-                else f"'{index}:{_word(positional.name)}:'"
-            )
-        body = " \\\n                        ".join(specs)
-        cases.append(
-            f"                {_word(command.name)})\n"
-            f"                    _arguments \\\n"
-            f"                        {body}\n"
-            f"                    ;;"
-        )
+        cases += _zsh_branch(command, 1, "                ")
     return (
         f"#compdef {PROG}\n"
         f"# zsh completion for {PROG}, {_GENERATED}\n"
@@ -366,12 +463,46 @@ def _zsh(spec: _Spec) -> str:
     )
 
 
+# ------------------------------------------------------------
+# fish
+# ------------------------------------------------------------
+
 def _fish_flags(option: _Option) -> str:
     parts = []
     for flag in option.flags:
         word = _word(flag)
         parts.append(f"-l {word[2:]}" if word.startswith("--") else f"-s {word[1:]}")
+    if option.choices:
+        parts.append(f"-r -a '{_words(option.choices)}'")
     return " ".join(parts)
+
+
+def _fish_lines(command: _Command, path: tuple[str, ...]) -> list[str]:
+    """Completions for a command reached by path, which includes its own name."""
+    seen = "; and ".join(
+        f"__fish_seen_subcommand_from {_word(word)}" for word in path
+    )
+    lines = []
+    if command.children:
+        names = _words(tuple(child.name for child in command.children))
+        held = f"__fish_seen_subcommand_from {names}"
+        lines.append(
+            f"complete -c {PROG} -n '{seen}; and not {held}' -a '{names}'"
+        )
+    for option in command.options:
+        lines.append(
+            f"complete -c {PROG} -n '{seen}' "
+            f"{_fish_flags(option)} -d '{_description(option.help)}'"
+        )
+    if not command.children:
+        for positional in command.positionals:
+            if positional.choices:
+                lines.append(
+                    f"complete -c {PROG} -n '{seen}' -a '{_words(positional.choices)}'"
+                )
+    for child in command.children:
+        lines += _fish_lines(child, (*path, child.name))
+    return lines
 
 
 def _fish(spec: _Spec) -> str:
@@ -390,16 +521,7 @@ def _fish(spec: _Spec) -> str:
             f"-a {_word(command.name)} -d '{_description(command.summary)}'"
         )
     for command in spec.commands:
-        condition = f"'__fish_seen_subcommand_from {_word(command.name)}'"
-        for option in command.options:
-            lines.append(
-                f"complete -c {PROG} -n {condition} "
-                f"{_fish_flags(option)} -d '{_description(option.help)}'"
-            )
-        for positional in command.positionals:
-            if positional.choices:
-                choices = " ".join(_word(c) for c in positional.choices)
-                lines.append(f"complete -c {PROG} -n {condition} -a '{choices}'")
+        lines += _fish_lines(command, (command.name,))
     return "\n".join(lines) + "\n"
 
 

@@ -9,6 +9,8 @@ changes every generated file, so the drift check can tell.
 # Standard library
 import argparse
 import re
+import shutil
+import subprocess
 
 # Third party
 import pytest
@@ -46,12 +48,12 @@ _SCRIPTS = {
 
 
 def _headings(man):
-    return re.findall(r"^\.SS (.+)$", man, flags=re.M)
+    return [h.replace("\\-", "-") for h in re.findall(r"^\.SS (.+)$", man, flags=re.M)]
 
 
 def _sections(man):
     parts = re.split(r"^\.SS (.+)$", man, flags=re.M)
-    return {parts[i]: parts[i + 1] for i in range(1, len(parts) - 1, 2)}
+    return {parts[i].replace("\\-", "-"): parts[i + 1] for i in range(1, len(parts) - 1, 2)}
 
 
 def _roff(text):
@@ -86,9 +88,7 @@ def test_the_man_page_documents_every_command_that_does_something_and_nothing_el
 @pytest.mark.parametrize("path, leaf", _LEAVES, ids=lambda v: " ".join(v) if isinstance(v, tuple) else "")
 def test_each_nested_command_is_documented_in_full_under_its_whole_name(path, leaf):
     section = _sections(_MAN)[" ".join(path)]
-    # Compared with the hyphen escapes undone: whether a command's own name
-    # is escaped is not what this checks.
-    assert f"\\fBlibex-core {' '.join(path)}\\fR" in section.replace("\\-", "-")
+    assert f"\\fBlibex\\-core {_roff(' '.join(path))}\\fR" in section
     for action in leaf._actions:
         for flag in action.option_strings:
             assert _roff(flag) in section, (path, flag)
@@ -132,20 +132,23 @@ def test_bash_offers_a_groups_commands_at_the_word_after_it():
         assert f"candidates=({' '.join(names)})" in branch.group(1)
 
 
-def test_zsh_offers_a_groups_commands_as_its_first_argument():
+def test_zsh_offers_a_groups_commands_when_none_is_named_yet():
     for group, names in _GROUPS.items():
-        assert (
-            f"                {group})\n"
-            f"                    _arguments \\\n"
-            f"                        '1:command:({' '.join(names)})'"
-        ) in _SCRIPTS["zsh"], group
+        assert re.search(
+            rf"^                {group}\)\n\s+case \$\{{line\[2\]\}} in\n"
+            rf"(?:.*\n)*?\s+\*\)\n\s+_arguments \\\n"
+            rf"\s+'1:command:\({' '.join(names)}\)'\n",
+            _SCRIPTS["zsh"],
+            re.M,
+        ), group
 
 
-def test_fish_offers_a_groups_commands_after_the_group_word():
+def test_fish_offers_a_groups_commands_until_one_is_named():
     for group, names in _GROUPS.items():
+        words = " ".join(names)
         assert (
-            f"complete -c libex-core -n '__fish_seen_subcommand_from {group}' "
-            f"-a '{' '.join(names)}'"
+            f"complete -c libex-core -n '__fish_seen_subcommand_from {group}; and "
+            f"not __fish_seen_subcommand_from {words}' -a '{words}'\n"
         ) in _SCRIPTS["fish"], group
 
 
@@ -204,3 +207,114 @@ def test_a_group_built_with_the_shared_helpers_renders_in_all_four_files():
     assert "candidates=(peel)" in files[_render.BASH_PATH]
     assert "'1:command:(peel)'" in files[_render.ZSH_PATH]
     assert "-a 'peel'" in files[_render.FISH_PATH]
+
+
+# ============================================================
+# LEAF FLAGS COMPLETE UNDER A GROUP
+# ============================================================
+
+_REGIONS = "us uk ca au de fr it es jp in br".split()
+_REQUEST_PATHS = [
+    path for path, node in _LEAVES
+    if any("--region" in a.option_strings for a in node._actions)
+]
+
+
+def _flags(leaf):
+    return sorted(f for a in leaf._actions for f in a.option_strings if f.startswith("--"))
+
+
+def _bash_complete(words, cword):
+    """What bash's own completion would offer, by sourcing the committed
+    script in a real bash and calling its function."""
+    script = DATA_DIR / _render.BASH_PATH
+    quoted = " ".join(f"'{w}'" for w in words)
+    result = subprocess.run(
+        [
+            "bash", "-c",
+            f"source '{script}'; COMP_WORDS=({quoted}); COMP_CWORD={cword}; "
+            '_libex_core; printf "%s\\n" "${COMPREPLY[@]}"',
+        ],
+        capture_output=True, text=True, timeout=30, check=True,
+    )
+    return result.stdout.split()
+
+
+needs_bash = pytest.mark.skipif(shutil.which("bash") is None, reason="no bash")
+
+
+@needs_bash
+def test_bash_completes_a_nested_commands_flag_from_its_prefix():
+    assert _bash_complete(["libex-core", "book", "get", "--re"], 3) == ["--region"]
+    assert _bash_complete(["libex-core", "book", "bulk", "--f"], 3) == ["--file"]
+    assert _bash_complete(["libex-core", "abs", "quick-search", "--k"], 3) == ["--keywords"]
+    assert _bash_complete(["libex-core", "narrator", "books", "--l"], 3) == ["--limit"]
+
+
+@needs_bash
+def test_bash_completes_the_regions_after_the_region_flag():
+    assert _bash_complete(["libex-core", "book", "get", "--region", ""], 4) == _REGIONS
+    assert _bash_complete(["libex-core", "book", "get", "--region", "u"], 4) == ["us", "uk"]
+    assert _bash_complete(["libex-core", "abs", "search", "--region", "j"], 4) == ["jp"]
+    assert _bash_complete(["libex-core", "search", "--region", "b"], 3) == ["br"]
+
+
+@needs_bash
+@pytest.mark.parametrize("path", _REQUEST_PATHS, ids=" ".join)
+def test_bash_offers_every_flag_of_every_request_command(path):
+    leaf = dict(_LEAVES)[path]
+    offered = _bash_complete(["libex-core", *path, "-"], len(path) + 1)
+    assert sorted(f for f in offered if f.startswith("--")) == _flags(leaf)
+    assert "-h" in offered
+    regions = _bash_complete(["libex-core", *path, "--region", ""], len(path) + 2)
+    assert regions == _REGIONS
+
+
+@needs_bash
+def test_bash_still_offers_the_group_commands_and_not_flags_at_the_group_word():
+    assert _bash_complete(["libex-core", "book", ""], 2) == ["get", "bulk", "chapters"]
+    assert _bash_complete(["libex-core", ""], 1)[-3:] == ["narrator", "completion", "config"]
+
+
+@needs_bash
+def test_bash_offers_nothing_for_a_command_it_does_not_know():
+    assert _bash_complete(["libex-core", "book", "nope", ""], 3) == []
+
+
+def _zsh_leaf_block(group, leaf):
+    match = re.search(
+        rf"^                {group}\)\n\s+case \$\{{line\[2\]\}} in\n(.*?)^                    esac\n",
+        _SCRIPTS["zsh"],
+        re.M | re.S,
+    )
+    assert match, group
+    inner = re.search(rf"^                        {leaf}\)\n(.*?)^                            ;;", match.group(1), re.M | re.S)
+    assert inner, (group, leaf)
+    return inner.group(1)
+
+
+@pytest.mark.parametrize("path", [p for p in _REQUEST_PATHS if len(p) == 2], ids=" ".join)
+def test_zsh_spec_holds_each_nested_commands_flags_and_region_choices(path):
+    block = _zsh_leaf_block(*path)
+    for flag in _flags(dict(_LEAVES)[path]):
+        if flag != "--help":
+            assert f"'{flag}[" in block, (path, flag)
+    assert f":region:({' '.join(_REGIONS)})'" in block
+    assert "'(- *)'{-h,--help}" in block
+
+
+@pytest.mark.parametrize("path", [p for p in _REQUEST_PATHS if len(p) == 2], ids=" ".join)
+def test_fish_spec_holds_each_nested_commands_flags_and_region_choices(path):
+    group, leaf = path
+    condition = f"-n '__fish_seen_subcommand_from {group}; and __fish_seen_subcommand_from {leaf}'"
+    lines = [row for row in _SCRIPTS["fish"].splitlines() if condition in row]
+    for flag in _flags(dict(_LEAVES)[path]):
+        assert any(f"-l {flag[2:]}" in row for row in lines), (path, flag)
+    (region,) = [row for row in lines if "-l region" in row]
+    assert f"-r -a '{' '.join(_REGIONS)}'" in region
+
+
+def test_the_top_level_request_commands_complete_their_flags_too():
+    assert "'--region[" in _SCRIPTS["zsh"]
+    assert "-n '__fish_seen_subcommand_from search' -l region" in _SCRIPTS["fish"]
+    assert "-l sort-by" in _SCRIPTS["fish"] and "'--sort-by[" in _SCRIPTS["zsh"]

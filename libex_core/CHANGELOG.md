@@ -24,6 +24,10 @@ time it was cut.
 
 ### Changed
 - **Known difference: text sort order is not the same on both backends.** Sorting by title, publisher, narrator name or a non-numeric series position follows the database's locale collation on Postgres and plain byte order on SQLite, so mixed-case or accented text can come back in a different order.
+- **Known difference: a search pattern ending in a lone backslash.** On Postgres it is an error; on SQLite it is accepted and matches nothing.
+- **Known difference: series-position ordering and non-ASCII digits.** SQLite treats only ASCII digits (0-9) as digits when deciding whether a series position is numeric. Postgres's `\d` may also accept other Unicode digits, depending on locale. This affects series-position ordering only.
+- **Known difference: distinct plan names that are not strings.** Plan names are strings by contract. If a plan list holds a non-string JSON element, SQLite renders it with its own spacing, which can differ from Postgres's.
+- **SQLite version requirements.** The reads need SQLite 3.30 or later for `NULLS LAST`, and the JSON1 functions, which are built in from 3.38.
 
 Still groundwork: nothing opens a database or creates tables yet, and no command uses these readers. They need a session you have built yourself over tables you have created.
 

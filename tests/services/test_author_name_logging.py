@@ -93,7 +93,7 @@ async def test_catalog_first_page_failure_warning_reports_where_not_who(caplog):
     """The by-name walk's failure path: the name is in scope there too."""
     with (
         patch(
-            "app.services.audible.authors.by_name._fetch_name_search_page",
+            "libex_core.audible.authors.by_name._fetch_name_search_page",
             new_callable=AsyncMock,
         ) as mock_page,
         caplog.at_level(logging.INFO),

@@ -1,7 +1,7 @@
 """
 AudiMeta-shaped response models.
 
-These are the DTOs the hosted API returns for books, chapters, and series --
+These are the DTOs the hosted API returns for books, chapters, series and authors --
 derived from AudiMeta's response bodies. Libex is not a drop-in replacement:
 the shapes differ in places. Field names are camelCase because AudiMeta's are;
 optionality and defaults follow AudiMeta's rather than what the underlying
@@ -467,4 +467,20 @@ class SeriesResponse(BaseModel):
     description: str | None = None
     region: str
     position: str | None = None
+    updatedAt: str | None = None
+
+
+# ============================================================
+# AUTHOR RESPONSE
+# ============================================================
+
+class AuthorResponse(BaseModel):
+    id: int | None = None
+    asin: str
+    name: str
+    description: str | None = None
+    image: str | None = None
+    region: str
+    regions: list[str] = Field(default_factory=list)
+    genres: list = Field(default_factory=list)
     updatedAt: str | None = None

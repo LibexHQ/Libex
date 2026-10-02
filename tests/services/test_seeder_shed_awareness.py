@@ -52,17 +52,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 # Core
-from libex_core.exceptions import AudibleAPIException, NotFoundException
-
-# Services
-from app.core.response_headers import REASON_DISCOVERY_INCOMPLETE, record_incomplete
-from app.services.audible.authors.by_name import (
+from libex_core.audible.authors.by_name import (
     STOP_COMPLETED,
     STOP_DEADLINE,
     STOP_PAGE_CAP,
     STOP_PAGE_FAILED,
     STOP_PLATEAU,
 )
+from libex_core.exceptions import AudibleAPIException, NotFoundException
+
+# Services
+from app.core.response_headers import REASON_DISCOVERY_INCOMPLETE, record_incomplete
 from app.services import seeder
 from app.services.db.persist_queue import PersistOutcome
 

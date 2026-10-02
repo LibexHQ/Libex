@@ -26,7 +26,7 @@ def _is_retryable_status(status_code: int) -> bool:
     return status_code in _RETRYABLE_STATUS_CODES or 500 <= status_code < 600
 
 
-# Kept small on purpose. AUTHOR_BOOKS_TIME_BUDGET_SECONDS in authors/__init__.py caps
+# Kept small on purpose. The hosted service's author-books time budget caps
 # a whole discovery walk's wall-clock time, but that deadline is checked by
 # the callers between requests -- it never reaches LibexClient.get, since
 # this method's signature (region, path, params, extra_headers) doesn't
@@ -35,8 +35,8 @@ def _is_retryable_status(status_code: int) -> bool:
 # would eat into that budget fast with no way for this module to know it's
 # happening, so attempts and backoff both stay deliberately small rather
 # than aggressive. Making retries budget-aware would need an explicit
-# optional deadline parameter threaded from authors.py's existing deadline
-# value down through every intermediate call into LibexClient.get itself --
+# optional deadline parameter threaded from the author-books walks' existing
+# deadline value down through every intermediate call into LibexClient.get itself --
 # that's a real signature change and out of scope here.
 AUDIBLE_MAX_ATTEMPTS = 3
 AUDIBLE_RETRY_BASE_SECONDS = 0.5

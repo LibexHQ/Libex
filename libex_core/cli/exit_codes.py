@@ -66,7 +66,7 @@ _BY_ERROR_CODE: dict[ErrorCode, ExitCode] = {
 
 
 def classify(exc: Exception) -> Failure:
-    # Every branch prints the message as-is, so both are limited to classes
+    # Every branch prints the message as-is, so each is limited to classes
     # whose text is fixed by this package or by libex_core.
     if isinstance(exc, ConfigError):
         return Failure(ExitCode.CONFIG, "config_error", str(exc))

@@ -334,13 +334,19 @@ async def test_series_books_fall_back_to_the_stored_members_in_series_order(stor
         for i, a in enumerate(BOOKS)
     }
     got = await get_series_books(batch_get(**members), SERIES, store=store)
-    assert [b.asin for b in got] == list(BOOKS)
+    assert [b.asin for b in got.books] == list(BOOKS)
+    assert got.complete is True
+    assert got.incomplete_reasons == ()
 
     async def member_list_down(region, path, params=None, extra_headers=None):
         raise AudibleAPIException("boom", upstream_status=503)
 
     again = await get_series_books(member_list_down, SERIES, store=store)
-    assert [b.asin for b in again] == list(BOOKS)
+    assert [b.asin for b in again.books] == list(BOOKS)
+    # The stored members stand in for a member list Audible could not give, so
+    # the membership is unconfirmed even though every stored book came back.
+    assert again.complete is False
+    assert again.incomplete_reasons == ("discovery-incomplete",)
     with pytest.raises(AudibleAPIException):
         await get_series_books(member_list_down, "B0SERIES09", store=store)
 

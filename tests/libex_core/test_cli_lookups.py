@@ -141,15 +141,42 @@ def test_the_cli_region_list_is_the_library_region_list():
     assert len(_args.REGIONS) == len(set(_args.REGIONS)) == 11
 
 
-def test_the_default_region_is_us_on_every_command():
+# The db commands answer from the store, which holds every region: their book
+# --region filter is optional, and db stats scopes by it only when given.
+_DB_REGION_UNSET = {
+    ("db", "books"), ("db", "series-books"), ("db", "narrator-books"), ("db", "plan"),
+    ("db", "vvab"), ("db", "new-releases"), ("db", "coming-soon"), ("db", "stats"),
+}
+# The author's marketplace is part of an author's identity, so it defaults.
+_DB_REGION_DEFAULTED = {("db", "author"), ("db", "author-books")}
+
+
+def test_the_default_region_is_us_on_every_command_that_makes_a_request():
     seen = 0
     for path, parser in walk_parsers(build_parser()):
+        if path[:1] == ("db",):
+            continue
         for action in parser._actions:
             if "--region" in action.option_strings:
                 seen += 1
                 assert action.default == "us", path
                 assert tuple(action.choices) == _args.REGIONS, path
     assert seen == 18  # every command that makes a request
+
+
+def test_the_db_commands_region_is_optional_except_where_it_names_an_author_s_marketplace():
+    unset, defaulted = set(), set()
+    for path, parser in walk_parsers(build_parser()):
+        if path[:1] != ("db",):
+            continue
+        for action in parser._actions:
+            if "--region" in action.option_strings:
+                assert tuple(action.choices) == _args.REGIONS, path
+                (unset if action.default is None else defaulted).add(path)
+                if action.default is not None:
+                    assert action.default == "us", path
+    assert unset == _DB_REGION_UNSET
+    assert defaulted == _DB_REGION_DEFAULTED
 
 
 @pytest.mark.parametrize("region", ["xx", "US", "", "us ", "u"])

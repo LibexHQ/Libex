@@ -52,9 +52,15 @@ def _book(asin, title, **kw):
     return Book(**fields)
 
 
-async def seed(session) -> None:
+async def seed(session, *, odd_plans: bool = True) -> None:
     """Rows chosen so every filter, sort and fallback in the readers has
-    something to select and something to leave out."""
+    something to select and something to leave out.
+
+    B000000014 carries plans that are not all strings on purpose: the readers'
+    plan listing renders each element as text on both backends, and that is
+    pinned. A book like that cannot be put through BookResponse, whose plans
+    are strings, so anything that returns books whole (the hosted routes, the
+    db commands) must seed with odd_plans=False, which stores a clean list."""
     now = NOW
     day = timedelta(days=1)
     session.add_all([
@@ -98,7 +104,8 @@ async def seed(session) -> None:
               rating=1.7, release_date=now - 111 * day),
         _book("B000000013", "Series Odd", length_minutes=170,
               rating=1.8, release_date=now - 112 * day),
-        _book("B000000014", "Series Word", length_minutes=180, plans=["Premium", 1, True],
+        _book("B000000014", "Series Word", length_minutes=180,
+              plans=["Premium", 1, True] if odd_plans else ["Premium"],
               rating=1.9, release_date=now - 113 * day),
         _book("B000000015", "Series Nothing", length_minutes=190,
               rating=2.0, release_date=now - 114 * day),

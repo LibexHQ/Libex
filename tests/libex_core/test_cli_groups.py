@@ -74,12 +74,17 @@ def _roff(text):
 def test_the_groups_and_their_commands_are_what_this_file_checks():
     """A walk that found no groups would pass everything below for free."""
     assert _GROUPS == {
-        "book": ["get", "bulk", "chapters"],
+        "book": ["get", "bulk", "chapters", "sku"],
         "series": ["get", "books", "search"],
         "author": ["get", "search", "books", "books-by-name"],
         "abs": ["search", "quick-search"],
         "narrator": ["books"],
         "releases": ["new", "coming-soon", "categories"],
+        "db": [
+            "upgrade", "status", "book", "books", "chapters", "sku", "author",
+            "author-books", "series", "series-books", "narrators", "narrator-books",
+            "genres", "plans", "plan", "vvab", "new-releases", "coming-soon", "stats",
+        ],
     }
 
 
@@ -155,10 +160,15 @@ def test_zsh_offers_a_groups_commands_when_none_is_named_yet():
 def test_fish_offers_a_groups_commands_until_one_is_named():
     for group, names in _GROUPS.items():
         words = " ".join(names)
+        # A group that another group has a command named after (db book, db
+        # author, db series) is switched off after that group too.
+        held = _holders(group)
+        silenced = f"{words} {held}" if held else words
         assert (
             f"complete -c libex-core -n '__fish_seen_subcommand_from {group}; and "
-            f"not __fish_seen_subcommand_from {words}' -a '{words}'\n"
+            f"not __fish_seen_subcommand_from {silenced}' -a '{words}'\n"
         ) in _SCRIPTS["fish"], group
+    assert _holders("book") == "db"
 
 
 def test_a_group_is_listed_with_its_summary_in_zsh_and_fish():
@@ -201,7 +211,7 @@ def test_the_unchanged_parser_renders_the_committed_files_and_a_nested_addition_
         assert same[relative].encode("utf-8") == text, relative
         assert changed[relative].encode("utf-8") != text, relative
     assert "book frobnicate" in _headings(changed[_render.MAN_PATH])
-    assert "get bulk chapters frobnicate" in changed[_render.BASH_PATH]
+    assert "get bulk chapters sku frobnicate" in changed[_render.BASH_PATH]
 
 
 def test_a_group_built_with_the_shared_helpers_renders_in_all_four_files():
@@ -281,8 +291,8 @@ def test_bash_offers_every_flag_of_every_request_command(path):
 
 @needs_bash
 def test_bash_still_offers_the_group_commands_and_not_flags_at_the_group_word():
-    assert _bash_complete(["libex-core", "book", ""], 2) == ["get", "bulk", "chapters"]
-    assert _bash_complete(["libex-core", ""], 1)[-3:] == ["releases", "completion", "config"]
+    assert _bash_complete(["libex-core", "book", ""], 2) == ["get", "bulk", "chapters", "sku"]
+    assert _bash_complete(["libex-core", ""], 1)[-4:] == ["releases", "db", "completion", "config"]
 
 
 @needs_bash

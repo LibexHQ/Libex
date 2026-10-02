@@ -64,3 +64,26 @@ def hosted(client):
 
     with hosted_asker(client) as ask:
         yield ask
+
+
+@pytest.fixture
+def store_path(tmp_path):
+    """Where a store would live: a path in a fresh directory, nothing there."""
+    return str(tmp_path / "libex.db")
+
+
+@pytest.fixture
+def seeded_store(tmp_path):
+    """A SQLite store file, upgraded and holding the readers' seeded catalog.
+    The path is returned as LIBEX_CORE_STORAGE takes it."""
+    from tests.libex_core._db_support import make_store
+
+    return make_store(tmp_path / "seeded.db")
+
+
+@pytest.fixture
+def empty_store(tmp_path):
+    """An upgraded store file with nothing in it."""
+    from tests.libex_core._db_support import make_store
+
+    return make_store(tmp_path / "empty.db", seeded=False)

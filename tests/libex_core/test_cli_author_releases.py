@@ -176,7 +176,7 @@ def test_the_flags_come_from_the_librarys_own_filter_specs():
     shaped = {
         " ".join(path)
         for path, node in walk_parsers(build_parser())
-        if expected & {f for a in node._actions for f in a.option_strings}
+        if path[:1] != ("db",) and expected & {f for a in node._actions for f in a.option_strings}
     }
     assert shaped == {
         "series books", "book bulk", "author books", "author books-by-name",
@@ -186,6 +186,33 @@ def test_the_flags_come_from_the_librarys_own_filter_specs():
         flags = {f for a in node._actions for f in a.option_strings}
         if " ".join(path) in shaped:
             assert expected <= flags, path
+
+
+def test_the_db_commands_take_the_filters_too_with_no_default_region():
+    """The db commands read the store, which holds every region, so their
+    book --region filter is optional and carries no default; the shared filter
+    walk above is for the commands that ask Audible, where it defaults to us."""
+    from libex_core.cli.parser import build_parser
+    from tests.libex_core._cli_support import walk_parsers
+
+    expected = {_flag(spec) for spec in BOOK_FILTER_SPECS} | {"--sort", "--order"}
+    shaped = {
+        path[1]
+        for path, node in walk_parsers(build_parser())
+        if path[:1] == ("db",) and expected & {f for a in node._actions for f in a.option_strings}
+    }
+    # narrators has none of the book filters but takes --language, --sort and
+    # --order of its own, which is why the walk finds it.
+    assert shaped == {
+        "books", "author-books", "series-books", "narrator-books", "plan", "vvab",
+        "new-releases", "coming-soon", "narrators",
+    }
+    shaped.discard("narrators")
+    for path, node in walk_parsers(build_parser()):
+        if path[:1] == ("db",) and len(path) == 2 and path[1] in shaped and path[1] != "author-books":
+            region = [a for a in node._actions if "--region" in a.option_strings]
+            if region:
+                assert region[0].default is None, path
 
 
 # ============================================================

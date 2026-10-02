@@ -495,7 +495,9 @@ The library is built around preventing that from happening by accident:
   From a local store, which is used only when an application keeps one:
   - more than one stored row found for an author, while reading (warning): author ASIN, region, the number of rows;
   - a publication date that can't be read, while writing (warning): title ASIN and the kind of value, never the value;
-  - a SQLite file that other users can read, whenever the store checks the file (opening, upgrading or asking its status) (warning): the file's name, without the folder it is in.
+  - a SQLite file that other users can read, whenever the store checks the file (opening, upgrading or asking its status) (warning): the file's name, without the folder it is in;
+  - an upgrade that finished (info): the database type, the revision reached and, for SQLite, whether the file was new and its name, without the folder it is in;
+  - a SQLite file that stayed locked while being switched to write-ahead logging (warning): the file's name, without the folder it is in, and how long the store waited.
 
   Upgrading a store also writes routine messages from Alembic, the tool that
   creates its tables, to the logger named `alembic`: the database type and

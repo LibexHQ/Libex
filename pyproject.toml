@@ -32,6 +32,9 @@ postgres = [
     "libex-core[storage]",
     "asyncpg>=0.31,<0.32",
 ]
+socks = [
+    "httpx[socks]>=0.28.1,<0.29",
+]
 
 [project.scripts]
 libex-core = "libex_core.cli.main:main"

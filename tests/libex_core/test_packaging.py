@@ -116,6 +116,9 @@ _EXPECTED_EXTRAS = {
         "libex-core[storage]",
         "asyncpg>=0.31,<0.32",
     },
+    "socks": {
+        "httpx[socks]>=0.28.1,<0.29",
+    },
 }
 _EXTRA_MARKER = re.compile(r'^extra == "([a-z0-9-]+)"$')
 

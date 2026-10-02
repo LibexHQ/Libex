@@ -20,3 +20,6 @@ testcontainers[postgres]==4.14.2
 
 # Async SQLite driver for the packaged library's local storage; dev-only because the hosted service runs on Postgres.
 aiosqlite==0.22.1
+
+# SOCKS5 proxy transport for httpx, behind the packaged library's [socks] extra; dev-only because the hosted service makes no proxied calls.
+socksio==1.0.0

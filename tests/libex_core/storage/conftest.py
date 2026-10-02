@@ -14,8 +14,12 @@ from libex_core.storage.base import Base
 from tests.libex_core.storage._support import core_tables, seed
 
 
-def _unicode_lower(value):
-    return None if value is None else value.lower()
+def _simple_lower(value):
+    """Lower-cases one code point at a time and keeps any that would expand, as
+    Postgres' lower() does: no multi-character results, no final-sigma rule."""
+    if value is None:
+        return None
+    return "".join(c.lower() if len(c.lower()) == 1 else c for c in value)
 
 
 @pytest_asyncio.fixture
@@ -26,7 +30,7 @@ async def sqlite_engine():
 
     @event.listens_for(engine.sync_engine, "connect")
     def _register(dbapi_connection, _record):
-        dbapi_connection.create_function("lower", 1, _unicode_lower, deterministic=True)
+        dbapi_connection.create_function("lower", 1, _simple_lower, deterministic=True)
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all, tables=core_tables())

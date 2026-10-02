@@ -14,6 +14,19 @@ Entries below that predate publication are historical record for whoever
 embeds this package, not evidence that anyone consumed a given version at the
 time it was cut.
 
+## [0.17.0]
+
+### Added
+- **`libex_core.storage.read` reads the stored catalog.** It covers books (by ASIN, in bulk, by SKU group, search, plan, VVAB, new releases, coming soon, the distinct plans and genres, and tracks), authors and their books, narrators and their books, series and their books, and `count_stored` for per-table counts. Each function is async and takes a SQLAlchemy session as its first argument, and the results are the same dictionaries the hosted service serves from its stored-data routes. The building blocks that produce those dictionaries (book, narrator and series-position shaping) are in `libex_core.storage.read.shapes`.
+- **The readers raise on failure.** A broken database raises; it is never turned into an empty result, so a caller can tell a missing book (`None` or an empty list) from a database that could not be read.
+- **`libex_core.storage.filtering` and `libex_core.storage.sorting` build the filters and the sort for those reads.** `apply_book_filters`, `apply_narrator_filters`, `apply_genre_filter`, `apply_category_filter` and `apply_sort` take and return SQLAlchemy statements, and the sort allow-lists for books and narrators are published there.
+- **The reads work on SQLite as well as Postgres.** Case-insensitive matching, JSON containment and key checks, series-position classification and putting missing values last each have a SQLite equivalent. The statements Postgres receives are unchanged.
+
+### Changed
+- **Known difference: text sort order is not the same on both backends.** Sorting by title, publisher, narrator name or a non-numeric series position follows the database's locale collation on Postgres and plain byte order on SQLite, so mixed-case or accented text can come back in a different order.
+
+Still groundwork: nothing opens a database or creates tables yet, and no command uses these readers. They need a session you have built yourself over tables you have created.
+
 ## [0.15.0]
 
 ### Added

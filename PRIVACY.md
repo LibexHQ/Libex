@@ -382,8 +382,9 @@ this section describes the source as it stands, ahead of any release. The
 behaviour described is in `libex_core/audible/client.py`, with the logging of
 individual titles in `libex_core/audible/books.py` and
 `libex_core/audible/extras.py`, searching in `libex_core/audible/search.py`,
-reading a local store in `libex_core/storage/read/`, and the command-line tool
-in `libex_core/cli/`.
+the local store in `libex_core/storage/store.py`, with its reading in
+`libex_core/storage/read/` and its writing in `libex_core/storage/write/`, and
+the command-line tool in `libex_core/cli/`.
 
 If you are using an application that contains this library, that
 application's privacy policy is the one that applies to you. This section
@@ -424,27 +425,62 @@ The library is built around preventing that from happening by accident:
 - **No telemetry.** It has no analytics, usage reporting, version check, crash
   reporting or any other call home. It cannot import the Axiom client, and a
   test fails if that ever changes.
-- **No storage.** It writes no files, opens no database and keeps no cache.
-  Nothing about a lookup outlasts the call that made it. An optional local
-  record of titles already seen has been considered but not built. If it is
-  ever added, this section will change with it. Its store readers only read
-  a database that the application has opened itself and passes in, and they
-  change nothing in it.
+- **Fetching stores nothing.** Looking something up writes no files, opens no
+  database and keeps no cache. Nothing about a lookup outlasts the call that
+  made it.
+- **A local store, only if the application keeps one.** The library can also
+  keep Audible catalogue data in a database: a SQLite file or a PostgreSQL
+  database, named by a URL the application passes to `LocalStore`. Nothing in
+  the library opens a store by itself, the `libex-core` command does not use
+  one, and nothing is written to it unless the application writes it. What
+  is kept is catalogue data (titles, authors, narrators, series, genres,
+  chapters), with no record of who asked for it. Most rows do record when
+  they were first stored and last updated, though, so a store on someone's
+  device shows what they looked up and roughly when. Deleting the database
+  removes all of it; for SQLite that means the file and the `-wal` and
+  `-shm` files beside it.
+  - **Who can read a SQLite file.** On Linux and macOS a new file is created
+    readable and writable only by its owner (mode 0600), and so is the
+    folder directly holding it (0700) if that has to be created too. A file
+    that already exists keeps the permissions it has, with a warning if
+    other users can read it.
+  - **Where a PostgreSQL store sends its data.** Everything stored travels to
+    the server in the URL, protected as the URL's `ssl` option says.
+    `verify-ca` and `verify-full` check the server's certificate against the
+    system's trusted certificates. Unlike the Audible connection, that
+    check takes its certificates from the `SSL_CERT_FILE` and
+    `SSL_CERT_DIR` environment variables when they are set, so a setting
+    left on the device can change which servers it trusts. `require`
+    encrypts without checking who is at the other end. The default,
+    `prefer`, does the same but falls back to an unencrypted connection if
+    the server refuses encryption, and `allow` tries unencrypted first.
+    `disable` never encrypts.
+  - **Its connection settings come from the URL.** It reads no `PG*`
+    environment variable, no `~/.pgpass`, no PostgreSQL service file and
+    nothing under `~/.postgresql`. The URL can hold a database password, so
+    it is never put in an error message, a log record or the store's `repr`.
+  - **It refuses a database it didn't create.** A database with tables but
+    none of this library's migration records, a hosted Libex database
+    included, is refused and left untouched. Only an explicit `upgrade()`
+    changes the tables.
 - **The `libex-core` command reads two environment variables.** The
   command-line tool that comes with the library takes its proxy from
   `LIBEX_CORE_PROXY_URL` and its permission to connect directly from
   `LIBEX_CORE_ALLOW_DIRECT_EGRESS`, so a proxy password never has to be typed
   on a command line, where other programs on the machine can read it. Nothing
-  else in the library reads the environment, and a test fails if that
-  changes. The tool prints results as JSON to standard output. Errors, and
-  the library's warnings listed below, go to standard error. `-vv` adds
-  tracebacks, and `-q` leaves only the error line. It sends none of this
+  else in the library's own code reads the environment, and a test fails if
+  that changes. The one way the environment still reaches it is the local
+  store's certificate check, described above. The tool prints results as
+  JSON to standard output. Errors, and the library's warnings listed below,
+  go to standard error. `-vv` adds tracebacks, and `-q` leaves only the
+  error line. It sends none of this
   anywhere else. It has no lookup commands yet: `libex-core config` prints
   only whether a proxy is in use and the proxy's hostname, and makes no
   request. Neither its output nor its error messages contain the proxy URL or
   the value of either variable.
 - **Its logs go where the application sends them.** It writes to the standard
-  Python logger named `libex`, so its records end up wherever the host
+  Python logger named `libex` and the loggers beneath it, such as
+  `libex.storage`, so its records end up wherever the host
   application's logging is configured to send them. From fetching and
   reading Audible's answers:
   - closing a stale connection fails (debug): a traceback;
@@ -456,16 +492,21 @@ The library is built around preventing that from happening by accident:
   The subscription-plan and extra-data records log at most once a minute
   (extras, once a minute per reason), naming only the latest title.
 
-  From reading a local store, which happens only when an application reads
-  data it has stored:
-  - more than one stored row found for an author (warning): author ASIN, region, the number of rows.
+  From a local store, which is used only when an application keeps one:
+  - more than one stored row found for an author, while reading (warning): author ASIN, region, the number of rows;
+  - a publication date that can't be read, while writing (warning): title ASIN and the kind of value, never the value;
+  - a SQLite file that other users can read, whenever the store checks the file (opening, upgrading or asking its status) (warning): the file's name, without the folder it is in.
+
+  Upgrading a store also writes routine messages from Alembic, the tool that
+  creates its tables, to the logger named `alembic`: the database type and
+  the migration steps it runs. They contain no URL and no stored data.
 
   Only the region and the looked-up ASIN come from the caller: query
   parameters, where search text would appear, are left out, and in the
   records from Audible's answers any ASIN, name or value not shaped like an
   ASIN or a short catalogue entry is logged as `REDACTED`. The local-store
-  record logs its author ASIN and region without that check, but only once
-  both have matched rows already in the store. A title or author ASIN is
+  author record logs its author ASIN and region without that check, but only
+  once both have matched rows already in the store. A title or author ASIN is
   still something someone looked up or searched for, so these records are
   part of their reading history.
 

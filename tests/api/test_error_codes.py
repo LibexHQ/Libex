@@ -26,6 +26,7 @@ from libex_core.exceptions import (
     ErrorCode,
     NotFoundException,
 )
+from tests.fixtures.outage import assert_outage_503
 from tests.api.test_books import _cache_route_product, _placeholder_audible_product
 
 ASIN = "B08G9PRS1K"
@@ -151,17 +152,17 @@ async def test_real_product_is_not_withheld(async_client):
     ("/book?asins=" + ASIN, "app.api.routes.books.router.get_books_by_asins", {}),
     ("/search?title=Dune", "app.api.routes.search.router.search", {}),
 ])
-async def test_upstream_unavailable_from_outage_keeps_404(async_client, path, target, kwargs):
+async def test_upstream_unavailable_from_outage_is_503(async_client, path, target, kwargs):
     with patch(target, new_callable=AsyncMock) as mock:
         mock.side_effect = AudibleAPIException("Audible unavailable")
         response = await async_client.get(path)
 
-    assert response.status_code == 404
+    assert response.status_code == 503
     assert response.json()["code"] == "upstream_unavailable"
 
 
 @pytest.mark.asyncio
-async def test_outage_and_genuine_absence_share_status_but_not_code(async_client):
+async def test_outage_and_genuine_absence_differ_in_status_and_code(async_client):
     path = f"/book/{ASIN}"
     with patch("app.api.routes.books.router.get_book_by_asin", new_callable=AsyncMock) as mock:
         mock.side_effect = AudibleAPIException("down")
@@ -170,25 +171,22 @@ async def test_outage_and_genuine_absence_share_status_but_not_code(async_client
         mock.side_effect = NotFoundException(f"Book not found: {ASIN}")
         absent = await async_client.get(path)
 
-    assert outage.status_code == absent.status_code == 404
+    assert outage.status_code == 503
+    assert absent.status_code == 404
     assert outage.json()["code"] == "upstream_unavailable"
     assert absent.json()["code"] == "not_on_audible"
 
 
 @pytest.mark.asyncio
 async def test_raw_audible_api_exception_reaches_handler_as_upstream_unavailable(async_client):
-    """No outage_as_not_found wrap on /db routes: the exception reaches the
-    handler itself, which keeps its 502 and carries the class default code."""
+    """No outage_as_unavailable wrap on /db routes: the exception reaches the
+    handler itself, which answers every AudibleAPIException as a 503 with
+    Retry-After, whatever the route."""
     with patch("app.api.routes.db.router.get_book_from_db", new_callable=AsyncMock) as mock:
         mock.side_effect = AudibleAPIException("Audible unavailable")
         response = await async_client.get(f"/db/book/{ASIN}")
 
-    assert response.status_code == 502
-    assert response.json() == {
-        "error": "Audible unavailable",
-        "status_code": 502,
-        "code": "upstream_unavailable",
-    }
+    assert_outage_503(response, "Audible unavailable")
 
 
 @pytest.mark.asyncio
@@ -331,3 +329,50 @@ def test_openapi_documents_error_response_on_404(path):
     schema = operation["responses"]["404"]["content"]["application/json"]["schema"]
 
     assert schema == {"$ref": "#/components/schemas/ErrorResponse"}
+
+
+@pytest.mark.parametrize("path", [
+    "/book/{asin}",
+    "/book/{asin}/chapters",
+    "/book",
+    "/search",
+    "/author/{asin}",
+    "/series/{asin}",
+    "/narrator/books",
+    "/new-releases",
+])
+def test_openapi_documents_503_with_a_retry_after_header(path):
+    operation = app.openapi()["paths"][path]["get"]
+    response = operation["responses"]["503"]
+
+    assert response["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/ErrorResponse"
+    }
+    assert response["headers"]["Retry-After"]["schema"] == {"type": "integer"}
+
+
+def test_openapi_error_response_declares_retry_after_as_optional():
+    error = app.openapi()["components"]["schemas"]["ErrorResponse"]
+
+    assert "retryAfter" in error["properties"]
+    assert "retryAfter" not in error["required"]
+
+
+def test_error_response_omits_retry_after_when_none_and_keeps_it_when_set():
+    from app.api.routes.errors import ErrorResponse
+
+    plain = ErrorResponse(error="x", status_code=404, code=ErrorCode.NOT_ON_AUDIBLE)
+    outage = ErrorResponse(
+        error="x", status_code=503, code=ErrorCode.UPSTREAM_UNAVAILABLE, retryAfter=30
+    )
+
+    assert "retryAfter" not in plain.model_dump(mode="json")
+    assert "retryAfter" not in plain.model_dump_json()
+    assert outage.model_dump(mode="json")["retryAfter"] == 30
+
+
+def test_openapi_bulk_book_response_declares_not_fetched_as_a_string_array():
+    schema = app.openapi()["components"]["schemas"]["BulkBookResponse"]["properties"]
+
+    assert schema["notFetched"]["type"] == "array"
+    assert schema["notFetched"]["items"] == {"type": "string"}

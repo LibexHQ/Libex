@@ -13,6 +13,16 @@ into its own distribution. Entries below that predate publication are
 historical record for whoever embeds this package later, not evidence that
 anyone consumed a given version at the time it was cut.
 
+## [Unreleased]
+
+Bump class: MINOR (a new public field on `BulkBookResponse`; nothing removed or renamed). Version number to be assigned at merge; 0.7.0 is also claimed by another unmerged change.
+
+### Added
+- **`BulkBookResponse.notFetched`, a list of the requested ASINs that could not be looked up because Audible was unreachable and no stored or cached copy covered them.** It defaults to an empty list, so code that builds a `BulkBookResponse` without it is unaffected, and it serializes always-present like `placeholderRecords`.
+
+### Changed
+- **The documented meaning of `BulkBookResponse.notFound` narrows to ASINs Audible confirmed it has no record of.** The field, its type and its position are unchanged, but it no longer holds ASINs that could not be fetched; those belong in `notFetched`. An embedder that fills `notFound` itself and treated it as "missing or unfetched" should move the unfetched ones to `notFetched`. The field description (visible in the generated schema) was reworded to match.
+
 ## [0.6.0]
 
 ### Added

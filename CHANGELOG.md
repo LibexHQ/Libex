@@ -10,6 +10,23 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [2.0.0]
+
+**MAJOR.** An Audible outage used to come back as a `404`, the same status as "this does not exist". It is now a `503`. That changes a status code callers could observe, so it is a breaking release; Shane approved it as the first MAJOR on 2026-10-02 (outages as 503: Mandrel `f25cc04f`; the `notFound`/`notFetched` split: `686e8ccc`). Everything else in the published shape is unchanged or only added to.
+
+### Changed
+- **Every Audible outage is now `503`, not `404`.** When Libex could not reach Audible and had no stored or cached copy to answer from, the response is `503` with `Retry-After: 30` and `Cache-Control: no-store`. The body is `{"error": ..., "status_code": 503, "code": "upstream_unavailable", "retryAfter": 30}`; `retryAfter` is the same number of seconds as the header and appears only on `503` bodies. Before, the same situation was a `404` carrying `code: "upstream_unavailable"` (since 1.27.0), which a client that reads only the status could not tell from a missing record. A `404` now always means Audible or Libex's own store was asked and has no such record; retrying a `404` will not change it, retrying a `503` should.
+- **The `503` applies to every route that calls Audible, not only to a failed first page.** It covers single-book, chapters, series, author and series lookups, searches, narrators, new releases, coming soon and categories, and bulk `GET /book`. It also covers a total failure partway through a multi-step route: `GET /author/books?name=` when fetching the full details of the books it found fails outright, `GET /author/books/{asin}` when either its walk through the author's catalogue or the fetching of the books' details fails outright, and the series books routes when the book details cannot be fetched. A response that is only partly short is not an error: it stays `200` with `X-Libex-Complete: false` and the reason in `X-Libex-Incomplete-Reason`, as before.
+- **The `404` that `GET /author/books?name=` gave for an Audible outage on the first page, noted as unchanged in 1.28.0, is now `503`.** The 1.28.0 entry said that route still answered `404` for it; that no longer holds.
+- **Bulk `GET /book` now separates ASINs Audible confirmed absent from ASINs Libex could not look up.** `notFound` used to hold both. It now holds only the ASINs Audible confirmed it has no record of. A new `notFetched` field holds the ASINs Libex could not look up because Audible was unreachable and neither the stored copy nor the cache had them. If your code reads `notFound` as "worth retrying later" or as "treat as missing for now", it must now look at `notFetched` for the retryable ones; an ASIN left in `notFound` will not resolve on retry. `books`, `notFound`, `placeholderRecords` and `notFetched` never share an ASIN, and the ASINs in each are given as you sent them, in request order. If Audible is unreachable and nothing at all can be served, the request is the `503` described above rather than a `404`.
+
+### Added
+- **`notFetched` on the bulk `GET /book` response.** It is always present and is an empty list when nothing failed to be fetched. When it is not empty, `X-Libex-Complete` is `false` and `X-Libex-Incomplete-Reason` is `hydration-failed`, as it already was for an ASIN a failed chunk left uncovered.
+- **The `503` is documented in the OpenAPI schema** on the routes that can return it, including the `Retry-After` header.
+
+### Fixed
+- **The `/docs` description of `X-Libex-Incomplete-Reason` no longer says `discovery-incomplete` is never emitted.** `GET /author/books?name=` has emitted it since 1.28.0, when its walk through Audible's results stops early. The description now says so.
+
 ## [1.28.1]
 
 No endpoint, parameter, response shape, field or status code moved. The code that fetches and normalizes Audible book, chapter and series records now lives in the embeddable core library; the output is unchanged.

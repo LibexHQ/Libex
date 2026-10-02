@@ -362,10 +362,12 @@ what a task actually did.
 - `not_in_libex` — Libex's stored copy has no record. This is what the `/db` routes and `/book/sku` return when they find nothing.
 - `not_on_audible` — Audible has no record.
 - `withheld` — Audible answered, but Libex deliberately doesn't return it (a placeholder record, for example).
-- `upstream_unavailable` — Libex couldn't find out right now. Retry later.
+- `upstream_unavailable` — Audible couldn't answer right now and Libex has no stored copy to fall back on. Retry later.
 - `invalid_request` — the request itself is malformed.
 
-Status codes are unchanged. FastAPI's own request-validation errors (`422`) and unknown-route responses keep their `{detail}` body, and an unhandled server error (`500`) is still just `{error, status_code}`.
+`upstream_unavailable` is always a `503`, never a `404`. That response carries `Retry-After: 30` and `Cache-Control: no-store`, and its body adds `retryAfter` (seconds, matching the header): `{error, status_code: 503, code: "upstream_unavailable", retryAfter: 30}`. `retryAfter` appears on no other error.
+
+FastAPI's own request-validation errors (`422`) and unknown-route responses keep their `{detail}` body, and an unhandled server error (`500`) is still just `{error, status_code}`.
 
 **Local database:** Every successful Audible response is written to a persistent relational database. This powers the DB query endpoints and serves as a fallback when Audible is unavailable.
 
@@ -665,7 +667,7 @@ Libex is not a drop-in replacement for AudiMeta. Its response objects started fr
 
 Differences you may hit:
 
-- Bulk `/book?asins=` returns `{books, notFound, placeholderRecords}` with `200`. AudiMeta returned a bare array, and `404` when it was empty.
+- Bulk `/book?asins=` returns `{books, notFound, placeholderRecords, notFetched}` with `200`. AudiMeta returned a bare array, and `404` when it was empty. `notFound` holds only ASINs Audible confirmed it doesn't have. `notFetched` is always present and holds ASINs lost to an Audible outage with no stored or cached copy; retry those. The four lists never share an ASIN.
 - `/book?asin=` (singular query parameter) is not supported and returns `422`.
 - `/podcast/{asin}` and `/ping` do not exist.
 - Libex's own errors (invalid ASIN, invalid region, not found, upstream failure) return `{error, status_code, code}`; see Error codes under API Behavior. A server error (`500`) returns `{error, status_code}` with no `code`. Request-validation errors (`422`) and unknown routes return FastAPI's `{detail}` instead. AudiMeta used `{message}` or `{errors: [...]}`.
@@ -724,7 +726,6 @@ None of this has shipped yet, and none of it comes with a date. It is where thin
 **In progress for the hosted API**
 
 - Honest completeness flags on author-by-name lookups, so a partial result says it is partial.
-- Audible outages reported as `503` with a `Retry-After` header instead of `404`. This changes a status code, so it will ship as a major version.
 
 **Planned**
 

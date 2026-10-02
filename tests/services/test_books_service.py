@@ -2501,6 +2501,225 @@ async def test_results_are_identical_with_and_without_the_out_param():
 
 
 # ============================================================
+# NOT-FETCHED ASINS -- not_fetched_asins OUT-PARAMETER
+# ============================================================
+# What an Audible failure left with nothing: never fetched, no stored or
+# cached copy in the result, and not already confirmed absent or placeholder
+# by a chunk Audible did answer. Filled on the partial path (failed chunks
+# minus the DB backstop) and on both full-outage fallbacks; the final raise
+# leaves it empty because the caller gets an error rather than a result.
+
+NF_GOOD = [f"B0GOOD{i:04d}" for i in range(50)]
+
+
+def _chunk_router(answers):
+    """audible_get stand-in: a batch whose first ASIN is a key of `answers`
+    gets that value (a products list); any other batch fails."""
+    async def _get(region, path, params):
+        asins = params["asins"].split(",")
+        if asins[0] in answers:
+            return {"products": answers[asins[0]]}
+        raise RuntimeError("Audible 500")
+
+    return AsyncMock(side_effect=_get)
+
+
+@pytest.mark.asyncio
+async def test_partial_failure_lists_the_failed_chunk_asins_the_backstop_did_not_cover():
+    from app.services.audible.books import get_books_by_asins
+
+    failed = ["B0FAIL0001", "B0FAIL0002", "B0FAIL0003"]
+    out: list[str] = []
+    audible = _chunk_router({NF_GOOD[0]: [_hydration_product(a) for a in NF_GOOD]})
+
+    with patch("app.services.audible.books.audible_get", new=audible), \
+         patch("app.services.audible.books.get_books_from_db",
+               new=AsyncMock(return_value=[{"asin": failed[0], "title": "Stored"}])), \
+         patch("app.services.audible.books.persist_books_background"):
+        result = await get_books_by_asins(
+            NF_GOOD + failed, "us", AsyncMock(), not_fetched_asins=out
+        )
+
+    assert [b["asin"] for b in result][-1] == failed[0]
+    assert out == [failed[1], failed[2]]
+
+
+@pytest.mark.asyncio
+async def test_partial_failure_fully_covered_by_the_backstop_lists_nothing():
+    from app.services.audible.books import get_books_by_asins
+
+    failed = ["B0FAIL0001", "B0FAIL0002"]
+    out: list[str] = []
+    audible = _chunk_router({NF_GOOD[0]: [_hydration_product(a) for a in NF_GOOD]})
+
+    with patch("app.services.audible.books.audible_get", new=audible), \
+         patch("app.services.audible.books.get_books_from_db",
+               new=AsyncMock(return_value=[{"asin": a, "title": "Stored"} for a in failed])), \
+         patch("app.services.audible.books.persist_books_background"):
+        await get_books_by_asins(NF_GOOD + failed, "us", AsyncMock(), not_fetched_asins=out)
+
+    assert out == []
+
+
+@pytest.mark.asyncio
+async def test_partial_failure_never_lists_a_confirmed_stub_or_placeholder():
+    from app.services.audible.books import get_books_by_asins
+
+    stub, placeholder = "B0STUB0001", "B0PLACE001"
+    answered = NF_GOOD[:48] + [stub, placeholder]
+    failed = ["B0FAIL0001"]
+    out: list[str] = []
+    placeholders: list[str] = []
+    products = [_hydration_product(a) for a in NF_GOOD[:48]] + [
+        _hollow_stub(stub), _placeholder_product(placeholder),
+    ]
+    audible = _chunk_router({answered[0]: products})
+
+    with patch("app.services.audible.books.audible_get", new=audible), \
+         patch("app.services.audible.books.get_books_from_db", new=AsyncMock(return_value=[])), \
+         patch("app.services.audible.books.persist_books_background"):
+        await get_books_by_asins(
+            answered + failed, "us", AsyncMock(),
+            placeholder_asins=placeholders, not_fetched_asins=out,
+        )
+
+    assert out == failed
+    assert placeholders == [placeholder]
+
+
+@pytest.mark.asyncio
+async def test_full_outage_db_fallback_lists_the_requested_asins_the_db_lacked():
+    from app.services.audible.books import get_books_by_asins
+
+    asins = ["B0ASIN0001", "B0ASIN0002", "B0ASIN0003"]
+    out: list[str] = []
+
+    with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=RuntimeError("down"))), \
+         patch("app.services.audible.books.get_books_from_db",
+               new=AsyncMock(return_value=[{"asin": asins[1], "title": "Stored"}])):
+        result = await get_books_by_asins(asins, "us", AsyncMock(), not_fetched_asins=out)
+
+    assert [b["asin"] for b in result] == [asins[1]]
+    assert out == [asins[0], asins[2]]
+
+
+@pytest.mark.asyncio
+async def test_full_outage_cache_fallback_lists_the_requested_asins_the_cache_lacked():
+    from app.services.audible.books import get_books_by_asins
+
+    asins = ["B0ASIN0001", "B0ASIN0002", "B0ASIN0003"]
+    out: list[str] = []
+    cached = {"asin": asins[2], "title": "Cached"}
+
+    with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=RuntimeError("down"))), \
+         patch("app.services.audible.books.get_books_from_db", new=AsyncMock(return_value=[])), \
+         patch("app.services.audible.books.cache.get_many",
+               new=AsyncMock(return_value={book_key(asins[2], "us"): cached})):
+        result = await get_books_by_asins(asins, "us", AsyncMock(), not_fetched_asins=out)
+
+    assert result == [cached]
+    assert out == [asins[0], asins[1]]
+
+
+@pytest.mark.asyncio
+async def test_full_outage_fallback_excludes_confirmed_not_found_placeholders_and_non_asins():
+    """A chunk Audible answered with nothing servable, plus a failed chunk:
+    the request falls to the DB fallback, and what the answered chunk
+    confirmed (a stub, a placeholder) and the non-ASIN screened out before
+    fetch are accounted for -- only the failed chunk's uncovered ASIN is
+    not fetched."""
+    from app.services.audible.books import get_books_by_asins
+
+    stubs = [f"B0STUB{i:04d}" for i in range(49)]
+    placeholder = "B0PLACE001"
+    answered = stubs + [placeholder]
+    failed, stored = "B0FAIL0001", "B0FAIL0002"
+    non_asin = "not-an-asin"
+    out: list[str] = []
+    placeholders: list[str] = []
+    audible = _chunk_router({
+        answered[0]: [_hollow_stub(a) for a in stubs] + [_placeholder_product(placeholder)],
+    })
+
+    with patch("app.services.audible.books.audible_get", new=audible), \
+         patch("app.services.audible.books.get_books_from_db",
+               new=AsyncMock(return_value=[{"asin": stored, "title": "Stored"}])):
+        result = await get_books_by_asins(
+            answered + [failed, stored, non_asin], "us", AsyncMock(),
+            placeholder_asins=placeholders, not_fetched_asins=out,
+        )
+
+    assert [b["asin"] for b in result] == [stored]
+    assert out == [failed]
+    assert placeholders == [placeholder]
+
+
+@pytest.mark.asyncio
+async def test_full_outage_cache_fallback_excludes_confirmed_not_found_and_placeholders():
+    from app.services.audible.books import get_books_by_asins
+
+    stubs = [f"B0STUB{i:04d}" for i in range(49)]
+    placeholder = "B0PLACE001"
+    answered = stubs + [placeholder]
+    failed, cached_asin = "B0FAIL0001", "B0FAIL0002"
+    cached = {"asin": cached_asin, "title": "Cached"}
+    out: list[str] = []
+    audible = _chunk_router({
+        answered[0]: [_hollow_stub(a) for a in stubs] + [_placeholder_product(placeholder)],
+    })
+
+    with patch("app.services.audible.books.audible_get", new=audible), \
+         patch("app.services.audible.books.get_books_from_db", new=AsyncMock(return_value=[])), \
+         patch("app.services.audible.books.cache.get_many",
+               new=AsyncMock(return_value={book_key(cached_asin, "us"): cached})):
+        result = await get_books_by_asins(
+            answered + [failed, cached_asin], "us", AsyncMock(), not_fetched_asins=out
+        )
+
+    assert result == [cached]
+    assert out == [failed]
+
+
+@pytest.mark.asyncio
+async def test_full_outage_with_nothing_stored_or_cached_raises_and_leaves_the_list_empty():
+    from app.services.audible.books import get_books_by_asins
+    from libex_core.exceptions import AudibleAPIException
+
+    out: list[str] = []
+
+    with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=RuntimeError("down"))), \
+         patch("app.services.audible.books.get_books_from_db", new=AsyncMock(return_value=[])), \
+         patch("app.services.audible.books.cache.get_many", new=AsyncMock(return_value={})):
+        with pytest.raises(AudibleAPIException):
+            await get_books_by_asins(
+                ["B0ASIN0001", "B0ASIN0002"], "us", AsyncMock(), not_fetched_asins=out
+            )
+
+    assert out == []
+
+
+@pytest.mark.asyncio
+async def test_healthy_fetch_leaves_not_fetched_empty_and_results_match_without_it():
+    from app.services.audible.books import get_books_by_asins
+
+    asins = ["B0REAL0001", "B0STUB0001"]
+
+    async def _get(region, path, params):
+        return {"products": [_hydration_product(asins[0]), _hollow_stub(asins[1])]}
+
+    results = []
+    outs: list[list[str]] = []
+    for out in (None, []):
+        with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=_get)), \
+             patch("app.services.audible.books.persist_books_background"):
+            results.append(await get_books_by_asins(asins, "us", AsyncMock(), not_fetched_asins=out))
+        outs.append(out)
+
+    assert results[0] == results[1]
+    assert outs[1] == []
+
+
+# ============================================================
 # CHAPTERS: a value that is not an ASIN is a terminal not-found, as it was
 # when Audible answered for it -- never an outage, never retried
 # ============================================================

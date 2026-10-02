@@ -14,6 +14,7 @@ import pytest
 
 # Local
 from libex_core.exceptions import AudibleAPIException
+from tests.fixtures.outage import assert_outage_503
 
 
 # Flat node list as _ensure_genres returns it: parents have parent_id="",
@@ -378,19 +379,14 @@ async def test_coming_soon_invalid_category_rejected(async_client):
     pytest.param("/coming-soon", "get_coming_soon", "No upcoming releases found", id="coming_soon"),
     pytest.param("/categories", "_ensure_genres", "No categories available", id="categories"),
 ])
-async def test_outage_is_404_upstream_unavailable_with_the_routes_own_message(
+async def test_outage_is_503_upstream_unavailable_with_the_routes_own_message(
     async_client, path, service, message
 ):
     with patch(f"app.api.routes.releases.router.{service}", new_callable=AsyncMock) as mock:
         mock.side_effect = AudibleAPIException("Audible genre taxonomy fetch failed")
         response = await async_client.get(path)
 
-    assert response.status_code == 404
-    assert response.json() == {
-        "error": message,
-        "status_code": 404,
-        "code": "upstream_unavailable",
-    }
+    assert_outage_503(response, message)
 
 
 @pytest.mark.asyncio

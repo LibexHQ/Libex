@@ -17,3 +17,6 @@ pytest-asyncio==1.3.0
 pytest-timeout==2.4.0
 
 testcontainers[postgres]==4.14.2
+
+# Async SQLite driver for the packaged library's local storage; dev-only because the hosted service runs on Postgres.
+aiosqlite==0.22.1

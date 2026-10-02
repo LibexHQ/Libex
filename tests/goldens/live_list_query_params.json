@@ -1,0 +1,1677 @@
+{
+ "GET /author/books": [
+  {
+   "description": "Author name",
+   "in": "query",
+   "name": "name",
+   "required": true,
+   "schema": {
+    "description": "Author name",
+    "title": "Name",
+    "type": "string"
+   }
+  },
+  {
+   "description": "Field to sort the returned books by",
+   "in": "query",
+   "name": "sort",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "$ref": "#/components/schemas/BookSortField"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Field to sort the returned books by",
+    "title": "Sort"
+   }
+  },
+  {
+   "description": "Sort direction",
+   "in": "query",
+   "name": "order",
+   "required": false,
+   "schema": {
+    "$ref": "#/components/schemas/SortOrder",
+    "default": "asc",
+    "description": "Sort direction"
+   }
+  },
+  {
+   "description": "Audible region code",
+   "in": "query",
+   "name": "region",
+   "required": false,
+   "schema": {
+    "default": "us",
+    "description": "Audible region code",
+    "title": "Region",
+    "type": "string"
+   }
+  },
+  {
+   "description": "Filter by language (exact match)",
+   "in": "query",
+   "name": "language",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by language (exact match)",
+    "title": "Language"
+   }
+  },
+  {
+   "description": "Filter by book format (e.g. unabridged)",
+   "in": "query",
+   "name": "book_format",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by book format (e.g. unabridged)",
+    "title": "Book Format"
+   }
+  },
+  {
+   "description": "Filter by explicit",
+   "in": "query",
+   "name": "explicit",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "boolean"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by explicit",
+    "title": "Explicit"
+   }
+  },
+  {
+   "description": "Filter by Whispersync availability",
+   "in": "query",
+   "name": "whisper_sync",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "boolean"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by Whispersync availability",
+    "title": "Whisper Sync"
+   }
+  },
+  {
+   "description": "Filter by PDF companion availability",
+   "in": "query",
+   "name": "has_pdf",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "boolean"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by PDF companion availability",
+    "title": "Has Pdf"
+   }
+  },
+  {
+   "description": "Filter by VVAB (virtual voice audiobook) status",
+   "in": "query",
+   "name": "is_vvab",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "boolean"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by VVAB (virtual voice audiobook) status",
+    "title": "Is Vvab"
+   }
+  },
+  {
+   "description": "Filter by Audible plan name (e.g. US Minerva)",
+   "in": "query",
+   "name": "plan_name",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by Audible plan name (e.g. US Minerva)",
+    "title": "Plan Name"
+   }
+  },
+  {
+   "description": "Minimum rating",
+   "in": "query",
+   "name": "rating_better_than",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "number"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Minimum rating",
+    "title": "Rating Better Than"
+   }
+  },
+  {
+   "description": "Maximum rating",
+   "in": "query",
+   "name": "rating_worse_than",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "number"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Maximum rating",
+    "title": "Rating Worse Than"
+   }
+  },
+  {
+   "description": "Minimum length in minutes",
+   "in": "query",
+   "name": "longer_than",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "integer"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Minimum length in minutes",
+    "title": "Longer Than"
+   }
+  },
+  {
+   "description": "Maximum length in minutes",
+   "in": "query",
+   "name": "shorter_than",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "integer"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Maximum length in minutes",
+    "title": "Shorter Than"
+   }
+  },
+  {
+   "description": "Filter by genre or tag name (partial match, e.g. 'fantasy')",
+   "in": "query",
+   "name": "genre",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by genre or tag name (partial match, e.g. 'fantasy')",
+    "title": "Genre"
+   }
+  }
+ ],
+ "GET /author/books/{asin}": [
+  {
+   "description": "Serve Libex's stored copy when one exists, covering both the catalogue discovery walk and the per-book hydration that follows it. false forces a full re-walk of the author's catalogue and a fresh fetch of every book in it.",
+   "in": "query",
+   "name": "cache",
+   "required": false,
+   "schema": {
+    "default": true,
+    "description": "Serve Libex's stored copy when one exists, covering both the catalogue discovery walk and the per-book hydration that follows it. false forces a full re-walk of the author's catalogue and a fresh fetch of every book in it.",
+    "title": "Cache",
+    "type": "boolean"
+   }
+  },
+  {
+   "description": "Field to sort the returned books by",
+   "in": "query",
+   "name": "sort",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "$ref": "#/components/schemas/BookSortField"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Field to sort the returned books by",
+    "title": "Sort"
+   }
+  },
+  {
+   "description": "Sort direction",
+   "in": "query",
+   "name": "order",
+   "required": false,
+   "schema": {
+    "$ref": "#/components/schemas/SortOrder",
+    "default": "asc",
+    "description": "Sort direction"
+   }
+  },
+  {
+   "description": "Audible region code",
+   "in": "query",
+   "name": "region",
+   "required": false,
+   "schema": {
+    "default": "us",
+    "description": "Audible region code",
+    "title": "Region",
+    "type": "string"
+   }
+  },
+  {
+   "description": "Filter by language (exact match)",
+   "in": "query",
+   "name": "language",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by language (exact match)",
+    "title": "Language"
+   }
+  },
+  {
+   "description": "Filter by book format (e.g. unabridged)",
+   "in": "query",
+   "name": "book_format",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by book format (e.g. unabridged)",
+    "title": "Book Format"
+   }
+  },
+  {
+   "description": "Filter by explicit",
+   "in": "query",
+   "name": "explicit",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "boolean"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by explicit",
+    "title": "Explicit"
+   }
+  },
+  {
+   "description": "Filter by Whispersync availability",
+   "in": "query",
+   "name": "whisper_sync",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "boolean"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by Whispersync availability",
+    "title": "Whisper Sync"
+   }
+  },
+  {
+   "description": "Filter by PDF companion availability",
+   "in": "query",
+   "name": "has_pdf",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "boolean"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by PDF companion availability",
+    "title": "Has Pdf"
+   }
+  },
+  {
+   "description": "Filter by VVAB (virtual voice audiobook) status",
+   "in": "query",
+   "name": "is_vvab",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "boolean"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by VVAB (virtual voice audiobook) status",
+    "title": "Is Vvab"
+   }
+  },
+  {
+   "description": "Filter by Audible plan name (e.g. US Minerva)",
+   "in": "query",
+   "name": "plan_name",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by Audible plan name (e.g. US Minerva)",
+    "title": "Plan Name"
+   }
+  },
+  {
+   "description": "Minimum rating",
+   "in": "query",
+   "name": "rating_better_than",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "number"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Minimum rating",
+    "title": "Rating Better Than"
+   }
+  },
+  {
+   "description": "Maximum rating",
+   "in": "query",
+   "name": "rating_worse_than",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "number"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Maximum rating",
+    "title": "Rating Worse Than"
+   }
+  },
+  {
+   "description": "Minimum length in minutes",
+   "in": "query",
+   "name": "longer_than",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "integer"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Minimum length in minutes",
+    "title": "Longer Than"
+   }
+  },
+  {
+   "description": "Maximum length in minutes",
+   "in": "query",
+   "name": "shorter_than",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "integer"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Maximum length in minutes",
+    "title": "Shorter Than"
+   }
+  },
+  {
+   "description": "Filter by genre or tag name (partial match, e.g. 'fantasy')",
+   "in": "query",
+   "name": "genre",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by genre or tag name (partial match, e.g. 'fantasy')",
+    "title": "Genre"
+   }
+  }
+ ],
+ "GET /book": [
+  {
+   "description": "ASINs \u2014 comma-separated, repeated params, or both. Max 1000.",
+   "in": "query",
+   "name": "asins",
+   "required": true,
+   "schema": {
+    "description": "ASINs \u2014 comma-separated, repeated params, or both. Max 1000.",
+    "items": {
+     "type": "string"
+    },
+    "title": "Asins",
+    "type": "array"
+   }
+  },
+  {
+   "description": "Serve Libex's stored copy when one exists. false forces a fresh Audible fetch -- the result is still stored, but this response is not cached at any layer.",
+   "in": "query",
+   "name": "cache",
+   "required": false,
+   "schema": {
+    "default": true,
+    "description": "Serve Libex's stored copy when one exists. false forces a fresh Audible fetch -- the result is still stored, but this response is not cached at any layer.",
+    "title": "Cache",
+    "type": "boolean"
+   }
+  },
+  {
+   "description": "Field to sort the returned books by",
+   "in": "query",
+   "name": "sort",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "$ref": "#/components/schemas/BookSortField"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Field to sort the returned books by",
+    "title": "Sort"
+   }
+  },
+  {
+   "description": "Sort direction",
+   "in": "query",
+   "name": "order",
+   "required": false,
+   "schema": {
+    "$ref": "#/components/schemas/SortOrder",
+    "default": "asc",
+    "description": "Sort direction"
+   }
+  },
+  {
+   "description": "Audible region code",
+   "in": "query",
+   "name": "region",
+   "required": false,
+   "schema": {
+    "default": "us",
+    "description": "Audible region code",
+    "title": "Region",
+    "type": "string"
+   }
+  },
+  {
+   "description": "Filter by language (exact match)",
+   "in": "query",
+   "name": "language",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by language (exact match)",
+    "title": "Language"
+   }
+  },
+  {
+   "description": "Filter by book format (e.g. unabridged)",
+   "in": "query",
+   "name": "book_format",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by book format (e.g. unabridged)",
+    "title": "Book Format"
+   }
+  },
+  {
+   "description": "Filter by explicit",
+   "in": "query",
+   "name": "explicit",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "boolean"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by explicit",
+    "title": "Explicit"
+   }
+  },
+  {
+   "description": "Filter by Whispersync availability",
+   "in": "query",
+   "name": "whisper_sync",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "boolean"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by Whispersync availability",
+    "title": "Whisper Sync"
+   }
+  },
+  {
+   "description": "Filter by PDF companion availability",
+   "in": "query",
+   "name": "has_pdf",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "boolean"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by PDF companion availability",
+    "title": "Has Pdf"
+   }
+  },
+  {
+   "description": "Filter by VVAB (virtual voice audiobook) status",
+   "in": "query",
+   "name": "is_vvab",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "boolean"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by VVAB (virtual voice audiobook) status",
+    "title": "Is Vvab"
+   }
+  },
+  {
+   "description": "Filter by Audible plan name (e.g. US Minerva)",
+   "in": "query",
+   "name": "plan_name",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by Audible plan name (e.g. US Minerva)",
+    "title": "Plan Name"
+   }
+  },
+  {
+   "description": "Minimum rating",
+   "in": "query",
+   "name": "rating_better_than",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "number"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Minimum rating",
+    "title": "Rating Better Than"
+   }
+  },
+  {
+   "description": "Maximum rating",
+   "in": "query",
+   "name": "rating_worse_than",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "number"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Maximum rating",
+    "title": "Rating Worse Than"
+   }
+  },
+  {
+   "description": "Minimum length in minutes",
+   "in": "query",
+   "name": "longer_than",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "integer"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Minimum length in minutes",
+    "title": "Longer Than"
+   }
+  },
+  {
+   "description": "Maximum length in minutes",
+   "in": "query",
+   "name": "shorter_than",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "integer"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Maximum length in minutes",
+    "title": "Shorter Than"
+   }
+  },
+  {
+   "description": "Filter by genre or tag name (partial match, e.g. 'fantasy')",
+   "in": "query",
+   "name": "genre",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by genre or tag name (partial match, e.g. 'fantasy')",
+    "title": "Genre"
+   }
+  }
+ ],
+ "GET /coming-soon": [
+  {
+   "description": "Look-ahead window in days",
+   "in": "query",
+   "name": "days",
+   "required": false,
+   "schema": {
+    "$ref": "#/components/schemas/ReleaseWindow",
+    "default": 30,
+    "description": "Look-ahead window in days"
+   }
+  },
+  {
+   "description": "Audible category id to scope the scan to (see GET /categories). Without it, the scan returns a live sample, not the full catalog.",
+   "in": "query",
+   "name": "category",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "pattern": "^\\d{1,12}$",
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Audible category id to scope the scan to (see GET /categories). Without it, the scan returns a live sample, not the full catalog.",
+    "title": "Category"
+   }
+  },
+  {
+   "description": "Field to sort the returned books by",
+   "in": "query",
+   "name": "sort",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "$ref": "#/components/schemas/BookSortField"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Field to sort the returned books by",
+    "title": "Sort"
+   }
+  },
+  {
+   "description": "Sort direction",
+   "in": "query",
+   "name": "order",
+   "required": false,
+   "schema": {
+    "$ref": "#/components/schemas/SortOrder",
+    "default": "asc",
+    "description": "Sort direction"
+   }
+  },
+  {
+   "description": "Audible region code",
+   "in": "query",
+   "name": "region",
+   "required": false,
+   "schema": {
+    "default": "us",
+    "description": "Audible region code",
+    "title": "Region",
+    "type": "string"
+   }
+  },
+  {
+   "description": "Filter by language (exact match)",
+   "in": "query",
+   "name": "language",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by language (exact match)",
+    "title": "Language"
+   }
+  },
+  {
+   "description": "Filter by book format (e.g. unabridged)",
+   "in": "query",
+   "name": "book_format",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by book format (e.g. unabridged)",
+    "title": "Book Format"
+   }
+  },
+  {
+   "description": "Filter by explicit",
+   "in": "query",
+   "name": "explicit",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "boolean"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by explicit",
+    "title": "Explicit"
+   }
+  },
+  {
+   "description": "Filter by Whispersync availability",
+   "in": "query",
+   "name": "whisper_sync",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "boolean"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by Whispersync availability",
+    "title": "Whisper Sync"
+   }
+  },
+  {
+   "description": "Filter by PDF companion availability",
+   "in": "query",
+   "name": "has_pdf",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "boolean"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by PDF companion availability",
+    "title": "Has Pdf"
+   }
+  },
+  {
+   "description": "Filter by VVAB (virtual voice audiobook) status",
+   "in": "query",
+   "name": "is_vvab",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "boolean"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by VVAB (virtual voice audiobook) status",
+    "title": "Is Vvab"
+   }
+  },
+  {
+   "description": "Filter by Audible plan name (e.g. US Minerva)",
+   "in": "query",
+   "name": "plan_name",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by Audible plan name (e.g. US Minerva)",
+    "title": "Plan Name"
+   }
+  },
+  {
+   "description": "Minimum rating",
+   "in": "query",
+   "name": "rating_better_than",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "number"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Minimum rating",
+    "title": "Rating Better Than"
+   }
+  },
+  {
+   "description": "Maximum rating",
+   "in": "query",
+   "name": "rating_worse_than",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "number"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Maximum rating",
+    "title": "Rating Worse Than"
+   }
+  },
+  {
+   "description": "Minimum length in minutes",
+   "in": "query",
+   "name": "longer_than",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "integer"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Minimum length in minutes",
+    "title": "Longer Than"
+   }
+  },
+  {
+   "description": "Maximum length in minutes",
+   "in": "query",
+   "name": "shorter_than",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "integer"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Maximum length in minutes",
+    "title": "Shorter Than"
+   }
+  },
+  {
+   "description": "Filter by genre or tag name (partial match, e.g. 'fantasy')",
+   "in": "query",
+   "name": "genre",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by genre or tag name (partial match, e.g. 'fantasy')",
+    "title": "Genre"
+   }
+  }
+ ],
+ "GET /new-releases": [
+  {
+   "description": "Look-back window in days",
+   "in": "query",
+   "name": "days",
+   "required": false,
+   "schema": {
+    "$ref": "#/components/schemas/ReleaseWindow",
+    "default": 30,
+    "description": "Look-back window in days"
+   }
+  },
+  {
+   "description": "Audible category id to scope the scan to (see GET /categories). Without it, the scan returns a live sample, not the full catalog.",
+   "in": "query",
+   "name": "category",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "pattern": "^\\d{1,12}$",
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Audible category id to scope the scan to (see GET /categories). Without it, the scan returns a live sample, not the full catalog.",
+    "title": "Category"
+   }
+  },
+  {
+   "description": "Field to sort the returned books by",
+   "in": "query",
+   "name": "sort",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "$ref": "#/components/schemas/BookSortField"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Field to sort the returned books by",
+    "title": "Sort"
+   }
+  },
+  {
+   "description": "Sort direction",
+   "in": "query",
+   "name": "order",
+   "required": false,
+   "schema": {
+    "$ref": "#/components/schemas/SortOrder",
+    "default": "desc",
+    "description": "Sort direction"
+   }
+  },
+  {
+   "description": "Audible region code",
+   "in": "query",
+   "name": "region",
+   "required": false,
+   "schema": {
+    "default": "us",
+    "description": "Audible region code",
+    "title": "Region",
+    "type": "string"
+   }
+  },
+  {
+   "description": "Filter by language (exact match)",
+   "in": "query",
+   "name": "language",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by language (exact match)",
+    "title": "Language"
+   }
+  },
+  {
+   "description": "Filter by book format (e.g. unabridged)",
+   "in": "query",
+   "name": "book_format",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by book format (e.g. unabridged)",
+    "title": "Book Format"
+   }
+  },
+  {
+   "description": "Filter by explicit",
+   "in": "query",
+   "name": "explicit",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "boolean"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by explicit",
+    "title": "Explicit"
+   }
+  },
+  {
+   "description": "Filter by Whispersync availability",
+   "in": "query",
+   "name": "whisper_sync",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "boolean"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by Whispersync availability",
+    "title": "Whisper Sync"
+   }
+  },
+  {
+   "description": "Filter by PDF companion availability",
+   "in": "query",
+   "name": "has_pdf",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "boolean"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by PDF companion availability",
+    "title": "Has Pdf"
+   }
+  },
+  {
+   "description": "Filter by VVAB (virtual voice audiobook) status",
+   "in": "query",
+   "name": "is_vvab",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "boolean"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by VVAB (virtual voice audiobook) status",
+    "title": "Is Vvab"
+   }
+  },
+  {
+   "description": "Filter by Audible plan name (e.g. US Minerva)",
+   "in": "query",
+   "name": "plan_name",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by Audible plan name (e.g. US Minerva)",
+    "title": "Plan Name"
+   }
+  },
+  {
+   "description": "Minimum rating",
+   "in": "query",
+   "name": "rating_better_than",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "number"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Minimum rating",
+    "title": "Rating Better Than"
+   }
+  },
+  {
+   "description": "Maximum rating",
+   "in": "query",
+   "name": "rating_worse_than",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "number"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Maximum rating",
+    "title": "Rating Worse Than"
+   }
+  },
+  {
+   "description": "Minimum length in minutes",
+   "in": "query",
+   "name": "longer_than",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "integer"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Minimum length in minutes",
+    "title": "Longer Than"
+   }
+  },
+  {
+   "description": "Maximum length in minutes",
+   "in": "query",
+   "name": "shorter_than",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "integer"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Maximum length in minutes",
+    "title": "Shorter Than"
+   }
+  },
+  {
+   "description": "Filter by genre or tag name (partial match, e.g. 'fantasy')",
+   "in": "query",
+   "name": "genre",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by genre or tag name (partial match, e.g. 'fantasy')",
+    "title": "Genre"
+   }
+  }
+ ],
+ "GET /series/books/{asin}": [
+  {
+   "description": "Serve Libex's stored copy when one exists. false forces a fresh Audible fetch -- the result is still stored, but this response is not cached at any layer.",
+   "in": "query",
+   "name": "cache",
+   "required": false,
+   "schema": {
+    "default": true,
+    "description": "Serve Libex's stored copy when one exists. false forces a fresh Audible fetch -- the result is still stored, but this response is not cached at any layer.",
+    "title": "Cache",
+    "type": "boolean"
+   }
+  },
+  {
+   "description": "Field to sort by (overrides default series position order)",
+   "in": "query",
+   "name": "sort",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "$ref": "#/components/schemas/BookSortField"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Field to sort by (overrides default series position order)",
+    "title": "Sort"
+   }
+  },
+  {
+   "description": "Sort direction",
+   "in": "query",
+   "name": "order",
+   "required": false,
+   "schema": {
+    "$ref": "#/components/schemas/SortOrder",
+    "default": "asc",
+    "description": "Sort direction"
+   }
+  },
+  {
+   "description": "Audible region code",
+   "in": "query",
+   "name": "region",
+   "required": false,
+   "schema": {
+    "default": "us",
+    "description": "Audible region code",
+    "title": "Region",
+    "type": "string"
+   }
+  },
+  {
+   "description": "Filter by language (exact match)",
+   "in": "query",
+   "name": "language",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by language (exact match)",
+    "title": "Language"
+   }
+  },
+  {
+   "description": "Filter by book format (e.g. unabridged)",
+   "in": "query",
+   "name": "book_format",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by book format (e.g. unabridged)",
+    "title": "Book Format"
+   }
+  },
+  {
+   "description": "Filter by explicit",
+   "in": "query",
+   "name": "explicit",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "boolean"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by explicit",
+    "title": "Explicit"
+   }
+  },
+  {
+   "description": "Filter by Whispersync availability",
+   "in": "query",
+   "name": "whisper_sync",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "boolean"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by Whispersync availability",
+    "title": "Whisper Sync"
+   }
+  },
+  {
+   "description": "Filter by PDF companion availability",
+   "in": "query",
+   "name": "has_pdf",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "boolean"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by PDF companion availability",
+    "title": "Has Pdf"
+   }
+  },
+  {
+   "description": "Filter by VVAB (virtual voice audiobook) status",
+   "in": "query",
+   "name": "is_vvab",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "boolean"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by VVAB (virtual voice audiobook) status",
+    "title": "Is Vvab"
+   }
+  },
+  {
+   "description": "Filter by Audible plan name (e.g. US Minerva)",
+   "in": "query",
+   "name": "plan_name",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by Audible plan name (e.g. US Minerva)",
+    "title": "Plan Name"
+   }
+  },
+  {
+   "description": "Minimum rating",
+   "in": "query",
+   "name": "rating_better_than",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "number"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Minimum rating",
+    "title": "Rating Better Than"
+   }
+  },
+  {
+   "description": "Maximum rating",
+   "in": "query",
+   "name": "rating_worse_than",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "number"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Maximum rating",
+    "title": "Rating Worse Than"
+   }
+  },
+  {
+   "description": "Minimum length in minutes",
+   "in": "query",
+   "name": "longer_than",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "integer"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Minimum length in minutes",
+    "title": "Longer Than"
+   }
+  },
+  {
+   "description": "Maximum length in minutes",
+   "in": "query",
+   "name": "shorter_than",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "integer"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Maximum length in minutes",
+    "title": "Shorter Than"
+   }
+  },
+  {
+   "description": "Filter by genre or tag name (partial match, e.g. 'fantasy')",
+   "in": "query",
+   "name": "genre",
+   "required": false,
+   "schema": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "description": "Filter by genre or tag name (partial match, e.g. 'fantasy')",
+    "title": "Genre"
+   }
+  }
+ ]
+}

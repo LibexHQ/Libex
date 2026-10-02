@@ -18,6 +18,7 @@ Libex also runs as a hosted API, and a free public instance is at
 pip install libex-core
 pip install "libex-core[storage]"    # adds the optional local store (SQLite)
 pip install "libex-core[postgres]"   # the store, with Postgres as well
+pip install "libex-core[socks]"      # lets the proxy be a SOCKS5 proxy
 ```
 
 Python 3.12 or newer. The base install depends on `httpx` and `pydantic`
@@ -34,7 +35,7 @@ other processes could read from a command line:
 
 | Variable | Meaning |
 |---|---|
-| `LIBEX_CORE_PROXY_URL` | An `http://` or `https://` proxy every request goes through. May carry credentials. |
+| `LIBEX_CORE_PROXY_URL` | An `http://`, `https://`, `socks5://` or `socks5h://` proxy every request goes through. May carry credentials. A SOCKS5 URL needs its port and the `socks` extra. |
 | `LIBEX_CORE_ALLOW_DIRECT_EGRESS` | `1`, `true`, `yes` or `on` lets requests leave from this machine's own address when no proxy is set. Anything else, or unset, refuses. |
 
 ```
@@ -44,6 +45,16 @@ libex-core config        # {"transport":{"mode":"proxy","host":"proxy.example"}}
 # or, knowing what it means:
 export LIBEX_CORE_ALLOW_DIRECT_EGRESS=1
 ```
+
+SOCKS5 proxies need `pip install "libex-core[socks]"`; without it a SOCKS5
+URL is refused when the client is built, not on the first request. `socks5://`
+and `socks5h://` behave the same: the proxy is always handed Audible's
+hostname and resolves it, and TLS to Audible stays end to end through the
+tunnel. A username and password in a SOCKS5 URL are sent to the proxy as
+RFC 1929 username/password authentication, which is cleartext between this
+machine and the proxy; only the tunnelled TLS to Audible is encrypted. Use
+SOCKS5 credentials only on a network you trust, such as a local or private
+one. `socks4://` and `socks4a://` are not supported.
 
 With neither set, a command that needs Audible exits with status 5 and says
 what to set. `libex-core config` makes no request and never prints the proxy

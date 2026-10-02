@@ -39,6 +39,7 @@ import libex_core.audible.client as client_module
 from libex_core.audible.client import LibexClient, get_audible_url
 from libex_core.exceptions import AudibleAPIException, NotFoundException
 
+BAD_SCHEME_MESSAGE = "proxy URL must use the http, https, socks5 or socks5h scheme"
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
@@ -123,7 +124,7 @@ def test_a_real_proxy_url_succeeds_regardless_of_allow_direct_egress():
     "case, value, expected_message",
     [
         ("missing scheme", "libex-seeder-vpn:8888", "proxy URL could not be parsed"),
-        ("bad scheme", "socks5://libex-seeder-vpn:8888", "proxy URL must use the http or https scheme"),
+        ("bad scheme", "socks4://libex-seeder-vpn:8888", BAD_SCHEME_MESSAGE),
         ("empty host", "http://:8888", "proxy URL must include a host and a valid port"),
         ("bad port", "http://libex-seeder-vpn:999999", "proxy URL must include a host and a valid port"),
     ],
@@ -159,12 +160,12 @@ def test_constructor_error_never_names_the_credentialed_value():
 # TRANSPORT_SUMMARY() -- NEVER THE URL, NEVER CREDENTIALS
 # ============================================================
 
-def test_transport_summary_carries_only_mode_and_host():
+def test_transport_summary_carries_only_mode_host_and_scheme():
     client = LibexClient(proxy_url="http://opsuser:s3cr3t-token@libex-seeder-vpn:8888")
     summary = client.transport_summary()
 
     field_names = {f.name for f in dataclasses.fields(summary)}
-    assert field_names == {"mode", "host"}
+    assert field_names == {"mode", "host", "scheme"}
 
 
 def test_transport_summary_never_exposes_the_url_or_credentials():

@@ -31,7 +31,9 @@ def build_client(config: Config) -> LibexClient:
         if config.proxy_url:
             raise ConfigError(
                 f"{PROXY_URL_VARIABLE} is not a valid proxy URL: it needs an "
-                "http or https scheme and a host (the port is optional)"
+                "http, https, socks5 or socks5h scheme and a host (the port is "
+                "optional for http and https, required for socks5 and socks5h, "
+                'which also need: pip install "libex-core[socks]")'
             ) from None
         raise ConfigError(
             f"no proxy is configured: set {PROXY_URL_VARIABLE}, or set "

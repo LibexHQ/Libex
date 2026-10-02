@@ -151,7 +151,7 @@ def test_config_prints_the_host_only_never_the_url(run_cli):
 
 _BAD_PROXY_URLS = {
     "schemeless user:pw@h:1": f"{USER}:{PASSWORD_RAW}@h:1",
-    "bad scheme": f"socks5://{USER}:{PASSWORD_RAW}@proxy.example.net:1080",
+    "bad scheme": f"socks4://{USER}:{PASSWORD_RAW}@proxy.example.net:1080",
     "ftp scheme": f"ftp://{USER}:{PASSWORD_RAW}@proxy.example.net:21",
     "no host": f"http://{USER}:{PASSWORD_RAW}@:8080",
     "port out of range": f"http://{USER}:{PASSWORD_RAW}@proxy.example.net:99999",
@@ -170,8 +170,10 @@ def test_a_rejected_proxy_url_exits_five_without_the_credential(run_cli, name, v
 
 
 _INVALID_PROXY_TEXT = (
-    f"{PROXY_URL_VARIABLE} is not a valid proxy URL: it needs an http or "
-    "https scheme and a host (the port is optional)"
+    f"{PROXY_URL_VARIABLE} is not a valid proxy URL: it needs an "
+    "http, https, socks5 or socks5h scheme and a host (the port is "
+    "optional for http and https, required for socks5 and socks5h, "
+    'which also need: pip install "libex-core[socks]")'
 )
 
 
@@ -186,7 +188,7 @@ def test_a_rejected_proxy_url_gets_the_fixed_text_and_never_the_value(run_cli, n
 
 @pytest.mark.parametrize(
     "url",
-    ["ftp://proxy.example.net:21", "socks5://proxy.example.net:1080", "http://", "http://:8080"],
+    ["ftp://proxy.example.net:21", "socks4://proxy.example.net:1080", "http://", "http://:8080"],
 )
 def test_an_invalid_proxy_url_without_credentials_gets_the_same_text(run_cli, url):
     result = run_cli(["config"], {PROXY_URL_VARIABLE: url})

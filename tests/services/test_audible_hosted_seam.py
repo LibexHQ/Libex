@@ -92,9 +92,9 @@ def test_blank_audible_proxy_url_resolves_to_direct_egress_without_raising(tmp_p
 # ============================================================
 
 def test_malformed_audible_proxy_url_still_raises_at_import(tmp_path):
-    result = _run_with_proxy_url(tmp_path, "socks5://libex-seeder-vpn:8888")
+    result = _run_with_proxy_url(tmp_path, "socks4://libex-seeder-vpn:8888")
 
     assert result.returncode != 0
     assert "ValueError" in result.stderr
-    assert "proxy URL must use the http or https scheme" in result.stderr
+    assert "proxy URL must use the http, https, socks5 or socks5h scheme" in result.stderr
     assert "MODE:" not in result.stdout

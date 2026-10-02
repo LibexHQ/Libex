@@ -22,7 +22,7 @@ STORAGE_VARIABLE = "LIBEX_CORE_STORAGE"
 VARIABLES: tuple[tuple[str, str], ...] = (
     (
         PROXY_URL_VARIABLE,
-        "URL of the http or https proxy that every request goes through. "
+        "URL of the http, https, socks5 or socks5h proxy that every request goes through. "
         "It may carry credentials, so it is read from the environment and "
         "never accepted as an option. Empty means unset.",
     ),

@@ -25,3 +25,6 @@
 # perturb it.
 ruff==0.14.14
 pip-audit==2.10.1
+# build and flit_core are here so libex-core builds with --no-isolation from this hashed venv; an isolated build would fetch its backend unhashed.
+build==1.6.1
+flit_core==4.1.0

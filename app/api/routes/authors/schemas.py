@@ -1,6 +1,6 @@
 """
 Authors route schemas.
-Field names match AudiMeta's AuthorDto and MinimalAuthorDto exactly.
+Field names follow AudiMeta's AuthorDto and MinimalAuthorDto.
 """
 
 # Third party

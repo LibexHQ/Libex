@@ -110,7 +110,7 @@ async def test_get_book_response_has_required_fields(async_client):
 
 @pytest.mark.asyncio
 async def test_get_book_author_has_regions_field(async_client):
-    """Book endpoint author objects include regions list matching AudiMeta."""
+    """Book endpoint author objects include a regions list."""
     with patch("app.api.routes.books.router.get_book_by_asin", new_callable=AsyncMock) as mock:
         mock.return_value = MOCK_BOOK
         response = await async_client.get("/book/B08G9PRS1K")
@@ -241,8 +241,8 @@ async def test_bulk_books_rejects_invalid_asin_in_list(async_client):
 
 @pytest.mark.asyncio
 async def test_get_book_rejects_invalid_asin_response_body_is_pinned_exactly(async_client):
-    """Drop-in AudiMeta contract surface: the exception handler's rendered
-    body, byte for byte, not just a substring of one field."""
+    """An invalid ASIN renders exactly the pinned error body, byte for byte,
+    rather than merely containing a substring of it."""
     response = await async_client.get("/book/not-an-asin")
     assert response.json() == {
         "error": "Invalid ASIN format: not-an-asin",
@@ -438,7 +438,7 @@ async def test_get_books_by_sku_forwards_sku_to_reader(async_client):
 # to. What that leaves unproven is the one thing this router actually ships:
 # BookResponse(**data) -- a cache hit and a live fetch could still diverge
 # once Pydantic gets to coerce, default, or drop fields on the way out, and
-# that is the layer drop-in AudiMeta compatibility is actually enforced at.
+# that is the layer the response shape is actually enforced at.
 # These mock one level deeper than the router (audible_get and cache.get,
 # not get_book_by_asin itself) so the real service call, the real cache-hit
 # branch, and the real response_model serialization all run for real.

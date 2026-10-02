@@ -2,11 +2,10 @@
 AudiMeta-shaped response models.
 
 These are the DTOs the hosted API returns for books, chapters, and series --
-shaped and named to match AudiMeta's own response bodies field for field, so
-that anything built against AudiMeta works against Libex without changes.
-Field names are camelCase because AudiMeta's are; optionality and defaults
-mirror what AudiMeta actually returns rather than what the underlying data
-would otherwise suggest. They carry no database, cache, or web-framework
+derived from AudiMeta's response bodies. Libex is not a drop-in replacement:
+the shapes differ in places. Field names are camelCase because AudiMeta's are;
+optionality and defaults follow AudiMeta's rather than what the underlying
+data would otherwise suggest. They carry no database, cache, or web-framework
 dependency of their own so the shape of a response can be reused anywhere
 this package is embedded, independent of how it is served.
 """

@@ -242,14 +242,15 @@ async def get_books_by_asins(
     listed even if another chunk fails and the request falls back to stored
     copies. An ASIN in a failed or abandoned chunk is never classified,
     whether or not other chunks succeeded; with no stored copy covering it,
-    it ends up in notFound. If no chunk produced a servable book and nothing
-    came from the cache, a failed chunk sends the whole request to the outage
-    fallback, which checks every requested ASIN against the database and then
-    the cache; if that finds none of them, the route turns the outage into a
-    whole-request 404 and no placeholder reaches the caller, even one from a
-    chunk Audible answered. When any chunk did produce a book, an uncovered
-    failed chunk only adds its ASINs to notFound. None leaves every other
-    caller unchanged.
+    it is reported through not_fetched_asins below, not as not found. If no
+    chunk produced a servable book and nothing came from the cache, a failed
+    chunk sends the whole request to the outage fallback, which checks every
+    requested ASIN against the database and then the cache; if that finds none
+    of them, the call raises (see as_audible_failure), the route answers 503,
+    and no placeholder reaches the caller, even one from a chunk Audible
+    answered. When any chunk did produce a book, an uncovered failed chunk
+    only adds its ASINs to not_fetched_asins. None leaves every other caller
+    unchanged.
 
     not_fetched_asins, when given, receives the requested ASINs that an
     Audible failure (a transient error or an abandoned chunk) left with
@@ -337,8 +338,8 @@ async def _get_books_by_asins_unsettled(
     other chunks did. When no chunk produced a servable book and nothing came
     from the cache, any failed chunk sends the request to the outage
     fallback; if no stored or cached copy of any requested ASIN exists
-    either, it ends as a route-level 404, so the list is then never seen by
-    the caller, placeholders from answered chunks included.
+    either, the call raises and the route answers 503, so the list is then
+    never seen by the caller, placeholders from answered chunks included.
 
     not_fetched_asins, when given, is extended with the requested ASINs an
     Audible failure left with nothing -- see get_books_by_asins for the

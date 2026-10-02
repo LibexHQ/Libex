@@ -9,6 +9,9 @@ app.main answers it as a 503 with Retry-After; a confirmed absence stays a
 else gets them.
 """
 
+# Standard library
+from unittest.mock import AsyncMock, patch
+
 # Third party
 import pytest
 
@@ -95,8 +98,6 @@ def test_libex_core_audible_exception_keeps_its_502():
 
 @pytest.mark.asyncio
 async def test_handler_answers_an_audible_api_exception_with_the_full_503(async_client):
-    from unittest.mock import AsyncMock, patch
-
     with patch("app.api.routes.db.router.get_book_from_db", new_callable=AsyncMock) as mock:
         mock.side_effect = AudibleAPIException("Audible unavailable", upstream_status=502)
         response = await async_client.get(f"/db/book/{ASIN}")
@@ -107,8 +108,6 @@ async def test_handler_answers_an_audible_api_exception_with_the_full_503(async_
 @pytest.mark.asyncio
 @pytest.mark.parametrize("upstream_status", [None, 429, 500, 502, 504])
 async def test_handler_503_does_not_depend_on_the_upstream_status(async_client, upstream_status):
-    from unittest.mock import AsyncMock, patch
-
     with patch("app.api.routes.db.router.get_book_from_db", new_callable=AsyncMock) as mock:
         mock.side_effect = AudibleAPIException("down", upstream_status=upstream_status)
         response = await async_client.get(f"/db/book/{ASIN}")
@@ -118,8 +117,6 @@ async def test_handler_503_does_not_depend_on_the_upstream_status(async_client, 
 
 @pytest.mark.asyncio
 async def test_handler_retry_after_header_and_body_agree(async_client):
-    from unittest.mock import AsyncMock, patch
-
     with patch("app.api.routes.db.router.get_book_from_db", new_callable=AsyncMock) as mock:
         mock.side_effect = AudibleAPIException("down")
         response = await async_client.get(f"/db/book/{ASIN}")
@@ -134,8 +131,6 @@ async def test_handler_retry_after_header_and_body_agree(async_client):
     ("/db/book", 404, "invalid_request"),
 ])
 async def test_404_body_has_no_retry_after_and_no_outage_headers(async_client, path, status, code):
-    from unittest.mock import AsyncMock, patch
-
     with patch("app.api.routes.db.router.get_book_from_db", new_callable=AsyncMock) as mock:
         mock.return_value = None
         response = await async_client.get(path)
@@ -164,8 +159,6 @@ async def test_400_body_has_no_retry_after_and_no_outage_headers(async_client):
 
 @pytest.mark.asyncio
 async def test_cache_exception_stays_500_without_outage_shape(async_client):
-    from unittest.mock import AsyncMock, patch
-
     with patch("app.api.routes.db.router.get_book_from_db", new_callable=AsyncMock) as mock:
         mock.side_effect = CacheException("cache down")
         response = await async_client.get(f"/db/book/{ASIN}")

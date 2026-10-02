@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 
 # Local
 import app.main as main_module
+from app.api.routes.errors import ErrorResponse
 from app.core.config import get_settings
 from app.main import app
 from libex_core.exceptions import (
@@ -359,8 +360,6 @@ def test_openapi_error_response_declares_retry_after_as_optional():
 
 
 def test_error_response_omits_retry_after_when_none_and_keeps_it_when_set():
-    from app.api.routes.errors import ErrorResponse
-
     plain = ErrorResponse(error="x", status_code=404, code=ErrorCode.NOT_ON_AUDIBLE)
     outage = ErrorResponse(
         error="x", status_code=503, code=ErrorCode.UPSTREAM_UNAVAILABLE, retryAfter=30

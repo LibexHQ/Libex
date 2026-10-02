@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 # Local
+from app.services.audible.books import get_books_by_asins
 from libex_core.audible.books import (
     _best_image,
     _parse_authors,
@@ -34,6 +35,7 @@ from app.core.response_headers import (
     SOURCE_CACHE,
     SOURCE_DB,
 )
+from libex_core.exceptions import AudibleAPIException
 
 
 # ============================================================
@@ -2526,8 +2528,6 @@ def _chunk_router(answers):
 
 @pytest.mark.asyncio
 async def test_partial_failure_lists_the_failed_chunk_asins_the_backstop_did_not_cover():
-    from app.services.audible.books import get_books_by_asins
-
     failed = ["B0FAIL0001", "B0FAIL0002", "B0FAIL0003"]
     out: list[str] = []
     audible = _chunk_router({NF_GOOD[0]: [_hydration_product(a) for a in NF_GOOD]})
@@ -2546,8 +2546,6 @@ async def test_partial_failure_lists_the_failed_chunk_asins_the_backstop_did_not
 
 @pytest.mark.asyncio
 async def test_partial_failure_fully_covered_by_the_backstop_lists_nothing():
-    from app.services.audible.books import get_books_by_asins
-
     failed = ["B0FAIL0001", "B0FAIL0002"]
     out: list[str] = []
     audible = _chunk_router({NF_GOOD[0]: [_hydration_product(a) for a in NF_GOOD]})
@@ -2563,8 +2561,6 @@ async def test_partial_failure_fully_covered_by_the_backstop_lists_nothing():
 
 @pytest.mark.asyncio
 async def test_partial_failure_never_lists_a_confirmed_stub_or_placeholder():
-    from app.services.audible.books import get_books_by_asins
-
     stub, placeholder = "B0STUB0001", "B0PLACE001"
     answered = NF_GOOD[:48] + [stub, placeholder]
     failed = ["B0FAIL0001"]
@@ -2589,8 +2585,6 @@ async def test_partial_failure_never_lists_a_confirmed_stub_or_placeholder():
 
 @pytest.mark.asyncio
 async def test_full_outage_db_fallback_lists_the_requested_asins_the_db_lacked():
-    from app.services.audible.books import get_books_by_asins
-
     asins = ["B0ASIN0001", "B0ASIN0002", "B0ASIN0003"]
     out: list[str] = []
 
@@ -2605,8 +2599,6 @@ async def test_full_outage_db_fallback_lists_the_requested_asins_the_db_lacked()
 
 @pytest.mark.asyncio
 async def test_full_outage_cache_fallback_lists_the_requested_asins_the_cache_lacked():
-    from app.services.audible.books import get_books_by_asins
-
     asins = ["B0ASIN0001", "B0ASIN0002", "B0ASIN0003"]
     out: list[str] = []
     cached = {"asin": asins[2], "title": "Cached"}
@@ -2628,8 +2620,6 @@ async def test_full_outage_fallback_excludes_confirmed_not_found_placeholders_an
     confirmed (a stub, a placeholder) and the non-ASIN screened out before
     fetch are accounted for -- only the failed chunk's uncovered ASIN is
     not fetched."""
-    from app.services.audible.books import get_books_by_asins
-
     stubs = [f"B0STUB{i:04d}" for i in range(49)]
     placeholder = "B0PLACE001"
     answered = stubs + [placeholder]
@@ -2656,8 +2646,6 @@ async def test_full_outage_fallback_excludes_confirmed_not_found_placeholders_an
 
 @pytest.mark.asyncio
 async def test_full_outage_cache_fallback_excludes_confirmed_not_found_and_placeholders():
-    from app.services.audible.books import get_books_by_asins
-
     stubs = [f"B0STUB{i:04d}" for i in range(49)]
     placeholder = "B0PLACE001"
     answered = stubs + [placeholder]
@@ -2682,9 +2670,6 @@ async def test_full_outage_cache_fallback_excludes_confirmed_not_found_and_place
 
 @pytest.mark.asyncio
 async def test_full_outage_with_nothing_stored_or_cached_raises_and_leaves_the_list_empty():
-    from app.services.audible.books import get_books_by_asins
-    from libex_core.exceptions import AudibleAPIException
-
     out: list[str] = []
 
     with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=RuntimeError("down"))), \
@@ -2700,8 +2685,6 @@ async def test_full_outage_with_nothing_stored_or_cached_raises_and_leaves_the_l
 
 @pytest.mark.asyncio
 async def test_healthy_fetch_leaves_not_fetched_empty_and_results_match_without_it():
-    from app.services.audible.books import get_books_by_asins
-
     asins = ["B0REAL0001", "B0STUB0001"]
 
     async def _get(region, path, params):

@@ -9,7 +9,7 @@ _libex-core() {
         '(- *)'{-h,--help}'[show this help message and exit]' \
         '(- *)--version[show the version number and exit]' \
         {-q,--quiet}'[print only the final error line]' \
-        {-v,--verbose}'[more detail on standard error (repeat as -vv for debug output with tracebacks)]' \
+        {-v,--verbose}'[more detail on standard error, repeat as -vv for debug output with tracebacks]' \
         '1: :->command' \
         '*:: :->args'
 

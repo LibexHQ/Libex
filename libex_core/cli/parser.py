@@ -52,8 +52,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="count",
         default=0,
         help=(
-            "more detail on standard error "
-            "(repeat as -vv for debug output with tracebacks)"
+            "more detail on standard error, "
+            "repeat as -vv for debug output with tracebacks"
         ),
     )
     subparsers = parser.add_subparsers(

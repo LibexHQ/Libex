@@ -46,18 +46,18 @@ _libex-core() {
                                 '(- *)'{-h,--help}'[show this help message and exit]' \
                                 '--file[read more ASINs from this file, or from standard input when it is -]' \
                                 '--region[the Audible marketplace to ask, default us]:region:(us uk ca au de fr it es jp in br)' \
-                                '--language[Filter by language (exact match)]' \
-                                '--book-format[Filter by book format (e.g. unabridged)]' \
+                                '--language[Filter by language - exact match]' \
+                                '--book-format[Filter by book format - e.g. unabridged]' \
                                 '--explicit[Filter by explicit]:explicit:(true false)' \
                                 '--whisper-sync[Filter by Whispersync availability]:whisper-sync:(true false)' \
                                 '--has-pdf[Filter by PDF companion availability]:has-pdf:(true false)' \
-                                '--is-vvab[Filter by VVAB (virtual voice audiobook) status]:is-vvab:(true false)' \
-                                '--plan-name[Filter by Audible plan name (e.g. US Minerva)]' \
+                                '--is-vvab[Filter by VVAB - virtual voice audiobook status]:is-vvab:(true false)' \
+                                '--plan-name[Filter by Audible plan name - e.g. US Minerva]' \
                                 '--rating-better-than[Minimum rating]' \
                                 '--rating-worse-than[Maximum rating]' \
                                 '--longer-than[Minimum length in minutes]' \
                                 '--shorter-than[Maximum length in minutes]' \
-                                '--genre[Filter by genre or tag name (partial match, e.g. fantasy)]' \
+                                '--genre[Filter by genre or tag name - partial match, e.g. fantasy]' \
                                 '--sort[sort the books by this field, default is the order they were found in]:sort:(title releaseDate rating lengthMinutes language publisher updatedAt)' \
                                 '--order[the direction of --sort, default asc]:order:(asc desc)' \
                                 '1:command:(bulk)' \
@@ -89,18 +89,18 @@ _libex-core() {
                             _arguments \
                                 '(- *)'{-h,--help}'[show this help message and exit]' \
                                 '--region[the Audible marketplace to ask, default us]:region:(us uk ca au de fr it es jp in br)' \
-                                '--language[Filter by language (exact match)]' \
-                                '--book-format[Filter by book format (e.g. unabridged)]' \
+                                '--language[Filter by language - exact match]' \
+                                '--book-format[Filter by book format - e.g. unabridged]' \
                                 '--explicit[Filter by explicit]:explicit:(true false)' \
                                 '--whisper-sync[Filter by Whispersync availability]:whisper-sync:(true false)' \
                                 '--has-pdf[Filter by PDF companion availability]:has-pdf:(true false)' \
-                                '--is-vvab[Filter by VVAB (virtual voice audiobook) status]:is-vvab:(true false)' \
-                                '--plan-name[Filter by Audible plan name (e.g. US Minerva)]' \
+                                '--is-vvab[Filter by VVAB - virtual voice audiobook status]:is-vvab:(true false)' \
+                                '--plan-name[Filter by Audible plan name - e.g. US Minerva]' \
                                 '--rating-better-than[Minimum rating]' \
                                 '--rating-worse-than[Maximum rating]' \
                                 '--longer-than[Minimum length in minutes]' \
                                 '--shorter-than[Maximum length in minutes]' \
-                                '--genre[Filter by genre or tag name (partial match, e.g. fantasy)]' \
+                                '--genre[Filter by genre or tag name - partial match, e.g. fantasy]' \
                                 '--sort[sort the books by this field, default is the order they were found in]:sort:(title releaseDate rating lengthMinutes language publisher updatedAt)' \
                                 '--order[the direction of --sort, default asc]:order:(asc desc)' \
                                 '1:command:(books)' \
@@ -139,18 +139,18 @@ _libex-core() {
                             _arguments \
                                 '(- *)'{-h,--help}'[show this help message and exit]' \
                                 '--region[the Audible marketplace to ask, default us]:region:(us uk ca au de fr it es jp in br)' \
-                                '--language[Filter by language (exact match)]' \
-                                '--book-format[Filter by book format (e.g. unabridged)]' \
+                                '--language[Filter by language - exact match]' \
+                                '--book-format[Filter by book format - e.g. unabridged]' \
                                 '--explicit[Filter by explicit]:explicit:(true false)' \
                                 '--whisper-sync[Filter by Whispersync availability]:whisper-sync:(true false)' \
                                 '--has-pdf[Filter by PDF companion availability]:has-pdf:(true false)' \
-                                '--is-vvab[Filter by VVAB (virtual voice audiobook) status]:is-vvab:(true false)' \
-                                '--plan-name[Filter by Audible plan name (e.g. US Minerva)]' \
+                                '--is-vvab[Filter by VVAB - virtual voice audiobook status]:is-vvab:(true false)' \
+                                '--plan-name[Filter by Audible plan name - e.g. US Minerva]' \
                                 '--rating-better-than[Minimum rating]' \
                                 '--rating-worse-than[Maximum rating]' \
                                 '--longer-than[Minimum length in minutes]' \
                                 '--shorter-than[Maximum length in minutes]' \
-                                '--genre[Filter by genre or tag name (partial match, e.g. fantasy)]' \
+                                '--genre[Filter by genre or tag name - partial match, e.g. fantasy]' \
                                 '--sort[sort the books by this field, default is the order they were found in]:sort:(title releaseDate rating lengthMinutes language publisher updatedAt)' \
                                 '--order[the direction of --sort, default asc]:order:(asc desc)' \
                                 '1:command:(books)' \
@@ -160,18 +160,18 @@ _libex-core() {
                             _arguments \
                                 '(- *)'{-h,--help}'[show this help message and exit]' \
                                 '--region[the Audible marketplace to ask, default us]:region:(us uk ca au de fr it es jp in br)' \
-                                '--language[Filter by language (exact match)]' \
-                                '--book-format[Filter by book format (e.g. unabridged)]' \
+                                '--language[Filter by language - exact match]' \
+                                '--book-format[Filter by book format - e.g. unabridged]' \
                                 '--explicit[Filter by explicit]:explicit:(true false)' \
                                 '--whisper-sync[Filter by Whispersync availability]:whisper-sync:(true false)' \
                                 '--has-pdf[Filter by PDF companion availability]:has-pdf:(true false)' \
-                                '--is-vvab[Filter by VVAB (virtual voice audiobook) status]:is-vvab:(true false)' \
-                                '--plan-name[Filter by Audible plan name (e.g. US Minerva)]' \
+                                '--is-vvab[Filter by VVAB - virtual voice audiobook status]:is-vvab:(true false)' \
+                                '--plan-name[Filter by Audible plan name - e.g. US Minerva]' \
                                 '--rating-better-than[Minimum rating]' \
                                 '--rating-worse-than[Maximum rating]' \
                                 '--longer-than[Minimum length in minutes]' \
                                 '--shorter-than[Maximum length in minutes]' \
-                                '--genre[Filter by genre or tag name (partial match, e.g. fantasy)]' \
+                                '--genre[Filter by genre or tag name - partial match, e.g. fantasy]' \
                                 '--sort[sort the books by this field, default is the order they were found in]:sort:(title releaseDate rating lengthMinutes language publisher updatedAt)' \
                                 '--order[the direction of --sort, default asc]:order:(asc desc)' \
                                 '1:command:(books-by-name)' \
@@ -255,18 +255,18 @@ _libex-core() {
                                 '--days[how many days back to look, default 30]:days:(30 60 90 120 240 365)' \
                                 '--category[only this category, by the id that releases categories prints. Without one the scan is a live sample, not the whole catalog]' \
                                 '--region[the Audible marketplace to ask, default us]:region:(us uk ca au de fr it es jp in br)' \
-                                '--language[Filter by language (exact match)]' \
-                                '--book-format[Filter by book format (e.g. unabridged)]' \
+                                '--language[Filter by language - exact match]' \
+                                '--book-format[Filter by book format - e.g. unabridged]' \
                                 '--explicit[Filter by explicit]:explicit:(true false)' \
                                 '--whisper-sync[Filter by Whispersync availability]:whisper-sync:(true false)' \
                                 '--has-pdf[Filter by PDF companion availability]:has-pdf:(true false)' \
-                                '--is-vvab[Filter by VVAB (virtual voice audiobook) status]:is-vvab:(true false)' \
-                                '--plan-name[Filter by Audible plan name (e.g. US Minerva)]' \
+                                '--is-vvab[Filter by VVAB - virtual voice audiobook status]:is-vvab:(true false)' \
+                                '--plan-name[Filter by Audible plan name - e.g. US Minerva]' \
                                 '--rating-better-than[Minimum rating]' \
                                 '--rating-worse-than[Maximum rating]' \
                                 '--longer-than[Minimum length in minutes]' \
                                 '--shorter-than[Maximum length in minutes]' \
-                                '--genre[Filter by genre or tag name (partial match, e.g. fantasy)]' \
+                                '--genre[Filter by genre or tag name - partial match, e.g. fantasy]' \
                                 '--sort[sort the books by this field, default is the order they were found in]:sort:(title releaseDate rating lengthMinutes language publisher updatedAt)' \
                                 '--order[the direction of --sort, default desc]:order:(asc desc)' \
                                 '1:command:(new)'
@@ -277,18 +277,18 @@ _libex-core() {
                                 '--days[how many days ahead to look, default 30]:days:(30 60 90 120 240 365)' \
                                 '--category[only this category, by the id that releases categories prints. Without one the scan is a live sample, not the whole catalog]' \
                                 '--region[the Audible marketplace to ask, default us]:region:(us uk ca au de fr it es jp in br)' \
-                                '--language[Filter by language (exact match)]' \
-                                '--book-format[Filter by book format (e.g. unabridged)]' \
+                                '--language[Filter by language - exact match]' \
+                                '--book-format[Filter by book format - e.g. unabridged]' \
                                 '--explicit[Filter by explicit]:explicit:(true false)' \
                                 '--whisper-sync[Filter by Whispersync availability]:whisper-sync:(true false)' \
                                 '--has-pdf[Filter by PDF companion availability]:has-pdf:(true false)' \
-                                '--is-vvab[Filter by VVAB (virtual voice audiobook) status]:is-vvab:(true false)' \
-                                '--plan-name[Filter by Audible plan name (e.g. US Minerva)]' \
+                                '--is-vvab[Filter by VVAB - virtual voice audiobook status]:is-vvab:(true false)' \
+                                '--plan-name[Filter by Audible plan name - e.g. US Minerva]' \
                                 '--rating-better-than[Minimum rating]' \
                                 '--rating-worse-than[Maximum rating]' \
                                 '--longer-than[Minimum length in minutes]' \
                                 '--shorter-than[Maximum length in minutes]' \
-                                '--genre[Filter by genre or tag name (partial match, e.g. fantasy)]' \
+                                '--genre[Filter by genre or tag name - partial match, e.g. fantasy]' \
                                 '--sort[sort the books by this field, default is the order they were found in]:sort:(title releaseDate rating lengthMinutes language publisher updatedAt)' \
                                 '--order[the direction of --sort, default asc]:order:(asc desc)' \
                                 '1:command:(coming-soon)'

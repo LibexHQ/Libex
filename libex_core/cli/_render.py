@@ -36,10 +36,12 @@ _SCRIPT_PATHS = {"bash": BASH_PATH, "zsh": ZSH_PATH, "fish": FISH_PATH}
 
 # Words a completion script may contain, and the looser set descriptions may
 # use. Neither allows a quote, a backslash, a dollar sign, a backtick, a
-# colon or a bracket, so no value needs quoting per shell, and one that would
-# is refused instead of being escaped.
+# colon, a bracket or a parenthesis, so no value needs quoting per shell and
+# nothing a shell could evaluate is emitted. A description's parentheses are
+# rewritten to a dash by _description; anything else outside the set is
+# refused instead of being escaped.
 _WORD = re.compile(r"[A-Za-z0-9_.-]+")
-_DESCRIPTION = re.compile(r"[A-Za-z0-9 ,.()/_-]+")
+_DESCRIPTION = re.compile(r"[A-Za-z0-9 ,./_-]+")
 
 _GENERATED = "generated from the command definitions, do not edit by hand"
 
@@ -173,6 +175,7 @@ def _word(value: str) -> str:
 
 
 def _description(value: str) -> str:
+    value = re.sub(r"\s*\(([^()]*)\)", r" - \1", value).strip()
     if not _DESCRIPTION.fullmatch(value):
         raise ValueError(f"description not safe to emit into a completion script: {value!r}")
     return value

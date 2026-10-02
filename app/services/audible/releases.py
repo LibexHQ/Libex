@@ -255,8 +255,7 @@ async def get_new_releases(
 
     if books:
         # Unsettled: the writer needs the tri-state flags None/True/False
-        # exactly as normalize_product produced them (see _asserted_bool
-        # in writer.py), so this runs before the settle below.
+        # exactly as normalize_product produced them (see libex_core.storage.write.support.asserted_bool), so this runs before the settle below.
         try:
             persist_books_background(books, region)
         except Exception as e:
@@ -333,8 +332,7 @@ async def get_coming_soon(
 
     if books:
         # Unsettled: the writer needs the tri-state flags None/True/False
-        # exactly as normalize_product produced them (see _asserted_bool
-        # in writer.py), so this runs before the settle below.
+        # exactly as normalize_product produced them (see libex_core.storage.write.support.asserted_bool), so this runs before the settle below.
         try:
             persist_books_background(books, region)
         except Exception as e:

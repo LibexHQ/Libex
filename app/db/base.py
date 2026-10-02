@@ -1,11 +1,10 @@
 """
 SQLAlchemy declarative base.
-All models inherit from this.
+The base itself lives in libex_core.storage so the hosted tables and the
+library's share one metadata.
 """
 
-# Third party
-from sqlalchemy.orm import DeclarativeBase
+# Local
+from libex_core.storage.base import Base
 
-
-class Base(DeclarativeBase):
-    pass
+__all__ = ["Base"]

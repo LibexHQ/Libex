@@ -16,6 +16,7 @@ what the AST walk does.
 
 # Standard library
 import ast
+import os
 import pkgutil
 import subprocess
 import sys
@@ -52,12 +53,25 @@ _FORBIDDEN_MODULES = (
 # imported half the forbidden list itself by the time this module loads, so
 # it is never used to test isolation, only to know what "found everything"
 # should look like.
-_EXPECTED_MODULES = {_libex_core_package.__name__} | {
+_STORAGE_PACKAGE = "libex_core.storage"
+
+
+def _is_storage(name: str) -> bool:
+    return name == _STORAGE_PACKAGE or name.startswith(_STORAGE_PACKAGE + ".")
+
+
+_ALL_MODULES = {_libex_core_package.__name__} | {
     info.name
     for info in pkgutil.walk_packages(
         _libex_core_package.__path__, prefix=_libex_core_package.__name__ + "."
     )
 }
+
+# Storage is the one opt-in part of the package and is allowed a database
+# library, so the base walk leaves it out and its own walk (section a3) holds
+# it to a narrower rule.
+_EXPECTED_MODULES = {name for name in _ALL_MODULES if not _is_storage(name)}
+_EXPECTED_STORAGE_MODULES = {name for name in _ALL_MODULES if _is_storage(name)}
 
 # Run inside a child process against libex_core's real __path__, with the
 # forbidden list interpolated in from the same constant this module asserts
@@ -71,6 +85,8 @@ import libex_core as package
 
 found = [package.__name__]
 for info in pkgutil.walk_packages(package.__path__, prefix=package.__name__ + "."):
+    if info.name == "libex_core.storage" or info.name.startswith("libex_core.storage."):
+        continue
     importlib.import_module(info.name)
     found.append(info.name)
 
@@ -142,6 +158,103 @@ def test_the_isolated_import_actually_walked_every_libex_core_module(tmp_path):
     found = set(modules_line[len("MODULES:"):].split(","))
 
     assert found == _EXPECTED_MODULES
+
+
+def test_the_base_walk_expectation_excludes_storage_and_keeps_the_rest():
+    assert _EXPECTED_STORAGE_MODULES
+    assert not (_EXPECTED_MODULES & _EXPECTED_STORAGE_MODULES)
+    assert "libex_core.cli.main" in _EXPECTED_MODULES
+    assert "libex_core.storage.models" not in _EXPECTED_MODULES
+
+
+# ============================================================
+# (a3) SUBPROCESS -- storage may load sqlalchemy and aiosqlite, nothing else
+# ============================================================
+
+# Storage is allowed exactly the two libraries its extra installs. Everything
+# the base walk forbids stays forbidden except sqlalchemy, and the migration
+# tool joins the list: the hosted app owns the Postgres chain, the library
+# only describes tables.
+_STORAGE_FORBIDDEN_MODULES = tuple(
+    name for name in _FORBIDDEN_MODULES if name != "sqlalchemy"
+) + ("alembic",)
+
+_STORAGE_CHILD_SCRIPT = """
+import importlib
+import pkgutil
+import sys
+
+import libex_core.storage as package
+
+found = [package.__name__]
+for info in pkgutil.walk_packages(package.__path__, prefix=package.__name__ + "."):
+    importlib.import_module(info.name)
+    found.append(info.name)
+
+# Importing the models is what loads the driver-facing pieces; touch the
+# aiosqlite dialect so its import is part of what is measured.
+import sqlalchemy.dialects.sqlite.aiosqlite  # noqa: F401
+
+forbidden = {forbidden!r}
+leaked = [name for name in forbidden if name in sys.modules]
+
+print("MODULES:" + ",".join(sorted(found)))
+print("LEAKED:" + ",".join(leaked))
+""".format(forbidden=_STORAGE_FORBIDDEN_MODULES)
+
+
+def _storage_child_env() -> dict:
+    """The repo root plus the one site-packages directory holding sqlalchemy
+    and aiosqlite, and nothing else, so the child resolves the two libraries
+    storage is allowed and still starts from an empty environment."""
+    import aiosqlite
+    import sqlalchemy
+
+    site = {
+        str(Path(module.__file__).resolve().parent.parent)
+        for module in (sqlalchemy, aiosqlite)
+    }
+    return {"PYTHONPATH": os.pathsep.join([str(REPO_ROOT), *sorted(site)])}
+
+
+def _run_storage_walk(tmp_path) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, "-c", _STORAGE_CHILD_SCRIPT],
+        cwd=tmp_path,
+        env=_storage_child_env(),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+def test_importing_every_storage_module_pulls_in_only_sqlalchemy_and_aiosqlite(tmp_path):
+    result = _run_storage_walk(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    leaked_line = next(
+        (line for line in result.stdout.splitlines() if line.startswith("LEAKED:")), ""
+    )
+    assert leaked_line[len("LEAKED:"):] == "", leaked_line
+
+
+def test_the_storage_walk_actually_walked_every_storage_module(tmp_path):
+    result = _run_storage_walk(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    modules_line = next(
+        (line for line in result.stdout.splitlines() if line.startswith("MODULES:")), ""
+    )
+    found = set(modules_line[len("MODULES:"):].split(","))
+
+    assert found
+    assert found == _EXPECTED_STORAGE_MODULES
+
+
+def test_the_storage_forbidden_list_still_names_what_matters():
+    assert {"asyncpg", "app", "fastapi", "starlette", "pydantic_settings",
+            "axiom_py", "pythonjsonlogger", "alembic"} <= set(_STORAGE_FORBIDDEN_MODULES)
+    assert "sqlalchemy" not in _STORAGE_FORBIDDEN_MODULES
 
 
 # ============================================================

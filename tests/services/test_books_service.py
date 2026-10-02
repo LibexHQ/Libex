@@ -634,9 +634,10 @@ def test_normalize_product_whisper_sync_is_none_for_a_podcast_missing_read_along
 @pytest.mark.parametrize("field", ["explicit", "hasPdf", "whisperSync"])
 def test_settle_flags_defaults_a_missing_flag_to_false(field):
     """_settle_flags is the last stop before a dict leaves the service layer
-    for anything but persistence, and AudiMeta's own contract for exactly
-    these three fields is `?? false` -- a None reaching a caller would be a
-    drop-in compatibility break, not merely an odd value."""
+    for anything but persistence, and Libex's published shape for exactly
+    these three fields is a plain bool (`?? false`) -- a None reaching a
+    caller would break that shape, which is additive-only because callers
+    cannot be warned of a change, not merely be an odd value."""
     settled = _settle_flags({field: None})
     assert settled[field] is False
 

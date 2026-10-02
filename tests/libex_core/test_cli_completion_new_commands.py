@@ -146,6 +146,14 @@ def _holds(condition, words):
     return True
 
 
+def _order(payload):
+    """A sort key for a payload. repr of a frozenset follows its iteration
+    order, which differs between two equal sets built in different orders and
+    between processes under hash randomisation, so it cannot be the key."""
+    flags, words = payload
+    return (sorted(flags), list(words))
+
+
 def _expected(path, node):
     """What a command line ending at this parser should be offered, from the
     parser alone."""
@@ -167,7 +175,7 @@ def _expected(path, node):
             offered.append((flags, tuple(action.choices or ())))
         elif action.choices:
             offered.append((frozenset(), tuple(action.choices)))
-    return sorted(offered, key=repr)
+    return sorted(offered, key=_order)
 
 
 _PATHS = [(path, node) for path, node in walk_parsers(_PARSER)]
@@ -177,7 +185,7 @@ _PATHS = [(path, node) for path, node in walk_parsers(_PARSER)]
 def test_the_rows_that_fire_after_a_command_are_exactly_that_commands_own(path, node):
     fired = sorted(
         (payload for condition, payload in _rows() if _holds(condition, list(path))),
-        key=repr,
+        key=_order,
     )
     assert fired == _expected(path, node), path
 

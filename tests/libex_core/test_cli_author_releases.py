@@ -190,9 +190,7 @@ def test_the_flags_come_from_the_librarys_own_filter_specs():
 # A REFUSED VALUE IS REFUSED BEFORE ANYTHING IS ASKED
 # ============================================================
 
-# Flags whose value argparse checks against a list of choices. argparse's own
-# message for those repeats the value that was typed; see
-# test_a_choice_flag_refusal_repeats_the_value below.
+# Flags whose value is checked against a list of choices.
 _CHOICE_REFUSALS = [
     ("--explicit", PLANTED),
     ("--whisper-sync", "yes"),
@@ -237,24 +235,97 @@ def test_a_value_the_tool_refuses_is_not_repeated(run, base, fn, default_order, 
         assert value not in result.err.replace("1000000", "").replace("0 to", "")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="argparse repeats the typed value when it refuses one of a list of choices",
-)
-@pytest.mark.parametrize("base, fn, default_order", SHAPED[:1])
-@pytest.mark.parametrize("flag, value", [(f, v) for f, v in _CHOICE_REFUSALS if v == PLANTED])
-def test_a_choice_flag_refusal_repeats_the_value(run, base, fn, default_order, flag, value):
-    result = run([*base, flag, value], AsyncMock())
+SECRET_URL = "https://user:hunter2@example.invalid/path?token=abc123"
+
+_CHOICE_ARGVS = [
+    pytest.param(["series", "books", SERIES, "--explicit"], id="boolean filter"),
+    pytest.param(["author", "books", AUTHOR, "--sort"], id="sort"),
+    pytest.param(["author", "books", AUTHOR, "--order"], id="order"),
+    pytest.param(["releases", "new", "--days"], id="days"),
+    pytest.param(["book", "get", "B0LOOK0001", "--region"], id="region"),
+    pytest.param(["releases", "categories", "--region"], id="region on categories"),
+]
+
+
+@pytest.mark.parametrize("value", [PLANTED, SECRET_URL])
+@pytest.mark.parametrize("argv", _CHOICE_ARGVS)
+def test_a_choice_flag_refusal_does_not_repeat_the_value(run, argv, value):
+    get = AsyncMock()
+    result = run([*argv, value], get)
+    assert result.code == 2 and result.stdout == b""
+    assert "invalid choice (choose from" in result.err
+    for part in (PLANTED, "hunter2", "abc123", "example.invalid"):
+        assert part not in result.err
+    get.assert_not_called()
+
+
+@pytest.mark.parametrize("argv, listed", [
+    (["releases", "new", "--days"], "30, 60, 90, 120, 240, 365"),
+    (["author", "books", AUTHOR, "--order"], "asc, desc"),
+    (["book", "get", "B0LOOK0001", "--region"], "us, uk, ca, au, de, fr, it, es, jp, in, br"),
+])
+def test_the_refusal_still_lists_what_is_allowed(run, argv, listed):
+    assert listed in run([*argv, "nope"], AsyncMock()).err
+
+
+@pytest.mark.parametrize("argv", [
+    [PLANTED],
+    ["book", PLANTED],
+    ["author", PLANTED],
+    ["releases", PLANTED],
+    ["completion", PLANTED],
+    ["completion", "--shell", PLANTED],
+], ids=lambda a: " ".join(a[:-1]) or "top")
+def test_a_command_or_shell_refusal_does_not_repeat_what_was_typed(run, argv):
+    result = run(argv, AsyncMock())
+    assert result.code == 2 and result.stdout == b""
     assert PLANTED not in result.err
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="argparse repeats the typed value when it refuses one of a list of choices",
-)
-def test_a_window_choice_refusal_repeats_the_value(run):
-    result = run(["releases", "new", "--days", PLANTED], AsyncMock())
+@pytest.mark.parametrize("argv", [
+    ["book", "get", "B0LOOK0001", PLANTED],
+    ["book", "get", "B0LOOK0001", "--" + PLANTED],
+    ["book", "get", "B0LOOK0001", "--region=us", SECRET_URL],
+    ["releases", "new", PLANTED, SECRET_URL],
+    ["author", "books", AUTHOR, f"--{PLANTED}=x"],
+])
+def test_leftover_arguments_are_refused_without_being_listed(run, argv):
+    get = AsyncMock()
+    result = run(argv, get)
+    assert result.code == 2 and result.stdout == b""
+    assert "unrecognized arguments" in result.err
+    for part in (PLANTED, "hunter2", "abc123"):
+        assert part not in result.err
+    get.assert_not_called()
+
+
+@pytest.mark.parametrize("argv", [
+    ["releases", "new", "--da", "30"],
+    ["releases", "new", "--d", "30"],
+    ["releases", "new", "--cat", "1"],
+    ["author", "books", AUTHOR, "--lon", "10"],
+    ["author", "books", AUTHOR, "--so", "title"],
+    ["book", "get", "B0LOOK0001", "--reg", "de"],
+    ["book", "get", "B0LOOK0001", "--reg=de"],
+    ["author", "books", AUTHOR, f"--s={PLANTED}"],
+])
+def test_a_flag_abbreviation_is_refused_and_the_exact_flag_is_not(run, argv):
+    get = AsyncMock()
+    result = run(argv, get)
+    assert result.code == 2 and result.stdout == b""
+    assert "unrecognized arguments" in result.err
     assert PLANTED not in result.err
+    get.assert_not_called()
+
+
+@pytest.mark.parametrize("argv", [
+    ["releases", "new", "--days", "30"],
+    ["releases", "new", "--days=30"],
+    ["author", "books", AUTHOR, "--longer-than", "10"],
+    ["book", "get", "B0LOOK0001", "--region", "de"],
+])
+def test_the_exact_flag_works_in_both_spellings(run, argv):
+    assert run(argv).code in (0, 3)
 
 
 # ============================================================

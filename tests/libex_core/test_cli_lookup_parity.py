@@ -7,74 +7,23 @@ be the same failure on both: a 404 is status 3 and a 503 is status 4.
 
 # Standard library
 import json
-from contextlib import ExitStack
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 # Third party
 import pytest
 
 # Local
-from app.db.session import get_session
-from app.main import app
 from libex_core.exceptions import AudibleAPIException, NotFoundException
 from tests.libex_core._cli_lookup_support import (
     CASE_IDS,
     CASES,
     EGRESS,
+    PLAIN_NOT_FOUND_CASES,
     install_session,
     library_json,
+    unclocked,
 )
 from tests.libex_core.test_lookup import _asins, _batch_get
-
-_HOSTED_MODULES = (
-    "app.services.audible.books",
-    "app.services.audible.search",
-    "app.services.audible.series",
-)
-# Everything the hosted path would otherwise reach a stored copy or the cache
-# through. Each answers "nothing", so what comes back is what Audible said.
-_NOTHING = (
-    ("app.services.audible.books.get_books_from_db", AsyncMock(return_value=[])),
-    ("app.services.audible.books.get_track_from_db", AsyncMock(return_value=None)),
-    ("app.services.audible.books.cache.get", AsyncMock(return_value=None)),
-    ("app.services.audible.books.cache.get_many", AsyncMock(return_value={})),
-    ("app.services.audible.series.get_series_from_db", AsyncMock(return_value=None)),
-    ("app.services.audible.series.cache.get", AsyncMock(return_value=None)),
-    ("app.services.audible.search.search_books_from_db", AsyncMock(return_value=[])),
-)
-_PERSISTERS = (
-    "app.services.audible.books.persist_books_background",
-    "app.services.audible.books.persist_track_background",
-    "app.services.audible.search.persist_books_background",
-    "app.services.audible.series.persist_series_background",
-    "app.services.audible.series.persist_cache_background",
-)
-
-
-@pytest.fixture
-def hosted(client):
-    """Asks a hosted route with Audible answered by `get`. Returns the
-    response. The `cache=false` the routes take keeps every read off the
-    cache, and the rest of what the route could consult is patched to say
-    nothing, so the body is only what `get` made of it."""
-
-    app.dependency_overrides[get_session] = lambda: AsyncMock()
-
-    def ask(get, path, params):
-        with ExitStack() as stack:
-            for module in _HOSTED_MODULES:
-                stack.enter_context(patch(f"{module}.audible_get", new=get))
-            for name in _PERSISTERS:
-                stack.enter_context(patch(name))
-            for name, stand_in in _NOTHING:
-                stack.enter_context(patch(name, new=stand_in))
-            return client.get(path, params={**params, "cache": "false"})
-
-    try:
-        yield ask
-    finally:
-        app.dependency_overrides.pop(get_session, None)
-
 
 @pytest.fixture
 def run(run_cli, monkeypatch):
@@ -100,8 +49,8 @@ def test_the_command_prints_what_the_hosted_route_returns(run, hosted, case, reg
     assert response.status_code == 200, response.text
 
     printed = json.loads(cli.out)
-    assert printed == response.json()
-    assert printed == library_json(case, region)
+    assert unclocked(printed) == unclocked(response.json())
+    assert unclocked(printed) == unclocked(library_json(case, region))
     assert printed, "two empty answers would agree"
 
 
@@ -152,8 +101,10 @@ def test_a_lower_case_bulk_asin_is_reported_as_the_caller_sent_it_on_both(run, h
 # ============================================================
 
 # The commands whose route answers an absence with a 404 and an outage with
-# a 503. A bulk request reports its misses in the body instead.
-_FAILING = [c for c in CASES if c.name != "book bulk"]
+# a 503. A bulk request reports its misses in the body instead, a by-name
+# lookup reads a 404 on its first page as an outage, and the release scans answer
+# 503; test_cli_author_releases.py pins each of those against its route.
+_FAILING = PLAIN_NOT_FOUND_CASES
 
 
 @pytest.mark.parametrize("case", _FAILING, ids=lambda c: c.name)

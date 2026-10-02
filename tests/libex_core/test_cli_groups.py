@@ -41,6 +41,13 @@ def _groups(parser):
 _PARSER = build_parser()
 _LEAVES = _leaves(_PARSER)
 _GROUPS = _groups(_PARSER)
+
+
+def _holders(word):
+    """The groups that hold a command named word, in the order the parser
+    lists them. A top-level command of that name is switched off in fish after
+    any of them, because the test for its name matches anywhere on the line."""
+    return " ".join(group for group, names in _GROUPS.items() if word in names)
 _MAN = _render.man_page(_PARSER)
 _SCRIPTS = {
     shell: _render.completion_script(_PARSER, shell) for shell in ("bash", "zsh", "fish")
@@ -64,13 +71,15 @@ def _roff(text):
 # THE WALK FOUND THE GROUPS
 # ============================================================
 
-def test_the_four_groups_and_their_commands_are_what_this_file_checks():
+def test_the_groups_and_their_commands_are_what_this_file_checks():
     """A walk that found no groups would pass everything below for free."""
     assert _GROUPS == {
         "book": ["get", "bulk", "chapters"],
-        "series": ["get", "books"],
+        "series": ["get", "books", "search"],
+        "author": ["get", "search", "books", "books-by-name"],
         "abs": ["search", "quick-search"],
         "narrator": ["books"],
+        "releases": ["new", "coming-soon", "categories"],
     }
 
 
@@ -273,7 +282,7 @@ def test_bash_offers_every_flag_of_every_request_command(path):
 @needs_bash
 def test_bash_still_offers_the_group_commands_and_not_flags_at_the_group_word():
     assert _bash_complete(["libex-core", "book", ""], 2) == ["get", "bulk", "chapters"]
-    assert _bash_complete(["libex-core", ""], 1)[-3:] == ["narrator", "completion", "config"]
+    assert _bash_complete(["libex-core", ""], 1)[-3:] == ["releases", "completion", "config"]
 
 
 @needs_bash
@@ -316,7 +325,11 @@ def test_fish_spec_holds_each_nested_commands_flags_and_region_choices(path):
 
 def test_the_top_level_request_commands_complete_their_flags_too():
     assert "'--region[" in _SCRIPTS["zsh"]
-    assert "-n '__fish_seen_subcommand_from search; and not __fish_seen_subcommand_from abs' -l region" in _SCRIPTS["fish"]
+    held = _holders("search")
+    assert (
+        f"-n '__fish_seen_subcommand_from search; and not __fish_seen_subcommand_from {held}' -l region"
+        in _SCRIPTS["fish"]
+    )
     assert "-l sort-by" in _SCRIPTS["fish"] and "'--sort-by[" in _SCRIPTS["zsh"]
 
 
@@ -340,10 +353,11 @@ def test_fish_top_level_search_flags_are_not_offered_after_abs(word):
     offer the top-level flags (--narrator, --limit...) that abs search does
     not take."""
     condition = (
-        f"-n '__fish_seen_subcommand_from {word}; and not __fish_seen_subcommand_from abs'"
+        f"-n '__fish_seen_subcommand_from {word}; and not __fish_seen_subcommand_from "
+        f"{_holders(word)}'"
     )
     top = [row for row in _fish_lines() if f"seen_subcommand_from {word};" in row
-           and "seen_subcommand_from abs;" not in row]
+           and not any(f"seen_subcommand_from {g};" in row for g in _GROUPS)]
     assert top, word
     for row in top:
         assert condition in row, row
@@ -368,4 +382,5 @@ def test_every_top_level_search_row_is_conditioned_on_abs_not_being_named():
     rows = [row for row in _fish_lines() if any(p in row for p in prefixes)]
     assert len(rows) == 13  # search: help, nine options, region; quick-search: help, region
     for row in rows:
-        assert "; and not __fish_seen_subcommand_from abs'" in row, row
+        word = "quick-search" if "from quick-search;" in row else "search"
+        assert f"; and not __fish_seen_subcommand_from {_holders(word)}'" in row, row

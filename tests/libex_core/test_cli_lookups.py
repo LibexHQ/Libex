@@ -28,9 +28,11 @@ from tests.libex_core._cli_lookup_support import (
     CASE_IDS,
     CASES,
     EGRESS,
+    PLAIN_NOT_FOUND_CASES,
     PLANTED,
     install_session,
     library_json,
+    unclocked,
 )
 from tests.libex_core.test_lookup import _asins, _batch_get
 
@@ -68,7 +70,7 @@ def test_each_command_prints_its_lookup_result_as_one_line_of_json(run, case):
     )
     assert result.out.endswith("\n") and result.out.count("\n") == 1
     printed = json.loads(result.out)
-    assert printed == library_json(case)
+    assert unclocked(printed) == unclocked(library_json(case))
     assert printed, "an empty result would equal an empty result"
 
 
@@ -108,7 +110,7 @@ def test_each_command_asks_the_region_it_was_given(run, case, region):
     result = run([*case.argv, "--region", region], get)
     assert result.code == 0, result.err
     assert {call.args[0] for call in get.await_args_list} == {region}
-    assert json.loads(result.out) == library_json(case, region)
+    assert unclocked(json.loads(result.out)) == unclocked(library_json(case, region))
 
 
 def test_each_command_asks_us_when_no_region_is_given(run, case):
@@ -147,7 +149,7 @@ def test_the_default_region_is_us_on_every_command():
                 seen += 1
                 assert action.default == "us", path
                 assert tuple(action.choices) == _args.REGIONS, path
-    assert seen == 10  # every command that makes a request
+    assert seen == 18  # every command that makes a request
 
 
 @pytest.mark.parametrize("region", ["xx", "US", "", "us ", "u"])
@@ -173,9 +175,11 @@ def _error_lines(result):
     ]
 
 
-# Commands whose "nothing there" answer is a failure; a bulk lookup reports
-# its misses in the body instead and is covered separately.
-_NOT_FOUND_CASES = [c for c in CASES if c.name != "book bulk"]
+# Commands whose "nothing there" answer is a 404 on the route and status 3 here.
+# A bulk lookup reports its misses in the body, a by-name lookup reads a 404
+# on its first page as an outage, and the release scans are a 503 on the route;
+# test_cli_author_releases.py covers each of those.
+_NOT_FOUND_CASES = PLAIN_NOT_FOUND_CASES
 
 
 @pytest.mark.parametrize("case", _NOT_FOUND_CASES, ids=lambda c: c.name)

@@ -81,7 +81,7 @@ Libex exists to be a permanent, community-owned alternative:
 
 - **MIT licensed** — no restrictions, fork it, build on it, use it however you want
 - **No usage restrictions** — works with any software, any workflow
-- **Drop-in replacement** — compatible with AudiMeta's API endpoints
+- **AudiMeta-derived shapes** — response objects follow AudiMeta's field names and structure, and Libex only ever adds to them
 - **Audible-first** — Audible is the source of truth; the local database is a fallback and a cache, not a crutch
 - **Persistent local library** — every book, author, and series ever requested is stored and queryable
 - **All regions** — full support for all Audible markets without language restrictions
@@ -356,6 +356,16 @@ what a task actually did.
 **ASIN validation:** All ASIN parameters are validated against Audible's 10-character alphanumeric format. Invalid ASINs return a 404 with a clear error message.
 
 **Region validation:** All region parameters are validated against supported Audible regions. Invalid regions return a 400 error.
+
+**Error codes:** Libex's own error bodies are `{error, status_code, code}`. `status_code` still says how the request failed; `code` says whose gap it is, so you can branch on it instead of parsing `error`:
+
+- `not_in_libex` — Libex's stored copy has no record. This is what the `/db` routes and `/book/sku` return when they find nothing.
+- `not_on_audible` — Audible has no record.
+- `withheld` — Audible answered, but Libex deliberately doesn't return it (a placeholder record, for example).
+- `upstream_unavailable` — Libex couldn't find out right now. Retry later.
+- `invalid_request` — the request itself is malformed.
+
+Status codes are unchanged. FastAPI's own request-validation errors (`422`) and unknown-route responses keep their `{detail}` body, and an unhandled server error (`500`) is still just `{error, status_code}`.
 
 **Local database:** Every successful Audible response is written to a persistent relational database. This powers the DB query endpoints and serves as a fallback when Audible is unavailable.
 
@@ -647,11 +657,24 @@ Each egress network is created only by its own stack's compose file, which is wh
 
 ## Migrating from AudiMeta
 
-Libex is API-compatible with AudiMeta. To migrate:
+Libex is not a drop-in replacement for AudiMeta. Its response objects started from AudiMeta's shapes and field names, and Libex has since grown past it, so some endpoints, parameters and fields differ. To migrate:
 
 1. Deploy Libex using the quick start above
 2. Update your base URL from your AudiMeta instance to your Libex instance
-3. That's it — no other changes required
+3. Check the differences below against the calls you depend on
+
+Differences you may hit:
+
+- Bulk `/book?asins=` returns `{books, notFound, placeholderRecords}` with `200`. AudiMeta returned a bare array, and `404` when it was empty.
+- `/book?asin=` (singular query parameter) is not supported and returns `422`.
+- `/podcast/{asin}` and `/ping` do not exist.
+- Libex's own errors (invalid ASIN, invalid region, not found, upstream failure) return `{error, status_code, code}`; see Error codes under API Behavior. A server error (`500`) returns `{error, status_code}` with no `code`. Request-validation errors (`422`) and unknown routes return FastAPI's `{detail}` instead. AudiMeta used `{message}` or `{errors: [...]}`.
+- An invalid ASIN returns `404` and an invalid region `400`. AudiMeta returned `422` for both.
+- An empty author or series list returns `404`. AudiMeta returned `[]` with `200`.
+- Author books ignores `page` and `limit`.
+- Some smaller differences in defaults and null handling.
+
+Within Libex, fields and shapes are only ever added to, never removed or changed, so a client that works today keeps working.
 
 ---
 
@@ -691,6 +714,27 @@ If you deployed Libex before the VPN requirement and the backup/backfill/refresh
 3. Backup moved out of `docker-compose.yml` into its own stack. Remove the old `libex-backup` container — `docker rm -f libex-backup`, or redeploy the API stack with `--remove-orphans` — then deploy `docker-compose.backup.yml` on its own.
 4. The old deployment's `libex-backup-spool` and `libex-backup-ca` volumes are safe to remove once the new backup stack is running, unless you'd put a certificate directly into the CA volume rather than mounting it from a host path.
 5. Relative paths (like `LOGS_PATH`) now resolve against each stack's own compose file rather than a shared project directory — if you relied on several stacks sharing one relative logs path, set the same absolute `LOGS_PATH` in each stack's `.env` instead.
+
+---
+
+## Roadmap
+
+None of this has shipped yet, and none of it comes with a date. It is where things are headed.
+
+**In progress for the hosted API**
+
+- Honest completeness flags on author-by-name lookups, so a partial result says it is partial.
+- Audible outages reported as `503` with a `Retry-After` header instead of `404`. This changes a status code, so it will ship as a major version.
+
+**Planned**
+
+- `libex-core`, an installable Python package (on PyPI) with the Audible client, books, chapters, series, search and authors, and a command-line tool.
+
+**Later**
+
+- Releases and categories in the package.
+- A documentation site.
+- Optional local storage.
 
 ---
 

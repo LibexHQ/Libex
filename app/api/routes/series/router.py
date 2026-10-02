@@ -1,6 +1,6 @@
 """
 Series router.
-Compatible with AudiMeta endpoint structure for drop-in replacement.
+Endpoint structure is derived from AudiMeta's, with known differences.
 """
 
 # Standard library
@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_session
 
 # Routes
+from app.api.routes.errors import ERROR_RESPONSES
 from app.api.routes.audible_outage import outage_as_not_found
 from app.api.routes.cache_param import CacheStandardParam, apply_cache_control
 from app.api.routes.facts_headers import FACTS_RESPONSE_HEADERS, stamp_facts_headers
@@ -38,7 +39,7 @@ router = APIRouter(prefix="/series", tags=["Series"])
 # ENDPOINTS
 # ============================================================
 
-@router.get("/search", response_model=list[SeriesResponse])
+@router.get("/search", response_model=list[SeriesResponse], responses=ERROR_RESPONSES)
 async def search(
     name: Annotated[str, Query(description="Series name to search for")],
     region: str = Depends(valid_region),
@@ -64,7 +65,7 @@ async def search_legacy(
     return [SeriesResponse(**s) for s in results]
 
 
-@router.get("/books/{asin}", response_model=list[BookResponse], responses={200: {"headers": FACTS_RESPONSE_HEADERS}})
+@router.get("/books/{asin}", response_model=list[BookResponse], responses={**ERROR_RESPONSES, 200: {"headers": FACTS_RESPONSE_HEADERS}})
 async def get_books_by_series(
     asin: Annotated[str, Depends(valid_asin("Series ASIN"))],
     response: Response,
@@ -79,7 +80,7 @@ async def get_books_by_series(
     Get all books in a series.
 
     Defaults to series position order; passing a sort field overrides it.
-    Returns full book objects matching AudiMeta's BookDto format.
+    Returns full book objects in the BookDto shape derived from AudiMeta's.
     """
     asins = await outage_as_not_found(get_series_books(asin, region, session, cache))
     if not asins:
@@ -126,7 +127,7 @@ async def get_books_by_series_primary(
     return [BookResponse(**b) for b in books]
 
 
-@router.get("/{asin}", response_model=SeriesResponse, responses={200: {"headers": FACTS_RESPONSE_HEADERS}})
+@router.get("/{asin}", response_model=SeriesResponse, responses={**ERROR_RESPONSES, 200: {"headers": FACTS_RESPONSE_HEADERS}})
 async def get_series_by_asin(
     asin: Annotated[str, Depends(valid_asin("Series ASIN"))],
     response: Response,

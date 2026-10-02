@@ -98,7 +98,7 @@ def test_generate_session_id_returns_string():
 
 
 def test_generate_session_id_has_correct_format():
-    """Session ID matches AudiMeta format: 000-XXXXXXX-XXXXXXX."""
+    """Session ID uses the 000-XXXXXXX-XXXXXXX format, as AudiMeta does."""
     session_id = _generate_session_id()
     parts = session_id.split("-")
     assert len(parts) == 3
@@ -166,14 +166,14 @@ def test_normalize_author_sets_region():
 
 
 def test_normalize_author_sets_regions_list():
-    """Normalized author includes regions list matching AudiMeta MinimalAuthorDto."""
+    """Normalized author includes regions list (AudiMeta MinimalAuthorDto shape)."""
     data = {"contributor": {"name": "Frank Herbert", "bio": None, "profile_image_url": None}}
     result = _normalize_author(data, "B000APF21M", "us")
     assert result["regions"] == ["us"]
 
 
 def test_normalize_author_includes_id_field():
-    """Normalized author includes id field matching AudiMeta MinimalAuthorDto."""
+    """Normalized author includes id field (AudiMeta MinimalAuthorDto shape)."""
     data = {"contributor": {"name": "Frank Herbert", "bio": None, "profile_image_url": None}}
     result = _normalize_author(data, "B000APF21M", "us")
     assert "id" in result
@@ -189,7 +189,7 @@ def test_normalize_author_includes_updated_at():
 
 
 def test_normalize_author_includes_genres():
-    """Normalized author includes empty genres list matching AudiMeta AuthorDto."""
+    """Normalized author includes empty genres list (AudiMeta AuthorDto shape)."""
     data = {"contributor": {"name": "Frank Herbert", "bio": None, "profile_image_url": None}}
     result = _normalize_author(data, "B000APF21M", "us")
     assert result["genres"] == []

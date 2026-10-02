@@ -5,7 +5,7 @@ All notable changes to Libex are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-Because Libex is a drop-in AudiMeta replacement, the wire format is a hard
+Libex's callers cannot be warned about a change, so the wire format is a hard
 contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
@@ -20,6 +20,25 @@ Bump class: MINOR (a new response header signal on an existing route; no field, 
 ### Fixed
 - **An Audible outage on the first page of a by-name lookup is now reported as an outage, not as an author with no books.** The route previously treated a failed first page as an empty catalogue. It still answers `404` on this route, with the upstream failure's message rather than a "no books found" one.
 - **The background seeder no longer marks an author as done after a walk that stopped on a temporary failure.** A failed page leaves the author to be retried next cycle, so the rest of their catalogue is not skipped for good. An author whose walk ended at Audible's result plateau or the page cap is still marked done, since a retry would stop in the same place.
+
+## [1.27.0]
+
+### Added
+- **Every error response now carries a `code` field saying why the request failed.** The body keeps `error` and `status_code` exactly as before and gains `code` beside them, so a client that reads only the old two fields sees no difference. Status codes are unchanged, including 404 for an invalid ASIN and 400 for an invalid region. The values are `not_in_libex` (Libex's own store has no record: the `/db` routes and `/book/sku`), `not_on_audible` (Audible has no record), `withheld` (Audible answered but Libex deliberately does not return it), `upstream_unavailable` (Libex could not find out right now; try again later) and `invalid_request` (a malformed ASIN, region or parameter).
+- **A single `GET /book/{asin}` for an ASIN Audible answered with only a placeholder record now returns `code: "withheld"`.** It is still a 404, as before. Until now it was indistinguishable from an ASIN Audible has never heard of.
+- **An Audible outage that surfaces as a 404 now returns `code: "upstream_unavailable"`.** Those 404s used to read the same as a genuine miss. The status is unchanged; the code is what tells them apart.
+- **The OpenAPI schema now documents the error body and its `code` values** on the routes that return it.
+
+### Fixed
+- **`GET /new-releases` and `GET /coming-soon` no longer turn a successful Audible scan into a 404 when Libex's own storage step fails.** If the scan found books but saving them or caching the result failed, the endpoints used to return nothing, which surfaced as "No new releases found" or "No upcoming releases found". They now log the failure and return the books that were found. A failed scan itself is still a 404, now with `code: "upstream_unavailable"`; a scan that genuinely finds nothing is still a 404 with `code: "not_on_audible"`.
+- **`GET /categories` no longer returns an empty or wrongly labelled result around a failed taxonomy fetch.** When Audible cannot be reached and nothing is stored for the region, the 404 now carries `code: "upstream_unavailable"`. When Audible answers but saving the taxonomy fails and nothing is stored, the freshly fetched categories are returned instead of a 404. Where categories are already stored, they are served as before.
+
+FastAPI's own validation (422) and unknown-route (`detail`) bodies are unchanged and carry no `code`. Neither does the body of an unhandled 500.
+
+## [1.26.1]
+
+### Changed
+- **Libex no longer describes itself as a drop-in AudiMeta replacement.** Its response shapes started from AudiMeta's and have since grown past them, so some endpoints, parameters and fields differ. The README now lists the known differences in its migration section. Nothing on the wire changed: no endpoint, parameter, field, status code or response shape moved, and the promise that fields and shapes are only ever added to, never removed or altered, stands exactly as before.
 
 ## [1.26.0]
 

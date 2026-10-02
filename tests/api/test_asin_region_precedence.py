@@ -14,10 +14,9 @@ itself.
 
 This file pins today's answer so a future reorder shows up as a failing
 test rather than a silent behaviour change. It is documented current
-behaviour, not a promise made to AudiMeta consumers: AudiMeta validates
-ASIN and region as a single object and reports both problems in one 422
-`errors` array, so it has no equivalent precedence for Libex to match either
-way.
+behaviour, not a promised contract. AudiMeta validates ASIN and region as
+a single object and reports both problems in one 422 `errors` array, so
+Libex's precedence is its own.
 
 Three cases per route, not one: pinning only the both-invalid case cannot
 tell a future reader whether a change moved the precedence or broke one of
@@ -56,6 +55,7 @@ async def test_both_invalid_the_asin_dependency_wins(async_client, label, url_te
     assert response.json() == {
         "error": f"Invalid ASIN format: {_BAD_ASIN}",
         "status_code": 404,
+        "code": "invalid_request",
     }
 
 
@@ -69,6 +69,7 @@ async def test_bad_asin_alone_still_404s(async_client, label, url_template, good
     assert response.json() == {
         "error": f"Invalid ASIN format: {_BAD_ASIN}",
         "status_code": 404,
+        "code": "invalid_request",
     }
 
 
@@ -82,6 +83,7 @@ async def test_bad_region_alone_still_400s(async_client, label, url_template, go
     assert response.json() == {
         "error": f"Invalid region: {_BAD_REGION}",
         "status_code": 400,
+        "code": "invalid_request",
     }
 
 
@@ -104,4 +106,5 @@ async def test_db_book_has_no_region_dependency_to_race_against(async_client):
     assert response.json() == {
         "error": f"Invalid ASIN format: {_BAD_ASIN}",
         "status_code": 404,
+        "code": "invalid_request",
     }

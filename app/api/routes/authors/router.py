@@ -1,6 +1,6 @@
 """
 Authors router.
-Compatible with AudiMeta endpoint structure for drop-in replacement.
+Endpoint structure is derived from AudiMeta's, with known differences.
 """
 
 # Standard library
@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_session
 
 # Routes
+from app.api.routes.errors import ERROR_RESPONSES
 from app.api.routes.audible_outage import outage_as_not_found
 from app.api.routes.authors.schemas import AuthorResponse
 from app.api.routes.cache_param import CacheAuthorBooksParam, CacheStandardParam, apply_cache_control
@@ -53,7 +54,7 @@ router = APIRouter(prefix="/author", tags=["Authors"])
 # ENDPOINTS
 # ============================================================
 
-@router.get("", response_model=list[AuthorResponse])
+@router.get("", response_model=list[AuthorResponse], responses=ERROR_RESPONSES)
 async def search(
     name: Annotated[str, Query(description="Author name to search for")],
     region: str = Depends(valid_region),
@@ -69,7 +70,7 @@ async def search(
 @router.get(
     "/books",
     response_model=list[BookResponse],
-    responses={200: {"headers": COMPLETE_WITH_REASON_RESPONSE_HEADERS}},
+    responses={200: {"headers": COMPLETE_WITH_REASON_RESPONSE_HEADERS}, **ERROR_RESPONSES},
 )
 async def get_books_by_author_name(
     name: Annotated[str, Query(description="Author name")],
@@ -83,7 +84,7 @@ async def get_books_by_author_name(
     """
     Get books by author name.
     Used when no author ASIN is available.
-    Returns full book objects matching AudiMeta's BookDto format.
+    Returns full book objects in the BookDto shape derived from AudiMeta's.
 
     Both phases record into one ResponseFacts. A walk that stopped before it
     could confirm the catalogue is whole, or a hydration that returned fewer
@@ -143,10 +144,10 @@ def _mark_completeness(
     and how long it may be held.
 
     Completeness travels in a header rather than the body, because the
-    response is a bare list[BookResponse] and that shape is a drop-in
-    compatibility contract -- adding a field would change it for every
-    consumer. A header is purely additive: a client that ignores it behaves
-    exactly as before.
+    response is a bare list[BookResponse] and that shape is one
+    existing clients already parse -- adding a field would change it for
+    every consumer. A header is purely additive: a client that ignores it
+    behaves exactly as before.
 
     The status stays 200. 206 was considered and rejected: HTTP already
     assigns it to range requests and requires Content-Range with it, so
@@ -208,7 +209,7 @@ def _mark_completeness(
 @router.get(
     "/books/{asin}",
     response_model=list[BookResponse],
-    responses={200: {"headers": COMPLETE_ONLY_RESPONSE_HEADERS}},
+    responses={**ERROR_RESPONSES, 200: {"headers": COMPLETE_ONLY_RESPONSE_HEADERS}},
 )
 async def get_books_by_author(
     asin: Annotated[str, Depends(valid_asin("Author ASIN"))],
@@ -225,7 +226,7 @@ async def get_books_by_author(
 ) -> list[BookResponse] | Response:
     """
     Get all books by author ASIN.
-    Returns full book objects matching AudiMeta's BookDto format.
+    Returns full book objects in the BookDto shape derived from AudiMeta's.
     """
     # One deadline for the whole request, computed here and shared by both
     # phases. Previously each phase was bounded separately -- discovery by its
@@ -347,7 +348,7 @@ async def get_books_by_author_primary(
     )
 
 
-@router.get("/{asin}", response_model=AuthorResponse, responses={200: {"headers": FACTS_RESPONSE_HEADERS}})
+@router.get("/{asin}", response_model=AuthorResponse, responses={**ERROR_RESPONSES, 200: {"headers": FACTS_RESPONSE_HEADERS}})
 async def get_author_by_asin(
     asin: Annotated[str, Depends(valid_asin("Author ASIN"))],
     response: Response,

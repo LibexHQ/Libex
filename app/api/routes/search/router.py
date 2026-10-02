@@ -1,6 +1,6 @@
 """
 Search router.
-Compatible with AudiMeta endpoint structure for drop-in replacement.
+Endpoint structure is derived from AudiMeta's, with known differences.
 """
 
 # Standard library
@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_session
 
 # Routes
+from app.api.routes.errors import ERROR_RESPONSES
 from app.api.routes.audible_outage import outage_as_not_found
 from app.api.routes.books.schemas import AbsBookResponse, AbsSearchResponse, AbsSeriesRef
 from app.api.routes.cache_param import CacheInertParam, CacheStandardParam, apply_cache_control
@@ -24,7 +25,7 @@ from app.services.audible.search import search, quick_search
 # Core
 from app.core.middleware import valid_region
 from libex_core.audible.client import validate_region
-from libex_core.exceptions import NotFoundException, RegionException
+from libex_core.exceptions import ErrorCode, NotFoundException, RegionException
 from libex_core.models import BookResponse
 
 router = APIRouter(tags=["Search"])
@@ -63,7 +64,7 @@ def _to_abs_book(book: dict) -> AbsBookResponse:
 # ENDPOINTS
 # ============================================================
 
-@router.get("/search", response_model=list[BookResponse])
+@router.get("/search", response_model=list[BookResponse], responses=ERROR_RESPONSES)
 async def search_books(
     response: Response,
     region: str = Depends(valid_region),
@@ -99,7 +100,7 @@ async def search_books(
     return [BookResponse(**b) for b in books]
 
 
-@router.get("/quick-search", response_model=list[BookResponse])
+@router.get("/quick-search", response_model=list[BookResponse], responses=ERROR_RESPONSES)
 async def quick_search_books(
     keywords: Annotated[str, Query(description="Search keywords")],
     response: Response,
@@ -122,7 +123,7 @@ async def quick_search_books(
     return [BookResponse(**b) for b in books]
 
 
-@router.get("/{region}/search", response_model=AbsSearchResponse)
+@router.get("/{region}/search", response_model=AbsSearchResponse, responses=ERROR_RESPONSES)
 async def abs_search(
     region: Annotated[str, Path(description="Audible region code")],
     title: Annotated[str | None, Query(description="Book title")] = None,
@@ -138,7 +139,7 @@ async def abs_search(
     try:
         validated_region = validate_region(region)
     except RegionException:
-        raise NotFoundException(f"Invalid region: {region}")
+        raise NotFoundException(f"Invalid region: {region}", code=ErrorCode.INVALID_REQUEST)
 
     effective_title = title or query
     not_found_message = "No books found"
@@ -151,7 +152,7 @@ async def abs_search(
     return AbsSearchResponse(matches=[_to_abs_book(b) for b in books])
 
 
-@router.get("/{region}/quick-search/search", response_model=AbsSearchResponse)
+@router.get("/{region}/quick-search/search", response_model=AbsSearchResponse, responses=ERROR_RESPONSES)
 async def abs_quick_search(
     region: Annotated[str, Path(description="Audible region code")],
     response: Response,
@@ -170,11 +171,11 @@ async def abs_quick_search(
     try:
         validated_region = validate_region(region)
     except RegionException:
-        raise NotFoundException(f"Invalid region: {region}")
+        raise NotFoundException(f"Invalid region: {region}", code=ErrorCode.INVALID_REQUEST)
 
     effective_keywords = keywords or query or title
     if not effective_keywords:
-        raise NotFoundException("No search terms provided")
+        raise NotFoundException("No search terms provided", code=ErrorCode.INVALID_REQUEST)
 
     not_found_message = "No books found"
     books = await outage_as_not_found(

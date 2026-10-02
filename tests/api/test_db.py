@@ -246,8 +246,8 @@ async def test_get_db_stats_no_region_response_carries_only_the_original_five_st
     Documents the actual current shape of a no-param call rather than the
     stronger claim that it is byte-for-byte identical to the pre-region
     response: StatsResponse now always includes a `region` key (null here),
-    which a caller ignoring unknown fields tolerates (additive, per the
-    drop-in compatibility rule) but which a caller pinning the exact key
+    which a caller ignoring unknown fields tolerates (additive-only
+    response changes) but which a caller pinning the exact key
     set of the old response would not have seen before this change.
     """
     with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock:
@@ -298,7 +298,7 @@ async def test_get_db_stats_invalid_region_returns_400_same_shape_as_categories(
     assert stats_response.status_code == 400
     assert stats_response.status_code == categories_response.status_code
     assert stats_response.json() == categories_response.json()
-    assert stats_response.json() == {"error": "Invalid region: zz", "status_code": 400}
+    assert stats_response.json() == {"error": "Invalid region: zz", "status_code": 400, "code": "invalid_request"}
 
 
 @pytest.mark.asyncio

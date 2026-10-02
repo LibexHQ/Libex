@@ -25,6 +25,7 @@ import pytest
 
 # Services
 from app.services.audible import releases
+from libex_core.exceptions import AudibleAPIException
 
 
 NOW = datetime.now(timezone.utc)
@@ -230,6 +231,68 @@ async def test_duplicate_page_wall_stops_walk():
         assert len(result) == 50  # deduped, not 100
         product_calls = [c for c in mock_get.await_args_list if "/products" in c.args[1]]
         assert len(product_calls) == 2  # page 0, then the repeat -> stop
+
+
+# ============================================================
+# WALK FAILURE RAISES; OUR OWN FAILURES DO NOT
+# ============================================================
+
+_WALK_FUNCS = [
+    pytest.param(releases.get_new_releases, -2, id="new_releases"),
+    pytest.param(releases.get_coming_soon, 2, id="coming_soon"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("func,offset", _WALK_FUNCS)
+async def test_walk_failure_raises_audible_api_exception_and_caches_nothing(func, offset):
+    """An Audible failure must not read as 'nothing released': it raises, and
+    nothing is persisted or cached."""
+    mock_set = AsyncMock()
+    persist = patch.object(releases, "persist_books_background")
+    with patch.object(releases.cache, "get", new=AsyncMock(return_value=None)), \
+         patch.object(releases.cache, "set", new=mock_set), \
+         persist as persisted, \
+         patch.object(releases, "audible_get", new=AsyncMock(side_effect=RuntimeError("boom"))):
+        with pytest.raises(AudibleAPIException) as exc:
+            await func("us", AsyncMock(), days=30, category="C1")
+
+    assert exc.value.status_code == 502
+    mock_set.assert_not_awaited()
+    persisted.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("func,offset", _WALK_FUNCS)
+async def test_persist_failure_still_returns_the_fetched_books(func, offset):
+    """The scan succeeded; a failure queueing the write-behind is ours, not
+    Audible's, and neither raises nor discards the answer. The cache is still
+    written."""
+    page = _page(_product("B1", offset))
+    mock_set = AsyncMock()
+    with patch.object(releases.cache, "get", new=AsyncMock(return_value=None)), \
+         patch.object(releases.cache, "set", new=mock_set), \
+         patch.object(releases, "persist_books_background", side_effect=RuntimeError("queue full")), \
+         patch.object(releases, "audible_get", new=_audible({"C1": [page]})):
+        result = await func("us", AsyncMock(), days=30, category="C1")
+
+    assert [b["asin"] for b in result] == ["B1"]
+    mock_set.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("func,offset", _WALK_FUNCS)
+async def test_cache_write_failure_still_returns_the_fetched_books(func, offset):
+    page = _page(_product("B1", offset))
+    persisted = patch.object(releases, "persist_books_background")
+    with patch.object(releases.cache, "get", new=AsyncMock(return_value=None)), \
+         patch.object(releases.cache, "set", new=AsyncMock(side_effect=RuntimeError("db down"))), \
+         persisted as persist, \
+         patch.object(releases, "audible_get", new=_audible({"C1": [page]})):
+        result = await func("us", AsyncMock(), days=30, category="C1")
+
+    assert [b["asin"] for b in result] == ["B1"]
+    persist.assert_called_once()
 
 
 # ============================================================
@@ -629,3 +692,47 @@ def test_genre_age_seconds_reads_a_naive_timestamp_as_utc():
     naive = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=600)
     age = releases._genre_age_seconds(naive)
     assert 590 < age < 700
+
+
+# ============================================================
+# _ensure_genres -- failure with nothing stored
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_ensure_genres_raises_on_fetch_failure_with_empty_store():
+    """No stored set to fall back on: an empty list would claim Audible has no
+    categories, so the failure is raised, with nothing written."""
+    with patch.object(releases, "_fetch_catalog_genres", new=AsyncMock(side_effect=RuntimeError("down"))), \
+         patch.object(releases, "get_stored_genres", new=AsyncMock(return_value=([], None))), \
+         patch.object(releases, "reconcile_genres", new=AsyncMock()) as recon, \
+         patch.object(releases, "upsert_genres", new=AsyncMock()) as upsert:
+        with pytest.raises(AudibleAPIException) as exc:
+            await releases._ensure_genres(AsyncMock(), "us")
+
+    assert exc.value.status_code == 502
+    recon.assert_not_awaited()
+    upsert.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ensure_genres_store_failure_with_empty_store_returns_fetched_nodes():
+    """Audible answered but the write failed: that is ours, not an outage, and
+    the freshly fetched nodes are the only honest answer."""
+    fresh = _nodes(50)
+    with patch.object(releases, "_fetch_catalog_genres", new=AsyncMock(return_value=fresh)), \
+         patch.object(releases, "get_stored_genres", new=AsyncMock(return_value=([], None))), \
+         patch.object(releases, "reconcile_genres", new=AsyncMock(side_effect=RuntimeError("db write"))):
+        result = await releases._ensure_genres(AsyncMock(), "us")
+
+    assert result == fresh
+
+
+@pytest.mark.asyncio
+async def test_ensure_genres_store_failure_with_stored_set_returns_stored():
+    stored = _nodes(100)
+    with patch.object(releases, "_fetch_catalog_genres", new=AsyncMock(return_value=_nodes(100))), \
+         patch.object(releases, "get_stored_genres", new=AsyncMock(return_value=(stored, None))), \
+         patch.object(releases, "reconcile_genres", new=AsyncMock(side_effect=RuntimeError("db write"))):
+        result = await releases._ensure_genres(AsyncMock(), "us")
+
+    assert result == stored

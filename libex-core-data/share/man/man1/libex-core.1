@@ -1,0 +1,72 @@
+.TH LIBEX\-CORE 1 "" "libex-core" "User Commands"
+.SH NAME
+libex\-core \- fetch Audible metadata
+.SH SYNOPSIS
+.B libex\-core
+[\fIOPTION\fR]... \fICOMMAND\fR [\fIARGUMENT\fR]...
+.SH DESCRIPTION
+Fetch Audible metadata. Results are written to standard output as JSON, and logs and errors go to standard error.
+.SH OPTIONS
+Options precede the command.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.TP
+\fB\-\-version\fR
+show the version number and exit
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+print errors only
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+log progress to standard error, repeat for debug detail and tracebacks
+.SH COMMANDS
+.SS completion
+\fBlibex\-core completion\fR \fIshell\fR
+.PP
+Print the completion script for the named shell to standard output. Source it, or install it where the shell looks for completions.
+.TP
+\fIshell\fR
+the shell to print the script for. One of bash, zsh, fish.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.SS config
+\fBlibex\-core config\fR
+.PP
+Print, as JSON, whether requests go through a proxy or leave directly, and the proxy host. The proxy URL itself is never printed. No request is made.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+show this help message and exit
+.SH ENVIRONMENT
+.TP
+\fBLIBEX_CORE_PROXY_URL\fR
+URL of the http or https proxy that every request goes through. It may carry credentials, so it is read from the environment and never accepted as an option. Empty means unset.
+.TP
+\fBLIBEX_CORE_ALLOW_DIRECT_EGRESS\fR
+Set to 1, true, yes or on to let requests leave on this machine's own address when no proxy is set. 0, false, no, off or empty keeps that refused. A proxy, when set, is always used.
+.SH EXIT STATUS
+.TP
+\fB0\fR
+The command succeeded.
+.TP
+\fB1\fR
+An unexpected error occurred. Rerun with \-vv for a traceback.
+.TP
+\fB2\fR
+The command line was not understood, or an argument was rejected.
+.TP
+\fB3\fR
+The requested item does not exist.
+.TP
+\fB4\fR
+Audible could not be reached or did not answer. Retrying later may succeed.
+.TP
+\fB5\fR
+The environment configuration is missing or invalid.
+.TP
+\fB130\fR
+Interrupted by SIGINT.
+.TP
+\fB141\fR
+The reader of standard output went away before the output was complete.

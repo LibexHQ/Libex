@@ -9,6 +9,7 @@ without extracting them, so a hostile or malformed name is inspected as a
 string rather than acted on.
 """
 
+import configparser
 import importlib.util
 import re
 import subprocess
@@ -52,7 +53,29 @@ _PACKAGE_FILES = {
 _PACKAGE_ALLOWED_SUFFIXES = {".py"}
 _PACKAGE_ALLOWED_NAMES = {"py.typed", "CHANGELOG.md"}
 
+# The man page and completions are installed under the environment prefix by
+# flit's external-data, which puts them under the wheel's .data/data/ tree.
+# Exactly these four names, never a directory glob: a fifth file in the data
+# directory, or a .data/scripts entry that an installer would execute or
+# place on PATH, must fail here rather than ship.
+_DATA_DIR = f"libex_core-{libex_core.__version__}.data"
+_DATA_SHARE_PATHS = (
+    "share/man/man1/libex-core.1",
+    "share/bash-completion/completions/libex-core",
+    "share/zsh/site-functions/_libex-core",
+    "share/fish/vendor_completions.d/libex-core.fish",
+)
+_WHEEL_DATA_ALLOWED = {f"{_DATA_DIR}/data/{path}" for path in _DATA_SHARE_PATHS}
+_SDIST_DATA_ALLOWED = {
+    f"{_SDIST_ROOT}/libex-core-data/{path}" for path in _DATA_SHARE_PATHS
+}
+_DATA_SCHEMES_FORBIDDEN = re.compile(r"\.data/(scripts|purelib|platlib|headers)(/|$)")
+_DATA_DIRECTORY_PATTERN = r"\.data(/|$)"
+
+_ENTRY_POINT = ("libex-core", "libex_core.cli.main:main")
+
 _WHEEL_METADATA_ALLOWED = {
+    f"{_DIST_INFO}/entry_points.txt",
     f"{_DIST_INFO}/WHEEL",
     f"{_DIST_INFO}/METADATA",
     f"{_DIST_INFO}/RECORD",
@@ -74,7 +97,7 @@ _FORBIDDEN_PATTERNS = (
     re.compile(r"(^|/)\.claude(/|$)"),
     re.compile(r"(^|/)CLAUDE"),
     re.compile(r"(^|/)LIBEX_"),
-    re.compile(r"\.data(/|$)"),
+    re.compile(_DATA_DIRECTORY_PATTERN),
 )
 
 _EXPECTED_REQUIRES_DIST = {
@@ -109,12 +132,20 @@ def _sdist_members(sdist):
         return tf.getmembers()
 
 
+def _data_names(names):
+    return {name for name in names if re.search(_DATA_DIRECTORY_PATTERN, name)}
+
+
 def _assert_safe_name(name):
     path = PurePosixPath(name)
     assert not path.is_absolute(), name
     assert ".." not in path.parts, name
     assert "\\" not in name, name
     for pattern in _FORBIDDEN_PATTERNS:
+        # The .data ban stands for every name except the four allowed
+        # verbatim; a near miss such as a fifth file beside them still trips it.
+        if pattern.pattern == _DATA_DIRECTORY_PATTERN and name in _WHEEL_DATA_ALLOWED:
+            continue
         assert not pattern.search(name), f"{name} matches {pattern.pattern}"
 
 
@@ -132,7 +163,7 @@ def test_wheel_contains_only_the_allowlist(built):
         if name.startswith("libex_core/"):
             _assert_package_member(name)
         else:
-            assert name in _WHEEL_METADATA_ALLOWED, name
+            assert name in _WHEEL_METADATA_ALLOWED | _WHEEL_DATA_ALLOWED, name
     assert {n for n in names if n.startswith("libex_core/")} == _PACKAGE_FILES
     assert _WHEEL_METADATA_ALLOWED <= set(names)
 
@@ -151,9 +182,10 @@ def test_sdist_contains_only_the_allowlist(built):
         if member.name.startswith(f"{_SDIST_ROOT}/libex_core/"):
             _assert_package_member(member.name.removeprefix(f"{_SDIST_ROOT}/"))
         else:
-            assert member.name in _SDIST_ROOT_ALLOWED, member.name
+            assert member.name in _SDIST_ROOT_ALLOWED | _SDIST_DATA_ALLOWED, member.name
     names = {m.name for m in members}
     assert _SDIST_ROOT_ALLOWED <= names
+    assert _SDIST_DATA_ALLOWED <= names
     assert {n.removeprefix(f"{_SDIST_ROOT}/") for n in names if "/libex_core/" in n} == _PACKAGE_FILES
 
 
@@ -190,3 +222,264 @@ def test_runtime_dependencies_are_exactly_the_two(built):
     with tarfile.open(sdist) as tf:
         pkg_info = message_from_bytes(tf.extractfile(f"{_SDIST_ROOT}/PKG-INFO").read())
     assert set(pkg_info.get_all("Requires-Dist")) == _EXPECTED_REQUIRES_DIST
+
+
+# ============================================================
+# DATA FILES -- the man page and completions, and nothing beside them
+# ============================================================
+
+def test_wheel_data_tree_is_exactly_the_four_files(built):
+    wheel, _ = built
+    assert _data_names(_wheel_names(wheel)) == _WHEEL_DATA_ALLOWED
+
+
+def test_wheel_installs_no_scripts_purelib_platlib_or_headers(built):
+    """A .data/scripts entry is copied onto PATH and made executable by an
+    installer, and purelib/platlib/headers write into the interpreter's own
+    trees. None of them is something this package asks for."""
+    wheel, _ = built
+    for name in _wheel_names(wheel):
+        assert not _DATA_SCHEMES_FORBIDDEN.search(name), name
+
+
+@pytest.mark.parametrize(
+    "scheme", ["scripts", "purelib", "platlib", "headers"]
+)
+def test_the_forbidden_scheme_pattern_catches_each_scheme(scheme):
+    """Proves the pattern above is not inert: it must match a planted name for
+    every scheme it claims to forbid, and must not match the allowed data."""
+    assert _DATA_SCHEMES_FORBIDDEN.search(f"{_DATA_DIR}/{scheme}/anything")
+    assert _DATA_SCHEMES_FORBIDDEN.search(f"{_DATA_DIR}/{scheme}")
+    assert not any(_DATA_SCHEMES_FORBIDDEN.search(n) for n in _WHEEL_DATA_ALLOWED)
+
+
+def test_the_data_ban_still_rejects_a_fifth_data_file():
+    """The .data pattern is kept, with the four names as the only exemption."""
+    for planted in (
+        f"{_DATA_DIR}/data/share/man/man1/other.1",
+        f"{_DATA_DIR}/data/share/libex-core-extra",
+        f"{_DATA_DIR}/scripts/libex-core",
+        f"{_DATA_DIR}/data/{_DATA_SHARE_PATHS[0]}.bak",
+    ):
+        with pytest.raises(AssertionError):
+            _assert_safe_name(planted)
+    for allowed in _WHEEL_DATA_ALLOWED:
+        _assert_safe_name(allowed)
+
+
+def test_the_data_files_in_the_wheel_and_sdist_are_the_committed_ones(built):
+    wheel, sdist = built
+    with zipfile.ZipFile(wheel) as zf, tarfile.open(sdist) as tf:
+        for relative in _DATA_SHARE_PATHS:
+            committed = (REPO_ROOT / "libex-core-data" / relative).read_bytes()
+            assert zf.read(f"{_DATA_DIR}/data/{relative}") == committed
+            member = tf.extractfile(f"{_SDIST_ROOT}/libex-core-data/{relative}")
+            assert member.read() == committed
+
+
+def test_sdist_data_tree_is_exactly_the_four_sources(built):
+    _, sdist = built
+    names = {m.name for m in _sdist_members(sdist)}
+    sources = {n for n in names if n.startswith(f"{_SDIST_ROOT}/libex-core-data")}
+    assert sources == _SDIST_DATA_ALLOWED
+
+
+# ============================================================
+# ENTRY POINT -- the one console script
+# ============================================================
+
+def test_entry_points_is_exactly_the_one_console_script(built):
+    wheel, _ = built
+    with zipfile.ZipFile(wheel) as zf:
+        text = zf.read(f"{_DIST_INFO}/entry_points.txt").decode()
+    parser = configparser.ConfigParser(delimiters=("=",))
+    parser.optionxform = str
+    parser.read_string(text)
+    assert parser.sections() == ["console_scripts"]
+    assert parser.items("console_scripts") == [_ENTRY_POINT]
+
+
+# ============================================================
+# MAN PAGE AND COMPLETIONS -- text the installer places for the shell to read
+# ============================================================
+
+# Requests that read a file, run a command, or write one. A man page that
+# carries any of them can disclose or execute something when it is rendered.
+_ROFF_FORBIDDEN_REQUESTS = frozenset(
+    {"so", "mso", "pso", "sy", "pi", "open", "opena", "write", "cf"}
+)
+_ROFF_REQUEST = re.compile(r"^[.'][ \t]*([A-Za-z]+)", re.MULTILINE)
+
+
+def _roff_forbidden(text):
+    return sorted(
+        {m.group(1) for m in _ROFF_REQUEST.finditer(text)} & _ROFF_FORBIDDEN_REQUESTS
+    )
+
+
+def _committed(relative):
+    return (REPO_ROOT / "libex-core-data" / relative).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("request_name", sorted(_ROFF_FORBIDDEN_REQUESTS))
+def test_the_roff_check_catches_each_forbidden_request(request_name):
+    for lead in (".", "'", ". ", ".\t"):
+        assert _roff_forbidden(f".TH X 1\n{lead}{request_name} /etc/passwd\n") == [
+            request_name
+        ]
+    assert _roff_forbidden(".SH NAME\nthe word so mid-line\n") == []
+
+
+def test_man_page_has_no_file_or_command_requests(built):
+    wheel, _ = built
+    with zipfile.ZipFile(wheel) as zf:
+        shipped = zf.read(f"{_DATA_DIR}/data/{_DATA_SHARE_PATHS[0]}").decode()
+    assert _roff_forbidden(shipped) == []
+    assert _roff_forbidden(_committed(_DATA_SHARE_PATHS[0])) == []
+    assert shipped.startswith(".TH "), "the man page check read something else"
+
+
+_COMPLETIONS = {
+    "bash": _DATA_SHARE_PATHS[1],
+    "zsh": _DATA_SHARE_PATHS[2],
+    "fish": _DATA_SHARE_PATHS[3],
+}
+
+# Variables a completion script may expand. The shell's own completion state
+# and the script's own locals; never HOME, PATH or anything the user set.
+_ALLOWED_VARIABLES = {
+    "bash": {"COMP_WORDS", "COMP_CWORD", "cur", "cmd", "ci", "i", "word", "candidates"},
+    "zsh": {"curcontext", "state", "line", "@"},
+    "fish": set(),
+}
+_VARIABLE_REFERENCE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*|[@*#?!$0-9-])")
+
+# What may begin a statement. Anything else is a command this package did not
+# mean the shell to run.
+_ALLOWED_COMMANDS = {
+    "bash": {
+        "local", "for", "do", "done", "case", "esac", "if", "then", "else", "fi",
+        "break", "complete", "COMPREPLY=()", "}",
+    },
+    "zsh": {
+        "local", "typeset", "case", "esac", "_arguments", "_describe",
+        "_libex-core", "}", "commands=(",
+    },
+}
+_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
+_CASE_ARM = re.compile(r"^\(?[A-Za-z0-9_\"*|-]*\)\s*")
+_ARITHMETIC = re.compile(r"\(\([^)]*\)\)")
+_FISH_CONDITION = re.compile(
+    r"-n ('__fish_seen_subcommand_from [a-z-]+'|__fish_use_subcommand)( |$)"
+)
+
+
+def _statement_heads(text):
+    heads = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Quoted continuation lines of a multi-line argument list.
+        if line[0] in "'{)(" or line == ";;":
+            continue
+        line = _ARITHMETIC.sub("((", line)
+        arm = _CASE_ARM.match(line)
+        if arm:
+            line = line[arm.end():]
+        for statement in re.split(r";|&&|\|\|", line):
+            statement = statement.strip()
+            if statement:
+                heads.append(statement.split()[0])
+    return heads
+
+
+def _completion_problems(shell, text):
+    problems = []
+    if "$(" in text:
+        problems.append("command substitution $(")
+    if "`" in text:
+        problems.append("backtick")
+    if re.search(r"\beval\b", text):
+        problems.append("eval")
+    for forbidden in ("|", "<(", ">(", "&>", " >", "<<"):
+        if forbidden in text:
+            problems.append(f"shell operator {forbidden!r}")
+    for name in _VARIABLE_REFERENCE.findall(text):
+        if name not in _ALLOWED_VARIABLES[shell]:
+            problems.append(f"expands ${name}")
+    for line in text.splitlines():
+        if "libex-core" in line and not line.lstrip().startswith("#"):
+            allowed = (
+                line == "complete -F _libex_core libex-core"
+                or line == "#compdef libex-core"
+                or line.startswith("complete -c libex-core ")
+                or "'libex-core command'" in line
+                or line.startswith("_libex-core()")
+                or line == '_libex-core "$@"'
+            )
+            if not allowed:
+                problems.append(f"calls back into libex-core: {line.strip()}")
+    if shell == "fish":
+        for line in text.splitlines():
+            if line and not line.startswith(("#", "complete -c libex-core ")):
+                problems.append(f"fish line that is not a complete registration: {line}")
+            if "(" in line:
+                problems.append(f"fish command substitution: {line}")
+            if " -n " in line and not _FISH_CONDITION.search(line):
+                problems.append(f"fish condition that is not a subcommand test: {line}")
+    else:
+        for head in _statement_heads(text):
+            if head in _ALLOWED_COMMANDS[shell] or _ASSIGNMENT.match(head):
+                continue
+            if shell == "bash" and head in {"_libex_core()", "[[", "((", "("}:
+                continue
+            if shell == "zsh" and head.startswith("_libex-core()"):
+                continue
+            problems.append(f"runs {head!r}")
+    return problems
+
+
+@pytest.mark.parametrize("shell", sorted(_COMPLETIONS))
+def test_committed_completions_hold_no_execution_or_environment_reads(shell):
+    text = _committed(_COMPLETIONS[shell])
+    assert text.strip(), "an empty file would pass every check below"
+    assert _completion_problems(shell, text) == []
+
+
+@pytest.mark.parametrize("shell", sorted(_COMPLETIONS))
+def test_shipped_completions_are_checked_too(built, shell):
+    wheel, _ = built
+    with zipfile.ZipFile(wheel) as zf:
+        text = zf.read(f"{_DATA_DIR}/data/{_COMPLETIONS[shell]}").decode()
+    assert _completion_problems(shell, text) == []
+
+
+@pytest.mark.parametrize(
+    ("shell", "planted", "expected"),
+    [
+        ("bash", 'x=$(libex-core config)', "command substitution"),
+        ("bash", "x=`id`", "backtick"),
+        ("bash", 'eval "$cur"', "eval"),
+        ("bash", 'echo "$HOME"', "expands $HOME"),
+        ("bash", 'echo "${PATH}"', "expands $PATH"),
+        ("bash", "libex-core config", "calls back into libex-core"),
+        ("bash", "curl http://example.invalid", "runs 'curl'"),
+        ("bash", "cat /etc/passwd | sh", "shell operator"),
+        ("zsh", 'x=$(python -c 1)', "command substitution"),
+        ("zsh", 'print "$AUDIBLE_PROXY_URL"', "expands $AUDIBLE_PROXY_URL"),
+        ("zsh", "libex-core config", "calls back into libex-core"),
+        ("zsh", "wget http://example.invalid", "runs 'wget'"),
+        ("fish", "complete -c libex-core -a '(libex-core config)'", "command substitution"),
+        ("fish", "complete -c libex-core -n 'test -f /etc/passwd' -a x", "fish condition"),
+        ("fish", "libex-core config", "calls back into libex-core"),
+        ("fish", "python3 -c 1", "fish line that is not a complete registration"),
+        ("fish", "set x $HOME", "expands $HOME"),
+    ],
+)
+def test_the_completion_check_catches_each_planted_form(shell, planted, expected):
+    """Each planted line is appended to the real committed script; a check that
+    passed it would be passing for a reason other than the script being safe."""
+    text = _committed(_COMPLETIONS[shell]) + "\n" + planted + "\n"
+    problems = _completion_problems(shell, text)
+    assert any(expected in problem for problem in problems), problems

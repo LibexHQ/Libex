@@ -21,8 +21,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Third party
+import pytest
+
 # Local
 import libex_core as _libex_core_package
+from tests.libex_core._cli_support import clean_env, run_python, walk_actions
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 LIBEX_CORE_DIR = REPO_ROOT / "libex_core"
@@ -232,3 +236,294 @@ def test_the_ast_walk_actually_checked_every_libex_core_file():
     checked = {path for path in LIBEX_CORE_DIR.rglob("*.py")}
 
     assert checked, "no .py files found under libex_core/"
+
+
+# ============================================================
+# (c) AST WALK -- the process environment is read in one place only
+# ============================================================
+
+ENVIRONMENT_MODULE = LIBEX_CORE_DIR / "cli" / "environment.py"
+
+_ENV_NAMES = frozenset(
+    {"environ", "environb", "getenv", "getenvb", "putenv", "unsetenv"}
+)
+_OS_MODULES = frozenset({"os", "posix", "nt"})
+
+
+def _is_dotenv(name: str) -> bool:
+    return name == "dotenv" or name.startswith("dotenv.")
+
+
+class _EnvironmentWalk(ast.NodeVisitor):
+    """Finds every way the source can reach the process environment.
+
+    `deferred` is true only inside a function body, which runs when called.
+    A decorator, a default value, an annotation, a class body and module
+    level all run when the module is imported, so a read there is an import-
+    time read. A lambda inherits whatever context it sits in, which is the
+    strict reading: a module-level lambda is not a function body.
+    """
+
+    def __init__(self) -> None:
+        self.reads: list[tuple[int, str, bool]] = []
+        self.dotenv: list[int] = []
+        self._deferred = False
+
+    def _read(self, node: ast.AST, what: str) -> None:
+        self.reads.append((node.lineno, what, self._deferred))
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        if node.attr in _ENV_NAMES:
+            self._read(node, f".{node.attr}")
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        module = node.module or ""
+        if node.level == 0 and module in _OS_MODULES:
+            for alias in node.names:
+                if alias.name in _ENV_NAMES or alias.name == "*":
+                    self._read(node, f"from {module} import {alias.name}")
+        if node.level == 0 and _is_dotenv(module):
+            self.dotenv.append(node.lineno)
+        self.generic_visit(node)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            if _is_dotenv(alias.name):
+                self.dotenv.append(node.lineno)
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        # getattr(os, "environ"), getattr(os, name), getattr(anything, "environ")
+        if isinstance(node.func, ast.Name) and node.func.id in {"getattr", "hasattr"}:
+            target = node.args[0] if node.args else None
+            name = node.args[1] if len(node.args) > 1 else None
+            on_os = isinstance(target, ast.Name) and target.id in _OS_MODULES
+            named = isinstance(name, ast.Constant) and name.value in _ENV_NAMES
+            if on_os or named:
+                self._read(node, f"{node.func.id}(...)")
+        self.generic_visit(node)
+
+    def _visit_function(self, node) -> None:
+        outer = self._deferred
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        self.visit(node.args)
+        if node.returns:
+            self.visit(node.returns)
+        self._deferred = True
+        for statement in node.body:
+            self.visit(statement)
+        self._deferred = outer
+
+    visit_FunctionDef = _visit_function
+    visit_AsyncFunctionDef = _visit_function
+
+
+def _environment_use(source: str, filename: str = "<planted>"):
+    walk = _EnvironmentWalk()
+    walk.visit(ast.parse(source, filename=filename))
+    return walk
+
+
+def _environment_violations(path: Path, source: str) -> list[str]:
+    walk = _environment_use(source, str(path))
+    inside = path == ENVIRONMENT_MODULE
+    problems = []
+    for lineno, what, deferred in walk.reads:
+        if not inside:
+            problems.append(f"{path.name}:{lineno} reads the environment ({what})")
+        elif not deferred:
+            problems.append(f"{path.name}:{lineno} reads the environment outside a function body ({what})")
+    if not inside:
+        problems.extend(f"{path.name}:{lineno} imports dotenv" for lineno in walk.dotenv)
+    return problems
+
+
+def test_only_environment_dot_py_reads_the_environment_and_only_in_functions():
+    problems = []
+    for path in sorted(LIBEX_CORE_DIR.rglob("*.py")):
+        problems.extend(_environment_violations(path, path.read_text()))
+    assert problems == []
+
+
+def test_environment_dot_py_reads_the_environment_at_all():
+    """A walk that found nothing in the one module allowed to read would
+    satisfy the test above for the wrong reason."""
+    walk = _environment_use(ENVIRONMENT_MODULE.read_text())
+    assert walk.reads, "no environment read found in cli/environment.py"
+    assert all(deferred for _, _, deferred in walk.reads)
+
+
+_ELSEWHERE = LIBEX_CORE_DIR / "cli" / "other.py"
+
+_FORMS_FLAGGED_ANYWHERE = {
+    "os.environ attribute": "import os\nx = os.environ['A']\n",
+    "os.environ.get": "import os\ndef f():\n    return os.environ.get('A')\n",
+    "os.environb": "import os\ndef f():\n    return os.environb\n",
+    "os.getenv": "import os\ndef f():\n    return os.getenv('A')\n",
+    "os.getenvb": "import os\ndef f():\n    return os.getenvb(b'A')\n",
+    "os.putenv": "import os\ndef f():\n    os.putenv('A', 'b')\n",
+    "os.unsetenv": "import os\ndef f():\n    os.unsetenv('A')\n",
+    "aliased os": "import os as o\ndef f():\n    return o.environ\n",
+    "from os import environ": "from os import environ\n",
+    "from os import getenv as g": "from os import getenv as g\n",
+    "from os import star": "from os import *\n",
+    "from posix import environ": "from posix import environ\n",
+    "getattr(os, 'environ')": "import os\ndef f():\n    return getattr(os, 'environ')\n",
+    "getattr(os, name)": "import os\ndef f(n):\n    return getattr(os, n)\n",
+    "getattr(x, 'getenv')": "def f(x):\n    return getattr(x, 'getenv')\n",
+    "hasattr(os, name)": "import os\ndef f(n):\n    return hasattr(os, n)\n",
+    "import dotenv": "import dotenv\n",
+    "import dotenv.main": "import dotenv.main\n",
+    "from dotenv import": "from dotenv import load_dotenv\n",
+    "from dotenv.main import": "from dotenv.main import find_dotenv\n",
+}
+
+
+@pytest.mark.parametrize("form", sorted(_FORMS_FLAGGED_ANYWHERE))
+def test_a_planted_env_read_outside_environment_dot_py_is_caught(form):
+    problems = _environment_violations(_ELSEWHERE, _FORMS_FLAGGED_ANYWHERE[form])
+    assert problems, form
+
+
+def test_ordinary_os_use_is_not_flagged():
+    source = "import os\nfrom os import path\nx = os.devnull\nos.open(x, 0)\n"
+    assert _environment_violations(_ELSEWHERE, source) == []
+
+
+_IN_ENVIRONMENT_MODULE_OK = "import os\ndef load():\n    return os.environ.get('A')\n"
+
+_IN_ENVIRONMENT_MODULE_BAD = {
+    "module level": "import os\nA = os.environ.get('A')\n",
+    "class body": "import os\nclass C:\n    A = os.environ.get('A')\n",
+    "default argument": "import os\ndef f(a=os.environ.get('A')):\n    return a\n",
+    "keyword-only default": "import os\ndef f(*, a=os.getenv('A')):\n    return a\n",
+    "decorator": "import os\n@os.environ.get\ndef f():\n    pass\n",
+    "annotation": "import os\ndef f(a: os.environ):\n    pass\n",
+    "module-level lambda": "import os\nf = lambda: os.environ.get('A')\n",
+    "module-level from-import": "from os import environ\n",
+    "module-level getattr": "import os\nA = getattr(os, 'environ')\n",
+}
+
+
+def test_a_read_inside_a_function_body_is_allowed_in_environment_dot_py():
+    assert _environment_violations(ENVIRONMENT_MODULE, _IN_ENVIRONMENT_MODULE_OK) == []
+
+
+@pytest.mark.parametrize("where", sorted(_IN_ENVIRONMENT_MODULE_BAD))
+def test_a_read_that_runs_at_import_is_caught_in_environment_dot_py(where):
+    assert _environment_violations(ENVIRONMENT_MODULE, _IN_ENVIRONMENT_MODULE_BAD[where]), where
+
+
+# ============================================================
+# (d) THE COMMAND LINE -- no proxy option, and importing it does nothing
+# ============================================================
+
+def test_no_option_or_command_in_the_parser_is_about_a_proxy():
+    """A proxy URL can carry credentials, which must come from the environment
+    and never from an argument a process listing would show."""
+    from libex_core.cli.parser import build_parser
+
+    actions = walk_actions(build_parser())
+    assert actions, "the walk found no actions"
+    for path, action in actions:
+        names = [action.dest, *action.option_strings, *(action.choices or ())]
+        if action.metavar:
+            names.append(str(action.metavar))
+        for name in names:
+            assert "proxy" not in str(name).lower(), (path, name)
+
+
+def test_the_proxy_check_catches_a_planted_option():
+    import argparse
+
+    from libex_core.cli.parser import build_parser
+
+    parser = build_parser()
+    container = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    container.choices["config"].add_argument("--proxy-url")
+    flagged = [
+        (path, action)
+        for path, action in walk_actions(parser)
+        if any("proxy" in str(n).lower() for n in [action.dest, *action.option_strings])
+    ]
+    assert flagged
+
+
+_IMPORT_EFFECTS_SCRIPT = """
+import importlib
+import logging
+import os
+import pkgutil
+import sys
+import threading
+
+# Every snapshot is taken before the first import of the package: one taken
+# after would already include whatever the import itself did.
+before_env = dict(os.environ)
+before_argv = list(sys.argv)
+before_threads = threading.active_count()
+before_logging = {
+    name: (list(logging.getLogger(name).handlers), logging.getLogger(name).level)
+    for name in ("", "libex")
+}
+
+import libex_core.cli as package
+
+names = [package.__name__] + [
+    info.name
+    for info in pkgutil.walk_packages(package.__path__, prefix=package.__name__ + ".")
+]
+for name in names:
+    importlib.import_module(name)
+
+after_logging = {
+    name: (list(logging.getLogger(name).handlers), logging.getLogger(name).level)
+    for name in ("", "libex")
+}
+print("MODULES:" + ",".join(sorted(names)))
+print("ENV:" + str(dict(os.environ) == before_env))
+print("ARGV:" + str(sys.argv == before_argv))
+print("THREADS:" + str(threading.active_count() == before_threads))
+print("LOGGING:" + str(after_logging == before_logging))
+"""
+
+
+def _line(stdout: str, prefix: str) -> str:
+    return next(line for line in stdout.splitlines() if line.startswith(prefix))[len(prefix):]
+
+
+def test_importing_every_cli_module_has_no_side_effects(tmp_path):
+    result = run_python(
+        ["-c", _IMPORT_EFFECTS_SCRIPT],
+        env=clean_env(),
+        cwd=tmp_path,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    stdout_lines = result.stdout.splitlines()
+    assert result.stderr == ""
+    # Nothing was printed beyond the five report lines.
+    assert len(stdout_lines) == 5, result.stdout
+    modules = _line(result.stdout, "MODULES:").split(",")
+    assert "libex_core.cli.main" in modules and "libex_core.cli.environment" in modules
+    assert len(modules) >= 8
+    assert _line(result.stdout, "ENV:") == "True"
+    assert _line(result.stdout, "ARGV:") == "True"
+    assert _line(result.stdout, "THREADS:") == "True"
+    assert _line(result.stdout, "LOGGING:") == "True"
+
+
+def test_importing_the_entry_point_module_runs_nothing(tmp_path):
+    """The module is the target of `python -m`; the guard under it is what
+    keeps an import from parsing sys.argv and exiting."""
+    result = run_python(
+        ["-c", "import libex_core.__main__ as m; print('imported', hasattr(m, 'main'))"],
+        env=clean_env(),
+        cwd=tmp_path,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "imported True\n"
+    assert result.stderr == ""

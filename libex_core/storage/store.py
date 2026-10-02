@@ -8,6 +8,11 @@ tables but no record of this package's migrations is somebody else's, and is
 refused outright: pointing the store at the hosted production database by
 mistake must not be able to alter it.
 
+The database settings come from the URL and from nowhere else. A Postgres
+connection is made with every parameter given outright, so the driver never
+falls back on `PG*` variables, `~/.pgpass`, a service file or `~/.postgresql`;
+a URL without a password connects without one.
+
 The URL is the caller's secret. It is never logged and never placed in an
 exception or in `repr`; every error raised here names what is wrong without
 quoting it, and a failure to connect drops the driver's own message, which is
@@ -28,6 +33,7 @@ import importlib.util
 import logging
 import os
 import sqlite3
+import ssl
 import stat
 import sys
 import time
@@ -68,6 +74,16 @@ _DRIVERS = {
 # all (it loads code by entry point), is refused rather than passed through.
 _POSTGRES_QUERY = frozenset({"ssl", "application_name"})
 _POSTGRES_PORT = 5432
+# The TLS modes a URL may name, and the order each tries encrypted then plain.
+# Named as libpq names them; `ssl` in the query is read the way `sslmode` is.
+_TLS_ATTEMPTS = {
+    "disable": (False,),
+    "allow": (False, True),
+    "prefer": (True, False),
+    "require": (True,),
+    "verify-ca": (True,),
+    "verify-full": (True,),
+}
 # How long preparing a new SQLite file keeps retrying while another connection
 # holds it, in seconds.
 WAL_RETRY_SECONDS = 10.0
@@ -144,7 +160,77 @@ def _validate(url: str | URL) -> URL:
         raise StoreConfigError("a Postgres URL carries an option this library does not accept")
     if any(not isinstance(value, str) for value in parsed.query.values()):
         raise StoreConfigError("a Postgres URL option was given more than once")
-    return parsed.set(port=parsed.port or _POSTGRES_PORT)
+    parsed = parsed.set(port=parsed.port or _POSTGRES_PORT)
+    _tls_mode(parsed)
+    return parsed
+
+
+def _tls_mode(url: URL) -> str:
+    mode = url.query.get("ssl")
+    if mode is None:
+        return "prefer"
+    mode = mode.lower().replace("_", "-")
+    if mode not in _TLS_ATTEMPTS:
+        raise StoreConfigError(
+            "the ssl option must be one of: " + ", ".join(sorted(_TLS_ATTEMPTS))
+        )
+    return mode
+
+
+def _tls_context(mode: str) -> ssl.SSLContext:
+    """The TLS context for a mode, built here so that the driver reads no
+    client certificate, key, root or revocation file from `PG*` variables or
+    `~/.postgresql`. Verifying modes trust the system store; the opportunistic
+    modes and `require` encrypt without verifying, as libpq does."""
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    if mode in ("verify-ca", "verify-full"):
+        context.load_default_certs()
+        context.check_hostname = mode == "verify-full"
+    else:
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    return context
+
+
+def _postgres_creator(url: URL):
+    """An async connection factory that hands asyncpg every parameter, so it
+    consults no environment variable and no password file: the password is
+    the URL's or empty, the session attribute, GSS library and Kerberos name
+    are fixed, and TLS negotiation is the standard one. SQLAlchemy ignores the
+    URL when a creator is given, so everything it carries is passed here."""
+    mode = _tls_mode(url)
+    attempts = _TLS_ATTEMPTS[mode]
+    settings = {"application_name": url.query["application_name"]} if "application_name" in url.query else None
+    gsslib = "sspi" if sys.platform == "win32" else "gssapi"
+
+    async def create():
+        import asyncpg
+
+        context = _tls_context(mode) if True in attempts else None
+        failure = None
+        for encrypted in attempts:
+            try:
+                return await asyncpg.connect(
+                    host=url.host,
+                    port=url.port,
+                    user=url.username,
+                    password=url.password if url.password is not None else "",
+                    database=url.database,
+                    ssl=context if encrypted else False,
+                    direct_tls=False,
+                    target_session_attrs="any",
+                    krbsrvname="postgres",
+                    gsslib=gsslib,
+                    server_settings=settings,
+                )
+            except (ConnectionError, asyncpg.InvalidAuthorizationSpecificationError) as exc:
+                # Only the opportunistic modes move on, and only when the
+                # server refused this way of connecting; the last error stands.
+                failure = exc
+        raise failure
+
+    return create
 
 
 def _is_memory(url: URL) -> bool:
@@ -205,8 +291,9 @@ class LocalStore:
                 "Postgres needs the 'postgres' extra (missing: asyncpg); "
                 "install it with: pip install 'libex-core[postgres]'"
             )
+        options = {"async_creator": _postgres_creator(self._url)} if self._postgres else {}
         self._engine: AsyncEngine = create_async_engine(
-            self._url, hide_parameters=True, echo=False
+            self._url, hide_parameters=True, echo=False, **options
         )
         if not self._postgres:
             # WAL is a property of the file, set by `upgrade()` once the file

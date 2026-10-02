@@ -149,7 +149,7 @@ async def persist_track(
     # does not hold cannot be written; the hosted service meets the same limit
     # and only logs the failure. A read that fails is not the same as the book
     # being absent: it is logged as a failed read and nothing is written.
-    held = await _read(store, "chapter book", lambda s: _book_held(s, asin), None)
+    held = await _read(store, "chapter book", lambda s: _book_held(s, asin, region), None)
     if held is None:
         return False
     if not held:
@@ -184,12 +184,17 @@ async def _read(
         return default
 
 
-async def _book_held(session: Any, asin: str) -> bool:
+async def _book_held(session: Any, asin: str, region: str) -> bool:
+    """Whether the book is stored for this marketplace. Rows are keyed by ASIN
+    alone, so a book stored for another marketplace is not this one's, and
+    chapters are never written onto it."""
     from sqlalchemy import select
 
     from libex_core.storage.models import Book
 
-    result = await session.execute(select(Book.asin).where(Book.asin == asin))
+    result = await session.execute(
+        select(Book.asin).where(Book.asin == asin, Book.region == region)
+    )
     return result.first() is not None
 
 
@@ -229,17 +234,20 @@ async def stored_books(
 
 
 async def serve_merged(
-    store: "LocalStore", live: list[dict[str, Any]], written: set[str]
+    store: "LocalStore", live: list[dict[str, Any]], written: set[str], region: str
 ) -> list[dict[str, Any]]:
     """
     The live books, in their order, with each one that was just written replaced
     by the row the store now holds, which is the merge of what it had and what
     Audible just said. A book that was not written, or that cannot be read
     back, is served as Audible sent it. Settled.
+
+    Rows are keyed by ASIN alone, so a row that another marketplace stored is
+    never served for this one: that ASIN is answered with the live copy.
     """
     if not written:
         return settle_flags_list(live)
-    stored = {b["asin"]: b for b in await stored_books(store, sorted(written))}
+    stored = {b["asin"]: b for b in await stored_books(store, sorted(written), region)}
     return settle_flags_list([
         stored[b["asin"]] if b.get("asin") in stored else b for b in live
     ])

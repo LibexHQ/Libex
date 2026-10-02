@@ -147,7 +147,7 @@ async def _search_books(
         return settle_flags_list(normalized)
     # Written unsettled, as the writer needs the tri-state flags.
     written, _ = await _store.persist_books(store, normalized, region)
-    return await _store.serve_merged(store, normalized, written)
+    return await _store.serve_merged(store, normalized, written, region)
 
 
 async def _quick_search_books(

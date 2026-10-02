@@ -295,7 +295,7 @@ async def hydrate_books(
         served = settle_flags_list(normalized)
         if store is not None and normalized:
             written, write_failed = await _store.persist_books(store, normalized, region)
-            served = await _store.serve_merged(store, normalized, written)
+            served = await _store.serve_merged(store, normalized, written, region)
 
         # What the failed chunks left uncovered is answered from the store
         # where it holds the ASIN, and only the rest is reported not fetched.
@@ -567,5 +567,5 @@ async def get_chapters(
                 return ChapterResponse(**stored)
         raise as_audible_failure(e, OUTAGE_MESSAGE) from e
     if store is not None and await _store.persist_track(store, canonical, result, region):
-        result = await _store.stored_track(store, canonical) or result
+        result = await _store.stored_track(store, canonical, region) or result
     return ChapterResponse(**result)

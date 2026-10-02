@@ -365,18 +365,41 @@ async def test_the_quick_search_stored_leg_is_limited_to_the_region(store):
         await quick_search(compound_get(outage_get), keywords, region="de", store=store)
 
 
-async def test_a_book_just_written_is_served_merged_whatever_region_its_row_holds(store):
-    # serve_merged reads back the rows this very call wrote, so it is not
-    # filtered by region: the row is the merge of what the store had and what
-    # Audible just said, and dropping it for its stored region would serve the
-    # unmerged live copy and lose the richer stored fields.
+async def test_a_book_another_marketplace_stored_is_not_served_for_this_one(store):
+    # Rows are keyed by ASIN alone, so the row a de fetch merges onto is the
+    # one the us fetch made; it is never served for de, the live answer is.
     await get_book(
         batch_get(**{ASIN: product(ASIN, subtitle="Kept")}), ASIN, region="us", store=store
     )
 
-    served = await get_book(batch_get(**{ASIN: product(ASIN)}), ASIN, region="de", store=store)
+    served = await get_book(
+        batch_get(**{ASIN: product(ASIN, subtitle="Aufgenommen")}),
+        ASIN, region="de", store=store,
+    )
 
-    assert served.subtitle == "Kept"
+    assert served.region == "de"
+    assert served.subtitle == "Aufgenommen"
+
+
+async def test_a_series_another_marketplace_stored_is_not_served_for_this_one(store):
+    await get_series(fake_get, SERIES, region="us", store=store)
+
+    served = await get_series(fake_get, SERIES, region="de", store=store)
+
+    assert served.region == "de"
+
+
+async def test_chapters_are_not_written_onto_another_marketplaces_book(store, caplog):
+    await get_book(batch_get(**{ASIN: product(ASIN)}), ASIN, region="us", store=store)
+    caplog.set_level(logging.INFO, logger="libex")
+
+    served = await get_chapters(chapter_get(CHAPTERS), ASIN, region="de", store=store)
+
+    assert len(served.chapters) == 2
+    assert [r for r in caplog.records
+            if r.getMessage() == "Chapters not stored: the book is not in the store"]
+    async with store.session() as session:
+        assert await read_books.get_track(session, ASIN) is None
 
 
 # Section: reads in chunks
@@ -408,7 +431,7 @@ async def test_a_failed_read_of_the_chapter_book_is_logged_and_writes_nothing(
 ):
     await get_book(batch_get(**{ASIN: product(ASIN)}), ASIN, store=store)
 
-    async def broken(session, asin):
+    async def broken(session, asin, region):
         raise RuntimeError("secret detail")
 
     monkeypatch.setattr(store_module, "_book_held", broken)

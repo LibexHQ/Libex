@@ -88,7 +88,7 @@ async def get_series(
                 return SeriesResponse(**stored)
         raise as_audible_failure(e, OUTAGE_MESSAGE) from e
     if store is not None and await _store.persist_series(store, normalized, region):
-        normalized = await _store.stored_series(store, canonical) or normalized
+        normalized = await _store.stored_series(store, canonical, region) or normalized
     return SeriesResponse(**normalized)
 
 

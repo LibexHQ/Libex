@@ -113,7 +113,7 @@ async def _scan(
     if store is None or not books:
         return settle_flags_list(books)
     written, _ = await _store.persist_books(store, books, region)
-    return await _store.serve_merged(store, books, written)
+    return await _store.serve_merged(store, books, written, region)
 
 
 async def new_releases(

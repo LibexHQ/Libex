@@ -10,6 +10,13 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [2.1.1]
+
+Only the text of the API description on `/docs` and `/redoc` changed. No endpoint, parameter, response shape, field or status code moved.
+
+### Changed
+- **The `/docs` and `/redoc` description folds its long sections.** Response headers (with "What a response actually tells you" inside it), Audible outages and Caching are now click-to-open sections, closed until opened. The one-line intro stays visible, and so does the migration notice when one is shown. The text of each section is unchanged.
+
 ## [2.1.0]
 
 Additive: new fields on the chapters and series responses, and one database migration. No existing field, status code or parameter changed.

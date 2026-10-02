@@ -14,6 +14,17 @@ Entries below that predate publication are historical record for whoever
 embeds this package, not evidence that anyone consumed a given version at the
 time it was cut.
 
+## [0.12.0]
+
+### Added
+- **The package can now rebuild Audible's new-releases and coming-soon lists, and fetch its genre taxonomy.** A new public module, `libex_core.audible.releases`, exposes `fetch_new_releases` and `fetch_coming_soon`, both `(get, region, days=30, category=None, *, now=None)`. Audible has no endpoint for either list, so each walks the catalog sorted by release date, newest first, and keeps the books inside the window: `fetch_new_releases` the last `days` (pre-orders skipped), returned newest first; `fetch_coming_soon` the next `days` (titles already out skipped), returned soonest first. Books with no parseable release date are skipped by the walk and never returned. `now` defaults to the current UTC time and can be passed to fix the window. The request callable is the first argument and the region is checked first (`RegionException` for one of the eleven it is not).
+- **Lower-level pieces of the same walk are public too.** `walk_catalog(get, region, category_id, collect, should_stop)` runs one catalog query with your own date gates and returns the accepted books deduped by ASIN. `new_releases_gates` and `coming_soon_gates` build the two gates for a window, `new_releases_sort_key` and `coming_soon_sort_key` give the orderings, and `release_datetime` reads a normalized book's `releaseDate` back into a datetime, or `None`. The constants `CATEGORIES_PATH`, `RELEASE_PAGE_SIZE` (50) and `GENRE_TAXONOMY_LEVELS` (5) are exported with them.
+- **`fetch_catalog_genres(get, region)` fetches one region's genre taxonomy, flattened, and `build_category_tree` shapes it.** `flatten_genre_nodes` turns the response into one row per node per parent (`genre_id`, `name`, `parent_id`, with `""` for a top-level node), following the tree to whatever depth Audible returned and deduping on node and parent. `build_category_tree(nodes, *, flat=False, depth=None)` returns those rows as a nested tree, or with `flat=True` as a flat list in which every node carries its ancestors root-first; both are sorted by name at every level, and `depth` limits the levels returned (1 is the top level only).
+- **`CategoryNode`, `CategoryAncestor` and `FlatCategoryNode` are now public in `libex_core.models`.** They are the shapes `build_category_tree` returns. Field names, optionality and defaults are unchanged from the hosted service's copies.
+- **A window is as complete as the walk can make it, and no more.** Audible caps every catalog query at roughly 535 results however it is filtered, and a parent category is not a superset of its children. Called with no `category`, the functions return a slice of the catalog, not the full window; reaching all of it means calling once per category id from the taxonomy and merging, which this module does not do for you.
+- **The books come back as normalized, not settled.** Their tri-state flags are left as Audible gave them, for the caller to store or settle. Nothing here reads or writes a cache or a database, and the module does not log.
+- **`fetch_new_releases` and `fetch_coming_soon` raise `ValueError` for `days` below 1, and `build_category_tree` for a `depth` below 1.** The messages repeat nothing the caller passed in. A `NotFoundException` or `AudibleAPIException` from the request callable propagates unchanged.
+
 ## [0.10.0]
 
 ### Added

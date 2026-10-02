@@ -25,9 +25,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 # Local
 from libex_core.storage.dialect import WRITE_OPTION
-from libex_core.storage.write.support import SQLITE
+from libex_core.storage.write.support import SQLITE, dialect_of
 
-_locks: "weakref.WeakKeyDictionary[object, asyncio.Lock]" = weakref.WeakKeyDictionary()
+# One lock per (engine, running event loop). An asyncio.Lock binds to the loop
+# it is first contended on and raises if used from another, so a lock shared
+# by an engine that outlives its loop (asyncio.run called twice, a test per
+# loop) would fail on the second. Keying by loop as well gives each loop its
+# own lock; loops do not share an event loop's tasks, and SQLite's own file
+# lock, taken by BEGIN IMMEDIATE, still orders writers from different loops
+# or threads. Both levels are weak, so neither an engine nor a finished loop
+# is kept alive by its lock.
+_locks: "weakref.WeakKeyDictionary[object, weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]]" = (
+    weakref.WeakKeyDictionary()
+)
 
 
 def _engine_of(session: AsyncSession):
@@ -48,14 +58,18 @@ async def exclusive_write(session: AsyncSession):
     into a write transaction after the fact, and the session raises when asked
     to.
     """
-    if session.get_bind().dialect.name != SQLITE:
+    if dialect_of(session) != SQLITE:
         yield
         return
 
     engine = _engine_of(session)
-    lock = _locks.get(engine)
+    loop = asyncio.get_running_loop()
+    by_loop = _locks.get(engine)
+    if by_loop is None:
+        by_loop = _locks[engine] = weakref.WeakKeyDictionary()
+    lock = by_loop.get(loop)
     if lock is None:
-        lock = _locks[engine] = asyncio.Lock()
+        lock = by_loop[loop] = asyncio.Lock()
     async with lock:
         await session.connection(execution_options={WRITE_OPTION: True})
         yield

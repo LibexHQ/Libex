@@ -4,8 +4,10 @@ run it.
 
 Postgres is the hosted backend, and the statements the hosted writer emits must
 not move by a byte. SQLite is the embedded one and lacks a few of the things
-those statements lean on: a Unicode `lower`, `btrim`, jsonb's containment and
-concatenation operators, and an enforced foreign key. This module supplies what
+those statements lean on: a Unicode `lower`, jsonb's containment and
+concatenation operators, and an enforced foreign key. (Postgres's `btrim` is
+not among what is supplied: SQLite's own `trim` takes the same set argument,
+and the merge builders spell it that way on SQLite.) This module supplies what
 SQLite is missing, as functions registered on every connection, and
 `DialectVariant`, which lets one expression carry a Postgres spelling and a
 SQLite spelling and chooses between them when the statement is compiled.
@@ -103,6 +105,12 @@ def _reject_constant(name: str) -> None:
     raise ValueError(f"{name} is not valid JSON")
 
 
+# How deep a stored JSON document may nest before it is refused. Far beyond
+# anything the extras builder lets in (32), far inside the interpreter's own
+# recursion limit, so a pathological document fails with a clear error.
+MAX_JSON_DEPTH = 200
+
+
 def _load(text: str | bytes | int | float) -> Any:
     # SQLite gives a JSON column numeric affinity, so a stored document that is
     # a bare number comes back as a number, not as the text it was written as.
@@ -110,10 +118,29 @@ def _load(text: str | bytes | int | float) -> Any:
         text = str(text)
     # Floats load as Decimal so a number compares and re-serialises with the
     # digits it arrived with, as jsonb's numeric does.
-    return json.loads(text, parse_float=Decimal, parse_constant=_reject_constant)
+    try:
+        document = json.loads(text, parse_float=Decimal, parse_constant=_reject_constant)
+    except RecursionError:
+        raise ValueError(f"JSON document nests deeper than {MAX_JSON_DEPTH} levels") from None
+    _check_depth(document)
+    return document
+
+
+def _check_depth(document: Any) -> None:
+    # Iterative, so the check itself cannot hit the limit it guards.
+    stack = [(document, 1)]
+    while stack:
+        value, depth = stack.pop()
+        if isinstance(value, (dict, list)):
+            if depth > MAX_JSON_DEPTH:
+                raise ValueError(f"JSON document nests deeper than {MAX_JSON_DEPTH} levels")
+            children = value.values() if isinstance(value, dict) else value
+            stack.extend((child, depth + 1) for child in children)
 
 
 def _dump(value: Any) -> str:
+    # Callers pass only documents _load has already depth-checked, and a merge
+    # of two of them is at most as deep as the deeper one.
     if isinstance(value, dict):
         return "{" + ",".join(f"{json.dumps(k)}:{_dump(v)}" for k, v in value.items()) + "}"
     if isinstance(value, list):
@@ -184,8 +211,10 @@ def sqlite_json_merge(existing: str | bytes | None, new: str | bytes | None) -> 
     """jsonb's `existing || new` over JSON text; NULL in, NULL out.
 
     Two objects merge key by key with new winning a clash and nothing below the
-    top level combined, which is jsonb's behaviour and the shallow merge the
-    writer's containment guard exists to make safe. Anything else follows the
+    top level combined. That is jsonb's behaviour, kept exactly so both
+    backends give the same row, including the shallow-merge hole recorded in
+    `libex_core.storage.merge.extras_union`; the containment guard there
+    narrows it and does not close it. Anything else follows the
     same rules jsonb applies: an empty object or array yields the other side,
     and otherwise both sides are taken as arrays (a lone value as a one-element
     array) and joined.

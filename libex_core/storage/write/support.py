@@ -16,6 +16,7 @@ logger = logging.getLogger("libex")
 
 POSTGRESQL = "postgresql"
 SQLITE = "sqlite"
+SUPPORTED_DIALECTS = (POSTGRESQL, SQLITE)
 
 
 def utc_now() -> datetime:
@@ -28,14 +29,27 @@ def dialect_of(session: AsyncSession) -> str:
     return session.get_bind().dialect.name
 
 
+def check_dialect(dialect: str) -> str:
+    """Returns the dialect name if the writer has SQL for it, ValueError if
+    not. The writer has two spellings and no third; a name it does not know
+    must not quietly fall through to the Postgres one."""
+    if dialect not in SUPPORTED_DIALECTS:
+        raise ValueError(
+            f"unsupported dialect {dialect!r}; the writer supports "
+            + " and ".join(repr(name) for name in SUPPORTED_DIALECTS)
+        )
+    return dialect
+
+
 def insert_for(dialect: str):
     """The INSERT construct that carries ON CONFLICT for a dialect.
 
     SQLite's has the same on_conflict_do_update / on_conflict_do_nothing /
     excluded surface Postgres's does, and renders the same ON CONFLICT clause
-    (SQLite 3.24 or newer). Anything that is not SQLite gets the Postgres
-    construct, which is what the hosted writer has always used.
+    (SQLite 3.24 or newer). Postgres gets the construct the hosted writer has
+    always used. Any other dialect raises ValueError.
     """
+    check_dialect(dialect)
     return sqlite.insert if dialect == SQLITE else postgresql.insert
 
 
@@ -45,9 +59,9 @@ def conflict_on_constraint(dialect: str, name: str, columns: list[str]) -> dict:
 
     Postgres names the constraint (ON CONFLICT ON CONSTRAINT name). SQLite has
     no such form and takes the constraint's columns instead, which resolves to
-    the same unique index.
+    the same unique index. Any other dialect raises ValueError.
     """
-    if dialect == SQLITE:
+    if check_dialect(dialect) == SQLITE:
         return {"index_elements": columns}
     return {"constraint": name}
 

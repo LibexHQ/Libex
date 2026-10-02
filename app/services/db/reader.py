@@ -233,8 +233,8 @@ def _book_to_dict(book: Book, series_positions: dict[str, str | None]) -> dict[s
     # withheld that kind, over the same span of fetches audibleExtras above
     # it covers. That is what lets the two be read together, and it is also
     # why neither of them answers "what is missing from the blob right now".
-    # The extras_withheld merge in writer.py sets out why the column has that
-    # shape.
+    # The extras_withheld merge in libex_core.storage.write.statements sets out
+    # why the column has that shape.
     if book.extras_withheld:
         result["extrasWithheld"] = book.extras_withheld
     return result
@@ -868,8 +868,8 @@ async def get_author_from_db(session: AsyncSession, asin: str, region: str) -> d
     content are selected independently of each other:
 
     - id, name and region come from the oldest row. This is a stability choice,
-      not a content comparison — oldest-id is also the convention writer.py's
-      upsert_author uses to converge concurrent writers, but only for its own,
+      not a content comparison — oldest-id is also the convention
+      libex_core.storage.write.entities.upsert_author uses to converge concurrent writers, but only for its own,
       narrower case: same-name rows still missing an asin, racing to claim
       one. That path never runs for what this function merges — a non-null
       asin under a *different* name spelling — which upsert_author's exact
@@ -878,13 +878,13 @@ async def get_author_from_db(session: AsyncSession, asin: str, region: str) -> d
       duplicates exist; the oldest-id choice here is this function's own
       answer to it, not a convergence the writer already provides.
     - description is the longest trimmed value across every candidate, in the
-      spirit of _longer_wins (writer.py) — a whitespace-only value measures as
-      absent — independently of which row supplies identity above. Not a
-      literal match: _longer_wins trims only the incoming side and Postgres
-      btrim strips spaces only, while this trims every candidate and Python's
-      .strip() strips all Unicode whitespace. Neither difference can make the
-      result poorer, only occasionally more willing to treat a candidate as
-      absent.
+      spirit of libex_core.storage.merge.longer_wins — a whitespace-only value
+      measures as absent — independently of which row supplies identity above.
+      Not a literal match: longer_wins trims only the incoming side, and its
+      trim strips the Unicode White_Space set (BLANK_CHARS) while Python's
+      .strip() strips its own whitespace definition, and this trims every
+      candidate. Neither difference can make the result poorer, only
+      occasionally more willing to treat a candidate as absent.
     - image is the first candidate, in id order, with a real, non-blank value
       — using the same absent test as description (a whitespace-only or empty
       image is exactly as absent as a whitespace-only description) but not
@@ -930,7 +930,7 @@ async def get_author_from_db(session: AsyncSession, asin: str, region: str) -> d
 
         def _measured_length(value: str | None) -> int:
             """Trimmed length, floored to -1 for absent — same idea as
-            _longer_wins' absent-sentinel, applied to whichever text is
+            merge.longer_wins' absent-sentinel, applied to whichever text is
             being ranked (description or image)."""
             stripped = value.strip() if value else ""
             return len(stripped) if stripped else -1

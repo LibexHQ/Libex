@@ -19,7 +19,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # Core
 from libex_core.asin import is_valid_asin
 from libex_core.audible.client import as_audible_failure, upstream_status_of
-from libex_core.audible.series import fetch_series, fetch_series_book_asins, normalize_series
+from libex_core.audible.series import (
+    fetch_series,
+    fetch_series_book_asins,
+    fetch_series_search_asins,
+    normalize_series,
+)
 from libex_core.exceptions import AudibleAPIException, NotFoundException
 from app.core.logging import get_logger
 from app.core.response_headers import ResponseFacts, SOURCE_AUDIBLE, SOURCE_CACHE, SOURCE_DB, record_source
@@ -210,27 +215,10 @@ async def search_series(
     try:
         start = time.monotonic()
 
-        # Step 1: Search Audible products by title
-        path = "/1.0/catalog/products"
-        params = {
-            "title": name,
-            "response_groups": "relationships",
-            "num_results": 10,
-        }
-        data = await audible_get(region, path, params)
-        products = data.get("products", [])
-
-        # Step 2: Extract unique series ASINs from relationships
-        seen_asins: set[str] = set()
-        series_asins: list[str] = []
-
-        for product in products:
-            for rel in product.get("relationships", []):
-                if rel.get("relationship_type") == "series":
-                    asin = rel.get("asin")
-                    if asin and asin not in seen_asins:
-                        seen_asins.add(asin)
-                        series_asins.append(asin)
+        # Steps 1 and 2: search Audible by title and collect the unique
+        # series ASINs off the matching products' relationships
+        series_asins = await fetch_series_search_asins(audible_get, name, region)
+        seen_asins: set[str] = set(series_asins)
 
         # Step 3: Fetch full series metadata
         results = []

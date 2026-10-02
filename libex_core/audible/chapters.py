@@ -52,22 +52,66 @@ def has_chapter_info(data: Any) -> bool:
     return bool(data.get("content_metadata", {}).get("chapter_info"))
 
 
+# Keys normalize_chapters reproduces as first-class fields; everything else on
+# the same object goes through verbatim in audibleExtras, so a key Audible
+# adds later surfaces without a code change.
+_CHAPTER_INFO_CONSUMED = frozenset({
+    "brandIntroDurationMs", "brandOutroDurationMs", "is_accurate",
+    "runtime_length_ms", "runtime_length_sec", "chapters",
+})
+_CHAPTER_CONSUMED = frozenset({
+    "length_ms", "start_offset_ms", "start_offset_sec", "title", "chapters",
+})
+_CONTENT_METADATA_CONSUMED = frozenset({"chapter_info", "content_reference", "content_url"})
+
+# The response's own top-level keys other than content_metadata. response_groups
+# is the one recorded drop: Audible echoes back the groups that were requested,
+# which is the request's own constant and carries nothing about the book. Any
+# other top-level key rides in audibleExtras.
+_RESPONSE_NOISE = frozenset({"response_groups"})
+
+
+def _normalize_chapter(c: dict) -> dict[str, Any]:
+    """
+    One chapter in the response shape. Sub-chapters, which Audible nests under
+    a chapter's own chapters key, are normalized the same way and carried as
+    chapters on the chapter; keys this does not reproduce ride in the
+    chapter's audibleExtras. Both appear only when Audible sent them, so a
+    chapter with neither is byte-identical to one from before they were kept.
+    """
+    chapter: dict[str, Any] = {
+        "lengthMs": c.get("length_ms", 0),
+        "startOffsetMs": c.get("start_offset_ms", 0),
+        "startOffsetSec": c.get("start_offset_sec", 0),
+        "title": c.get("title", ""),
+    }
+    children = c.get("chapters")
+    if children:
+        chapter["chapters"] = [_normalize_chapter(child) for child in children]
+    extras = {k: v for k, v in c.items() if k not in _CHAPTER_CONSUMED}
+    if extras:
+        chapter["audibleExtras"] = extras
+    return chapter
+
+
 def normalize_chapters(data: dict) -> dict[str, Any]:
-    """Normalizes raw Audible chapter data into the chapter response shape."""
-    chapter_info = data.get("content_metadata", {}).get("chapter_info", {})
+    """
+    Normalizes raw Audible chapter data into the chapter response shape.
+
+    The content_reference and content_url groups the fetch requests arrive
+    beside chapter_info and are carried as contentReference and contentUrl,
+    verbatim. Every other key Audible sends that no field above reproduces
+    is gathered under audibleExtras by level -- response, contentMetadata,
+    chapterInfo -- and each of those keys, like contentReference and
+    contentUrl, appears only when Audible sent something for it.
+    """
+    content_metadata = data.get("content_metadata", {})
+    chapter_info = content_metadata.get("chapter_info", {})
     raw_chapters = chapter_info.get("chapters", [])
 
-    chapters = [
-        {
-            "lengthMs": c.get("length_ms", 0),
-            "startOffsetMs": c.get("start_offset_ms", 0),
-            "startOffsetSec": c.get("start_offset_sec", 0),
-            "title": c.get("title", ""),
-        }
-        for c in raw_chapters
-    ]
+    chapters = [_normalize_chapter(c) for c in raw_chapters]
 
-    return {
+    result: dict[str, Any] = {
         "brandIntroDurationMs": chapter_info.get("brandIntroDurationMs", 0),
         "brandOutroDurationMs": chapter_info.get("brandOutroDurationMs", 0),
         "isAccurate": chapter_info.get("is_accurate", False),
@@ -75,3 +119,26 @@ def normalize_chapters(data: dict) -> dict[str, Any]:
         "runtimeLengthSec": chapter_info.get("runtime_length_sec", 0),
         "chapters": chapters,
     }
+
+    if "content_reference" in content_metadata:
+        result["contentReference"] = content_metadata["content_reference"]
+    if "content_url" in content_metadata:
+        result["contentUrl"] = content_metadata["content_url"]
+
+    extras = {
+        "response": {
+            k: v for k, v in data.items()
+            if k != "content_metadata" and k not in _RESPONSE_NOISE
+        },
+        "contentMetadata": {
+            k: v for k, v in content_metadata.items() if k not in _CONTENT_METADATA_CONSUMED
+        },
+        "chapterInfo": {
+            k: v for k, v in chapter_info.items() if k not in _CHAPTER_INFO_CONSUMED
+        },
+    }
+    extras = {level: values for level, values in extras.items() if values}
+    if extras:
+        result["audibleExtras"] = extras
+
+    return result

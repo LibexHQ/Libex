@@ -299,6 +299,10 @@ def _chaptered_wins(new_value, existing_col):
     saw and refuse every correction after it. Merging the two is meaningless:
     chapters are an ordered whole, not a set of independently sourced fields.
 
+    The payload is replaced whole, so everything riding in it -- including
+    contentReference, contentUrl and audibleExtras -- is replaced by a later
+    chaptered response, not merged with the stored one.
+
     The whole payload moves together, not just the list. A chapterless
     response reads as runtimeLengthMs 0 and brandIntroDurationMs 0 because
     Audible omits those fields and normalize_chapters (libex_core.audible.
@@ -533,6 +537,11 @@ def _build_series_upsert():
         description=bindparam("description"),
         region=bindparam("region"),
         fetched_description=bindparam("fetched_description"),
+        # none_as_null so an absent blob binds SQL NULL rather than the JSON
+        # null scalar, which the NULL arms of _extras_union could not tell
+        # from a real answer. Same binding the books upsert uses.
+        audible_extras=cast(bindparam("audible_extras", type_=JSONB(none_as_null=True)), JSONB),
+        extras_withheld=cast(bindparam("extras_withheld", type_=JSONB(none_as_null=True)), JSONB),
         created_at=bindparam("created_at"),
         updated_at=bindparam("updated_at"),
     )
@@ -546,6 +555,11 @@ def _build_series_upsert():
             # region's response move it.
             "region": Series.region,
             "fetched_description": Series.fetched_description | stmt.excluded.fetched_description,
+            # Merged exactly as a book's are; _extras_union carries why. A
+            # series that arrives through a book's relationships binds both
+            # as NULL and leaves what a profile fetch stored untouched.
+            "audible_extras": _extras_union(stmt.excluded.audible_extras, Series.audible_extras),
+            "extras_withheld": _extras_union(stmt.excluded.extras_withheld, Series.extras_withheld),
             "updated_at": stmt.excluded.updated_at,
         },
     )
@@ -571,6 +585,8 @@ def _series_params(series: dict, now: datetime) -> dict | None:
         "description": description,
         "region": series.get("region"),
         "fetched_description": bool(description),
+        "audible_extras": series.get("audibleExtras"),
+        "extras_withheld": series.get("extrasWithheld"),
         "created_at": now,
         "updated_at": now,
     }

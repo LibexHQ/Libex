@@ -72,8 +72,10 @@ def _make_author(id_=1, asin="B000APF21M", name="Frank Herbert", region="us"):
     return a
 
 
-def _make_series(asin="B00SERIES1", title="Dune Chronicles", region="us"):
+def _make_series(asin="B00SERIES1", title="Dune Chronicles", region="us", audible_extras=None, extras_withheld=None):
     s = MagicMock()
+    s.audible_extras = audible_extras
+    s.extras_withheld = extras_withheld
     s.asin = asin
     s.title = title
     s.description = "A great series."
@@ -1037,6 +1039,34 @@ async def test_get_series_from_db_returns_dict_on_hit():
 
 
 @pytest.mark.asyncio
+async def test_get_series_from_db_serves_audible_extras_and_extras_withheld_from_their_columns():
+    extras = {"language": "english"}
+    withheld = {"relationships": {"episode": 1}}
+    series = _make_series(audible_extras=extras, extras_withheld=withheld)
+    session = AsyncMock()
+    result_mock = MagicMock()
+    result_mock.scalar_one_or_none.return_value = series
+    session.execute = AsyncMock(return_value=result_mock)
+
+    result = await get_series_from_db(session, "B00SERIES1")
+    assert result["audibleExtras"] == extras
+    assert result["extrasWithheld"] == withheld
+
+
+@pytest.mark.asyncio
+async def test_get_series_from_db_serves_none_for_columns_nothing_has_written():
+    series = _make_series()
+    session = AsyncMock()
+    result_mock = MagicMock()
+    result_mock.scalar_one_or_none.return_value = series
+    session.execute = AsyncMock(return_value=result_mock)
+
+    result = await get_series_from_db(session, "B00SERIES1")
+    assert "audibleExtras" in result and result["audibleExtras"] is None
+    assert "extrasWithheld" in result and result["extrasWithheld"] is None
+
+
+@pytest.mark.asyncio
 async def test_get_series_from_db_returns_none_on_miss():
     """Returns None when series is not found."""
     session = AsyncMock()
@@ -1133,6 +1163,22 @@ async def test_search_series_from_db_maps_title_to_name():
     result = await search_series_from_db(session, "Dune")
     assert result[0]["name"] == "Dune Chronicles"
     assert "title" not in result[0]
+
+
+@pytest.mark.asyncio
+async def test_search_series_from_db_serves_each_rows_own_extras():
+    series_list = [
+        _make_series(audible_extras={"a": 1}, extras_withheld={"w": 1}),
+        _make_series(asin="B00SERIES2", title="Dune Messiah"),
+    ]
+    session = AsyncMock()
+    result_mock = MagicMock()
+    result_mock.scalars.return_value.all.return_value = series_list
+    session.execute = AsyncMock(return_value=result_mock)
+
+    result = await search_series_from_db(session, "Dune")
+    assert (result[0]["audibleExtras"], result[0]["extrasWithheld"]) == ({"a": 1}, {"w": 1})
+    assert (result[1]["audibleExtras"], result[1]["extrasWithheld"]) == (None, None)
 
 
 @pytest.mark.asyncio

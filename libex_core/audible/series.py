@@ -14,6 +14,7 @@ from typing import Any
 
 # Core
 from libex_core.audible.client import AudibleGet, validate_region, validated_asin
+from libex_core.audible.extras import build_extras
 from libex_core.exceptions import NotFoundException
 from libex_core.text import strip_html
 
@@ -22,10 +23,27 @@ SERIES_PATH = "/1.0/catalog/products/{asin}"
 SERIES_RESPONSE_GROUPS = "product_attrs, product_desc, product_extended_attrs"
 SERIES_BOOKS_RESPONSE_GROUPS = "relationships"
 
+SERIES_SEARCH_PATH = "/1.0/catalog/products"
+SERIES_SEARCH_RESPONSE_GROUPS = "relationships"
+SERIES_SEARCH_NUM_RESULTS = 10
+
+# Keys of a series product that normalize_series reproduces as first-class
+# fields. Everything else the three response groups return rides in
+# audibleExtras, the same blob a book's unreproduced keys do.
+_SERIES_CONSUMED = frozenset({"asin", "title", "publisher_summary"})
+
 
 def normalize_series(product: dict, region: str) -> dict[str, Any]:
-    """Normalizes raw Audible product data into Libex series format."""
-    return {
+    """
+    Normalizes raw Audible product data into Libex series format.
+
+    Every key of the product beyond asin, title and publisher_summary is
+    carried in audibleExtras, built the way a book's is (build_extras), with
+    extrasWithheld recording anything that had to be left out of it. Both
+    appear only when there is something to say, so a product that carries
+    only the three consumed keys normalizes exactly as it did before.
+    """
+    series = {
         "asin": product.get("asin"),
         "name": product.get("title"),
         "description": strip_html(product.get("publisher_summary")),
@@ -33,6 +51,14 @@ def normalize_series(product: dict, region: str) -> dict[str, Any]:
         "position": None,
         "updatedAt": None,
     }
+
+    passthrough = {k: v for k, v in product.items() if k not in _SERIES_CONSUMED}
+    if passthrough:
+        extras, withheld = build_extras(passthrough, product.get("asin") or "", region)
+        series["audibleExtras"] = extras
+        if withheld:
+            series["extrasWithheld"] = withheld
+    return series
 
 
 async def fetch_series(get: AudibleGet, asin: str, region: str) -> dict[str, Any]:
@@ -102,4 +128,41 @@ async def fetch_series_book_asins(get: AudibleGet, asin: str, region: str) -> li
     asins = [item["asin"] for item in items]
     if not asins:
         raise NotFoundException(f"No books found for series: {asin}")
+    return asins
+
+
+async def fetch_series_search_asins(get: AudibleGet, name: str, region: str) -> list[str]:
+    """
+    Searches Audible's catalog by title, through `get`, and returns the unique
+    series ASINs found on the relationships of the matching products, in the
+    order they were found.
+
+    The name is the caller's text: it goes to Audible as the title parameter
+    and nowhere else -- it is not logged, and no message raised from here
+    carries it. An empty list is a search with no series behind it, which is
+    the caller's to treat as a miss; this does not raise NotFoundException
+    for it, because the caller may have other places to look. Transient
+    failures surface as AudibleAPIException from `get` and are the caller's
+    to handle.
+
+    Raises RegionException for a region that is not one of the eleven, before
+    anything is sent.
+    """
+    region = validate_region(region)
+    params = {
+        "title": name,
+        "response_groups": SERIES_SEARCH_RESPONSE_GROUPS,
+        "num_results": SERIES_SEARCH_NUM_RESULTS,
+    }
+    data = await get(region, SERIES_SEARCH_PATH, params)
+
+    seen: set[str] = set()
+    asins: list[str] = []
+    for product in data.get("products", []):
+        for rel in product.get("relationships", []):
+            if rel.get("relationship_type") == "series":
+                asin = rel.get("asin")
+                if asin and asin not in seen:
+                    seen.add(asin)
+                    asins.append(asin)
     return asins

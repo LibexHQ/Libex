@@ -29,6 +29,7 @@ from app.services.db.writer import (
     _BOOK_UPSERT,
     _book_params,
     _longer_wins,
+    _series_params,
     upsert_author,
     upsert_book,
     upsert_track,
@@ -1589,3 +1590,27 @@ def test_persist_chunk_size_matches_the_audible_fetch_chunk():
     Audible request takes. The two are coupled by intent rather than by a
     shared constant, which is the only reason it is pinned here."""
     assert _PERSIST_CHUNK_SIZE == 50
+
+
+# ============================================================
+# _series_params -- audibleExtras and extrasWithheld
+# ============================================================
+
+def test_series_params_binds_the_extras_and_withheld_the_normalizer_produced():
+    params = _series_params(
+        {"asin": "B0SERIES1X", "name": "S", "region": "us",
+         "audibleExtras": {"k": 1}, "extrasWithheld": {"relationships": {"episode": 1}}},
+        datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    assert params["audible_extras"] == {"k": 1}
+    assert params["extras_withheld"] == {"relationships": {"episode": 1}}
+
+
+def test_series_params_binds_none_for_a_series_that_carries_no_extras():
+    """A relationship-sourced series carries neither key; None, never an empty
+    object, is what lets the merge leave a stored profile untouched."""
+    params = _series_params(
+        {"asin": "B0SERIES1X", "name": "S", "region": "us"},
+        datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    assert params["audible_extras"] is None and params["extras_withheld"] is None

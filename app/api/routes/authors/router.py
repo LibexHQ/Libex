@@ -1,6 +1,6 @@
 """
 Authors router.
-Compatible with AudiMeta endpoint structure for drop-in replacement.
+Endpoint structure is derived from AudiMeta's, with known differences.
 """
 
 # Standard library
@@ -77,7 +77,7 @@ async def get_books_by_author_name(
     """
     Get books by author name.
     Used when no author ASIN is available.
-    Returns full book objects matching AudiMeta's BookDto format.
+    Returns full book objects in the BookDto shape derived from AudiMeta's.
     """
     asins = await outage_as_not_found(get_author_books_by_name(name, region, session))
     if not asins:
@@ -123,10 +123,10 @@ def _mark_completeness(
     and how long it may be held.
 
     Completeness travels in a header rather than the body, because the
-    response is a bare list[BookResponse] and that shape is a drop-in
-    compatibility contract -- adding a field would change it for every
-    consumer. A header is purely additive: a client that ignores it behaves
-    exactly as before.
+    response is a bare list[BookResponse] and that shape is one
+    existing clients already parse -- adding a field would change it for
+    every consumer. A header is purely additive: a client that ignores it
+    behaves exactly as before.
 
     The status stays 200. 206 was considered and rejected: HTTP already
     assigns it to range requests and requires Content-Range with it, so
@@ -205,7 +205,7 @@ async def get_books_by_author(
 ) -> list[BookResponse] | Response:
     """
     Get all books by author ASIN.
-    Returns full book objects matching AudiMeta's BookDto format.
+    Returns full book objects in the BookDto shape derived from AudiMeta's.
     """
     # One deadline for the whole request, computed here and shared by both
     # phases. Previously each phase was bounded separately -- discovery by its

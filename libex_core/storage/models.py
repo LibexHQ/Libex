@@ -303,7 +303,7 @@ class Series(Base):
     authors: Mapped[list["Author"]] = relationship(
         "Author", secondary="series_author", back_populates="series"
     )
-    
+
     __table_args__ = (
         Index("series_asin_index", "asin"),
         # Region-scoped series count. region is nullable, but a btree

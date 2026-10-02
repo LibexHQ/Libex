@@ -232,7 +232,7 @@ class _Stopper:
         self.stopping = True
 
 
-# --- proxy containment (unchanged; see LIBEX_LESSONS_HARD_WON.md) ----------
+# --- proxy containment -------------------------------------------------------
 
 def _verify_dedicated_proxy() -> None:
     """

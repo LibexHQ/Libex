@@ -198,18 +198,32 @@ def _mentions_libex_client(tree: ast.AST) -> bool:
     return False
 
 
+# httpx belongs to the client module alone. The client is also named by the
+# CLI's session module, the one place the command line builds it; every other
+# CLI module goes through build_client and never names it.
+CLIENT_NAMERS = frozenset({CLIENT_FILE, LIBEX_CORE_DIR / "cli" / "session.py"})
+
+
+def _stray_uses(path: Path, tree: ast.AST) -> list[str]:
+    found = []
+    if path != CLIENT_FILE and _imports_httpx(tree):
+        found.append("imports httpx")
+    if path not in CLIENT_NAMERS and _mentions_libex_client(tree):
+        found.append("names LibexClient")
+    return found
+
+
 def test_only_the_client_module_touches_httpx_or_names_libexclient():
     sources = _core_sources()
     assert CLIENT_FILE in sources
     assert len(sources) > 5, "the walk found nothing to check"
-    offenders = []
+    assert all(path in sources for path in CLIENT_NAMERS)
+    offenders = {}
     for path in sources:
-        if path == CLIENT_FILE:
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        if _imports_httpx(tree) or _mentions_libex_client(tree):
-            offenders.append(str(path.relative_to(LIBEX_CORE_DIR)))
-    assert offenders == []
+        found = _stray_uses(path, ast.parse(path.read_text(encoding="utf-8")))
+        if found:
+            offenders[str(path.relative_to(LIBEX_CORE_DIR))] = found
+    assert offenders == {}
 
 
 def test_the_static_check_would_see_a_stray_httpx_import_or_client():
@@ -221,6 +235,35 @@ def test_the_static_check_would_see_a_stray_httpx_import_or_client():
     assert _mentions_libex_client(ast.parse("import m\nm.LibexClient"))
     assert _mentions_libex_client(ast.parse("from m import LibexClient"))
     assert not _mentions_libex_client(ast.parse("x = 1"))
+
+
+def test_the_session_module_may_name_the_client_but_not_import_httpx():
+    session = LIBEX_CORE_DIR / "cli" / "session.py"
+    assert _stray_uses(session, ast.parse("from m import LibexClient")) == []
+    assert _stray_uses(session, ast.parse("import httpx")) == ["imports httpx"]
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "cli/commands/config.py",
+        "cli/commands/completion.py",
+        "cli/main.py",
+        "cli/environment.py",
+        "audible/_retry.py",
+        "models.py",
+    ],
+)
+def test_any_other_module_naming_the_client_or_httpx_still_fails(relative):
+    path = LIBEX_CORE_DIR / relative
+    assert _stray_uses(path, ast.parse("from m import LibexClient")) == ["names LibexClient"]
+    assert _stray_uses(path, ast.parse("x = m.LibexClient()")) == ["names LibexClient"]
+    assert _stray_uses(path, ast.parse("import httpx")) == ["imports httpx"]
+
+
+def test_the_client_module_itself_is_unrestricted():
+    tree = ast.parse("import httpx\nclass LibexClient: ...\nx = LibexClient()")
+    assert _stray_uses(CLIENT_FILE, tree) == []
 
 
 def _is_path_constant(node: ast.AST) -> bool:

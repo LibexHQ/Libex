@@ -75,6 +75,35 @@ jobs:
       # integration-marked, so this selects exactly what the marker did.
       - name: Run unit tests
         run: pytest tests/ -v -m "not integration" --ignore=tests/integration
+      # Built from the tooling venv with --no-isolation, never an isolated
+      # build: isolation would fetch flit_core from the index with no hash
+      # check, so the backend that writes the wheel would be the one thing in
+      # the build nobody verified.
+      - name: Build libex-core
+        run: |
+          "$RUNNER_TEMP/tooling/bin/python" -m build --no-isolation --outdir "$RUNNER_TEMP/libex-core-dist" .
+      # The packaging test skips itself when build or flit_core is missing, and
+      # the job's environment deliberately has neither, so the unit test step
+      # above skips it. Here it runs with exactly those two (plus
+      # pyproject_hooks, which build needs) borrowed from the tooling venv by
+      # symlink -- installing them into the job's environment would mean a
+      # second, unhashed copy, and putting the whole tooling site-packages on
+      # the path would shadow the application's pinned requests and idna with
+      # the tooling lock's. The import check comes first because a skip would
+      # otherwise pass this step green without testing anything.
+      - name: Check libex-core packaging
+        run: |
+          tools="$RUNNER_TEMP/build-tools"
+          site="$("$RUNNER_TEMP/tooling/bin/python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+          mkdir "$tools"
+          for entry in build build-*.dist-info flit_core flit_core-*.dist-info pyproject_hooks pyproject_hooks-*.dist-info; do
+            for path in "$site"/$entry; do
+              test -e "$path"
+              ln -s "$path" "$tools/"
+            done
+          done
+          PYTHONPATH="$tools" python -c 'import build, flit_core'
+          PYTHONPATH="$tools" pytest tests/libex_core/test_packaging.py -v
 
   integration:
     runs-on: ubuntu-latest

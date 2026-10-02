@@ -1,0 +1,33 @@
+# bash completion for libex-core, generated from the command definitions, do not edit by hand
+_libex_core() {
+    local cur cmd ci i word
+    local -a candidates
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    cmd=""
+    ci=0
+    for ((i = 1; i < COMP_CWORD; i++)); do
+        case "${COMP_WORDS[i]}" in
+            -*) ;;
+            *) cmd="${COMP_WORDS[i]}"; ci=$i; break ;;
+        esac
+    done
+    case "$cmd" in
+        "") candidates=(-h --help --version -q --quiet -v --verbose completion config) ;;
+        completion)
+            if (( COMP_CWORD == ci + 1 )); then
+                candidates=(-h --help bash zsh fish)
+            else
+                candidates=(-h --help)
+            fi
+            ;;
+        config) candidates=(-h --help) ;;
+        *) candidates=() ;;
+    esac
+    COMPREPLY=()
+    for word in "${candidates[@]}"; do
+        if [[ $word == "$cur"* ]]; then
+            COMPREPLY+=("$word")
+        fi
+    done
+}
+complete -F _libex_core libex-core

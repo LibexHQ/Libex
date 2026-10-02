@@ -496,6 +496,21 @@ class ChapterResponse(BaseModel):
             "there was nothing to carry."
         ),
     )
+    extrasWithheld: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "What was left out of the verbatim parts above and why, the same "
+            "account a book's extrasWithheld gives: sanitized (counts of "
+            "NUL characters stripped and unstorable numbers nulled), a field "
+            "name (contentReference, contentUrl, audibleExtras) mapped to "
+            "the reason that part was withheld whole, chapterExtras (a "
+            "count per reason of chapters whose own audibleExtras were "
+            "withheld) and subChapters (a count of sub-chapter lists nested "
+            "past the depth cap, carried in that chapter's audibleExtras "
+            "when they fit). Present only when something was withheld; null "
+            "otherwise."
+        ),
+    )
 
 
 # ============================================================

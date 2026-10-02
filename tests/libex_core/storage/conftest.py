@@ -5,39 +5,32 @@ Sessions over the same schema on SQLite and, when Docker is there, Postgres.
 # Third party
 import pytest
 import pytest_asyncio
-from sqlalchemy import event
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import NullPool, StaticPool
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.pool import NullPool
 
 # Local
 from libex_core.storage.base import Base
+from libex_core.storage.store import LocalStore
 from tests.libex_core.storage._support import core_tables, seed
 
 
-def _unicode_lower(value):
-    return None if value is None else value.lower()
+@pytest_asyncio.fixture
+async def sqlite_store():
+    """An in-memory SQLite store, upgraded by the package's own migrations and
+    opened, so the readers run against the engine setup and the schema a real
+    store has."""
+    store = LocalStore("sqlite+aiosqlite://")
+    await store.upgrade()
+    await store.open()
+    yield store
+    await store.close()
 
 
 @pytest_asyncio.fixture
-async def sqlite_engine():
-    """In-memory SQLite with a Unicode-aware lower(), the one function the
-    connection setup owes the readers: SQLite's own lowers ASCII only."""
-    engine = create_async_engine("sqlite+aiosqlite://", poolclass=StaticPool)
-
-    @event.listens_for(engine.sync_engine, "connect")
-    def _register(dbapi_connection, _record):
-        dbapi_connection.create_function("lower", 1, _unicode_lower, deterministic=True)
-
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all, tables=core_tables())
-    yield engine
-    await engine.dispose()
-
-
-@pytest_asyncio.fixture
-async def sqlite_session(sqlite_engine):
-    async with async_sessionmaker(sqlite_engine, expire_on_commit=False)() as session:
+async def sqlite_session(sqlite_store):
+    async with sqlite_store.write() as session:
         await seed(session)
+    async with sqlite_store.session() as session:
         yield session
 
 

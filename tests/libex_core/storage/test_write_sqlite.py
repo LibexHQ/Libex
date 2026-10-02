@@ -14,16 +14,19 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from libex_core.storage.dialect import configure_sqlite
 from libex_core.storage.models import Author, Book
+from libex_core.storage.store import LocalStore
 from libex_core.storage.write import exclusive_write, upsert_author, write_books
 from tests.libex_core.storage import _write_cases as cases
 
 
 @pytest.fixture
 async def engine(tmp_path):
-    eng = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'libex.db'}")
+    url = f"sqlite+aiosqlite:///{tmp_path / 'libex.db'}"
+    store = LocalStore(url)
+    await store.upgrade()  # the schema is the one the package's migrations make
+    await store.close()
+    eng = create_async_engine(url)
     configure_sqlite(eng, busy_timeout_ms=100)
-    async with eng.begin() as connection:
-        await connection.run_sync(lambda c: cases.Base.metadata.create_all(c, tables=cases.core_tables()))
     yield eng
     await eng.dispose()
 

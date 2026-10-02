@@ -492,3 +492,13 @@ series_author = Table(
     Index("series_author_index", "series_asin", "author_id"),
     Index("author_series_index", "author_id", "series_asin"),
 )
+
+
+# The tables this module defines, which are the ones the package's own
+# migrations create. The hosted app registers more on the same metadata, so
+# the metadata alone cannot say which tables are the core's.
+CORE_TABLES = frozenset({
+    "books", "authors", "series", "narrators", "genres", "tracks",
+    "author_book", "book_narrator", "book_series", "book_genre",
+    "author_genre", "series_author",
+})

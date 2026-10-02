@@ -48,10 +48,11 @@ _PACKAGE_FILES = {
 }
 
 # flit ships every non-bytecode file inside the package directory, so the
-# package's own changelog travels in the wheel. It is the only non-Python
-# file allowed to.
+# package's own changelog travels in the wheel, and so does the template the
+# storage migrations are written from. Those are the only non-Python files
+# allowed to.
 _PACKAGE_ALLOWED_SUFFIXES = {".py"}
-_PACKAGE_ALLOWED_NAMES = {"py.typed", "CHANGELOG.md"}
+_PACKAGE_ALLOWED_NAMES = {"py.typed", "CHANGELOG.md", "script.py.mako"}
 
 # The man page and completions are installed under the environment prefix by
 # flit's external-data, which puts them under the wheel's .data/data/ tree.

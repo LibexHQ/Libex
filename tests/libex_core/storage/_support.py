@@ -13,6 +13,7 @@ from sqlalchemy import insert, select
 from libex_core.storage import read
 from libex_core.storage.base import Base
 from libex_core.storage.models import (
+    CORE_TABLES,
     Author,
     Book,
     Genre,
@@ -29,12 +30,6 @@ from libex_core.storage.read import books, people, series, stats
 from libex_core.storage.read._compat import NumericPosition
 
 assert read  # the package docstring is the contract; the import keeps it loaded
-
-CORE_TABLES = (
-    "books", "authors", "series", "narrators", "genres", "tracks",
-    "author_book", "book_narrator", "book_series", "book_genre",
-    "author_genre", "series_author",
-)
 
 STAMP = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
 

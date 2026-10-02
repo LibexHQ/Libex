@@ -88,7 +88,7 @@ New features require tests. When writing tests:
 
 ## Response Schemas
 
-All response field names use **camelCase** to match AudiMeta's `BookDto` format. This ensures drop-in compatibility for existing consumers.
+All response field names use **camelCase** because the response shapes derive from AudiMeta's `BookDto` format. Changes to them are additive only: never remove a field or alter a shape, because callers can't be warned.
 
 Examples: `releaseDate`, `lengthMinutes`, `imageUrl`, `whisperSync`, `contentDeliveryType`, `isVvab`, `bookFormat`
 

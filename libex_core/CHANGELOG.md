@@ -20,6 +20,11 @@ Bump class: MINOR.
 ### Added
 - **New public `ErrorCode` enum, and every `LibexException` gains a `code` attribute.** `ErrorCode` is a `StrEnum` with `NOT_IN_LIBEX`, `NOT_ON_AUDIBLE`, `WITHHELD`, `UPSTREAM_UNAVAILABLE` and `INVALID_REQUEST`, its values being the lowercase names. Each exception class has a default: `NotFoundException` is `NOT_ON_AUDIBLE`, `RegionException` is `INVALID_REQUEST`, and `AudibleAPIException`, `CacheException` and the base `LibexException` are `UPSTREAM_UNAVAILABLE`. A raise site can override it with a new optional `code=` argument. Existing raises keep working untouched and keep their messages and status codes; the argument is keyword-optional and last, so no positional call changes meaning.
 
+## [0.4.1]
+
+### Changed
+- **The package and its response models are no longer described as a drop-in AudiMeta replacement.** The shapes are derived from AudiMeta's and differ from them in places; the package docstring and the models module now say so. Documentation only: no model, field, default or function changed.
+
 ## [0.4.0]
 
 ### Added

@@ -1,6 +1,6 @@
 """
 Series router.
-Compatible with AudiMeta endpoint structure for drop-in replacement.
+Endpoint structure is derived from AudiMeta's, with known differences.
 """
 
 # Standard library
@@ -80,7 +80,7 @@ async def get_books_by_series(
     Get all books in a series.
 
     Defaults to series position order; passing a sort field overrides it.
-    Returns full book objects matching AudiMeta's BookDto format.
+    Returns full book objects in the BookDto shape derived from AudiMeta's.
     """
     asins = await outage_as_not_found(get_series_books(asin, region, session, cache))
     if not asins:

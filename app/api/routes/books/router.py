@@ -1,7 +1,7 @@
 """
 Books router.
 Endpoints for fetching book metadata by ASIN, bulk ASINs, and chapters.
-Response formats match AudiMeta exactly for drop-in compatibility.
+Response shapes are derived from AudiMeta's; they differ in places.
 """
 
 # Standard library
@@ -124,7 +124,7 @@ async def get_books_bulk(
     Get multiple books by ASIN.
     Accepts all three forms: ?asins=X,Y — ?asins=X&asins=Y — ?asins=X,Y&asins=Z
     Returns {"books": [...], "notFound": [...], "placeholderRecords": [...]};
-    books and notFound match AudiMeta's bulk format.
+    the bulk envelope is Libex's own, not a copy of AudiMeta's.
     """
     asin_list = [
         a.strip()

@@ -5,7 +5,7 @@ All notable changes to Libex are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-Because Libex is a drop-in AudiMeta replacement, the wire format is a hard
+Libex's callers cannot be warned about a change, so the wire format is a hard
 contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
@@ -21,6 +21,11 @@ Bump class: MINOR.
 - **The OpenAPI schema now documents the error body and its `code` values** on the routes that return it.
 
 FastAPI's own validation (422) and unknown-route (`detail`) bodies are unchanged and carry no `code`. Neither does the body of an unhandled 500.
+
+## [1.26.1]
+
+### Changed
+- **Libex no longer describes itself as a drop-in AudiMeta replacement.** Its response shapes started from AudiMeta's and have since grown past them, so some endpoints, parameters and fields differ. The README now lists the known differences in its migration section. Nothing on the wire changed: no endpoint, parameter, field, status code or response shape moved, and the promise that fields and shapes are only ever added to, never removed or altered, stands exactly as before.
 
 ## [1.26.0]
 

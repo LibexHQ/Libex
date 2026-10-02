@@ -182,7 +182,7 @@ The book, series and author routes also report on the data in the body:
 
   | Reason | What happened | Worth retrying? |
   |---|---|---|
-  | `hydration-not-found` | Audible has no record of the ASIN, or answered with a titleless placeholder instead of a book — also covers a title Audible returns in full but hasn't released yet | No for a genuinely missing ASIN; an unreleased one may appear once it's out |
+  | `hydration-not-found` | Audible has no record of the ASIN, or answered with a hollow, titleless stub instead of a book — also covers a titled record carrying Audible's 2200-01-01 placeholder date (bulk `/book` lists those in `placeholderRecords`) | No |
   | `hydration-failed` | Libex couldn't reach Audible for part of the request, and neither its stored DB copy nor its cache covered the gap | Yes, once Audible is reachable again |
   | `hydration-deadline` | The request ran out of its time budget before every element was fetched | Not currently emitted by any route — the one caller that imposes such a deadline reports completeness through a separate, coarser check instead |
   | `discovery-incomplete` | Reserved for a catalogue walk that ends before it finishes enumerating what exists | Not currently emitted by any route |
@@ -200,9 +200,13 @@ directly off the response.
   route (`/book/{asin}`, `/series/{asin}`, `/author/{asin}`), a missing
   element fails the whole request rather than returning a partial body —
   which is why those routes always read `true` at 200.
-- On the bulk `/book` route, ASINs Audible didn't have are listed in
+- On the bulk `/book` route, ASINs Audible had no record of, or that Libex
+  couldn't fetch and had no stored copy of, are listed in
   **`notFound`**, computed before filtering — a book that was found and then
-  removed by a filter parameter is never reported as missing.
+  removed by a filter parameter is never reported as missing. ASINs for which
+  Audible sent a placeholder record (one carrying its 2200-01-01 publication
+  date) are listed in **`placeholderRecords`** instead; `books`, `notFound`
+  and `placeholderRecords` never share an ASIN.
 - The two series-books routes (`/series/books/{asin}`, `/series/{asin}/books`)
   carry **no `notFound` field at all** — `X-Libex-Complete` and
   `X-Libex-Incomplete-Reason` are the only signal that a book is missing.

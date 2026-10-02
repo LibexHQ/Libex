@@ -2143,3 +2143,259 @@ async def test_get_books_by_asins_persist_outcome_defaults_to_none_harmlessly():
 
     assert result[0]["asin"] == asin
     mock_persist.assert_called_once()
+
+
+# ============================================================
+# PLACEHOLDER RECORDS -- placeholder_asins OUT-PARAMETER
+# ============================================================
+# A titled record carrying UNRELEASED_PLACEHOLDER is Audible describing a
+# stand-in, which is a different fact from a hollow titleless stub (no such
+# ASIN). Both are absent from the result; only the placeholder is reported
+# through placeholder_asins, and only when a chunk actually answered.
+
+def _placeholder_product(asin):
+    from app.services.audible.books import UNRELEASED_PLACEHOLDER
+
+    return {**_hydration_product(asin), "publication_datetime": UNRELEASED_PLACEHOLDER}
+
+
+def _hollow_stub(asin):
+    return {"asin": asin, "product_state": "NOT_AVAILABLE_FOR_PURCHASE"}
+
+
+def test_is_placeholder_record_needs_a_title_and_the_sentinel_date():
+    from app.services.audible.books import UNRELEASED_PLACEHOLDER, _is_placeholder_record
+
+    assert _is_placeholder_record({"title": "T", "publication_datetime": UNRELEASED_PLACEHOLDER})
+    assert not _is_placeholder_record({"publication_datetime": UNRELEASED_PLACEHOLDER})
+    assert not _is_placeholder_record({"title": "", "publication_datetime": UNRELEASED_PLACEHOLDER})
+    assert not _is_placeholder_record({"title": "T", "publication_datetime": "2021-01-01T00:00:00Z"})
+    assert not _is_placeholder_record({"title": "T"})
+
+
+def test_filter_products_output_is_the_titled_non_placeholder_records_only():
+    products = [
+        _hydration_product("B0REAL0001"),
+        _placeholder_product("B0PLACE001"),
+        _hollow_stub("B0STUB0001"),
+        {"asin": "B0TITLELES", "publication_datetime": "2200-01-01T00:00:00Z"},
+        _hydration_product("B0REAL0002"),
+    ]
+    assert [p["asin"] for p in _filter_products(products)] == ["B0REAL0001", "B0REAL0002"]
+
+
+@pytest.mark.asyncio
+async def test_batch_chunk_splits_real_placeholder_and_stub():
+    from app.services.audible.books import get_books_by_asins
+
+    real, placeholder, stub = "B0REAL0001", "B0PLACE001", "B0STUB0001"
+    facts = ResponseFacts()
+    placeholders: list[str] = []
+
+    async def _get(region, path, params):
+        return {"products": [
+            _hydration_product(real), _placeholder_product(placeholder), _hollow_stub(stub),
+        ]}
+
+    with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.books.persist_books_background") as mock_persist:
+        result = await get_books_by_asins(
+            [real, placeholder, stub], "us", AsyncMock(),
+            facts=facts, placeholder_asins=placeholders,
+        )
+
+    assert [b["asin"] for b in result] == [real]
+    assert placeholders == [placeholder]
+    assert stub not in placeholders
+    assert not facts.is_complete
+    assert facts.incomplete_reasons == {REASON_HYDRATION_NOT_FOUND}
+    persisted = [b["asin"] for b in mock_persist.call_args[0][0]]
+    assert persisted == [real]
+
+
+@pytest.mark.asyncio
+async def test_single_asin_placeholder_is_reported_and_not_returned():
+    from app.services.audible.books import get_books_by_asins
+
+    asin = "B0PLACE001"
+    facts = ResponseFacts()
+    placeholders: list[str] = []
+
+    with patch(
+        "app.services.audible.books.audible_get",
+        new=AsyncMock(return_value={"product": _placeholder_product(asin)}),
+    ), patch("app.services.audible.books.persist_books_background") as mock_persist:
+        result = await get_books_by_asins(
+            [asin], "us", AsyncMock(), facts=facts, placeholder_asins=placeholders
+        )
+
+    assert result == []
+    assert placeholders == [asin]
+    assert facts.incomplete_reasons == {REASON_HYDRATION_NOT_FOUND}
+    mock_persist.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_titleless_record_with_the_sentinel_date_is_a_stub_not_a_placeholder():
+    from app.services.audible.books import get_books_by_asins
+
+    real, titleless = "B0REAL0001", "B0TITLELES"
+    placeholders: list[str] = []
+
+    async def _get(region, path, params):
+        return {"products": [
+            _hydration_product(real),
+            {"asin": titleless, "publication_datetime": "2200-01-01T00:00:00Z"},
+        ]}
+
+    with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.books.persist_books_background"):
+        result = await get_books_by_asins(
+            [real, titleless], "us", AsyncMock(), placeholder_asins=placeholders
+        )
+
+    assert [b["asin"] for b in result] == [real]
+    assert placeholders == []
+
+
+@pytest.mark.asyncio
+async def test_placeholder_is_never_cached_and_is_reclassified_on_every_call():
+    from app.services.audible.books import get_books_by_asins
+
+    cached_asin, placeholder = "B0CACHED01", "B0PLACE001"
+    cached_book = {"asin": cached_asin, "title": "Cached"}
+    audible = AsyncMock(return_value={"product": _placeholder_product(placeholder)})
+
+    async def _get_many(session, keys):
+        return {book_key(cached_asin, "us"): cached_book}
+
+    outs: list[list[str]] = []
+    with patch("app.services.audible.books.cache.get_many", new=AsyncMock(side_effect=_get_many)), \
+         patch("app.services.audible.books.audible_get", new=audible), \
+         patch("app.services.audible.books.persist_books_background") as mock_persist:
+        for _ in range(2):
+            out: list[str] = []
+            result = await get_books_by_asins(
+                [cached_asin, placeholder], "us", AsyncMock(),
+                use_cache=True, placeholder_asins=out,
+            )
+            outs.append(out)
+            assert result == [cached_book]
+
+    assert outs == [[placeholder], [placeholder]]
+    assert audible.await_count == 2
+    mock_persist.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_placeholder_in_a_failed_chunk_is_not_reported_and_goes_to_the_db_backstop():
+    from app.services.audible.books import get_books_by_asins
+
+    good_asins = [f"B0GOOD{i:03d}" for i in range(50)]
+    bad_chunk = ["B0PLACE001", "B0OTHER001"]
+    placeholders: list[str] = []
+
+    async def _get(region, path, params):
+        asins = params["asins"].split(",")
+        if asins == good_asins:
+            return {"products": [_hydration_product(a) for a in asins]}
+        raise RuntimeError("Audible 500")
+
+    backstop = AsyncMock(return_value=[])
+    with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.books.get_books_from_db", new=backstop), \
+         patch("app.services.audible.books.persist_books_background"):
+        await get_books_by_asins(
+            good_asins + bad_chunk, "us", AsyncMock(), placeholder_asins=placeholders
+        )
+
+    assert placeholders == []
+    assert set(backstop.call_args[0][1]) == set(bad_chunk)
+
+
+@pytest.mark.asyncio
+async def test_all_placeholder_request_returns_empty_with_the_out_param_populated():
+    from app.services.audible.books import get_books_by_asins
+
+    asins = ["B0PLACE001", "B0PLACE002"]
+    placeholders: list[str] = []
+
+    async def _get(region, path, params):
+        return {"products": [_placeholder_product(a) for a in asins]}
+
+    with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.books.persist_books_background") as mock_persist:
+        result = await get_books_by_asins(
+            asins, "us", AsyncMock(), placeholder_asins=placeholders
+        )
+
+    assert result == []
+    assert placeholders == asins
+    mock_persist.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_placeholder_for_an_unrequested_asin_is_not_listed():
+    from app.services.audible.books import get_books_by_asins
+
+    real, other = "B0REAL0001", "B0REAL0002"
+    placeholders: list[str] = []
+
+    async def _get(region, path, params):
+        return {"products": [
+            _hydration_product(real), _hydration_product(other),
+            _placeholder_product("B0UNASKED1"),
+        ]}
+
+    with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.books.persist_books_background"):
+        await get_books_by_asins(
+            [real, other], "us", AsyncMock(), placeholder_asins=placeholders
+        )
+
+    assert placeholders == []
+
+
+@pytest.mark.asyncio
+async def test_a_duplicated_placeholder_in_one_response_is_listed_once():
+    from app.services.audible.books import get_books_by_asins
+
+    real, placeholder = "B0REAL0001", "B0PLACE001"
+    placeholders: list[str] = []
+
+    async def _get(region, path, params):
+        return {"products": [
+            _hydration_product(real),
+            _placeholder_product(placeholder), _placeholder_product(placeholder),
+        ]}
+
+    with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.books.persist_books_background"):
+        await get_books_by_asins(
+            [real, placeholder], "us", AsyncMock(), placeholder_asins=placeholders
+        )
+
+    assert placeholders == [placeholder]
+
+
+@pytest.mark.asyncio
+async def test_results_are_identical_with_and_without_the_out_param():
+    from app.services.audible.books import get_books_by_asins
+
+    asins = ["B0REAL0001", "B0PLACE001", "B0STUB0001"]
+
+    async def _get(region, path, params):
+        return {"products": [
+            _hydration_product(asins[0]), _placeholder_product(asins[1]), _hollow_stub(asins[2]),
+        ]}
+
+    results = []
+    for out in (None, []):
+        with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=_get)), \
+             patch("app.services.audible.books.persist_books_background"):
+            results.append(
+                await get_books_by_asins(asins, "us", AsyncMock(), placeholder_asins=out)
+            )
+
+    assert results[0] == results[1]
+    assert [b["asin"] for b in results[0]] == [asins[0]]

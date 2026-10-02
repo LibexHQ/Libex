@@ -340,7 +340,23 @@ class BulkBookResponse(BaseModel):
             "Requested ASINs Audible could not resolve, computed before "
             "filtering is applied. A book that was found and then removed "
             "by a filter is not reported here -- it is simply absent from "
-            "both books and notFound."
+            "both books and notFound. ASINs for which Audible sent a "
+            "placeholder record are listed in placeholderRecords instead. "
+            "This list also holds ASINs Libex could not fetch in this "
+            "request and had no stored copy of; X-Libex-Incomplete-Reason "
+            "tells those apart from ASINs Audible has no record of."
+        ),
+    )
+    placeholderRecords: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Requested ASINs for which Audible returned a record carrying "
+            "its 2200-01-01 placeholder publication date. Such records "
+            "have been seen standing in for series parents. They are "
+            "deliberately left out of books, and never appear in books or "
+            "notFound as well. ASINs are given as the caller sent them, in "
+            "request order, and computed before filtering is applied. "
+            "Always present; empty when there are none."
         ),
     )
 

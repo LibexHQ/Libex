@@ -730,7 +730,9 @@ async def test_get_books_bulk_source_header_false_on_a_real_hydration_shortfall(
 
 @pytest.mark.asyncio
 async def test_get_books_bulk_source_header_is_mixed_with_counts_summing_to_the_body(async_client):
-    async def fake_get_books_by_asins(asin_list, region, session, cache, *, facts=None):
+    async def fake_get_books_by_asins(
+        asin_list, region, session, cache, *, facts=None, placeholder_asins=None
+    ):
         record_source_keys(facts, SOURCE_AUDIBLE, ["B000000000", "B000000001"])
         record_source_keys(facts, SOURCE_CACHE, ["B000000002"])
         return [{**MOCK_BOOK, "asin": f"B{i:09d}"} for i in range(3)]
@@ -764,7 +766,9 @@ async def test_get_books_bulk_can_be_both_mixed_source_and_incomplete_at_once(as
     single-book shortfall test above) -- so the third, missing ASIN here is
     load-bearing, not incidental set dressing."""
 
-    async def fake_get_books_by_asins(asin_list, region, session, cache, *, facts=None):
+    async def fake_get_books_by_asins(
+        asin_list, region, session, cache, *, facts=None, placeholder_asins=None
+    ):
         record_source_keys(facts, SOURCE_AUDIBLE, ["B000000000"])
         record_source_keys(facts, SOURCE_DB, ["B000000001"])
         record_incomplete(facts, REASON_HYDRATION_FAILED)
@@ -788,7 +792,9 @@ async def test_get_books_bulk_source_header_omitted_when_post_filter_body_is_emp
     not the tally recorded before filtering ran, or a caller would see a
     source attributed to zero returned elements."""
 
-    async def fake_get_books_by_asins(asin_list, region, session, cache, *, facts=None):
+    async def fake_get_books_by_asins(
+        asin_list, region, session, cache, *, facts=None, placeholder_asins=None
+    ):
         record_source(facts, SOURCE_AUDIBLE, 1)
         return [MOCK_BOOK]  # rating 4.5
 
@@ -814,7 +820,9 @@ async def test_get_books_bulk_source_header_names_only_the_filter_survivors_sour
     audible_book = {**MOCK_BOOK, "asin": "B000000001", "rating": 4.9}
     cache_book = {**MOCK_BOOK, "asin": "B000000002", "rating": 1.0}
 
-    async def fake_get_books_by_asins(asin_list, region, session, cache, *, facts=None):
+    async def fake_get_books_by_asins(
+        asin_list, region, session, cache, *, facts=None, placeholder_asins=None
+    ):
         record_source_keys(facts, SOURCE_AUDIBLE, [audible_book["asin"]])
         record_source_keys(facts, SOURCE_CACHE, [cache_book["asin"]])
         return [audible_book, cache_book]
@@ -845,7 +853,9 @@ async def test_bulk_books_above_threshold_still_carries_facts_and_cache_headers(
     books = [{**MOCK_BOOK, "asin": f"B{i:09d}"} for i in range(n)]
     found_asins = [b["asin"] for b in books]
 
-    async def fake_get_books_by_asins(asin_list, region, session, cache, *, facts=None):
+    async def fake_get_books_by_asins(
+        asin_list, region, session, cache, *, facts=None, placeholder_asins=None
+    ):
         record_source_keys(facts, SOURCE_AUDIBLE, found_asins)
         return books
 
@@ -933,3 +943,217 @@ async def test_get_book_genuine_absence_is_unchanged(async_client):
         "error": "Book not found: B08G9PRS1K",
         "status_code": 404,
     }
+
+
+# ============================================================
+# PLACEHOLDER RECORDS -- placeholderRecords on the bulk response
+# ============================================================
+# The service is mocked one call above the router, with a side_effect that
+# fills the placeholder_asins out-parameter the router passes in, so what is
+# under test is the router's own list-building: the caller's original
+# strings, request order, once per occurrence, found wins, computed before
+# filtering. The end-to-end tests below run the real service with
+# audible_get mocked.
+
+PLACEHOLDER_ASIN = "B0PLACE001"
+
+
+def _bulk_service_fake(books, placeholders, facts_reason=None):
+    async def fake(asin_list, region, session, cache, *, facts=None, placeholder_asins=None):
+        placeholder_asins.extend(placeholders)
+        if facts_reason:
+            record_incomplete(facts, facts_reason)
+        return books
+
+    return fake
+
+
+@pytest.mark.asyncio
+async def test_bulk_placeholder_is_listed_and_excluded_from_not_found(async_client):
+    found = MOCK_BOOK["asin"]
+    missing = "B0MISSING1"
+    fake = _bulk_service_fake([MOCK_BOOK], [PLACEHOLDER_ASIN])
+
+    with patch("app.api.routes.books.router.get_books_by_asins", side_effect=fake):
+        response = await async_client.get(f"/book?asins={found},{PLACEHOLDER_ASIN},{missing}")
+
+    data = response.json()
+    assert response.status_code == 200
+    assert [b["asin"] for b in data["books"]] == [found]
+    assert data["placeholderRecords"] == [PLACEHOLDER_ASIN]
+    assert data["notFound"] == [missing]
+
+
+@pytest.mark.asyncio
+async def test_bulk_placeholder_records_echo_the_callers_strings_in_request_order_once_per_occurrence(
+    async_client,
+):
+    fake = _bulk_service_fake([], ["B0PLACE002", "B0PLACE001"])
+
+    with patch("app.api.routes.books.router.get_books_by_asins", side_effect=fake):
+        response = await async_client.get(
+            "/book?asins=b0place002,B0PLACE001,b0place002,B0PLACE001"
+        )
+
+    assert response.json()["placeholderRecords"] == [
+        "b0place002", "B0PLACE001", "b0place002", "B0PLACE001",
+    ]
+    assert response.json()["notFound"] == []
+
+
+@pytest.mark.asyncio
+async def test_bulk_asin_both_found_and_placeholder_is_only_in_books(async_client):
+    fake = _bulk_service_fake([MOCK_BOOK], [MOCK_BOOK["asin"]])
+
+    with patch("app.api.routes.books.router.get_books_by_asins", side_effect=fake):
+        response = await async_client.get(f"/book?asins={MOCK_BOOK['asin']}")
+
+    data = response.json()
+    assert [b["asin"] for b in data["books"]] == [MOCK_BOOK["asin"]]
+    assert data["placeholderRecords"] == []
+    assert data["notFound"] == []
+
+
+@pytest.mark.asyncio
+async def test_bulk_placeholder_is_listed_even_when_filters_remove_every_book(async_client):
+    fake = _bulk_service_fake([MOCK_BOOK], [PLACEHOLDER_ASIN])
+
+    with patch("app.api.routes.books.router.get_books_by_asins", side_effect=fake):
+        response = await async_client.get(
+            f"/book?asins={MOCK_BOOK['asin']},{PLACEHOLDER_ASIN}&language=klingon"
+        )
+
+    data = response.json()
+    assert data["books"] == []
+    assert data["placeholderRecords"] == [PLACEHOLDER_ASIN]
+    assert data["notFound"] == []
+
+
+@pytest.mark.asyncio
+async def test_bulk_placeholder_records_key_is_present_and_empty_when_there_are_none(async_client):
+    with patch("app.api.routes.books.router.get_books_by_asins", new_callable=AsyncMock) as mock:
+        mock.return_value = [MOCK_BOOK]
+        response = await async_client.get(f"/book?asins={MOCK_BOOK['asin']}")
+
+    assert response.json()["placeholderRecords"] == []
+
+
+@pytest.mark.asyncio
+async def test_bulk_above_threshold_response_carries_placeholder_records(async_client):
+    n = LARGE_RESPONSE_THREAD_THRESHOLD
+    books = [{**MOCK_BOOK, "asin": f"B{i:09d}"} for i in range(n)]
+    fake = _bulk_service_fake(books, [PLACEHOLDER_ASIN])
+    asins = [b["asin"] for b in books] + [PLACEHOLDER_ASIN]
+
+    with patch("app.api.routes.books.router.get_books_by_asins", side_effect=fake):
+        response = await async_client.get(f"/book?asins={','.join(asins)}&cache=false")
+
+    data = response.json()
+    assert len(data["books"]) == n
+    assert data["placeholderRecords"] == [PLACEHOLDER_ASIN]
+    assert data["notFound"] == []
+
+
+@pytest.mark.asyncio
+async def test_bulk_placeholder_marks_the_response_incomplete_as_hydration_not_found(async_client):
+    from app.core.response_headers import REASON_HYDRATION_NOT_FOUND
+
+    fake = _bulk_service_fake([MOCK_BOOK], [PLACEHOLDER_ASIN], REASON_HYDRATION_NOT_FOUND)
+
+    with patch("app.api.routes.books.router.get_books_by_asins", side_effect=fake):
+        response = await async_client.get(f"/book?asins={MOCK_BOOK['asin']},{PLACEHOLDER_ASIN}")
+
+    assert response.headers["x-libex-complete"] == "false"
+    assert response.headers["x-libex-incomplete-reason"] == "hydration-not-found"
+
+
+def test_bulk_openapi_declares_placeholder_records_as_a_string_array_and_not_found_unchanged():
+    schema = app.openapi()["components"]["schemas"]["BulkBookResponse"]["properties"]
+
+    assert schema["placeholderRecords"]["type"] == "array"
+    assert schema["placeholderRecords"]["items"] == {"type": "string"}
+    assert schema["notFound"]["type"] == "array"
+    assert schema["notFound"]["items"] == {"type": "string"}
+
+
+def _placeholder_audible_product(asin):
+    return {**_cache_route_product(asin), "publication_datetime": "2200-01-01T00:00:00Z"}
+
+
+@pytest.mark.asyncio
+async def test_bulk_end_to_end_fresh_path_splits_found_placeholder_and_stub(async_client):
+    real, stub = "B0REAL0001", "B0STUB0001"
+
+    async def _get(region, path, params):
+        return {"products": [
+            _cache_route_product(real),
+            _placeholder_audible_product(PLACEHOLDER_ASIN),
+            {"asin": stub, "product_state": "NOT_AVAILABLE_FOR_PURCHASE"},
+        ]}
+
+    with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.books.persist_books_background"):
+        response = await async_client.get(
+            f"/book?asins={real},{PLACEHOLDER_ASIN},{stub}&cache=false"
+        )
+
+    data = response.json()
+    assert response.status_code == 200
+    assert [b["asin"] for b in data["books"]] == [real]
+    assert data["placeholderRecords"] == [PLACEHOLDER_ASIN]
+    assert data["notFound"] == [stub]
+    assert response.headers["x-libex-complete"] == "false"
+    assert response.headers["x-libex-incomplete-reason"] == "hydration-not-found"
+
+
+@pytest.mark.asyncio
+async def test_bulk_end_to_end_cache_mixed_path_classifies_the_placeholder_fresh(async_client):
+    from app.services.cache.manager import book_key
+    from app.services.audible.books import get_books_by_asins
+
+    cached_asin = "B0CACHED01"
+    with patch("app.services.audible.books.audible_get",
+               return_value={"product": _cache_route_product(cached_asin)}), \
+         patch("app.services.audible.books.persist_books_background"):
+        cached_book = (await get_books_by_asins([cached_asin], "us", AsyncMock(), False))[0]
+
+    async def _get_many(session, keys):
+        return {book_key(cached_asin, "us"): cached_book}
+
+    audible = AsyncMock(return_value={"product": _placeholder_audible_product(PLACEHOLDER_ASIN)})
+    with patch("app.services.audible.books.cache.get_many", new=AsyncMock(side_effect=_get_many)), \
+         patch("app.services.audible.books.audible_get", new=audible), \
+         patch("app.services.audible.books.persist_books_background") as mock_persist:
+        response = await async_client.get(f"/book?asins={cached_asin},{PLACEHOLDER_ASIN}")
+
+    data = response.json()
+    assert [b["asin"] for b in data["books"]] == [cached_asin]
+    assert data["placeholderRecords"] == [PLACEHOLDER_ASIN]
+    assert data["notFound"] == []
+    assert response.headers["x-libex-source"] == "cache"
+    audible.assert_awaited_once()
+    mock_persist.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_bulk_end_to_end_placeholder_in_a_failed_chunk_lands_in_not_found(async_client):
+    good = [f"B{i:09d}" for i in range(50)]
+
+    async def _get(region, path, params):
+        if "asins" in params:
+            return {"products": [_cache_route_product(a) for a in params["asins"].split(",")]}
+        raise RuntimeError("Audible 500")
+
+    with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.books.get_books_from_db", new=AsyncMock(return_value=[])), \
+         patch("app.services.audible.books.persist_books_background"):
+        response = await async_client.get(
+            f"/book?asins={','.join(good)},{PLACEHOLDER_ASIN}&cache=false"
+        )
+
+    data = response.json()
+    assert response.status_code == 200
+    assert len(data["books"]) == 50
+    assert data["notFound"] == [PLACEHOLDER_ASIN]
+    assert data["placeholderRecords"] == []
+    assert response.headers["x-libex-incomplete-reason"] == "hydration-failed"

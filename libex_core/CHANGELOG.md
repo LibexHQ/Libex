@@ -13,6 +13,14 @@ into its own distribution. Entries below that predate publication are
 historical record for whoever embeds this package later, not evidence that
 anyone consumed a given version at the time it was cut.
 
+## [0.4.0]
+
+### Added
+- **`BulkBookResponse` gains `placeholderRecords: list[str]`, defaulting to an empty list.** Existing construction sites keep working untouched. What moves for every embedder is the serialized shape: a dump of `BulkBookResponse` now carries a `placeholderRecords` key, `[]` unless something supplied it, so a golden file or snapshot compared against a dump will differ on upgrade. That is why this is a MINOR rather than a PATCH. The field means requested ASINs for which Audible returned a record carrying its 2200-01-01 placeholder publication date, deliberately left out of `books` and never also in `notFound`. Nothing in this package fills it; the embedder decides what goes in.
+
+### Changed
+- **The `notFound` field description on `BulkBookResponse` is reworded; its type and default are unchanged.** It now points placeholder records at `placeholderRecords`, and says the list can also hold ASINs that could not be fetched in this request and had no stored copy. This changes the schema's description text in generated OpenAPI, nothing else.
+
 ## [0.3.0]
 
 ### Added

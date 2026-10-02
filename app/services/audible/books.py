@@ -103,8 +103,8 @@ IMAGE_SIZES = "500,1000,2400,3200"
 
 # The publication_datetime Audible puts on a placeholder catalogue record --
 # an entry that stands in for a title rather than being one, which Audible
-# does send. See _filter_products for the two records measured carrying it,
-# and for why one is dropped rather than served.
+# does send. See _filter_products for the records seen carrying it, and for
+# why one is dropped rather than served.
 UNRELEASED_PLACEHOLDER = "2200-01-01T00:00:00Z"
 
 # Below this many products, normalization runs inline on the event loop; at
@@ -1159,6 +1159,16 @@ def _normalize_chapters(data: dict, asin: str) -> dict[str, Any]:
     }
 
 
+def _is_placeholder_record(p: dict) -> bool:
+    """True for a titled record carrying the UNRELEASED_PLACEHOLDER date.
+
+    The title is part of the rule: a titleless hollow stub is a stub whatever
+    date it carries, and stays "not found". Only a record Audible actually
+    described and then marked as a stand-in is a placeholder.
+    """
+    return bool(p.get("title")) and p.get("publication_datetime") == UNRELEASED_PLACEHOLDER
+
+
 def _filter_products(products: list[dict]) -> list[dict]:
     """
     Drops two disjoint categories of product from a raw Audible list:
@@ -1226,11 +1236,7 @@ def _filter_products(products: list[dict]) -> list[dict]:
     confirmations above came from asking for one ASIN by name, which is
     exactly the path a caller takes and the sample never did.
     """
-    return [
-        p for p in products
-        if p.get("title")
-        and p.get("publication_datetime") != UNRELEASED_PLACEHOLDER
-    ]
+    return [p for p in products if p.get("title") and not _is_placeholder_record(p)]
 
 
 # ============================================================
@@ -1272,7 +1278,11 @@ class HydrationDeadlineExceeded(Exception):
 
 
 async def _fetch_chunk(asins: list[str], region: str) -> list[dict[str, Any]]:
-    """Fetches a single chunk of up to 50 ASINs from Audible."""
+    """Fetches a single chunk of up to 50 ASINs from Audible.
+
+    Returns Audible's products raw. Filtering is the caller's job, because
+    only the caller can tell a placeholder from a stub among the drops.
+    """
     if not asins:
         return []
 
@@ -1294,7 +1304,7 @@ async def _fetch_chunk(asins: list[str], region: str) -> list[dict[str, Any]]:
         data = await audible_get(region, path, params)
         products = data.get("products", [])
 
-    return _filter_products(products)
+    return products
 
 
 # ============================================================
@@ -1311,6 +1321,7 @@ async def get_books_by_asins(
     *,
     facts: ResponseFacts | None = None,
     persist_outcome: list[PersistOutcome] | None = None,
+    placeholder_asins: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Public entry point. Delegates to _get_books_by_asins_unsettled and settles
@@ -1339,6 +1350,23 @@ async def get_books_by_asins(
     caller nothing, the same as facts=None. When given, gets at most one
     PersistOutcome appended -- this function's own fetch path calls
     persist_books_background at most once per invocation.
+
+    placeholder_asins, when given, receives the requested ASINs Audible
+    answered with a placeholder record (see _is_placeholder_record). They are
+    absent from the result like any unresolved ASIN; this is how a caller
+    tells "Audible has no such book" from "Audible has it and won't serve it".
+    Only a chunk Audible answered can classify, and its placeholders are
+    listed even if another chunk fails and the request falls back to stored
+    copies. An ASIN in a failed or abandoned chunk is never classified,
+    whether or not other chunks succeeded; with no stored copy covering it,
+    it ends up in notFound. If no chunk produced a servable book and nothing
+    came from the cache, a failed chunk sends the whole request to the outage
+    fallback, which checks every requested ASIN against the database and then
+    the cache; if that finds none of them, the route turns the outage into a
+    whole-request 404 and no placeholder reaches the caller, even one from a
+    chunk Audible answered. When any chunk did produce a book, an uncovered
+    failed chunk only adds its ASINs to notFound. None leaves every other
+    caller unchanged.
     """
     books = await _get_books_by_asins_unsettled(
         asins,
@@ -1349,6 +1377,7 @@ async def get_books_by_asins(
         deadline,
         facts=facts,
         persist_outcome=persist_outcome,
+        placeholder_asins=placeholder_asins,
     )
     return _settle_flags_list(books)
 
@@ -1363,6 +1392,7 @@ async def _get_books_by_asins_unsettled(
     *,
     facts: ResponseFacts | None = None,
     persist_outcome: list[PersistOutcome] | None = None,
+    placeholder_asins: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Fetches one or more books by ASIN from Audible.
@@ -1398,6 +1428,19 @@ async def _get_books_by_asins_unsettled(
     the Audible-unavailable fallback -- has nothing freshly fetched to
     persist and leaves the list untouched, exactly as it would if the caller
     hadn't asked.
+
+    placeholder_asins, when given, is extended with the requested ASINs whose
+    Audible product is a placeholder record, on both the batch and the
+    single-ASIN fetch. Placeholders are never normalized, persisted or
+    cached, and still count as incomplete. The list is filled from every chunk
+    Audible answered, before any fallback is decided, so those placeholders
+    stay listed even when another chunk failed and the outage fallback runs.
+    An ASIN in a failed or abandoned chunk is never classified, whatever the
+    other chunks did. When no chunk produced a servable book and nothing came
+    from the cache, any failed chunk sends the request to the outage
+    fallback; if no stored or cached copy of any requested ASIN exists
+    either, it ends as a route-level 404, so the list is then never seen by
+    the caller, placeholders from answered chunks included.
     """
     if not asins:
         raise NotFoundException("No ASINs provided")
@@ -1530,6 +1573,7 @@ async def _get_books_by_asins_unsettled(
         not_found_asins: list[str] = []
         deadline_asins: list[str] = []
         transient_failed_asins: list[str] = []
+        placeholders: list[str] = []
         transient_errors: list[Exception] = []
 
         for idx, (chunk, result) in enumerate(zip(chunks, results)):
@@ -1566,31 +1610,40 @@ async def _get_books_by_asins_unsettled(
                     },
                 )
                 continue
-            # A batch chunk's own response is always a 200 even when some of
-            # its requested ASINs have no such record -- Audible answers
-            # those with a hollow, titleless stub rather than a 404 (see
-            # _filter_products), and that stub is already gone from `result`
-            # by the time it lands here. But `result` is _filter_products'
-            # output, and that function drops two disjoint categories: the
-            # titleless stub above, and any product whose
-            # publication_datetime equals UNRELEASED_PLACEHOLDER. A chunk
-            # ASIN with no matching product in `result` could be either one
-            # -- a genuinely nonexistent ASIN, or a title Audible returned in
-            # full that simply hasn't released yet, filtered out before this
-            # comparison ever runs. Both are structurally indistinguishable
-            # here, and both are correctly absent from the body either way:
-            # the ASIN is not present in what this function returns.
-            returned_asins = {p.get("asin") for p in result}
-            stub_asins = [a for a in chunk if a not in returned_asins]
+            # A batch answers 200 even when some requested ASINs have no
+            # record: those come back as hollow titleless stubs, which
+            # _filter_products drops. A titled record with the placeholder
+            # date is dropped too but is a different fact, so it is split
+            # out. Only ASINs that were requested count; Audible can return
+            # others.
+            kept = _filter_products(result)
+            kept_asins = {p.get("asin") for p in kept}
+            chunk_set = set(chunk)
+            chunk_placeholders = list(dict.fromkeys(
+                p["asin"] for p in result
+                if p.get("asin") in chunk_set and _is_placeholder_record(p)
+            ))
+            placeholder_set = set(chunk_placeholders)
+            stub_asins = [
+                a for a in chunk if a not in kept_asins and a not in placeholder_set
+            ]
             if stub_asins:
                 not_found_asins.extend(stub_asins)
+            if chunk_placeholders:
+                placeholders.extend(chunk_placeholders)
+            if stub_asins or chunk_placeholders:
                 record_incomplete(facts, REASON_HYDRATION_NOT_FOUND)
-            all_products.extend(result)
+            all_products.extend(kept)
 
-        if not_found_asins or transient_failed_asins:
+        if placeholder_asins is not None:
+            placeholder_asins.extend(placeholders)
+
+        if not_found_asins or placeholders or transient_failed_asins:
+            # Like its siblings, the placeholder_asins log field is a count.
             logger.warning("Partial hydration shortfall", extra={
                 "requested_num": len(fetch_asins),
                 "not_found_asins": len(not_found_asins),
+                "placeholder_asins": len(placeholders),
                 "failed_asins": len(transient_failed_asins),
                 "region": region,
             })
@@ -1648,6 +1701,7 @@ async def _get_books_by_asins_unsettled(
             "cache_hits": len(cached_results),
             "requested_took": requested_took,
             "not_found_asins": len(not_found_asins),
+            "placeholder_asins": len(placeholders),
             "failed_asins": len(transient_failed_asins),
             "db_backstop_num": len(db_backstop_results),
             "region": region,

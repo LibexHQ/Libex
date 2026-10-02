@@ -122,7 +122,8 @@ async def get_books_bulk(
     """
     Get multiple books by ASIN.
     Accepts all three forms: ?asins=X,Y — ?asins=X&asins=Y — ?asins=X,Y&asins=Z
-    Returns {"books": [...], "notFound": [...]} matching AudiMeta's bulk format.
+    Returns {"books": [...], "notFound": [...], "placeholderRecords": [...]};
+    books and notFound match AudiMeta's bulk format.
     """
     asin_list = [
         a.strip()
@@ -149,16 +150,29 @@ async def get_books_bulk(
         raise NotFoundException("Maximum 1000 ASINs per request")
 
     facts = ResponseFacts()
+    placeholders: list[str] = []
     data = await outage_as_not_found(
-        get_books_by_asins(asin_list, region, session, cache, facts=facts)
+        get_books_by_asins(
+            asin_list, region, session, cache, facts=facts, placeholder_asins=placeholders
+        )
     )
 
-    # notFound reflects what Audible didn't have — computed before filtering, so
-    # a book that was found but filtered out is not reported as missing. Both
-    # sides are normalised so the caller's form and the product's form are
-    # compared on equal terms.
+    # notFound holds ASINs Audible didn't have or Libex couldn't fetch —
+    # computed before filtering, so a book that was found but filtered out is
+    # not reported as missing. Both sides are normalised so the caller's form
+    # and the product's form are compared on equal terms.
     found_asins = {normalise_asin(book["asin"]) for book in data}
-    not_found = [a for a in original_asin_list if normalise_asin(a) not in found_asins]
+    placeholder_set = {normalise_asin(a) for a in placeholders} - found_asins
+    # Found wins, then placeholder: books, placeholderRecords and notFound
+    # never share an ASIN.
+    placeholder_records = [
+        a for a in original_asin_list if normalise_asin(a) in placeholder_set
+    ]
+    not_found = [
+        a
+        for a in original_asin_list
+        if normalise_asin(a) not in found_asins and normalise_asin(a) not in placeholder_set
+    ]
 
     data = filter_dicts(data, filters.as_kwargs())
     data = sort_dicts(data, sort.value if sort is not None else None, order.value, BOOK_SORT_FIELDS)
@@ -172,6 +186,7 @@ async def get_books_bulk(
         lambda: BulkBookResponse(
             books=[BookResponse(**book) for book in data],
             notFound=not_found,
+            placeholderRecords=placeholder_records,
         ),
         injected_response=response,
     )

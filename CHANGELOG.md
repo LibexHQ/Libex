@@ -10,6 +10,14 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.26.0]
+
+### Added
+- **Bulk `GET /book` now returns `placeholderRecords`, a list of the requested ASINs for which Audible sent a placeholder record.** A placeholder is a titled record carrying Audible's 2200-01-01 publication date, which has been seen standing in for a series parent. Libex still leaves these out of `books`, as before. The field is always present, an empty list when there are none, and lists ASINs as you sent them, in request order, computed before any filter is applied. `books`, `notFound` and `placeholderRecords` never share an ASIN. Only an ASIN Audible actually answered for can be listed here. One served from Libex's stored copy comes back in `books` as usual; one in a chunk that failed or was given up on, with no stored copy to cover it, lands in `notFound`. If no requested ASIN could be served at all, the request returns 404 as before.
+
+### Changed
+- **`notFound` no longer contains placeholder records.** Until now they were listed there, which says Audible could not resolve the ASIN, and that was untrue for them: Audible had a record and Libex chose not to serve it. They now appear only in `placeholderRecords`. A hollow, titleless stub, which is what Audible sends for an ASIN it has no record of, still goes in `notFound`, whatever date it carries. `notFound` keeps its type and its position in the response. Its description now also says it can hold ASINs Libex could not fetch in this request and had no stored copy of; `X-Libex-Incomplete-Reason` tells those apart. The `X-Libex-*` headers are unchanged, and a placeholder still reads as `hydration-not-found` with `X-Libex-Complete: false`. The docs now use "placeholder" only for the date-stamped record and "hollow, titleless stub" for the empty response.
+
 ## [1.25.0]
 
 ### Added

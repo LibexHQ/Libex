@@ -382,7 +382,8 @@ this section describes the source as it stands, ahead of any release. The
 behaviour described is in `libex_core/audible/client.py`, with the logging of
 individual titles in `libex_core/audible/books.py` and
 `libex_core/audible/extras.py`, searching in `libex_core/audible/search.py`,
-and the command-line tool in `libex_core/cli/`.
+the lookup functions in `libex_core/lookup/`, and the command-line tool in
+`libex_core/cli/`.
 
 If you are using an application that contains this library, that
 application's privacy policy is the one that applies to you. This section
@@ -434,15 +435,21 @@ The library is built around preventing that from happening by accident:
   on a command line, where other programs on the machine can read it. Nothing
   else in the library reads the environment, and a test fails if that
   changes. The tool prints results as JSON to standard output. Errors, and
-  the library's warnings listed below, go to standard error. `-vv` adds
-  tracebacks, and `-q` leaves only the error line. It sends none of this
-  anywhere else. It has no lookup commands yet: `libex-core config` prints
-  only whether a proxy is in use and the proxy's hostname, and makes no
-  request. Neither its output nor its error messages contain the proxy URL or
-  the value of either variable.
+  the library's warnings listed below, go to standard error. Only each
+  warning's fixed message is printed there, not the details listed with it.
+  `-v` adds the informational lines, `-vv` adds tracebacks, and `-q` leaves
+  only the error line. It sends none of this anywhere else. Its lookup
+  commands (books, chapters, series, searches and narrators) send the ASINs
+  and search terms you give them to Audible, as described above, and print
+  Audible's answer. A bulk lookup can read its list of ASINs from a file or
+  standard input. That input is read once, is not kept, and its path is not
+  repeated in an error. `libex-core config` prints only whether a proxy is in
+  use and the proxy's hostname, and makes no request. Neither the tool's
+  output nor its error messages contain the proxy URL or the value of either
+  variable.
 - **Its logs go where the application sends them.** It writes to the standard
   Python logger named `libex`, so its records end up wherever the host
-  application's logging is configured to send them. There are five:
+  application's logging is configured to send them. From the client:
   - closing a stale connection fails (debug): a traceback;
   - request throttled or degraded by Audible: status, region, API path (with the ASIN for a single-title lookup), pool, attempt count, the wait Audible asked for;
   - malformed author ASIN: title ASIN, region, the malformed value, the author's name;
@@ -450,11 +457,20 @@ The library is built around preventing that from happening by accident:
   - extra data cleaned up or held back: title ASIN, region, the reason, a count and, if oversized, its size; none of the data itself.
 
   The last two log at most once a minute (extras, once a minute per reason),
-  naming only the latest title. Only the region and the looked-up ASIN come from the
-  caller: query parameters, where search text would appear, are left out, and
-  any ASIN, name or value not shaped like an ASIN or a short catalogue entry
-  is logged as `REDACTED`. A title ASIN is still a title someone looked up or
-  searched for, so these records are part of their reading history.
+  naming only the latest title.
+
+  From the lookup functions:
+  - a completed lookup (info): region, how long Audible took, and counts of what was asked for and what came back; for a search, the names of the fields searched, and for a quick search, the length of the text and how many parts a compound query was split into;
+  - a lookup Audible only partly answered (warning): region, counts, and the kind of error where one occurred, including how many identifiers were skipped for not being ASINs;
+  - Audible unavailable (warning or error): region, the kind of error, Audible's status where there was one, and, for a chapters or series lookup, the ASIN asked for.
+
+  From the caller, these records take the region, the looked-up ASIN, the
+  names of searched fields, the length of quick-search text and how many
+  items were asked for. Search text itself is never logged: query parameters,
+  where it would appear, are left out, and any ASIN, name or value not shaped
+  like an ASIN or a short catalogue entry is logged as `REDACTED`. A title
+  ASIN is still a title someone looked up or searched for, so these records
+  are part of their reading history.
 
 An application that includes the library still has to answer three questions
 for its own users. Does it connect directly or through a proxy, and if through

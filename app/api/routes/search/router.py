@@ -1,6 +1,6 @@
 """
 Search router.
-Compatible with AudiMeta endpoint structure for drop-in replacement.
+Endpoint structure is derived from AudiMeta's, with known differences.
 """
 
 # Standard library

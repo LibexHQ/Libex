@@ -1474,7 +1474,7 @@ def _region_stats_side_effect(books=100, authors=200, narrators=999, series=300,
 @pytest.mark.asyncio
 async def test_get_db_stats_no_region_returns_exactly_the_original_five_keys():
     """
-    The drop-in guarantee: region=None must return precisely the key set
+    The unscoped guarantee: region=None must return precisely the key set
     get_db_stats has always returned. seriesRegionUnknown only exists for a
     region-scoped call — its presence here would mean an unscoped caller
     silently gets a shape it never asked for and no schema pinned it against.

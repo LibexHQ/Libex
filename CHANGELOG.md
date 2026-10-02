@@ -10,6 +10,13 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [1.28.1]
+
+No endpoint, parameter, response shape, field or status code moved. The code that fetches and normalizes Audible book, chapter and series records now lives in the embeddable core library; the output is unchanged.
+
+### Changed
+- **The malformed-author-ASIN warning no longer logs unsafe values verbatim.** Until now it wrote three fields raw: the book's ASIN, the malformed author ASIN and the author's name, all straight from Audible's response. Now the book's ASIN is logged as `REDACTED` unless it is a well-formed ASIN, and the malformed author ASIN and the author name are logged as-is only if they are short catalogue text (letters, numbers, punctuation and spaces in any script, no `;` or `=`, at most 64 characters), otherwise `REDACTED`. The other warnings that name an ASIN from an Audible response log it as `REDACTED` unless it is well-formed. This affects only what operators see in logs.
+
 ## [1.28.0]
 
 ### Added

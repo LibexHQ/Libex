@@ -85,7 +85,7 @@ SCREENS_PAGE_SIZE = 20
 # Tied directly to AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT rather than kept
 # as its own independent number: this walk only ever runs as part of the
 # live author-books request that pool is reserved for (see that constant's
-# own docstring in client.py for the measurements behind its value and why
+# own comment in libex_core/audible/_concurrency.py for the measurements behind its value and why
 # that call path specifically gets a wider pool than the shared IP's
 # default), and every audible_get call this walk makes already draws from
 # that same pool via author_books_concurrency() (entered by the caller in

@@ -607,3 +607,37 @@ def test_verify_dedicated_proxy_logs_nothing_at_error_when_correctly_named(
     with caplog.at_level(logging.ERROR, logger="libex"):
         _verify_dedicated_proxy()
     assert [r for r in caplog.records if r.levelno == logging.ERROR] == []
+
+
+# ============================================================
+# _raise_process_limits — THE RAISE MUST REACH THE LIVE SEMAPHORE
+# ============================================================
+
+def test_raise_process_limits_reaches_the_semaphore_the_walk_uses(monkeypatch):
+    from libex_core.audible import _concurrency
+    from app.services.db import persist_queue
+
+    monkeypatch.setattr(_concurrency, "AUDIBLE_CONCURRENCY_LIMIT", 10)
+    monkeypatch.setattr(_concurrency, "_audible_semaphore", None)
+    monkeypatch.setattr(_concurrency, "_audible_semaphore_loop", None)
+    monkeypatch.setattr(persist_queue, "_bg_write_semaphore", None)
+    monkeypatch.setattr(persist_queue, "_BG_WRITE_CONCURRENCY_LIMIT", persist_queue._BG_WRITE_CONCURRENCY_LIMIT)
+    monkeypatch.setattr(refresh_corpus.audible_client, "_AUDIBLE_POOL_LIMITS", refresh_corpus.audible_client._AUDIBLE_POOL_LIMITS)
+
+    refresh_corpus._raise_process_limits()
+
+    async def build():
+        return _concurrency._get_audible_semaphore()
+
+    semaphore = asyncio.run(build())
+    assert semaphore._value == refresh_corpus.CONCURRENCY_MAX
+    assert refresh_corpus.CONCURRENCY_MAX > 10
+
+
+def test_raise_process_limits_refuses_when_the_semaphore_is_already_built(monkeypatch):
+    from libex_core.audible import _concurrency
+
+    monkeypatch.setattr(_concurrency, "_audible_semaphore", asyncio.Semaphore(1))
+
+    with pytest.raises(RuntimeError, match="Audible semaphore already built"):
+        refresh_corpus._raise_process_limits()

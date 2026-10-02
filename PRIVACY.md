@@ -188,7 +188,10 @@ that can be searched by name. Some are worth describing individually:
   who asked.
 - **Problems with individual titles.** If data from Audible can't be parsed or
   stored, a warning names that title's ASIN, sometimes its region, and the kind
-  of problem. It does not include the value that caused the problem.
+  of problem. It does not include the value that caused the problem, except
+  for a malformed author ASIN: that value and the author's name, both from
+  Audible's catalogue, are logged, or `REDACTED` if either doesn't look like a
+  short catalogue entry.
 - **Database failures.** These name the item being read in its own field
   (`asin`, `author_asin`, `series_asin`, `plan_name` or `sku_group`), which
   repeats part of a path the request line already records. They include the
@@ -376,7 +379,9 @@ What the software does as shipped:
 fetches from Audible in that application's own process, with no Libex server
 involved. **It has not been published** to PyPI or any other package index, so
 this section describes the source as it stands, ahead of any release. The
-behaviour described is in `libex_core/audible/client.py`.
+behaviour described is in `libex_core/audible/client.py`, with the logging of
+individual titles in `libex_core/audible/books.py` and
+`libex_core/audible/extras.py`.
 
 If you are using an application that contains this library, that
 application's privacy policy is the one that applies to you. This section
@@ -422,12 +427,19 @@ preventing that from happening by accident:
   it.
 - **Its logs go where the application sends them.** It writes to the standard
   Python logger named `libex`, so its records end up wherever the host
-  application's logging is configured to send them. There are two: a debug
-  record with a traceback when closing a stale connection fails, and a warning
-  when Audible throttles or degrades a request. The warning records the status,
-  region, the API path (which includes the ASIN for a single-title lookup), the
-  concurrency pool, the attempt count and the wait Audible asked for. Query
-  parameters, where search text would appear, are not included.
+  application's logging is configured to send them. There are five:
+  - closing a stale connection fails (debug): a traceback;
+  - request throttled or degraded by Audible: status, region, API path (with the ASIN for a single-title lookup), pool, attempt count, the wait Audible asked for;
+  - malformed author ASIN: title ASIN, region, the malformed value, the author's name;
+  - unreadable subscription plans: title ASIN, a count;
+  - extra data cleaned up or held back: title ASIN, region, the reason, a count and, if oversized, its size; none of the data itself.
+
+  The last two log at most once a minute (extras, once a minute per reason),
+  naming only the latest title. Only the region and the looked-up ASIN come from the
+  caller: query parameters, where search text would appear, are left out, and
+  any ASIN, name or value not shaped like an ASIN or a short catalogue entry
+  is logged as `REDACTED`. A title ASIN is still a title someone looked up or
+  searched for, so these records are part of their reading history.
 
 An application that includes the library still has to answer three questions
 for its own users. Does it connect directly or through a proxy, and if through

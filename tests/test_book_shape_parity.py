@@ -64,7 +64,7 @@ from datetime import datetime, timezone
 
 # Local
 from app.db.models import Book
-from app.services.audible.books import _normalize_product
+from libex_core.audible.books import normalize_product as _normalize_product
 from app.services.db.reader import _book_to_dict
 from app.services.db.writer import _BOOK_UPSERT, _book_params
 from libex_core.models import BookResponse

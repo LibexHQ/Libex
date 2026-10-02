@@ -564,18 +564,34 @@ async def test_get_series_books_primary_cache_false_marks_the_response_no_store(
 # live batch call never actually takes.
 
 
+# 10 chars is a well-formed ASIN Audible has no record for; 11 chars is not an
+# ASIN at all, and on main it reached Audible and came back as the same hollow
+# stub. Both must still read as 200 + hydration-not-found on the wire.
+_STUB_ASINS = ["B0NOTFOUN1", "B0NOTFOUND1"]
+
+
+def _found_product(asin):
+    return {
+        "asin": asin, "title": "Real Book", "authors": [], "narrators": [],
+        "relationships": [], "product_images": {}, "category_ladders": [],
+        "rating": {}, "publication_datetime": "2021-01-01T00:00:00Z",
+    }
+
+
 @pytest.mark.asyncio
-async def test_get_series_books_marks_incomplete_on_a_hollow_stub_with_no_notfound_field(async_client):
+@pytest.mark.parametrize("stub_asin", _STUB_ASINS)
+async def test_get_series_books_marks_incomplete_on_a_hollow_stub_with_no_notfound_field(async_client, stub_asin):
     found_asin = "B0FOUND001"
-    stub_asin = "B0NOTFOUND1"
 
     async def _get(region, path, params):
+        if "asins" not in params:
+            # An 11-char stub never reaches Audible, which leaves one valid
+            # ASIN -- a lone ASIN is asked for on its own product path and
+            # answered with a single product, not a batch.
+            assert path.endswith(found_asin)
+            return {"product": _found_product(found_asin)}
         return {"products": [
-            {
-                "asin": found_asin, "title": "Real Book", "authors": [], "narrators": [],
-                "relationships": [], "product_images": {}, "category_ladders": [],
-                "rating": {}, "publication_datetime": "2021-01-01T00:00:00Z",
-            },
+            _found_product(found_asin),
             {"asin": stub_asin, "product_state": "NOT_AVAILABLE_FOR_PURCHASE"},
         ]}
 
@@ -594,19 +610,21 @@ async def test_get_series_books_marks_incomplete_on_a_hollow_stub_with_no_notfou
 
 
 @pytest.mark.asyncio
-async def test_get_series_books_primary_marks_incomplete_on_a_hollow_stub_with_no_notfound_field(async_client):
+@pytest.mark.parametrize("stub_asin", _STUB_ASINS)
+async def test_get_series_books_primary_marks_incomplete_on_a_hollow_stub_with_no_notfound_field(async_client, stub_asin):
     """The legacy twin (/series/{asin}/books) must not diverge from the
     named route above."""
     found_asin = "B0FOUND001"
-    stub_asin = "B0NOTFOUND1"
 
     async def _get(region, path, params):
+        if "asins" not in params:
+            # An 11-char stub never reaches Audible, which leaves one valid
+            # ASIN -- a lone ASIN is asked for on its own product path and
+            # answered with a single product, not a batch.
+            assert path.endswith(found_asin)
+            return {"product": _found_product(found_asin)}
         return {"products": [
-            {
-                "asin": found_asin, "title": "Real Book", "authors": [], "narrators": [],
-                "relationships": [], "product_images": {}, "category_ladders": [],
-                "rating": {}, "publication_datetime": "2021-01-01T00:00:00Z",
-            },
+            _found_product(found_asin),
             {"asin": stub_asin, "product_state": "NOT_AVAILABLE_FOR_PURCHASE"},
         ]}
 
@@ -743,3 +761,39 @@ async def test_get_series_by_asin_genuine_absence_is_unchanged(async_client):
         "status_code": 404,
         "code": "not_on_audible",
     }
+
+
+@pytest.mark.asyncio
+async def test_get_series_books_with_a_malformed_relationship_asin_is_200_with_the_valid_books(async_client):
+    """The series' relationships are Audible-sourced and one of them is 11
+    characters. The series answer is the real discovery path (nothing about
+    get_series_books is mocked): the valid member is hydrated, the malformed
+    one is a hydration-not-found, and the response is a 200 rather than an
+    Audible outage."""
+    found_asin = "B0FOUND001"
+    bad_asin = "B0NOTFOUND1"
+    assert len(bad_asin) == 11
+
+    async def _get(region, path, params):
+        if params.get("response_groups") == "relationships":
+            assert path == "/1.0/catalog/products/B00SERIES1"
+            return {"product": {"relationships": [
+                {"asin": found_asin, "sort": "1"},
+                {"asin": bad_asin, "sort": "2"},
+            ]}}
+        assert path.endswith(found_asin), f"hydration asked for {path} {params}"
+        return {"product": _found_product(found_asin)}
+
+    with patch("app.services.audible.series.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.series.persist_cache_background"), \
+         patch("app.services.audible.series.cache.get", new=AsyncMock(return_value=None)), \
+         patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.books.persist_books_background"), \
+         patch("app.services.audible.books.cache.get", new=AsyncMock(return_value=None)), \
+         patch("app.services.audible.books.cache.get_many", new=AsyncMock(return_value={})):
+        response = await async_client.get("/series/books/B00SERIES1")
+
+    assert response.status_code == 200
+    assert [b["asin"] for b in response.json()] == [found_asin]
+    assert response.headers["x-libex-complete"] == "false"
+    assert response.headers["x-libex-incomplete-reason"] == "hydration-not-found"

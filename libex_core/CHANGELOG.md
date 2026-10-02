@@ -13,6 +13,17 @@ into its own distribution. Entries below that predate publication are
 historical record for whoever embeds this package later, not evidence that
 anyone consumed a given version at the time it was cut.
 
+## [0.6.0]
+
+### Added
+- **The package can now fetch and normalize Audible books, chapters and series, not only describe them.** New public modules: `libex_core.audible.books` (`fetch_products`, `normalize_product`, `normalize_products`, `settle_flags`, `settle_flags_list`, `filter_products`, `is_placeholder_record`, and the response-group and image-size constants), `libex_core.audible.extras` (`build_extras`), `libex_core.audible.chapters` (`fetch_chapter_metadata`, `has_chapter_info`, `normalize_chapters`, `CHAPTERS_RESPONSE_GROUPS`) and `libex_core.audible.series` (`fetch_series`, `fetch_series_book_asins`, `normalize_series`). Normalized output is the same, key for key, as hosted Libex produced before the move; it is pinned by golden files. Earlier entries said this package did not fetch or normalize a product; that no longer holds.
+- **Every fetch function takes the request callable as its first argument.** `AudibleGet`, a new `Protocol` in `libex_core.audible.client`, describes it, so how a request leaves the process stays the embedder's choice. The fetch functions check the region first (`RegionException` for one of the eleven it is not) and every ASIN (`ValueError`, with a message that never repeats the rejected value) before anything is sent. `validated_asin` is exposed for the same check; it accepts a lowercase ASIN and returns it uppercased, which is also the form the fetch functions send. Hosted Libex screens out values that are not ASINs before it calls `fetch_products`, so one bad value does not reject the rest of a batch; the core itself still raises `ValueError` for the whole call. `fetch_products` accepts at most 50 ASINs per call; it does not split a longer list for you.
+- **`libex_core.log_safety`** exposes `is_safe_log_value`, `safe_asin_for_log` and `window_elapsed`, the checks the package uses to keep caller- or Audible-supplied text out of log lines and to rate-limit repeated warnings. `is_safe_log_value` is the same rule hosted Libex used; it is no longer importable from hosted Libex's own logging module.
+
+### Changed
+- **The transport's concurrency and retry internals moved into private modules.** Nothing public was removed: `author_books_concurrency` is still importable from `libex_core.audible.client`. Code that reached into the transport's other internals, such as its semaphore or its concurrency limit, now finds them in `libex_core.audible._concurrency`, a private module with no stability promise.
+- **The malformed-author-ASIN warning redacts unsafe values.** It used to log the book's ASIN, the malformed author ASIN and the author name verbatim. The book's ASIN is now `REDACTED` unless it is a well-formed ASIN; the malformed author ASIN and the author name are logged as-is only if `is_safe_log_value` accepts them (short catalogue text), otherwise `REDACTED`. Other warnings naming an ASIN from Audible use the same well-formed-ASIN rule.
+
 ## [0.5.0]
 
 ### Added

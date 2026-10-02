@@ -43,7 +43,7 @@ import pytest
 from sqlalchemy import text
 
 # Local
-from app.services.audible.books import _normalize_product
+from libex_core.audible.books import normalize_product as _normalize_product
 from app.services.db.reader import get_book_from_db
 from app.services.db.writer import write_books
 from tests.fixtures.audible_product import AUDIBLE_PRODUCT

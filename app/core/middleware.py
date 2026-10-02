@@ -24,7 +24,8 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 # Core
 from libex_core.asin import is_valid_asin, normalise_asin
 from libex_core.audible.client import validate_region
-from app.core.logging import get_logger, is_safe_log_value
+from app.core.logging import get_logger
+from libex_core.log_safety import is_safe_log_value
 from libex_core.exceptions import ErrorCode, NotFoundException, RegionException
 from app.core.migration_notice import MigrationNotice, MIGRATION_HEADER_NAMES, is_new_host_request
 from app.core.response_headers import (

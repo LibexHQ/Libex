@@ -39,15 +39,16 @@ from libex_core.storage.types import JSONDocument
 # -- U+200B, U+FEFF and their neighbours -- are not whitespace in Unicode and
 # are not trimmed, so a value made only of those still reads as an answer.
 BLANK_CHARS = (
-    "\t\n\v\f\r "  # U+0009..U+000D, U+0020
+    "\u0009\u000a\u000b\u000c\u000d"  # tab, line feed, vertical tab, form feed, carriage return
+    "\u0020"  # space
     "\u0085"  # next line
-    " "  # no-break space
-    " "  # ogham space mark
-    "           "
-    "  "  # line separator, paragraph separator
-    " "  # narrow no-break space
-    " "  # medium mathematical space
-    "　"  # ideographic space
+    "\u00a0"  # no-break space
+    "\u1680"  # ogham space mark
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"  # en quad .. hair space
+    "\u2028\u2029"  # line separator, paragraph separator
+    "\u202f"  # narrow no-break space
+    "\u205f"  # medium mathematical space
+    "\u3000"  # ideographic space
 )
 
 # The bind type for a JSON column that must be able to say "no value". A
@@ -215,8 +216,39 @@ def extras_union(new_value, existing_col):
     neither operator, so the two are registered functions with jsonb's
     semantics (see `libex_core.storage.dialect`), not an approximation.
 
-    The result is a union over time, never a snapshot: a key Audible stops
-    sending is never removed.
+    Two known limits, recorded rather than left for a reader to discover.
+
+    The first is a real hole, not an accepted invariant. || is shallow: if a
+    key's value is an object and the incoming one has fewer sub-keys, the whole
+    sub-object is replaced and the shrinkage rule is defeated one level down.
+    The containment arm only spares a stored blob that already contains the
+    incoming one in every nested key and element; an incoming blob that adds
+    one new key while thinning a sub-object is not contained, falls through to
+    ||, and loses the sub-object's other keys. Postgres has no deep jsonb merge
+    built in and writing one is complexity this has not earned, so the hole
+    stays open and stays written down; the SQLite spelling reproduces it
+    exactly (see `libex_core.storage.dialect.sqlite_json_merge`), because the
+    two backends must give the same row.
+
+    The second is that the result is a union over time, not a snapshot: a key
+    Audible genuinely stops sending is never removed from the blob. That is the
+    same posture as the additive pivot inserts, and a consumer reading the blob
+    as "what Audible said last" will be wrong about it.
+
+    Why none of the other merges here would do: `answered` measures emptiness
+    with a trim, and trim of a jsonb value does not resolve on Postgres (no
+    implicit cast from jsonb to text); `coalesce` and `longer_wins` take one
+    side whole, and byte length is no measure of information here (one long
+    review outweighs ten dropped keys, and the keys are the data); and
+    `chaptered_wins` refuses to combine because chapters are an ordered whole,
+    where these keys are independently sourced by different response groups.
+
+    extras_withheld is merged by this same function and the argument transfers
+    whole: it is a record whose top-level keys are independently sourced too,
+    describing this same blob, and merging the two columns differently would
+    give them different spans of time while presenting them to a caller as one
+    picture. Its merge site (`libex_core.storage.write.statements`) says what
+    that leaves the column meaning.
     """
     contains = DialectVariant(
         existing_col.contains(new_value),

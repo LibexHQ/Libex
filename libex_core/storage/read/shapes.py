@@ -226,8 +226,8 @@ def book_to_dict(book: Book, series_positions: dict[str, str | None]) -> dict[st
     # withheld that kind, over the same span of fetches audibleExtras above
     # it covers. That is what lets the two be read together, and it is also
     # why neither of them answers "what is missing from the blob right now".
-    # The extras_withheld merge in the writer sets out why the column has that
-    # shape.
+    # The extras_withheld merge in libex_core.storage.write.statements sets out
+    # why the column has that shape.
     if book.extras_withheld:
         result["extrasWithheld"] = book.extras_withheld
     return result

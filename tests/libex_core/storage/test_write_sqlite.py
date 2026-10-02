@@ -220,6 +220,7 @@ async def test_one_engines_writers_do_not_wait_on_anothers(tmp_path):
         configure_sqlite(eng)
         engines.append(eng)
     active = peak = 0
+    both_inside = asyncio.Event()
 
     async def hold(eng):
         nonlocal active, peak
@@ -227,7 +228,9 @@ async def test_one_engines_writers_do_not_wait_on_anothers(tmp_path):
             async with exclusive_write(session):
                 active += 1
                 peak = max(peak, active)
-                await asyncio.sleep(0.02)
+                if active == 2:
+                    both_inside.set()
+                await asyncio.wait_for(both_inside.wait(), timeout=5)
                 active -= 1
 
     try:
@@ -263,3 +266,49 @@ async def test_exclusive_write_does_nothing_off_sqlite():
     async with exclusive_write(session):
         pass
     session.connection.assert_not_called()
+
+
+def test_an_engine_outliving_its_loop_gets_a_fresh_lock(tmp_path):
+    eng = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'loops.db'}")
+    configure_sqlite(eng)
+
+    async def contended():
+        async def hold():
+            async with async_sessionmaker(eng)() as session:
+                async with exclusive_write(session):
+                    await asyncio.sleep(0.01)
+
+        await asyncio.gather(hold(), hold())
+
+    async def dispose():
+        await eng.dispose()
+
+    asyncio.run(contended())
+    asyncio.run(contended())
+    asyncio.run(dispose())
+
+
+def test_the_writer_refuses_a_dialect_it_has_no_sql_for():
+    from libex_core.storage.write.support import check_dialect, conflict_on_constraint, insert_for
+
+    assert check_dialect("sqlite") == "sqlite"
+    assert check_dialect("postgresql") == "postgresql"
+    with pytest.raises(ValueError, match="unsupported dialect 'mysql'"):
+        check_dialect("mysql")
+    with pytest.raises(ValueError):
+        insert_for("mysql")
+    with pytest.raises(ValueError):
+        conflict_on_constraint("mysql", "uq", ["a"])
+
+
+def test_a_json_document_nested_past_the_limit_is_refused():
+    from libex_core.storage.dialect import MAX_JSON_DEPTH, sqlite_json_merge
+
+    def nested(depth):
+        return "[" * depth + "]" * depth
+
+    assert sqlite_json_merge(nested(MAX_JSON_DEPTH), "{}") is not None
+    with pytest.raises(ValueError, match="nests deeper"):
+        sqlite_json_merge(nested(MAX_JSON_DEPTH + 1), "{}")
+    with pytest.raises(ValueError, match="nests deeper"):
+        sqlite_json_merge(nested(100000), "{}")

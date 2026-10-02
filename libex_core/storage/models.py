@@ -107,7 +107,7 @@ class Book(Base):
     # Keys are never removed either. So a key sitting here was not
     # necessarily sent by the most recent response, or by the marketplace
     # named in region, and the blob is not a snapshot of what Audible would
-    # say now. _extras_union in the writer carries why it is merged that way,
+    # say now. libex_core.storage.merge.extras_union carries why it is merged that way,
     # and the limits of that merge.
     #
     # The blob is large enough to be toasted, so reading it is a detoast per
@@ -134,8 +134,9 @@ class Book(Base):
     # changed on the same write. Nor is it an inventory of what is missing
     # from the blob as it stands -- an entry outlives a later response
     # supplying the key it names. Read it as evidence that something was
-    # dropped at some point. The extras_withheld merge in the writer sets out
-    # why the column has that shape.
+    # dropped at some point. The extras_withheld merge in
+    # libex_core.storage.write.statements sets out why the column has that
+    # shape.
     extras_withheld: Mapped[dict | None] = mapped_column(JSONDocument, nullable=True)
     chapters_checked_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -278,7 +279,7 @@ class Series(Base):
     last_seeded_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     # The series product's keys beyond asin, title and publisher_summary, and
     # the record of anything left out of them. Same meaning, NULL semantics and
-    # merge as the books columns of the same names; _extras_union in the writer
+    # merge as the books columns of the same names; libex_core.storage.merge.extras_union
     # carries why. NULL means no profile fetch has written this row since the
     # columns landed.
     audible_extras: Mapped[dict | None] = mapped_column(JSONDocument, nullable=True)
@@ -303,7 +304,7 @@ class Series(Base):
     authors: Mapped[list["Author"]] = relationship(
         "Author", secondary="series_author", back_populates="series"
     )
-    
+
     __table_args__ = (
         Index("series_asin_index", "asin"),
         # Region-scoped series count. region is nullable, but a btree

@@ -104,6 +104,21 @@ _EXPECTED_REQUIRES_DIST = {
     "pydantic>=2.13.4,<3",
 }
 
+# Optional extras, spelled out here rather than read from pyproject.toml so a
+# dependency added there without being declared here fails the build check.
+_EXPECTED_EXTRAS = {
+    "storage": {
+        "sqlalchemy>=2.0.46,<2.1",
+        "alembic>=1.18.4,<1.19",
+        "aiosqlite>=0.22.1,<0.23",
+    },
+    "postgres": {
+        "libex-core[storage]",
+        "asyncpg>=0.31,<0.32",
+    },
+}
+_EXTRA_MARKER = re.compile(r'^extra == "([a-z0-9-]+)"$')
+
 
 @pytest.fixture(scope="module")
 def built(tmp_path_factory):
@@ -215,16 +230,60 @@ def test_metadata_name_and_python_floor(built):
     assert "Typing :: Typed" in meta.get_all("Classifier")
 
 
-def _runtime_requirements(meta):
-    return {r for r in meta.get_all("Requires-Dist") if "extra ==" not in r}
+def _split_requirements(message):
+    """Split Requires-Dist into the unconditional set and a per-extra map."""
+    unconditional, extras = set(), {}
+    for line in message.get_all("Requires-Dist") or []:
+        requirement, _, marker = (part.strip() for part in line.partition(";"))
+        if not marker:
+            unconditional.add(requirement)
+            continue
+        match = _EXTRA_MARKER.match(marker)
+        assert match, f"{line!r} carries a marker that is not a bare extra"
+        extras.setdefault(match.group(1), set()).add(requirement)
+    return unconditional, extras
+
+
+def _sdist_pkg_info(sdist):
+    with tarfile.open(sdist) as tf:
+        return message_from_bytes(tf.extractfile(f"{_SDIST_ROOT}/PKG-INFO").read())
 
 
 def test_runtime_dependencies_are_exactly_the_two(built):
+    """The unconditional requirements are httpx and pydantic and nothing else;
+    anything else must sit behind an extra marker."""
     wheel, sdist = built
-    assert _runtime_requirements(_metadata(wheel)) == _EXPECTED_REQUIRES_DIST
-    with tarfile.open(sdist) as tf:
-        pkg_info = message_from_bytes(tf.extractfile(f"{_SDIST_ROOT}/PKG-INFO").read())
-    assert _runtime_requirements(pkg_info) == _EXPECTED_REQUIRES_DIST
+    for message in (_metadata(wheel), _sdist_pkg_info(sdist)):
+        unconditional, _ = _split_requirements(message)
+        assert unconditional == _EXPECTED_REQUIRES_DIST
+
+
+def test_extras_carry_exactly_the_declared_requirements(built):
+    wheel, sdist = built
+    for message in (_metadata(wheel), _sdist_pkg_info(sdist)):
+        _, extras = _split_requirements(message)
+        assert extras == _EXPECTED_EXTRAS
+
+
+def test_no_extras_exist_beyond_the_declared_ones(built):
+    wheel, sdist = built
+    for message in (_metadata(wheel), _sdist_pkg_info(sdist)):
+        assert set(message.get_all("Provides-Extra")) == set(_EXPECTED_EXTRAS)
+
+
+def test_the_requirement_split_is_not_inert():
+    """A requirement planted without a marker must land in the unconditional
+    set, and a marker that is not a bare extra must be refused."""
+    planted = message_from_bytes(
+        b"Requires-Dist: httpx>=1\nRequires-Dist: sqlalchemy>=2 ; extra == \"storage\"\n"
+        b"Requires-Dist: evil>=1\n"
+    )
+    unconditional, extras = _split_requirements(planted)
+    assert unconditional == {"httpx>=1", "evil>=1"}
+    assert extras == {"storage": {"sqlalchemy>=2"}}
+    bad = message_from_bytes(b'Requires-Dist: x ; python_version >= "3"\n')
+    with pytest.raises(AssertionError):
+        _split_requirements(bad)
 
 
 def test_long_description_is_the_package_readme(built):

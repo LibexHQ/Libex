@@ -14,6 +14,19 @@ Entries below that predate publication are historical record for whoever
 embeds this package, not evidence that anyone consumed a given version at the
 time it was cut.
 
+## [0.16.0]
+
+### Added
+- **`libex_core.storage.dialect` prepares a SQLite engine to run the same SQL the hosted service runs on Postgres.** `configure_sqlite(engine)` turns on foreign key enforcement, which SQLite leaves off, and a busy timeout so two processes sharing one file queue rather than fail on the first overlap. File databases are put in write-ahead logging mode, and writes open with `BEGIN IMMEDIATE` so a transaction that reads and then writes cannot find the write lock taken from under it. It also registers a `lower()` that matches Postgres and the JSON containment and merge functions the merge rules need. It accepts a sync or an async engine, is safe to call twice on the same one, and raises `ValueError` for an engine that is not SQLite. SQLite 3.35 or newer is required: below that, `configure_sqlite` and `require_sqlite_version()` raise `SQLiteTooOld`, naming both versions.
+- **`libex_core.storage.merge` holds the keep-the-richer-data merge rules, and they give identical results on SQLite and Postgres.** Stored data is never replaced by less. A blank or missing incoming value keeps what is stored, and a longer description wins over a shorter one. Extras only grow: a thinner response adds keys to a richer stored set and never replaces it. Links between books and authors, narrators, genres and series are only added, never removed. Chapters keep the richer list: a response with no chapters cannot erase a stored list, and a later response that has chapters replaces it whole.
+- **`libex_core.storage.write` writes normalized Audible responses into the stored schema.** It provides `write_books`, `upsert_author`, `upsert_genre`, `upsert_narrator`, `upsert_series`, `write_author_profile`, `write_series_profile` and `write_track`. Each takes the session first, reads no settings or environment, never commits, and raises on failure; the caller owns the transaction. `exclusive_write(session)` serializes writers on SQLite so they queue in the event loop instead of timing out in the driver, and does nothing on other databases. The names load on first use, like the rest of `libex_core.storage`, and raise `StorageUnavailable` if the `storage` extra is not installed.
+
+### Known differences between the two databases
+- **`lower()` matches Postgres for every character Python's Unicode tables know.** A few characters added to Unicode more recently than the Python in use may be lower-cased differently.
+- **SQLite does not yet reject an unknown region string.** Postgres does, through its region type. The check is to be enforced when the store's tables are created.
+
+This is still groundwork: nothing opens a database or creates tables yet, and no command uses it.
+
 ## [0.15.0]
 
 ### Added

@@ -41,6 +41,7 @@ from app.db.models import Author, Book, Narrator, Series
 from app.db.session import engine
 
 # Core
+from libex_core.audible.authors.by_name import NameWalkOutcome
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.core.response_headers import ResponseFacts
@@ -50,7 +51,6 @@ from libex_core.audible.releases import fetch_catalog_genres
 
 # Services
 from app.services.audible.authors import fetch_author_books_by_name
-from app.services.audible.authors.by_name import NameWalkOutcome
 from app.services.audible.books import fetch_and_store_chapters, get_books_by_asins
 from app.services.db.persist_queue import PersistOutcome
 

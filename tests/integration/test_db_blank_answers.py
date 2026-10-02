@@ -299,7 +299,7 @@ async def test_absent_plans_still_keep_a_stored_list(db_session):
 # THE AUTHOR PORTRAIT — THE SAME MERGE, A DIFFERENT TABLE
 # ============================================================
 # authors.image is the one column outside the book row where a blank arrives
-# with nothing upstream to stop it. _normalize_author passes the contributors
+# with nothing upstream to stop it. normalize_author passes the contributors
 # response's profile_image_url straight through, unfiltered and unstripped,
 # so an empty image field on that endpoint reaches the merge as '' -- and the
 # path it takes, upsert_author_profile, is the only one that refreshes an

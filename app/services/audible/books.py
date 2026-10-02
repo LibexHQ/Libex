@@ -59,7 +59,7 @@ from libex_core.audible.client import (
     upstream_status_of,
     REGION_MAP,
 )
-from libex_core.exceptions import NotFoundException
+from libex_core.exceptions import ErrorCode, NotFoundException
 from libex_core.text import strip_html, strip_image_size_suffix
 from app.core.logging import get_logger, is_safe_log_value
 from app.core.response_headers import (
@@ -1780,8 +1780,19 @@ async def get_book_by_asin(
     facts: ResponseFacts | None = None,
 ) -> dict[str, Any]:
     """Fetches a single book by ASIN."""
-    books = await get_books_by_asins([asin], region, session, use_cache, facts=facts)
+    placeholder_asins: list[str] = []
+    books = await get_books_by_asins(
+        [asin], region, session, use_cache, facts=facts,
+        placeholder_asins=placeholder_asins,
+    )
     if not books:
+        # A placeholder was dropped on purpose, so it 404s like a miss but is
+        # told apart: the ASIN exists on Audible, just without a real record.
+        if asin in placeholder_asins:
+            raise NotFoundException(
+                f"Audible returned only a placeholder record for this ASIN: {asin}",
+                code=ErrorCode.WITHHELD,
+            )
         raise NotFoundException(f"Book not found: {asin}")
     return books[0]
 

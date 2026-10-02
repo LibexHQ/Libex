@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_session
 
 # Routes
+from app.api.routes.errors import ERROR_RESPONSES
 from app.api.routes.audible_outage import outage_as_not_found
 from app.api.routes.authors.schemas import AuthorResponse
 from app.api.routes.cache_param import CacheAuthorBooksParam, CacheStandardParam, apply_cache_control
@@ -52,7 +53,7 @@ router = APIRouter(prefix="/author", tags=["Authors"])
 # ENDPOINTS
 # ============================================================
 
-@router.get("", response_model=list[AuthorResponse])
+@router.get("", response_model=list[AuthorResponse], responses=ERROR_RESPONSES)
 async def search(
     name: Annotated[str, Query(description="Author name to search for")],
     region: str = Depends(valid_region),
@@ -65,7 +66,7 @@ async def search(
     return [AuthorResponse(**a) for a in authors]
 
 
-@router.get("/books", response_model=list[BookResponse])
+@router.get("/books", response_model=list[BookResponse], responses=ERROR_RESPONSES)
 async def get_books_by_author_name(
     name: Annotated[str, Query(description="Author name")],
     region: str = Depends(valid_region),
@@ -188,7 +189,7 @@ def _mark_completeness(
 @router.get(
     "/books/{asin}",
     response_model=list[BookResponse],
-    responses={200: {"headers": COMPLETE_ONLY_RESPONSE_HEADERS}},
+    responses={**ERROR_RESPONSES, 200: {"headers": COMPLETE_ONLY_RESPONSE_HEADERS}},
 )
 async def get_books_by_author(
     asin: Annotated[str, Depends(valid_asin("Author ASIN"))],
@@ -327,7 +328,7 @@ async def get_books_by_author_primary(
     )
 
 
-@router.get("/{asin}", response_model=AuthorResponse, responses={200: {"headers": FACTS_RESPONSE_HEADERS}})
+@router.get("/{asin}", response_model=AuthorResponse, responses={**ERROR_RESPONSES, 200: {"headers": FACTS_RESPONSE_HEADERS}})
 async def get_author_by_asin(
     asin: Annotated[str, Depends(valid_asin("Author ASIN"))],
     response: Response,

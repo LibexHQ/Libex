@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_session
 
 # Routes
+from app.api.routes.errors import ERROR_RESPONSES
 from app.api.routes.audible_outage import outage_as_not_found
 from app.api.routes.cache_param import CacheStandardParam, apply_cache_control
 from app.api.routes.facts_headers import FACTS_RESPONSE_HEADERS, stamp_facts_headers
@@ -29,7 +30,7 @@ from app.services.sorting import sort_dicts, BOOK_SORT_FIELDS
 from app.services.filtering import filter_dicts
 
 # Core
-from libex_core.exceptions import NotFoundException
+from libex_core.exceptions import ErrorCode, NotFoundException
 from libex_core.asin import is_valid_asin, normalise_asin
 from libex_core.models import BookResponse, BulkBookResponse, ChapterResponse
 from app.core.middleware import valid_asin, valid_region
@@ -41,7 +42,7 @@ router = APIRouter(prefix="/book", tags=["Books"])
 # ENDPOINTS
 # ============================================================
 
-@router.get("/sku/{sku}", response_model=list[BookResponse])
+@router.get("/sku/{sku}", response_model=list[BookResponse], responses=ERROR_RESPONSES)
 async def get_books_by_sku(
     sku: Annotated[str, Path(description="Audible SKU group")],
     session: AsyncSession = Depends(get_session),
@@ -53,10 +54,10 @@ async def get_books_by_sku(
     """
     books = await get_books_by_sku_from_db(session, sku)
     if not books:
-        raise NotFoundException(f"No books found for SKU: {sku}")
+        raise NotFoundException(f"No books found for SKU: {sku}", code=ErrorCode.NOT_IN_LIBEX)
     return books
 
-@router.get("/{asin}", response_model=BookResponse, responses={200: {"headers": FACTS_RESPONSE_HEADERS}})
+@router.get("/{asin}", response_model=BookResponse, responses={**ERROR_RESPONSES, 200: {"headers": FACTS_RESPONSE_HEADERS}})
 async def get_book(
     asin: Annotated[str, Depends(valid_asin("Audible ASIN"))],
     response: Response,
@@ -75,7 +76,7 @@ async def get_book(
     return BookResponse(**data)
 
 
-@router.get("/{asin}/chapters", response_model=ChapterResponse, responses={200: {"headers": FACTS_RESPONSE_HEADERS}})
+@router.get("/{asin}/chapters", response_model=ChapterResponse, responses={**ERROR_RESPONSES, 200: {"headers": FACTS_RESPONSE_HEADERS}})
 async def get_book_chapters(
     asin: Annotated[str, Depends(valid_asin("Audible ASIN"))],
     response: Response,
@@ -108,7 +109,7 @@ async def get_book_chapters_legacy(
     return ChapterResponse(**data)
 
 
-@router.get("", response_model=BulkBookResponse, responses={200: {"headers": FACTS_RESPONSE_HEADERS}})
+@router.get("", response_model=BulkBookResponse, responses={**ERROR_RESPONSES, 200: {"headers": FACTS_RESPONSE_HEADERS}})
 async def get_books_bulk(
     asins: Annotated[list[str], Query(description="ASINs — comma-separated, repeated params, or both. Max 1000.")],
     response: Response,
@@ -134,7 +135,7 @@ async def get_books_bulk(
 
     invalid = [a for a in asin_list if not is_valid_asin(a)]
     if invalid:
-        raise NotFoundException(f"Invalid ASIN format: {', '.join(invalid)}")
+        raise NotFoundException(f"Invalid ASIN format: {', '.join(invalid)}", code=ErrorCode.INVALID_REQUEST)
 
     # The lookup runs on the canonical form -- Audible's catalogue is
     # case-sensitive, so only that form resolves. notFound entries are kept
@@ -144,10 +145,10 @@ async def get_books_bulk(
     asin_list = [normalise_asin(a) for a in asin_list]
 
     if not asin_list:
-        raise NotFoundException("No valid ASINs provided")
+        raise NotFoundException("No valid ASINs provided", code=ErrorCode.INVALID_REQUEST)
 
     if len(asin_list) > 1000:
-        raise NotFoundException("Maximum 1000 ASINs per request")
+        raise NotFoundException("Maximum 1000 ASINs per request", code=ErrorCode.INVALID_REQUEST)
 
     facts = ResponseFacts()
     placeholders: list[str] = []

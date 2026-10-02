@@ -357,6 +357,16 @@ what a task actually did.
 
 **Region validation:** All region parameters are validated against supported Audible regions. Invalid regions return a 400 error.
 
+**Error codes:** Libex's own error bodies are `{error, status_code, code}`. `status_code` still says how the request failed; `code` says whose gap it is, so you can branch on it instead of parsing `error`:
+
+- `not_in_libex` — Libex's stored copy has no record. This is what the `/db` routes and `/book/sku` return when they find nothing.
+- `not_on_audible` — Audible has no record.
+- `withheld` — Audible answered, but Libex deliberately doesn't return it (a placeholder record, for example).
+- `upstream_unavailable` — Libex couldn't find out right now. Retry later.
+- `invalid_request` — the request itself is malformed.
+
+Status codes are unchanged. FastAPI's own request-validation errors (`422`) and unknown-route responses keep their `{detail}` body, and an unhandled server error (`500`) is still just `{error, status_code}`.
+
 **Local database:** Every successful Audible response is written to a persistent relational database. This powers the DB query endpoints and serves as a fallback when Audible is unavailable.
 
 **Virtual Voice Audiobooks:** Book responses include `isVvab` (boolean indicating whether the book is a Virtual Voice Audiobook — AI-narrated rather than human-narrated).

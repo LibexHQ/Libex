@@ -486,7 +486,11 @@ async def redoc() -> HTMLResponse:
 async def libex_exception_handler(request: Request, exc: LibexException) -> JSONResponse:
     return JSONResponse(
         status_code=exc.status_code,
-        content={"error": exc.message, "status_code": exc.status_code},
+        content={
+            "error": exc.message,
+            "status_code": exc.status_code,
+            "code": exc.code.value,
+        },
     )
 
 @app.exception_handler(Exception)

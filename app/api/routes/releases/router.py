@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_session
 
 # Routes
+from app.api.routes.errors import ERROR_RESPONSES
 from app.api.routes.sort_params import BookSortField, SortOrder
 from app.api.routes.filter_params import LiveBookFilters
 from app.api.routes.release_params import ReleaseWindow
@@ -60,7 +61,7 @@ class FlatCategoryNode(BaseModel):
 # ENDPOINTS
 # ============================================================
 
-@router.get("/new-releases", response_model=list[BookResponse])
+@router.get("/new-releases", response_model=list[BookResponse], responses=ERROR_RESPONSES)
 async def new_releases(
     region: str = Depends(valid_region),
     days: Annotated[ReleaseWindow, Query(description="Look-back window in days")] = ReleaseWindow.days_30,
@@ -90,7 +91,7 @@ async def new_releases(
     return [BookResponse(**b) for b in books]
 
 
-@router.get("/coming-soon", response_model=list[BookResponse])
+@router.get("/coming-soon", response_model=list[BookResponse], responses=ERROR_RESPONSES)
 async def coming_soon(
     region: str = Depends(valid_region),
     days: Annotated[ReleaseWindow, Query(description="Look-ahead window in days")] = ReleaseWindow.days_30,
@@ -120,7 +121,7 @@ async def coming_soon(
     return [BookResponse(**b) for b in books]
 
 
-@router.get("/categories", response_model=list[CategoryNode] | list[FlatCategoryNode])
+@router.get("/categories", response_model=list[CategoryNode] | list[FlatCategoryNode], responses=ERROR_RESPONSES)
 async def categories(
     region: str = Depends(valid_region),
     flat: Annotated[bool, Query(description="Return a flat list instead of a nested tree. Each node carries its full ancestry (root-first) so its place in the taxonomy is still recoverable.")] = False,

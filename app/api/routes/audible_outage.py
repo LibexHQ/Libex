@@ -16,7 +16,7 @@ the stack can still catch AudibleAPIException on its own terms.
 from typing import Awaitable, TypeVar
 
 # Core
-from libex_core.exceptions import AudibleAPIException, NotFoundException
+from libex_core.exceptions import AudibleAPIException, ErrorCode, NotFoundException
 
 T = TypeVar("T")
 
@@ -36,4 +36,7 @@ async def outage_as_not_found(call: Awaitable[T], message: str | None = None) ->
     try:
         return await call
     except AudibleAPIException as exc:
-        raise NotFoundException(message if message is not None else exc.message) from exc
+        raise NotFoundException(
+            message if message is not None else exc.message,
+            code=ErrorCode.UPSTREAM_UNAVAILABLE,
+        ) from exc

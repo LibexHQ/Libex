@@ -10,6 +10,18 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [Unreleased]
+
+Bump class: MINOR.
+
+### Added
+- **Every error response now carries a `code` field saying why the request failed.** The body keeps `error` and `status_code` exactly as before and gains `code` beside them, so a client that reads only the old two fields sees no difference. Status codes are unchanged, including 404 for an invalid ASIN and 400 for an invalid region. The values are `not_in_libex` (Libex's own store has no record: the `/db` routes and `/book/sku`), `not_on_audible` (Audible has no record), `withheld` (Audible answered but Libex deliberately does not return it), `upstream_unavailable` (Libex could not find out right now; try again later) and `invalid_request` (a malformed ASIN, region or parameter).
+- **A single `GET /book/{asin}` for an ASIN Audible answered with only a placeholder record now returns `code: "withheld"`.** It is still a 404, as before. Until now it was indistinguishable from an ASIN Audible has never heard of.
+- **An Audible outage that surfaces as a 404 now returns `code: "upstream_unavailable"`.** Those 404s used to read the same as a genuine miss. The status is unchanged; the code is what tells them apart.
+- **The OpenAPI schema now documents the error body and its `code` values** on the routes that return it.
+
+FastAPI's own validation (422) and unknown-route (`detail`) bodies are unchanged and carry no `code`. Neither does the body of an unhandled 500.
+
 ## [1.26.0]
 
 ### Added

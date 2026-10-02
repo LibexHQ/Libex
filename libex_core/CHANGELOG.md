@@ -3,13 +3,13 @@
 All notable changes to `libex_core` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-`libex_core` is not yet on 1.0, so this project borrows post-1.0 MAJOR
+`libex_core` is below 1.0, so this project borrows post-1.0 MAJOR
 discipline into the MINOR slot rather than relying on SemVer's 0.x carve-out:
 while pre-1.0, MINOR carries any breaking change, and PATCH is reserved for
 fixes that have no effect on the package's public surface.
 
-`libex_core` is not yet published to PyPI. It is packaged for it as the
-`libex-core` distribution, and the first publish will be a 0.x release.
+`libex_core` is not published to PyPI. It is packaged for it as the
+`libex-core` distribution, and any first publish is a 0.x release.
 Entries below that predate publication are historical record for whoever
 embeds this package, not evidence that anyone consumed a given version at the
 time it was cut.
@@ -23,14 +23,14 @@ time it was cut.
 
 ### Known differences between the two databases
 - **`lower()` matches Postgres for every character Python's Unicode tables know.** A few characters added to Unicode more recently than the Python in use may be lower-cased differently.
-- **SQLite does not yet reject an unknown region string.** Postgres does, through its region type. The check is to be enforced when the store's tables are created.
+- **SQLite does not reject an unknown region string.** Postgres does, through its region type.
 
-This is still groundwork: nothing opens a database or creates tables yet, and no command uses it.
+Nothing in this release opens a database or creates tables, and no command uses it.
 
 ## [0.15.0]
 
 ### Added
-- **A new `libex_core.storage` subpackage holds the stored schema for books, authors, series, narrators, genres and tracks, and the links between them.** `Book`, `Author`, `Series`, `Narrator`, `Genre` and `Track` are the table classes, `Base` is their declarative base, and `UTCDateTime` and `JSONDocument` are the column types they use. This is groundwork: nothing reads or writes a database yet, no command uses it, and nothing in the package creates the tables. It is the schema the later local-storage work will build on.
+- **A new `libex_core.storage` subpackage holds the stored schema for books, authors, series, narrators, genres and tracks, and the links between them.** `Book`, `Author`, `Series`, `Narrator`, `Genre` and `Track` are the table classes, `Base` is their declarative base, and `UTCDateTime` and `JSONDocument` are the column types they use. Nothing in this release reads or writes a database, no command uses it, and nothing in the package creates the tables.
 - **The schema works on SQLite as well as Postgres.** On Postgres it is the same tables, columns and indexes as the hosted service has, unchanged. On SQLite, timestamps come back as UTC-aware datetimes (a naive value written in is taken to be UTC), a Python `None` in a JSON column is stored as SQL `NULL` rather than the JSON value `null`, and the partial index on authors with no ASIN is created there too.
 - **Importing `libex_core.storage` loads no database library.** The names above load on first access. If SQLAlchemy or aiosqlite is not installed, accessing one raises `StorageUnavailable`, a subclass of `ImportError`, whose message names the `storage` extra and the command to install it. `require_storage()` runs the same check on its own, without importing the libraries.
 - **Two new install extras.** `libex-core[storage]` adds SQLAlchemy, Alembic and aiosqlite, enough for SQLite. `libex-core[postgres]` adds asyncpg on top of that. The base install is unchanged and still needs only `httpx` and `pydantic`.
@@ -94,8 +94,8 @@ This is still groundwork: nothing opens a database or creates tables yet, and no
 ## [0.7.0]
 
 ### Added
-- **The package now ships a `libex-core` command line.** It is installed as the `libex-core` script and also runs as `python -m libex_core`. Two commands exist so far: `libex-core config` prints, as JSON, whether requests would go through a proxy or leave directly, and the proxy host (never the proxy URL, and no request is made); `libex-core completion bash|zsh|fish` prints a completion script. Neither fetches Audible data yet. `--help` and `--version` work everywhere. By default the library's warnings print to standard error with no flag, `-q` prints only the final error line, `-v` asks for more detail (the package emits no INFO-level records today, so it adds nothing yet), and `-vv` adds debug output with tracebacks. Results go to standard output; logs and errors go to standard error.
-- **The command line's exit status says what kind of failure it was.** 0 success, 1 unexpected error, 2 bad usage or a rejected argument, 3 not found, 4 Audible unavailable, 5 bad environment configuration, 130 interrupted, 141 the reader of standard output went away. A `LibexException` maps by its `code`: `invalid_request` is 2, `not_on_audible`, `not_in_libex` and `withheld` are 3, `upstream_unavailable` is 4, and a code added later that has no mapping yet is 1. The error line on standard error ends with the code; `config_error` and `unexpected_error` are the command line's own and are never raised by the library. These numbers are a public contract and will not be reassigned.
+- **The package now ships a `libex-core` command line.** It is installed as the `libex-core` script and also runs as `python -m libex_core`. Two commands exist so far: `libex-core config` prints, as JSON, whether requests would go through a proxy or leave directly, and the proxy host (never the proxy URL, and no request is made); `libex-core completion bash|zsh|fish` prints a completion script. Neither fetches Audible data. `--help` and `--version` work everywhere. By default the library's warnings print to standard error with no flag, `-q` prints only the final error line, `-v` asks for more detail (the package emits no INFO-level records, so it adds nothing), and `-vv` adds debug output with tracebacks. Results go to standard output; logs and errors go to standard error.
+- **The command line's exit status says what kind of failure it was.** 0 success, 1 unexpected error, 2 bad usage or a rejected argument, 3 not found, 4 Audible unavailable, 5 bad environment configuration, 130 interrupted, 141 the reader of standard output went away. A `LibexException` maps by its `code`: `invalid_request` is 2, `not_on_audible`, `not_in_libex` and `withheld` are 3, `upstream_unavailable` is 4, and a code that has no mapping is 1. The error line on standard error ends with the code; `config_error` and `unexpected_error` are the command line's own and are never raised by the library. These numbers are a public contract and will not be reassigned.
 - **The command line reads two environment variables.** `LIBEX_CORE_PROXY_URL` is the http or https proxy every request goes through; it is an environment variable and not an option because it can carry credentials. `LIBEX_CORE_ALLOW_DIRECT_EGRESS` (`1`, `true`, `yes` or `on`; `0`, `false`, `no`, `off` or empty to refuse) lets requests leave from the machine's own address when no proxy is set. Any other value is a configuration error (exit 5), reported even when a proxy is set.
 - **A man page and shell completions install with the wheel**, under the environment prefix.
 - **The package is now buildable and publishable as `libex-core`.** It declares `httpx` (`>=0.28.1,<0.29`) and `pydantic` (`>=2.13.4,<3`) as its dependencies, requires Python 3.12 or later, and ships a `py.typed` marker so type checkers use its annotations.

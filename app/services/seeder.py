@@ -45,6 +45,9 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.core.response_headers import ResponseFacts
 
+# Core
+from libex_core.audible.releases import fetch_catalog_genres
+
 # Services
 from app.services.audible.authors import fetch_author_books_by_name
 from app.services.audible.authors.by_name import NameWalkOutcome
@@ -576,41 +579,21 @@ async def _expand_narrators(region: str, delay: float) -> dict[str, int]:
 async def _fetch_catalog_genres(region: str) -> list[dict[str, str]]:
     """
     Fetches the genre taxonomy from Audible and flattens every node at every level
-    to a list, each tagged with its parent_id. The seeder's own copy: it shares
-    nothing with the live release endpoints and never touches the catalog_genres
-    table.
+    to a list, each tagged with its parent_id. Fetched and flattened by libex_core;
+    the seeder never touches the catalog_genres table.
 
     The taxonomy is a tree up to five levels deep and ragged — some branches stop
     at two levels, some go five. Every catalog/products query caps at ~535 results
     and a node is not a superset of its children (each level deeper surfaces titles
     the level above misses), so walking every node at every level and unioning is
     what reaches the full catalog. The flatten recurses to whatever depth Audible
-    returns (requested via categories_num_levels). A top-level parent gets
-    parent_id="" ; every other node gets its parent's id. A node that appears under
-    two parents yields one row per parent. Deduped by (genre_id, parent_id).
+    returns. A top-level parent gets parent_id="" ; every other node gets its
+    parent's id. A node that appears under two parents yields one row per parent.
+    Deduped by (genre_id, parent_id).
     """
     from app.services.audible import audible_get
 
-    data = await audible_get(
-        region,
-        "/1.0/catalog/categories",
-        {"root": "Genres", "categories_num_levels": 5},
-    )
-    seen: set[tuple[str, str]] = set()
-    nodes: list[dict[str, str]] = []
-
-    def emit(node_list: list[dict], parent_id: str) -> None:
-        for n in node_list:
-            nid = n.get("id")
-            name = n.get("name")
-            if nid and name and (nid, parent_id) not in seen:
-                seen.add((nid, parent_id))
-                nodes.append({"genre_id": nid, "name": name, "parent_id": parent_id})
-            if nid:
-                emit(n.get("children", []), nid)
-
-    emit(data.get("categories", []), "")
-    return nodes
+    return await fetch_catalog_genres(audible_get, region)
 
 
 async def _walk_genre_for_asins(

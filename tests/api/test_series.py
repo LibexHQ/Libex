@@ -567,7 +567,7 @@ async def test_get_series_books_primary_cache_false_marks_the_response_no_store(
 @pytest.mark.asyncio
 async def test_get_series_books_marks_incomplete_on_a_hollow_stub_with_no_notfound_field(async_client):
     found_asin = "B0FOUND001"
-    stub_asin = "B0NOTFOUND1"
+    stub_asin = "B0NOTFOUN1"
 
     async def _get(region, path, params):
         return {"products": [
@@ -598,7 +598,7 @@ async def test_get_series_books_primary_marks_incomplete_on_a_hollow_stub_with_n
     """The legacy twin (/series/{asin}/books) must not diverge from the
     named route above."""
     found_asin = "B0FOUND001"
-    stub_asin = "B0NOTFOUND1"
+    stub_asin = "B0NOTFOUN1"
 
     async def _get(region, path, params):
         return {"products": [

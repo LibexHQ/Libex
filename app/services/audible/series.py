@@ -18,8 +18,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 # Core
 from libex_core.audible.client import as_audible_failure, upstream_status_of
+from libex_core.audible.series import fetch_series, fetch_series_book_asins, normalize_series
 from libex_core.exceptions import AudibleAPIException, NotFoundException
-from libex_core.text import strip_html
 from app.core.logging import get_logger
 from app.core.response_headers import ResponseFacts, SOURCE_AUDIBLE, SOURCE_CACHE, SOURCE_DB, record_source
 
@@ -31,25 +31,6 @@ from app.services.db.persist_queue import persist_series_background, persist_cac
 from app.services.db.reader import get_series_from_db, search_series_from_db
 
 logger = get_logger()
-
-SERIES_RESPONSE_GROUPS = "product_attrs, product_desc, product_extended_attrs"
-SERIES_BOOKS_RESPONSE_GROUPS = "relationships"
-
-
-# ============================================================
-# HELPERS
-# ============================================================
-
-def _normalize_series(product: dict, region: str) -> dict[str, Any]:
-    """Normalizes raw Audible product data into Libex series format."""
-    return {
-        "asin": product.get("asin"),
-        "name": product.get("title"),
-        "description": strip_html(product.get("publisher_summary")),
-        "region": region,
-        "position": None,
-        "updatedAt": None,
-    }
 
 
 # ============================================================
@@ -80,25 +61,10 @@ async def get_series(
 
     try:
         start = time.monotonic()
-        path = f"/1.0/catalog/products/{asin}"
-        params = {
-            "response_groups": SERIES_RESPONSE_GROUPS,
-        }
-        data = await audible_get(region, path, params)
+        product = await fetch_series(audible_get, asin, region)
         series_took = round((time.monotonic() - start) * 1000, 2)
 
-        if (
-            not data
-            or not data.get("response_groups")
-            or len(data.get("response_groups", [])) == 1
-        ):
-            raise NotFoundException(f"Series not found: {asin}")
-
-        product = data.get("product")
-        if not product:
-            raise NotFoundException(f"Series not found: {asin}")
-
-        normalized = _normalize_series(product, region)
+        normalized = normalize_series(product, region)
 
         # Persist to DB and cache in the background
         persist_series_background(normalized, region)
@@ -186,25 +152,8 @@ async def get_series_books(
 
     try:
         start = time.monotonic()
-        path = f"/1.0/catalog/products/{asin}"
-        params = {
-            "response_groups": SERIES_BOOKS_RESPONSE_GROUPS,
-        }
-        data = await audible_get(region, path, params)
-
-        product = data.get("product", {})
-        relationships = product.get("relationships", [])
-
-        items = sorted(
-            [r for r in relationships if r.get("asin") and r.get("sort")],
-            key=lambda r: float(r.get("sort", 0)),
-        )
-
-        asins = [item["asin"] for item in items]
+        asins = await fetch_series_book_asins(audible_get, asin, region)
         series_book_took = round((time.monotonic() - start) * 1000, 2)
-
-        if not asins:
-            raise NotFoundException(f"No books found for series: {asin}")
 
         persist_cache_background(series_books_key(asin, region), asins)
 

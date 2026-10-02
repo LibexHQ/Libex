@@ -40,18 +40,18 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Core
+from libex_core.audible.books import (
+    BOOK_RESPONSE_GROUPS,
+    IMAGE_SIZES,
+    filter_products,
+    normalize_product,
+    settle_flags_list,
+)
 from app.core.logging import get_logger
 from app.core.utils import seconds_until_utc_midnight
 
 # Services
 from app.services.audible import audible_get
-from app.services.audible.books import (
-    _normalize_product,
-    _filter_products,
-    _settle_flags_list,
-    BOOK_RESPONSE_GROUPS,
-    IMAGE_SIZES,
-)
 from app.services.db.reader import get_stored_genres
 from app.services.db.persist_queue import persist_books_background
 from app.services.db.writer import upsert_genres, reconcile_genres
@@ -259,7 +259,7 @@ async def _walk_one_catalog(
         if category_id:
             params["category_id"] = category_id
         data = await audible_get(region, "/1.0/catalog/products/", params)
-        products = _filter_products(data.get("products", []))
+        products = filter_products(data.get("products", []))
         if not products:
             break
 
@@ -271,7 +271,7 @@ async def _walk_one_catalog(
 
         stop = False
         for product in products:
-            book = _normalize_product(product, region)
+            book = normalize_product(product, region)
             dt = _release_dt(book)
             if dt is None:
                 continue
@@ -343,14 +343,14 @@ async def get_new_releases(
 
         if books:
             # Unsettled: the writer needs the tri-state flags None/True/False
-            # exactly as _normalize_product produced them (see _asserted_bool
+            # exactly as normalize_product produced them (see _asserted_bool
             # in writer.py), so this runs before the settle below.
             persist_books_background(books, region)
             # This endpoint's cache is read-through and returned as-is on a
             # hit (see module docstring), unlike books.py's own cache, which
             # is re-settled on every read regardless of source -- so what's
             # cached and returned here has to already be the settled value.
-            books = _settle_flags_list(books)
+            books = settle_flags_list(books)
             await cache.set(session, key, books, ttl_seconds=seconds_until_utc_midnight())
         return books
 
@@ -410,14 +410,14 @@ async def get_coming_soon(
 
         if books:
             # Unsettled: the writer needs the tri-state flags None/True/False
-            # exactly as _normalize_product produced them (see _asserted_bool
+            # exactly as normalize_product produced them (see _asserted_bool
             # in writer.py), so this runs before the settle below.
             persist_books_background(books, region)
             # This endpoint's cache is read-through and returned as-is on a
             # hit (see module docstring), unlike books.py's own cache, which
             # is re-settled on every read regardless of source -- so what's
             # cached and returned here has to already be the settled value.
-            books = _settle_flags_list(books)
+            books = settle_flags_list(books)
             await cache.set(session, key, books, ttl_seconds=seconds_until_utc_midnight())
         return books
 

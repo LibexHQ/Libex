@@ -1,0 +1,6 @@
+{
+ "all_none": "{\"asin\": \"B0SETTLE01\", \"plans\": [], \"isListenable\": true, \"isAvailable\": true, \"isBuyable\": true, \"isVvab\": false, \"explicit\": false, \"hasPdf\": false, \"whisperSync\": false}",
+ "mixed": "{\"asin\": \"B0SETTLE01\", \"plans\": [\"A\"], \"isListenable\": true, \"isAvailable\": true, \"isBuyable\": true, \"isVvab\": false, \"explicit\": false, \"hasPdf\": false, \"whisperSync\": false}",
+ "foreign_subset": "{\"asin\": \"B0SETTLE02\", \"isVvab\": false}",
+ "empty": "{}"
+}

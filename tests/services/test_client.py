@@ -472,7 +472,7 @@ def test_parse_retry_after_returns_none_for_unparseable_garbage():
 def test_compute_backoff_seconds_prefers_retry_after_when_present():
     """When Retry-After is present, it wins outright over the exponential
     computation, capped."""
-    from libex_core.audible.client import _compute_backoff_seconds, AUDIBLE_RETRY_AFTER_CAP_SECONDS
+    from libex_core.audible._retry import _compute_backoff_seconds, AUDIBLE_RETRY_AFTER_CAP_SECONDS
 
     assert _compute_backoff_seconds(attempt=0, retry_after=2.0) == 2.0
     assert _compute_backoff_seconds(attempt=5, retry_after=2.0) == 2.0  # attempt is irrelevant here
@@ -485,7 +485,7 @@ def test_compute_backoff_seconds_exponential_ceiling_capped():
     pinned by patching random.uniform to report the ceiling it was called
     with."""
     from unittest.mock import patch
-    from libex_core.audible.client import (
+    from libex_core.audible._retry import (
         _compute_backoff_seconds, AUDIBLE_RETRY_MAX_BACKOFF_SECONDS, AUDIBLE_RETRY_BASE_SECONDS,
     )
 

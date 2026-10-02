@@ -12,16 +12,16 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 # Local
-from app.services.audible.books import (
+from libex_core.audible.books import (
     _best_image,
     _parse_authors,
     _parse_narrators,
     _parse_series,
     _parse_genres,
-    _normalize_product,
-    _filter_products,
     _parse_release_date,
-    _settle_flags,
+    filter_products as _filter_products,
+    normalize_product as _normalize_product,
+    settle_flags as _settle_flags,
 )
 from app.services.cache.manager import book_key
 from app.core.response_headers import (
@@ -68,7 +68,7 @@ def test_best_image_returns_none_for_none():
 # ============================================================
 
 def test_parse_release_date_converts_to_iso():
-    """Converts Audible date string to ISO 8601 format matching AudiMeta .toISO()."""
+    """Converts Audible date string to ISO 8601 format in the shape AudiMeta's .toISO() produces."""
     result = _parse_release_date("2021-03-02")
     assert result == "2021-03-02T00:00:00+00:00"
 
@@ -123,7 +123,7 @@ def test_parse_authors_includes_region():
 
 
 def test_parse_authors_includes_regions_list():
-    """Author dict includes regions list matching AudiMeta MinimalAuthorDto."""
+    """Author dict includes regions list in the AudiMeta MinimalAuthorDto shape."""
     product = {"authors": [{"name": "Frank Herbert", "asin": "B000APF21M"}]}
     result = _parse_authors(product, "us")
     assert result[0]["regions"] == ["us"]
@@ -161,7 +161,7 @@ MALFORMED_ASINS = [
 def test_parse_authors_flags_an_asin_that_is_not_asin_shaped(junk_asin):
     """A value that is not ASIN-shaped is recognised and warned about."""
     product = {"asin": "B0DKQBH3CR", "authors": [{"name": "Author", "asin": junk_asin}]}
-    with patch("app.services.audible.books.logger") as mock_logger:
+    with patch("libex_core.audible.books.logger") as mock_logger:
         _parse_authors(product, "us")
 
     messages = [c.args[0] for c in mock_logger.warning.call_args_list]
@@ -188,7 +188,7 @@ def test_parse_authors_logs_the_malformed_asin():
     product = {"asin": "B0DKQBH3CR", "authors": [
         {"name": "Trinka Enell", "asin": "Trinka Enell"},
     ]}
-    with patch("app.services.audible.books.logger") as mock_logger:
+    with patch("libex_core.audible.books.logger") as mock_logger:
         _parse_authors(product, "us")
 
     calls = [
@@ -206,7 +206,7 @@ def test_parse_authors_logs_the_malformed_asin():
 def test_parse_authors_logs_nothing_for_an_author_with_no_asin():
     """An absent asin is ordinary catalogue data, not a malformed value."""
     product = {"asin": "B0DKQBH3CR", "authors": [{"name": "Heinrich Heine"}]}
-    with patch("app.services.audible.books.logger") as mock_logger:
+    with patch("libex_core.audible.books.logger") as mock_logger:
         result = _parse_authors(product, "us")
 
     assert result[0]["asin"] is None
@@ -223,7 +223,7 @@ def test_parse_authors_leaves_a_lowercased_asin_alone():
     product = {"asin": "B00PLR8OQO", "authors": [
         {"name": "Johann Wolfgang von Goethe", "asin": "B001kioieu"},
     ]}
-    with patch("app.services.audible.books.logger") as mock_logger:
+    with patch("libex_core.audible.books.logger") as mock_logger:
         result = _parse_authors(product, "de")
 
     assert result[0]["asin"] == "B001kioieu"
@@ -233,7 +233,7 @@ def test_parse_authors_leaves_a_lowercased_asin_alone():
 def test_parse_authors_keeps_a_well_formed_asin_untouched():
     """The common case is unchanged by the shape check."""
     product = {"asin": "B0TEST0001", "authors": [{"name": "Frank Herbert", "asin": "B000APF21M"}]}
-    with patch("app.services.audible.books.logger") as mock_logger:
+    with patch("libex_core.audible.books.logger") as mock_logger:
         result = _parse_authors(product, "us")
 
     assert result[0]["asin"] == "B000APF21M"
@@ -243,7 +243,7 @@ def test_parse_authors_keeps_a_well_formed_asin_untouched():
 def test_parse_authors_keeps_an_isbn_keyed_asin():
     """An all-digit identifier is ASIN-shaped and is not a malformed value."""
     product = {"asin": "0008433844", "authors": [{"name": "J. R. R. Tolkien", "asin": "0008433844"}]}
-    with patch("app.services.audible.books.logger") as mock_logger:
+    with patch("libex_core.audible.books.logger") as mock_logger:
         result = _parse_authors(product, "uk")
 
     assert result[0]["asin"] == "0008433844"
@@ -253,7 +253,7 @@ def test_parse_authors_keeps_an_isbn_keyed_asin():
 def test_parse_authors_logs_the_over_long_asin_it_still_nulls():
     """The >12-character ceiling predates the check and keeps nulling."""
     product = {"asin": "B0TEST0001", "authors": [{"name": "Author", "asin": "TOOLONGASIN123"}]}
-    with patch("app.services.audible.books.logger") as mock_logger:
+    with patch("libex_core.audible.books.logger") as mock_logger:
         result = _parse_authors(product, "us")
 
     assert result[0]["asin"] is None
@@ -270,7 +270,7 @@ def test_parse_authors_flags_malformed_asins_in_every_region(region):
         {"name": "Vitor Peçanha", "asin": "25A7anha"},
         {"name": "Frank Herbert", "asin": "b000apf21m"},
     ]}
-    with patch("app.services.audible.books.logger") as mock_logger:
+    with patch("libex_core.audible.books.logger") as mock_logger:
         result = _parse_authors(product, region)
 
     assert result[0]["asin"] == "25A7anha"
@@ -292,7 +292,7 @@ def test_parse_authors_returns_empty_for_no_authors():
 
 
 def test_parse_authors_includes_id_field():
-    """Author dict includes id field matching AudiMeta MinimalAuthorDto."""
+    """Author dict includes id field in the AudiMeta MinimalAuthorDto shape."""
     product = {"authors": [{"name": "Frank Herbert", "asin": "B000APF21M"}]}
     result = _parse_authors(product, "us")
     assert "id" in result[0]
@@ -324,19 +324,19 @@ def test_parse_series_extracts_series():
     """Extracts series from relationships."""
     product = {
         "relationships": [
-            {"relationship_type": "series", "asin": "B000SERIES1", "title": "Dune", "sequence": "1"}
+            {"relationship_type": "series", "asin": "B00SERIES1", "title": "Dune", "sequence": "1"}
         ]
     }
     result = _parse_series(product, "us")
     assert len(result) == 1
-    assert result[0]["asin"] == "B000SERIES1"
+    assert result[0]["asin"] == "B00SERIES1"
 
 
 def test_parse_series_uses_name_field():
-    """Series dict uses name field matching AudiMeta MinimalSeriesDto."""
+    """Series dict uses name field in the AudiMeta MinimalSeriesDto shape."""
     product = {
         "relationships": [
-            {"relationship_type": "series", "asin": "B000SERIES1", "title": "Dune", "sequence": "1"}
+            {"relationship_type": "series", "asin": "B00SERIES1", "title": "Dune", "sequence": "1"}
         ]
     }
     result = _parse_series(product, "us")
@@ -348,7 +348,7 @@ def test_parse_series_ignores_non_series():
     """Ignores relationships that are not series."""
     product = {
         "relationships": [
-            {"relationship_type": "episode", "asin": "B000EP1", "title": "Episode 1"}
+            {"relationship_type": "episode", "asin": "B000000EP1", "title": "Episode 1"}
         ]
     }
     result = _parse_series(product, "us")
@@ -389,7 +389,7 @@ def test_parse_genres_includes_type():
 
 
 def test_parse_genres_includes_better_type():
-    """Genre dict includes betterType field matching AudiMeta GenreDto."""
+    """Genre dict includes betterType field in the AudiMeta GenreDto shape."""
     product = {
         "category_ladders": [
             {"ladder": [{"name": "Fiction"}]}
@@ -459,7 +459,7 @@ def test_filter_products_drops_the_hollow_not_found_stub_before_it_reaches_norma
     queried region carries no title and no `plans` key at all -- this is the
     only real shape that can trip _parse_plans' silence branch, and it never
     reaches _normalize_product because it has no title either."""
-    hollow_stub = {"asin": "B0NOTFOUND1", "product_state": "NOT_AVAILABLE_FOR_PURCHASE"}
+    hollow_stub = {"asin": "B0NOTFOUN1", "product_state": "NOT_AVAILABLE_FOR_PURCHASE"}
     assert _filter_products([hollow_stub]) == []
 
 
@@ -468,7 +468,7 @@ def test_filter_products_drops_the_hollow_not_found_stub_before_it_reaches_norma
 # ============================================================
 
 def test_normalize_product_returns_required_fields():
-    """Normalized product contains all required fields matching AudiMeta BookDto."""
+    """Normalized product contains all required fields in the AudiMeta BookDto shape."""
     product = {
         "asin": "B08G9PRS1K",
         "title": "Dune",
@@ -904,7 +904,7 @@ async def test_single_asin_cache_hit_settles_a_null_flag_before_it_reaches_the_c
     instead of false."""
     from app.services.audible.books import get_books_by_asins
 
-    asin = "B0FLAGCACH1"
+    asin = "B0FLAGCAC1"
     unsettled = _unsettled_cached_book(asin)
 
     with patch("app.services.audible.books.audible_get", new_callable=AsyncMock) as mock_audible_get, \
@@ -924,7 +924,7 @@ async def test_batch_cache_hits_settle_null_flags_before_they_reach_the_caller()
     independently settled on the way out."""
     from app.services.audible.books import get_books_by_asins
 
-    asins = ["B0FLAGCACH2", "B0FLAGCACH3"]
+    asins = ["B0FLAGCAC2", "B0FLAGCAC3"]
     hits = {book_key(a, "us"): _unsettled_cached_book(a) for a in asins}
 
     async def _cache_get_many(session, keys):
@@ -990,7 +990,7 @@ async def test_get_books_by_asins_not_found_chunk_does_not_discard_other_chunks(
     from libex_core.exceptions import NotFoundException
 
     mock_session = AsyncMock()
-    good_asins = [f"B0GOOD{i:03d}" for i in range(50)]
+    good_asins = [f"B0GOOD{i:04d}" for i in range(50)]
     missing_asin = "B0MISSING1"  # 51st ASIN -> its own single-ASIN chunk
     all_asins = good_asins + [missing_asin]
 
@@ -1044,8 +1044,8 @@ async def test_get_books_by_asins_not_found_and_transient_together_backstop_scop
     from libex_core.exceptions import NotFoundException
 
     mock_session = AsyncMock()
-    good_asins = [f"B0GOOD{i:03d}" for i in range(50)]
-    bad_asins = [f"B0BAD{i:03d}" for i in range(50)]  # whole-chunk transient failure
+    good_asins = [f"B0GOOD{i:04d}" for i in range(50)]
+    bad_asins = [f"B0BAD{i:05d}" for i in range(50)]  # whole-chunk transient failure
     missing_asin = "B0MISSING1"  # its own single-ASIN chunk -> 404
     all_asins = good_asins + bad_asins + [missing_asin]
     stale_missing_book = {"asin": missing_asin, "title": "Stale, no longer on Audible"}
@@ -1088,7 +1088,7 @@ async def test_get_books_by_asins_transient_chunk_failure_is_skipped_not_fatal()
     from app.services.audible.books import get_books_by_asins
 
     mock_session = AsyncMock()
-    good_asins = [f"B0GOOD{i:03d}" for i in range(50)]
+    good_asins = [f"B0GOOD{i:04d}" for i in range(50)]
     bad_asin = "B0BADCHUNK"  # single-ASIN chunk that fails transiently
     all_asins = good_asins + [bad_asin]
     db_backstop_book = {"asin": bad_asin, "title": "From DB backstop"}
@@ -1119,7 +1119,7 @@ async def test_get_books_by_asins_reraises_when_only_transient_failures_and_noth
     from app.services.audible.books import get_books_by_asins
 
     mock_session = AsyncMock()
-    asins = [f"B0BAD{i:03d}" for i in range(60)]  # 2 chunks, both fail transiently
+    asins = [f"B0BAD{i:05d}" for i in range(60)]  # 2 chunks, both fail transiently
     db_book = {"asin": asins[0], "title": "From DB"}
 
     with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=RuntimeError("Audible 500"))), \
@@ -1139,7 +1139,7 @@ async def test_get_books_by_asins_partial_shortfall_warning_fires_on_not_found_a
     from libex_core.exceptions import NotFoundException
 
     mock_session = AsyncMock()
-    good_asins = [f"B0GOOD{i:03d}" for i in range(50)]
+    good_asins = [f"B0GOOD{i:04d}" for i in range(50)]
     missing_asin = "B0MISSING1"
     all_asins = good_asins + [missing_asin]
 
@@ -1174,7 +1174,7 @@ async def test_get_books_by_asins_partial_shortfall_warning_fires_on_transient_a
     from app.services.audible.books import get_books_by_asins
 
     mock_session = AsyncMock()
-    good_asins = [f"B0GOOD{i:03d}" for i in range(50)]
+    good_asins = [f"B0GOOD{i:04d}" for i in range(50)]
     bad_asin = "B0BADCHUNK"
     all_asins = good_asins + [bad_asin]
     db_backstop_book = {"asin": bad_asin, "title": "From DB backstop"}
@@ -1331,8 +1331,8 @@ async def test_get_books_by_asins_facts_records_db_backstop_after_transient_fail
     could not cover."""
     from app.services.audible.books import get_books_by_asins
 
-    good_asins = [f"B0GOOD{i:03d}" for i in range(50)]
-    bad_asins = ["B0BAD0001", "B0BAD0002"]
+    good_asins = [f"B0GOOD{i:04d}" for i in range(50)]
+    bad_asins = ["B0BAD00001", "B0BAD00002"]
     recovered_book = {"asin": bad_asins[0], "title": "From DB backstop"}
     facts = ResponseFacts()
 
@@ -1377,7 +1377,7 @@ async def test_get_books_by_asins_facts_records_hydration_not_found_for_a_hollow
     from app.services.audible.books import get_books_by_asins
 
     found_asin = "B0FOUND001"
-    stub_asin = "B0NOTFOUND1"
+    stub_asin = "B0NOTFOUN1"
 
     async def _get(region, path, params):
         asins = params["asins"].split(",")
@@ -1848,7 +1848,7 @@ def test_the_unreadable_plans_warning_fires_on_a_freshly_booted_process():
     Driven against a fresh-boot clock rather than the ambient one, because
     the ambient one hides it: any machine with more than a minute of uptime
     passes regardless of which sentinel is used."""
-    import app.services.audible.books as books_mod
+    import libex_core.audible.books as books_mod
 
     with patch.object(books_mod, "_unreadable_plans_last_logged", None), \
          patch.object(books_mod, "_unreadable_plans_count", 0), \
@@ -1863,7 +1863,7 @@ def test_the_unreadable_plans_warning_fires_on_a_freshly_booted_process():
 def test_the_unreadable_plans_warning_still_windows_after_the_first():
     """The window must still close, or the fix trades a swallowed first
     report for a per-book flood."""
-    import app.services.audible.books as books_mod
+    import libex_core.audible.books as books_mod
 
     with patch.object(books_mod, "_unreadable_plans_last_logged", 12.0), \
          patch.object(books_mod, "_unreadable_plans_count", 0), \
@@ -2154,7 +2154,7 @@ async def test_get_books_by_asins_persist_outcome_defaults_to_none_harmlessly():
 # through placeholder_asins, and only when a chunk actually answered.
 
 def _placeholder_product(asin):
-    from app.services.audible.books import UNRELEASED_PLACEHOLDER
+    from libex_core.audible.books import UNRELEASED_PLACEHOLDER
 
     return {**_hydration_product(asin), "publication_datetime": UNRELEASED_PLACEHOLDER}
 
@@ -2164,7 +2164,7 @@ def _hollow_stub(asin):
 
 
 def test_is_placeholder_record_needs_a_title_and_the_sentinel_date():
-    from app.services.audible.books import UNRELEASED_PLACEHOLDER, _is_placeholder_record
+    from libex_core.audible.books import UNRELEASED_PLACEHOLDER, is_placeholder_record as _is_placeholder_record
 
     assert _is_placeholder_record({"title": "T", "publication_datetime": UNRELEASED_PLACEHOLDER})
     assert not _is_placeholder_record({"publication_datetime": UNRELEASED_PLACEHOLDER})
@@ -2291,7 +2291,7 @@ async def test_placeholder_is_never_cached_and_is_reclassified_on_every_call():
 async def test_placeholder_in_a_failed_chunk_is_not_reported_and_goes_to_the_db_backstop():
     from app.services.audible.books import get_books_by_asins
 
-    good_asins = [f"B0GOOD{i:03d}" for i in range(50)]
+    good_asins = [f"B0GOOD{i:04d}" for i in range(50)]
     bad_chunk = ["B0PLACE001", "B0OTHER001"]
     placeholders: list[str] = []
 

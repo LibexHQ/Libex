@@ -33,6 +33,11 @@ FOREIGN = "foreign"      # tables present, no revision recorded: not ours
 _PG_LOCK_KEY = 0x4C494258
 
 
+class SchemaIntegrityError(RuntimeError):
+    """A migration left rows that break a foreign key, or ran with foreign key
+    enforcement in the wrong state. Carries no row data."""
+
+
 @dataclass(frozen=True)
 class SchemaState:
     state: str
@@ -96,11 +101,47 @@ def _is_known(script, revision: str) -> bool:
         return False
 
 
+def set_foreign_keys(connection: Connection, enabled: bool) -> None:
+    """Switches SQLite foreign key enforcement on or off for `connection`.
+
+    SQLite ignores the pragma inside a transaction, so this must run before
+    one begins; it is applied through the driver, which opens none, and read
+    back, so a switch that did not take is an error and not a silent no-op.
+    A no-op on every other database."""
+    if connection.dialect.name != "sqlite":
+        return
+    cursor = connection.connection.dbapi_connection.cursor()
+    try:
+        cursor.execute(f"PRAGMA foreign_keys={'ON' if enabled else 'OFF'}")
+        cursor.execute("PRAGMA foreign_keys")
+        actual = bool(cursor.fetchone()[0])
+    finally:
+        cursor.close()
+    if actual != enabled:
+        raise SchemaIntegrityError("SQLite foreign key enforcement could not be switched")
+
+
 def upgrade_to_head(connection: Connection) -> None:
     """Runs every pending revision on `connection`, inside the transaction it
-    is already in; the caller commits."""
+    is already in; the caller commits.
+
+    On SQLite the connection must have foreign keys off (`set_foreign_keys`,
+    before the transaction): a batch migration rebuilds a table by creating
+    the new one, copying and dropping the old, and with enforcement on the drop
+    cascades into every child row. The result is then checked with
+    `PRAGMA foreign_key_check`, and any violation raises so the caller's
+    transaction rolls back."""
     from alembic import command
 
     if connection.dialect.name == "postgresql":
         connection.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _PG_LOCK_KEY})
+    elif connection.dialect.name == "sqlite":
+        if connection.exec_driver_sql("PRAGMA foreign_keys").scalar():
+            raise SchemaIntegrityError(
+                "migrations must run with SQLite foreign keys off, or a table rebuild "
+                "would delete child rows"
+            )
     command.upgrade(_config(connection), "head")
+    if connection.dialect.name == "sqlite":
+        if connection.exec_driver_sql("PRAGMA foreign_key_check").first() is not None:
+            raise SchemaIntegrityError("the migration left rows that break a foreign key")

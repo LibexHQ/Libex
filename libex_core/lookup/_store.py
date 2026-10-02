@@ -248,13 +248,13 @@ async def serve_merged(
 async def stored_series(
     store: "LocalStore", asin: str, region: str | None = None
 ) -> dict[str, Any] | None:
-    """The stored series record. With a region, a record stored for another
-    marketplace is not returned; one stored with no region is, since nothing
-    ties it to a different one."""
+    """The stored series record. With a region, only a record stored for
+    exactly that marketplace is returned; one stored for another, or with no
+    region at all, is not."""
     from libex_core.storage.read import series as read_series
 
     row = await _read(store, "series", lambda s: read_series.get_series(s, asin), None)
-    if row and region is not None and row.get("region") not in (None, region):
+    if row and region is not None and row.get("region") != region:
         return None
     return row
 

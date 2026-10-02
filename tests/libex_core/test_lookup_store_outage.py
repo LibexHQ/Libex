@@ -313,7 +313,7 @@ async def test_a_failed_chunk_is_not_answered_from_another_regions_row(store):
     assert sorted(same.from_store) == sorted(tail)
 
 
-async def test_a_series_stored_for_another_region_is_not_served_but_one_with_none_is(store):
+async def test_a_series_stored_for_another_region_is_not_served_nor_one_with_none(store):
     await get_series(fake_get, SERIES, region="us", store=store)
     with pytest.raises(AudibleAPIException):
         await get_series(outage_get, SERIES, region="de", store=store)
@@ -321,10 +321,9 @@ async def test_a_series_stored_for_another_region_is_not_served_but_one_with_non
     from libex_core.storage import write
     async with store.write() as session:
         await write.write_series_profile(session, {"asin": "B0NOREG001", "name": "Regionless"})
-    # Read at the store layer: the response model has no region-less case, so
-    # the lookup cannot render such a row, which the writer never produces.
-    served = await store_module.stored_series(store, "B0NOREG001", "de")
-    assert served["name"] == "Regionless"
+    assert await store_module.stored_series(store, "B0NOREG001", "de") is None
+    with pytest.raises(AudibleAPIException):
+        await get_series(outage_get, "B0NOREG001", region="de", store=store)
     assert await store_module.stored_series(store, SERIES, "de") is None
 
 

@@ -290,7 +290,9 @@ def _without_series(
     books: list[dict[str, Any]], foreign: set[str]
 ) -> tuple[list[dict[str, Any]], int]:
     """The books with every series entry in foreign taken out, as copies so the
-    caller's books are served as they were, and how many entries went."""
+    caller's own books are left as they were, and how many entries went. This
+    shapes only what is written: the entries are not lost to the caller, since
+    serve_merged puts Audible's back onto the row it serves."""
     if not foreign:
         return books, 0
     stripped = 0
@@ -366,13 +368,44 @@ async def serve_merged(
 
     Rows are keyed by ASIN alone, so a row that another marketplace stored is
     never served for this one: that ASIN is answered with the live copy.
+
+    A series link left out of the write (persist_books does not link a book
+    to a series stored for another marketplace) is not on the stored row, so
+    Audible's entry for it is put back on the served row: any live series
+    entry the stored row lacks is carried over as Audible sent it, the list
+    taking Audible's order and the stored row's own entries after it. The rest
+    of the row is the merged one.
     """
     if not written:
         return settle_flags_list(live)
     stored = {b["asin"]: b for b in await stored_books(store, sorted(written), region)}
     return settle_flags_list([
-        stored[b["asin"]] if b.get("asin") in stored else b for b in live
+        _with_live_series(stored[b["asin"]], b) if b.get("asin") in stored else b
+        for b in live
     ])
+
+
+def _with_live_series(row: dict[str, Any], live: dict[str, Any]) -> dict[str, Any]:
+    """The stored row with the live book's series entries it does not hold added
+    back. Entries are matched on ASIN; one the row holds is kept as stored (the
+    merged value), and a live entry with no ASIN, which can never be stored,
+    is always carried over. Unchanged when nothing is missing."""
+    held = {e.get("asin") for e in row.get("series") or []}
+    live_entries = live.get("series") or []
+    if all(e.get("asin") and e["asin"] in held for e in live_entries):
+        return row
+    by_asin = {e.get("asin"): e for e in row.get("series") or []}
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for entry in live_entries:
+        asin = entry.get("asin")
+        if asin and asin in seen:
+            continue
+        if asin:
+            seen.add(asin)
+        merged.append(by_asin.get(asin, entry) if asin else entry)
+    merged.extend(e for e in row.get("series") or [] if e.get("asin") not in seen)
+    return {**row, "series": merged}
 
 
 async def stored_series(

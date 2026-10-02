@@ -618,6 +618,44 @@ async def test_a_series_stored_for_another_region_is_not_touched_through_a_book(
     ]
 
 
+def series_of(book):
+    return [(e.asin, e.name, e.region, e.position) for e in book.series]
+
+
+async def test_a_book_is_served_the_series_link_left_out_of_its_write(store):
+    await get_series(fake_get, SERIES, region="us", store=store)
+    before = await row_snapshot(store, "series", "asin", SERIES)
+    own = "B0SERIES02"
+    de_book = product(ASIN, relationships=[
+        {**SERIES_RELATION, "title": "Die Serie (DE)"},
+        {**SERIES_RELATION, "asin": own, "title": "Meine Serie", "sequence": "2"},
+    ])
+    get = batch_get(**{ASIN: de_book})
+
+    served = await get_book(get, ASIN, region="de", store=store)
+    unstored = await get_book(get, ASIN, region="de")
+
+    assert (SERIES, "Die Serie (DE)", "de", "1") in series_of(served)
+    assert series_of(served) == series_of(unstored)
+    assert await series_links(store, ASIN) == [own]
+    assert await row_snapshot(store, "series", "asin", SERIES) == before
+
+
+async def test_books_are_served_the_series_link_left_out_of_their_write(store):
+    await get_series(fake_get, SERIES, region="us", store=store)
+    before = await row_snapshot(store, "series", "asin", SERIES)
+    de_book = product(ASIN, relationships=[{**SERIES_RELATION, "title": "Die Serie (DE)"}])
+    get = batch_get(**{ASIN: de_book, OTHER: product(OTHER)})
+
+    served = await get_books(get, [ASIN, OTHER], region="de", store=store)
+    unstored = await get_books(get, [ASIN, OTHER], region="de")
+
+    assert [series_of(b) for b in served.books] == [series_of(b) for b in unstored.books]
+    assert series_of(served.books[0]) == [(SERIES, "Die Serie (DE)", "de", "1")]
+    assert await series_links(store, ASIN) == []
+    assert await row_snapshot(store, "series", "asin", SERIES) == before
+
+
 async def test_only_the_foreign_series_of_a_book_is_left_out_of_the_write(store, caplog):
     await get_series(fake_get, SERIES, region="us", store=store)
     before = await row_snapshot(store, "series", "asin", SERIES)

@@ -50,6 +50,10 @@ _STRIPPED_RELATIONSHIP_TYPES = frozenset({"episode", "season"})
 _EXTRAS_MAX_BYTES = 64 * 1024
 _EXTRAS_MAX_DEPTH = 32
 
+# The same nesting bound, published for the one other structure Libex carries
+# that Audible can nest without limit: a chapter's sub-chapters.
+MAX_NESTING_DEPTH = _EXTRAS_MAX_DEPTH
+
 # The widest int that survives the whole path from this module to a jsonb
 # column, in bits.
 #
@@ -236,6 +240,48 @@ def _sanitize_for_jsonb(extras: dict[str, Any]) -> tuple[dict[str, Any] | None, 
     return root, counts
 
 
+def bound_extras(blob: dict[str, Any], asin: str, region: str) -> tuple[dict[str, Any] | None, dict[str, int], str | None]:
+    """
+    Makes one verbatim Audible blob safe to store and bounded in size, and
+    says what that cost: (the blob, or None when it is withheld whole; a count
+    of each value sanitized; the reason it was withheld whole, or None).
+
+    The one place the sanitizing and both caps are applied. build_extras runs
+    a product's passthrough through it, and the chapter normalizer runs each
+    of its verbatim groups through it, so a book, a series and a chapter
+    listing cannot answer differently for the same input. The caller owns the
+    name the reason is filed under in extrasWithheld, because a product has
+    one blob and a chapter listing has several. Incidents are logged here, at
+    most once per window per reason; the sanitized and withheld logs are
+    separate, as they always were.
+    """
+    sanitized, counts = _sanitize_for_jsonb(blob)
+    hits = {name: total for name, total in counts.items() if total}
+    if hits:
+        _log_extras_incident(asin, region, _WITHHELD_SANITIZED)
+
+    if sanitized is None:
+        _log_extras_incident(asin, region, _WITHHELD_DEPTH)
+        return None, hits, _WITHHELD_DEPTH
+
+    try:
+        # allow_nan=False so anything non-finite that somehow survived above
+        # raises here and is recorded, instead of being written out as the
+        # Infinity token and becoming invalid JSON nothing would catch until
+        # a reader choked on it.
+        encoded = json.dumps(sanitized, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError):
+        _log_extras_incident(asin, region, _WITHHELD_UNSERIALIZABLE)
+        return None, hits, _WITHHELD_UNSERIALIZABLE
+
+    blob_bytes = len(encoded.encode("utf-8"))
+    if blob_bytes > _EXTRAS_MAX_BYTES:
+        _log_extras_incident(asin, region, _WITHHELD_SIZE, blob_bytes=blob_bytes)
+        return None, hits, _WITHHELD_SIZE
+
+    return sanitized, hits, None
+
+
 def build_extras(passthrough: dict[str, Any], asin: str, region: str) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """
     Builds a product's audibleExtras blob and the record of anything withheld
@@ -267,32 +313,9 @@ def build_extras(passthrough: dict[str, Any], asin: str, region: str) -> tuple[d
             extras["relationships"] = kept
             withheld["relationships"] = stripped
 
-    sanitized, counts = _sanitize_for_jsonb(extras)
-    hits = {name: total for name, total in counts.items() if total}
+    sanitized, hits, reason = bound_extras(extras, asin, region)
     if hits:
         withheld[_WITHHELD_SANITIZED] = hits
-        _log_extras_incident(asin, region, _WITHHELD_SANITIZED)
-
-    if sanitized is None:
-        withheld["audibleExtras"] = _WITHHELD_DEPTH
-        _log_extras_incident(asin, region, _WITHHELD_DEPTH)
-        return None, withheld
-
-    try:
-        # allow_nan=False so anything non-finite that somehow survived above
-        # raises here and is recorded, instead of being written out as the
-        # Infinity token and becoming invalid JSON nothing would catch until
-        # a reader choked on it.
-        encoded = json.dumps(sanitized, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
-    except (TypeError, ValueError):
-        withheld["audibleExtras"] = _WITHHELD_UNSERIALIZABLE
-        _log_extras_incident(asin, region, _WITHHELD_UNSERIALIZABLE)
-        return None, withheld
-
-    blob_bytes = len(encoded.encode("utf-8"))
-    if blob_bytes > _EXTRAS_MAX_BYTES:
-        withheld["audibleExtras"] = _WITHHELD_SIZE
-        _log_extras_incident(asin, region, _WITHHELD_SIZE, blob_bytes=blob_bytes)
-        return None, withheld
-
+    if reason is not None:
+        withheld["audibleExtras"] = reason
     return sanitized, withheld

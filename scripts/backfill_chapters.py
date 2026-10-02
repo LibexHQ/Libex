@@ -879,7 +879,7 @@ async def _process_one(
         return _Outcome.NONE, False, False, elapsed
 
     try:
-        chapters = normalize_chapters(data)
+        chapters = normalize_chapters(data, asin, region)
         await _store_chapters(session, asin, chapters)
         await _mark_checked(session, asin)
         return _Outcome.STORED, False, False, elapsed

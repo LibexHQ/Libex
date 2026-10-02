@@ -123,6 +123,25 @@ async def test_get_series_falls_back_to_db_when_audible_fails():
 
 
 @pytest.mark.asyncio
+async def test_get_series_outage_fallback_serves_the_stored_extras_and_withheld():
+    """What the store holds for a series is what an outage answers with."""
+    from app.services.audible.series import get_series
+
+    db_series = {
+        "asin": "B00SERIES1", "name": "Dune Chronicles", "description": "From DB",
+        "region": "us", "position": None, "updatedAt": "2024-01-01T00:00:00+00:00",
+        "audibleExtras": {"language": "english"},
+        "extrasWithheld": {"relationships": {"episode": 1}},
+    }
+    with patch("app.services.audible.series.audible_get", side_effect=Exception("Audible down")), \
+         patch("app.services.audible.series.get_series_from_db", new_callable=AsyncMock, return_value=db_series), \
+         patch("app.services.audible.series.cache.get", return_value=None):
+        result = await get_series("B00SERIES1", "us", AsyncMock())
+    assert result["audibleExtras"] == {"language": "english"}
+    assert result["extrasWithheld"] == {"relationships": {"episode": 1}}
+
+
+@pytest.mark.asyncio
 async def test_get_series_falls_back_to_cache_when_db_empty():
     """Falls back to cache when Audible is down and DB has no results."""
     from app.services.audible.series import get_series

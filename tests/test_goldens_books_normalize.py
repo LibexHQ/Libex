@@ -173,12 +173,15 @@ def test_normalize_chapters_matches_golden(name):
     assert _dump(seam.normalize_chapters(data, asin)) == CHAPTER_GOLDEN[name]
 
 
-def test_normalize_chapters_drops_nested_subchapters_today():
+def test_normalize_chapters_keeps_nested_subchapters():
     data, asin = cases.chapter_cases()["nested_subchapters"]
     out = seam.normalize_chapters(data, asin)
     assert [c["title"] for c in out["chapters"]] == ["Part One", "Sparse"]
-    assert all(set(c) == {"lengthMs", "startOffsetMs", "startOffsetSec", "title"} for c in out["chapters"])
-    assert "Sub A" not in _dump(out)
+    assert out["chapters"][0]["chapters"] == [
+        {"lengthMs": 4000, "startOffsetMs": 0, "startOffsetSec": 0, "title": "Sub A"},
+        {"lengthMs": 5000, "startOffsetMs": 4000, "startOffsetSec": 4, "title": "Sub B"},
+    ]
+    # A chapter Audible sent no sub-chapters for carries no chapters key at all.
     assert out["chapters"][1] == {"lengthMs": 100, "startOffsetMs": 0, "startOffsetSec": 0, "title": "Sparse"}
 
 

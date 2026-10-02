@@ -1330,6 +1330,8 @@ async def get_series_from_db(session: AsyncSession, asin: str) -> dict[str, Any]
             "region": series.region,
             "position": None,
             "updatedAt": series.updated_at.isoformat() if series.updated_at else None,
+            "audibleExtras": series.audible_extras,
+            "extrasWithheld": series.extras_withheld,
         }
     except Exception as e:
         logger.warning(
@@ -1356,6 +1358,8 @@ async def search_series_from_db(session: AsyncSession, name: str) -> list[dict[s
                 "region": s.region,
                 "position": None,
                 "updatedAt": s.updated_at.isoformat() if s.updated_at else None,
+                "audibleExtras": s.audible_extras,
+                "extrasWithheld": s.extras_withheld,
             }
             for s in series_list
         ]

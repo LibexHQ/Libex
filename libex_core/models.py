@@ -446,6 +446,22 @@ class ChapterItem(BaseModel):
     startOffsetMs: int = 0
     startOffsetSec: int = 0
     title: str = ""
+    chapters: list["ChapterItem"] | None = Field(
+        default=None,
+        description=(
+            "Sub-chapters Audible nested under this chapter, each shaped like "
+            "this item and nested the same way. Present only when Audible "
+            "sent them; null otherwise."
+        ),
+    )
+    audibleExtras: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Every key Audible sent on this chapter that the fields above do "
+            "not reproduce, verbatim. Present only when Audible sent such a "
+            "key; null otherwise."
+        ),
+    )
 
 
 class ChapterResponse(BaseModel):
@@ -455,6 +471,46 @@ class ChapterResponse(BaseModel):
     runtimeLengthMs: int = 0
     runtimeLengthSec: int = 0
     chapters: list[ChapterItem] = Field(default_factory=list)
+    contentReference: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Audible's content_reference group for the book, verbatim. "
+            "Present only when Audible sent it; null otherwise."
+        ),
+    )
+    contentUrl: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Audible's content_url group for the book, verbatim. Present "
+            "only when Audible sent it; null otherwise."
+        ),
+    )
+    audibleExtras: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Every other key Audible sent with the chapter data that no "
+            "field above reproduces, verbatim, grouped by the level it "
+            "arrived at: response, contentMetadata, chapterInfo. A level "
+            "appears only when it had something. The echoed response_groups "
+            "request parameter is the one recorded omission. Null when "
+            "there was nothing to carry."
+        ),
+    )
+    extrasWithheld: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "What was left out of the verbatim parts above and why, the same "
+            "account a book's extrasWithheld gives: sanitized (counts of "
+            "NUL characters stripped and unstorable numbers nulled), a field "
+            "name (contentReference, contentUrl, audibleExtras) mapped to "
+            "the reason that part was withheld whole, chapterExtras (a "
+            "count per reason of chapters whose own audibleExtras were "
+            "withheld) and subChapters (a count of sub-chapter lists nested "
+            "past the depth cap, carried in that chapter's audibleExtras "
+            "when they fit). Present only when something was withheld; null "
+            "otherwise."
+        ),
+    )
 
 
 # ============================================================
@@ -468,6 +524,22 @@ class SeriesResponse(BaseModel):
     region: str
     position: str | None = None
     updatedAt: str | None = None
+    audibleExtras: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Every key of Audible's series product beyond asin, title and "
+            "publisher_summary, built the way a book's audibleExtras is. "
+            "Present only when Audible sent such a key; null otherwise."
+        ),
+    )
+    extrasWithheld: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "What was left out of this series' audibleExtras and why, the "
+            "same account a book's extrasWithheld gives. Present only when "
+            "something was withheld; null otherwise."
+        ),
+    )
 
 
 # ============================================================

@@ -309,6 +309,13 @@ class Series(Base):
     region: Mapped[str | None] = mapped_column(REGION_ENUM, nullable=True)
     fetched_description: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     last_seeded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # The series product's keys beyond asin, title and publisher_summary, and
+    # the record of anything left out of them. Same meaning, NULL semantics and
+    # merge as the books columns of the same names; _extras_union in the writer
+    # carries why. NULL means no profile fetch has written this row since the
+    # columns landed.
+    audible_extras: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    extras_withheld: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),

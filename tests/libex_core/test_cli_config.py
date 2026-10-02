@@ -263,7 +263,7 @@ def test_a_407_from_the_proxy_leaves_the_credential_out_of_every_stream(tmp_path
     finally:
         stub.close()
     assert f"Basic {BASIC}".encode() in stub.received, "the credential never reached the proxy"
-    assert result.returncode == 1
+    assert result.returncode == 4
     assert result.stdout == b""
     assert result.stderr.strip().splitlines()[-1].startswith(b"libex-core: error:")
     assert_no_credential(result.stdout, result.stderr)
@@ -282,7 +282,7 @@ def test_a_407_traceback_is_present_at_vv_and_still_clean(tmp_path):
 
 def test_connection_refused_leaves_the_credential_out_of_every_stream(tmp_path):
     result = _probe(tmp_path, credentialed("127.0.0.1", _closed_port()))
-    assert result.returncode == 1
+    assert result.returncode == 4
     assert result.stdout == b""
     assert b"Traceback (most recent call last)" in result.stderr
     assert_no_credential(result.stdout, result.stderr)
@@ -290,7 +290,7 @@ def test_connection_refused_leaves_the_credential_out_of_every_stream(tmp_path):
 
 def test_an_unresolvable_host_leaves_the_credential_out_of_every_stream(tmp_path):
     result = _probe(tmp_path, credentialed("no-such-host.invalid", 8080))
-    assert result.returncode == 1
+    assert result.returncode == 4
     assert result.stdout == b""
     assert b"Traceback (most recent call last)" in result.stderr
     assert_no_credential(result.stdout, result.stderr)

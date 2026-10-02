@@ -4,12 +4,19 @@ Process exit statuses, and the one place an exception becomes one.
 The numbers are a public contract: a shell script branches on them, so none
 is reassigned once published. 2 is argparse's own usage status, kept so a
 mistyped flag and a rejected argument report the same way.
+
+A LibexException maps by its `code`, so the status says whose gap the failure
+is rather than which class raised it. The error line's `code` suffix is that
+same value for those failures. `config_error` and `unexpected_error` are this
+tool's own codes, not members of the ErrorCode vocabulary: the library never
+raises them and an embedder cannot receive them from it.
 """
 
 import enum
 from dataclasses import dataclass
 
 from libex_core.cli.environment import ConfigError
+from libex_core.exceptions import ErrorCode, LibexException
 
 
 class ExitCode(enum.IntEnum):
@@ -30,7 +37,7 @@ DESCRIPTIONS: dict[ExitCode, str] = {
     ExitCode.USAGE: "The command line was not understood, or an argument was rejected.",
     ExitCode.NOT_FOUND: "The requested item does not exist.",
     ExitCode.UPSTREAM_UNAVAILABLE: "Audible could not be reached or did not answer. Retrying later may succeed.",
-    ExitCode.CONFIG: "The environment configuration is missing or invalid.",
+    ExitCode.CONFIG: "The environment configuration is missing or invalid. The error line names this as config_error, a code of this tool that the library itself never reports.",
     ExitCode.INTERRUPTED: "Interrupted by SIGINT.",
     ExitCode.BROKEN_PIPE: "The reader of standard output went away before the output was complete.",
 }
@@ -44,20 +51,28 @@ class Failure:
     message: str
 
 
-# Exception class -> (status, short machine-readable code), first match wins
-# via isinstance. Only classes whose message is fixed text written by this
-# package belong here: the message is printed as-is. Failures that map over
-# the library's error codes extend this table, keyed by class and reading
-# the code off the instance, rather than growing a second dispatch.
-_BY_EXCEPTION: tuple[tuple[type[Exception], ExitCode, str], ...] = (
-    (ConfigError, ExitCode.CONFIG, "config_error"),
-)
+# ErrorCode -> status. A code with no entry here (the vocabulary is additive)
+# falls through to ERROR rather than being guessed at.
+_BY_ERROR_CODE: dict[ErrorCode, ExitCode] = {
+    ErrorCode.INVALID_REQUEST: ExitCode.USAGE,
+    ErrorCode.NOT_ON_AUDIBLE: ExitCode.NOT_FOUND,
+    ErrorCode.NOT_IN_LIBEX: ExitCode.NOT_FOUND,
+    ErrorCode.WITHHELD: ExitCode.NOT_FOUND,
+    ErrorCode.UPSTREAM_UNAVAILABLE: ExitCode.UPSTREAM_UNAVAILABLE,
+}
 
 
 def classify(exc: Exception) -> Failure:
-    for exc_type, exit_code, code in _BY_EXCEPTION:
-        if isinstance(exc, exc_type):
-            return Failure(exit_code, code, str(exc))
+    # Both branches print the message as-is, so both are limited to classes
+    # whose text is fixed by this package or by libex_core.
+    if isinstance(exc, ConfigError):
+        return Failure(ExitCode.CONFIG, "config_error", str(exc))
+    if isinstance(exc, LibexException):
+        return Failure(
+            _BY_ERROR_CODE.get(exc.code, ExitCode.ERROR),
+            str(exc.code.value),
+            exc.message,
+        )
     # An unmapped exception's text is not printed: it can come from
     # anywhere under the transport, and the traceback at -vv is the
     # deliberate way to see it.

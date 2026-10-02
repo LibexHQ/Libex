@@ -94,7 +94,7 @@ async def search(
 
         # Persist to DB and cache in the background. Unsettled: the writer
         # needs the tri-state flags None/True/False as normalize_product
-        # produced them (see _asserted_bool in writer.py), so this runs
+        # produced them (see libex_core.storage.write.support.asserted_bool), so this runs
         # before settle_flags_list below, on the pre-settle list.
         persist_books_background(normalized, region)
 

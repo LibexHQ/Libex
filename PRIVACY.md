@@ -436,8 +436,15 @@ The library is built around preventing that from happening by accident:
   database's address, and the application decides where that database is.
   When the application passes that store to a lookup, the lookup writes what
   Audible returned into it (books, chapter lists, and series and author
-  profiles) and returns the stored copy. If Audible can't be reached, the
-  lookup answers from what the store already holds. A chapter list is kept
+  profiles) and returns the stored copy. If Audible can't be reached, a
+  lookup of a book, a chapter list, a series, an author, or a series' or an
+  author's books answers from what the store already holds. A search, a
+  narrator's books, or a new releases or coming soon scan that Audible can't
+  run is reported as Audible being unavailable rather than answered from the
+  store, though books it found that Audible then can't give are filled in
+  from the store where it holds them, and a quick search split into an
+  author and a title tries the store's matching books when Audible's search
+  for them fails or finds nothing. A chapter list is kept
   only for a book the store already holds. What is stored is Audible's
   catalogue data, the same kind the public instance's database holds, with no
   field about the person who looked it up. On someone's own device, though,
@@ -522,8 +529,8 @@ The library is built around preventing that from happening by accident:
   Nothing is created until `libex-core db upgrade` is run, and until then,
   with storage set, every lookup command stops before contacting Audible.
   Once the store is ready, every lookup command except `categories` writes
-  what Audible returned into it, prints the stored copy, and answers from it
-  when Audible can't be reached, as described above. Over time the store
+  what Audible returned into it and prints the stored copy, and the lookups
+  described above answer from it when Audible can't be reached. Over time the store
   becomes an unencrypted, dated list of the books, authors and series that
   user looked up on that machine. The `db` commands and `book sku` read only
   the store, contact nobody, and need no proxy. To remove a store in the

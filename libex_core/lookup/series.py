@@ -25,9 +25,11 @@ from libex_core.audible.client import (
 from libex_core.audible.series import fetch_series, fetch_series_book_asins, normalize_series
 from libex_core.exceptions import AudibleAPIException, NotFoundException
 from libex_core.lookup import _store
-from libex_core.lookup._shaping import check_shaping, shape_books
-from libex_core.lookup.books import _OUTAGE_MESSAGE, _canonical_asin, hydrate_books
-from libex_core.models import BookResponse, SeriesResponse
+from libex_core.lookup._common import OUTAGE_MESSAGE
+from libex_core.lookup._shaping import check_shaping
+from libex_core.lookup.author_books import BookList, _assemble
+from libex_core.lookup.books import Hydration, _canonical_asin, hydrate_books
+from libex_core.models import SeriesResponse
 
 if TYPE_CHECKING:
     from libex_core.storage.store import LocalStore
@@ -83,7 +85,7 @@ async def get_series(
             stored = await _store.stored_series(store, canonical)
             if stored:
                 return SeriesResponse(**stored)
-        raise as_audible_failure(e, _OUTAGE_MESSAGE) from e
+        raise as_audible_failure(e, OUTAGE_MESSAGE) from e
     if store is not None and await _store.persist_series(store, normalized, region):
         normalized = await _store.stored_series(store, canonical) or normalized
     return SeriesResponse(**normalized)
@@ -98,7 +100,7 @@ async def get_series_books(
     sort: str | None = None,
     order: str = "asc",
     store: "LocalStore | None" = None,
-) -> list[BookResponse]:
+) -> BookList:
     """
     Fetches the full books in a series.
 
@@ -114,6 +116,17 @@ async def get_series_books(
     member that is not ASIN-shaped, or that Audible has no record of, is left
     out; the bulk lookup is where such ASINs are reported. An empty list is
     possible when none of the members resolves, or when filters leave none.
+
+    As on the hosted route, which sends X-Libex-Complete and
+    X-Libex-Incomplete-Reason, the result says whether the list is whole:
+    complete is False, with hydration-failed and/or hydration-not-found in
+    incomplete_reasons, when a member's request failed or Audible has no record
+    of it. The member list is one request, so there is no discovery-incomplete
+    here and no deadline, so no hydration-deadline, unless the stored members
+    answered in place of a member list Audible could not give: then the
+    membership is unconfirmed and discovery-incomplete is reported. Judged
+    before filtering. store_write_failed is True when a store was given and
+    some fetched book could not be written to it.
 
     filters, sort and order are applied as on the hosted route: the books keep
     series order unless a sort is given, which overrides it. See
@@ -152,15 +165,16 @@ async def get_series_books(
         if store is not None:
             members = await _store.stored_series_books(store, canonical)
             if members:
-                return [
-                    BookResponse(**book) for book in shape_books(members, filters, sort, order)
-                ]
-        raise as_audible_failure(e, _OUTAGE_MESSAGE) from e
+                # The stored members are whatever the store holds, which
+                # nothing confirms is the whole series, so the list is
+                # reported as one whose membership was not confirmed.
+                return _assemble(False, Hydration(books=members), filters, sort, order)
+        raise as_audible_failure(e, OUTAGE_MESSAGE) from e
 
     if not asins:
         raise NotFoundException("No books found for series")
     hydration = await hydrate_books(get, asins, region, store=store)
-    return [BookResponse(**book) for book in shape_books(hydration.books, filters, sort, order)]
+    return _assemble(True, hydration, filters, sort, order)
 
 
 async def search_series(

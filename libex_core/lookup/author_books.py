@@ -6,7 +6,7 @@ cache and background completion. With no store nothing is persisted. Hosted
 tells a caller whether the list it got is whole in a
 response header, X-Libex-Complete, with the reasons in X-Libex-Incomplete-Reason
 on the by-name route; a library caller has no headers, so each lookup returns
-an AuthorBooks carrying the same facts: complete, and incomplete_reasons drawn
+a BookList carrying the same facts: complete, and incomplete_reasons drawn
 from the same vocabulary. A list that is not complete is still returned, since
 what was gathered is worth having; a caller that needs the whole catalogue
 retries or reads complete first.
@@ -29,7 +29,7 @@ stored profile when there is one, and the ASINs of the books the store already
 holds for the author are unioned into discovery on every request, as the
 hosted route does, so what was once found is never lost to a thin walk. When
 every live source comes up empty and the store holds none either, the outcome
-is the one it is without a store. AuthorBooks.store_write_failed says that a
+is the one it is without a store. BookList.store_write_failed says that a
 book could not be written, in which case it was still returned.
 
 What a caller typed as a name is never logged or repeated in a message.
@@ -61,6 +61,7 @@ from libex_core.audible.client import (
 )
 from libex_core.exceptions import AudibleAPIException, NotFoundException
 from libex_core.lookup import _store
+from libex_core.lookup._common import OUTAGE_MESSAGE
 from libex_core.lookup._shaping import check_shaping, shape_books
 from libex_core.lookup.books import Hydration, _canonical_asin, hydrate_books
 from libex_core.models import BookResponse
@@ -88,12 +89,11 @@ INCOMPLETE_REASONS = (
     REASON_HYDRATION_NOT_FOUND,
 )
 
-_OUTAGE_MESSAGE = "Audible unavailable for author books"
 _NOT_FOUND_MESSAGE = "No books found for author"
 
 
 @dataclass(frozen=True)
-class AuthorBooks:
+class BookList:
     """
     An author's books and whether the list is whole.
 
@@ -135,10 +135,10 @@ def _assemble(
     filters: dict[str, Any] | None,
     sort: str | None,
     order: str,
-) -> AuthorBooks:
+) -> BookList:
     reasons = _reasons(discovery_complete, hydration)
     books = shape_books(hydration.books, filters, sort, order)
-    return AuthorBooks(
+    return BookList(
         books=[BookResponse(**book) for book in books],
         complete=not reasons,
         incomplete_reasons=reasons,
@@ -285,7 +285,7 @@ async def _walk_author_books(
             # At least one source failed instead of confirming an empty
             # catalogue, so this is silence, not Audible saying there are no
             # books.
-            raise AudibleAPIException(_OUTAGE_MESSAGE)
+            raise AudibleAPIException(OUTAGE_MESSAGE)
         raise NotFoundException(_NOT_FOUND_MESSAGE)
 
     # Did each source do its own job. The screens grid plateauing is the
@@ -346,7 +346,7 @@ async def get_author_books(
     sort: str | None = None,
     order: str = "asc",
     store: "LocalStore | None" = None,
-) -> AuthorBooks:
+) -> BookList:
     """
     Fetches the full books an author is credited with, by author ASIN.
 
@@ -401,7 +401,7 @@ async def get_author_books_by_name(
     sort: str | None = None,
     order: str = "asc",
     store: "LocalStore | None" = None,
-) -> AuthorBooks:
+) -> BookList:
     """
     Fetches the full books an author is credited with, by exact author name.
 

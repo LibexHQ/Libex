@@ -5,7 +5,7 @@
 import argparse
 
 from libex_core.cli._args import add_command, add_group, add_region_option
-from libex_core.cli._shaping import add_shaping_options, shaping_kwargs
+from libex_core.cli._shaping import add_shaping_options, books_only, shaping_kwargs
 
 
 def register(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
@@ -32,7 +32,9 @@ def register(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") 
         "fetch the books in a series",
         "Print the full books in a series as JSON, in series order unless "
         "sorted. A member that cannot be resolved is left out. The books can "
-        "be filtered and sorted.",
+        "be filtered and sorted. When the list may not be whole, it is still "
+        "printed, a warning naming the reasons goes to standard error, and "
+        "the status is 0.",
     )
     books.add_argument("asin", metavar="ASIN", help="ASIN of the series")
     add_region_option(books)
@@ -64,9 +66,9 @@ def run_books(args: argparse.Namespace) -> int:
 
     return run_lookup(
         lambda get, store: get_series_books(
-            get, args.asin, region=args.region, **shaping_kwargs(args),
-            store=store
-        )
+            get, args.asin, region=args.region, **shaping_kwargs(args), store=store
+        ),
+        books_only,
     )
 
 

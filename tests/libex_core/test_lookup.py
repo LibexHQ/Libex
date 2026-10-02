@@ -342,15 +342,16 @@ async def test_get_series_unknown_series_is_not_found_and_outage_is_not():
 async def test_get_series_books_hydrates_the_members_in_series_order():
     members = ["B0LOOK0002", "B0LOOK0001"]
     result = await get_series_books(_series_get(members), "B0SERIES01", region="ca")
-    assert [b.asin for b in result] == members
-    assert all(isinstance(b, BookResponse) and b.region == "ca" for b in result)
+    assert [b.asin for b in result.books] == members
+    assert result.complete is True and result.incomplete_reasons == ()
+    assert all(isinstance(b, BookResponse) and b.region == "ca" for b in result.books)
 
 
 async def test_get_series_books_a_malformed_member_costs_only_itself():
     members = ["B0LOOK0001", "not-an-asin", "B0LOOK0002"]
     get = _series_get(members)
     result = await get_series_books(get, "B0SERIES01")
-    assert [b.asin for b in result] == ["B0LOOK0001", "B0LOOK0002"]
+    assert [b.asin for b in result.books] == ["B0LOOK0001", "B0LOOK0002"]
 
 
 async def test_get_series_books_no_members_is_not_found():
@@ -579,7 +580,7 @@ async def test_chunks_run_concurrently():
 async def test_series_members_are_sent_to_audible_in_uppercase():
     get = _series_get(["b0look0001", "B0LOOK0001", "b0look0002"])
     result = await get_series_books(get, "B0SERIES01")
-    assert [b.asin for b in result] == ["B0LOOK0001", "B0LOOK0002"]
+    assert [b.asin for b in result.books] == ["B0LOOK0001", "B0LOOK0002"]
     assert get.await_args.args[2]["asins"] == "B0LOOK0001,B0LOOK0002"
 
 

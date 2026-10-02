@@ -34,7 +34,8 @@ from libex_core.audible.client import (
 )
 from libex_core.exceptions import AudibleAPIException, NotFoundException
 from libex_core.lookup import _store
-from libex_core.lookup.books import _OUTAGE_MESSAGE, _canonical_asin
+from libex_core.lookup._common import OUTAGE_MESSAGE
+from libex_core.lookup.books import _canonical_asin
 from libex_core.models import AuthorResponse
 
 if TYPE_CHECKING:
@@ -94,7 +95,7 @@ async def get_author(
             stored = await _store.stored_author(store, canonical, region)
             if stored:
                 return AuthorResponse(**stored)
-        raise as_audible_failure(e, _OUTAGE_MESSAGE) from e
+        raise as_audible_failure(e, OUTAGE_MESSAGE) from e
     if store is not None and await _store.persist_author(store, normalized, region):
         normalized = await _store.stored_author(store, canonical, region) or normalized
     return AuthorResponse(**normalized)

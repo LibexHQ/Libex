@@ -145,7 +145,7 @@ def test_the_offered_windows_are_the_hosted_ones():
     assert RELEASE_WINDOWS == (30, 60, 90, 120, 240, 365)
 
 
-@pytest.mark.parametrize("category", ["", "abc", "12a", "-1", "1 2", "1234567890123", "1;2", 5, ["1"]])
+@pytest.mark.parametrize("category", ["", "abc", "12a", "-1", "1 2", "1234567890123", "1;2", "123\n", "\n123", 5, ["1"]])
 async def test_a_category_that_is_not_a_numeric_id_is_refused_before_any_request(category):
     get = AsyncMock()
     for fn in (new_releases, coming_soon):

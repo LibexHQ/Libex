@@ -25,6 +25,7 @@ from tests.libex_core._cli_lookup_support import (
 )
 from tests.libex_core.test_lookup import _asins, _batch_get
 
+
 @pytest.fixture
 def run(run_cli, monkeypatch):
     def go(argv, get):

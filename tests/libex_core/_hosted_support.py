@@ -68,17 +68,20 @@ def _nothing_stored():
 def hosted_asker(client):
     """Yields ask(get, path, params), which calls a hosted route and returns
     the response. The cache=false the routes take keeps every read off the
-    cache."""
+    cache. After a call, ask.hooks maps each background writer to its mock, so
+    a test can say what the route tried to store."""
     app.dependency_overrides[get_session] = lambda: AsyncMock()
 
     def ask(get, path, params):
+        hooks = {}
+        ask.hooks = hooks
         with ExitStack() as stack:
             for module in HOSTED_MODULES:
                 stack.enter_context(patch(f"{module}.audible_get", new=get))
             for target, stand_in in _nothing_stored():
                 stack.enter_context(patch(target, new=stand_in))
             for target in PERSIST_HOOKS:
-                stack.enter_context(patch(target))
+                hooks[target] = stack.enter_context(patch(target))
             return client.get(path, params={**params, "cache": "false"})
 
     try:

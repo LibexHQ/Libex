@@ -34,13 +34,19 @@ from libex_core.lookup import (
     search_authors,
     search_series,
 )
-from tests.libex_core._lookup_support import AUTHOR, AUTHOR_NAME, BOOKS, SERIES, fake_get
+from tests.libex_core._lookup_support import (
+    AUTHOR,
+    AUTHOR_NAME,
+    BOOKS,
+    SERIES,
+    fake_get,
+)
 from tests.libex_core.test_lookup import (
     _batch_get,
+    _product,
     _search_get,
     _series_get,
     _suggestion_get,
-    _product,
 )
 
 # Not an ASIN of anything, and unlikely to appear in any fixed message.

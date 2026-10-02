@@ -69,7 +69,7 @@ def _check_window(days: int, category: str | None) -> None:
             "days must be one of " + ", ".join(str(d) for d in RELEASE_WINDOWS)
         )
     if category is not None and not (
-        isinstance(category, str) and _CATEGORY_ID_PATTERN.match(category)
+        isinstance(category, str) and _CATEGORY_ID_PATTERN.fullmatch(category)
     ):
         raise ValueError("category must be a numeric Audible category id")
 

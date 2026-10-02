@@ -5,6 +5,7 @@ functions apply.
 """
 
 import argparse
+import logging
 import math
 import re
 from typing import Any
@@ -12,10 +13,13 @@ from typing import Any
 from libex_core.cli._args import bounded_int
 from libex_core.shaping import BOOK_FILTER_SPECS, BOOK_SORT_FIELDS
 
+logger = logging.getLogger("libex")
+
 _BOOLEANS = ("true", "false")
 
-# Help and completion text may hold only these characters, so a library
-# description with a quote or a colon in it is reduced to the rest.
+# Help text may hold only these characters, so a library description with a
+# quote or a colon in it is reduced to the rest. Completion descriptions are
+# narrower still: the completion renderer rewrites parentheses to a dash.
 _UNSAFE_HELP = re.compile(r"[^A-Za-z0-9 ,.()/_-]")
 
 # The largest length filter accepted, in minutes; far past any audiobook.
@@ -86,3 +90,16 @@ def shaping_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "sort": args.sort,
         "order": args.order,
     }
+
+
+def books_only(result: Any) -> Any:
+    """The hosted route's body is the list of books alone, with whether it is
+    whole carried beside it. Here that is a warning on standard error. The
+    reasons are words from a fixed list, so the notice holds no value
+    the caller or Audible supplied."""
+    if not result.complete:
+        logger.warning(
+            "the list of books may be incomplete (%s)",
+            ", ".join(result.incomplete_reasons),
+        )
+    return result.books

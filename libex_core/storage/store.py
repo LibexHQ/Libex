@@ -20,6 +20,11 @@ The default TLS mode, `prefer`, encrypts when the server offers it but does not
 verify the server, so it gives no protection against an active attacker on the
 path. On a network that is not trusted use `ssl=verify-full`.
 
+A caller who needs a connection this library cannot make (an SSH tunnel, IAM
+tokens, a vault-issued password, a pooler, an encrypted SQLite build) passes
+`connect=` and supplies the connection itself. See `LocalStore` for what that
+hands over; the schema, migration and locking guarantees do not change.
+
 The URL is the caller's secret. It is never logged and never placed in an
 exception or in `repr`; every error raised here names what is wrong without
 quoting it, and a failure to connect drops the driver's own message, which is
@@ -44,7 +49,7 @@ import ssl
 import stat
 import sys
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -141,7 +146,7 @@ class StoreClosed(StoreError):
 # URL and file
 # ------------------------------------------------------------
 
-def _validate(url: str | URL) -> URL:
+def _validate(url: str | URL, *, caller_connects: bool = False) -> URL:
     if isinstance(url, str):
         try:
             parsed = make_url(url)
@@ -167,6 +172,16 @@ def _validate(url: str | URL) -> URL:
             raise StoreConfigError("SQLite file: URIs are not accepted; give a plain path")
         if "\x00" in database:
             raise StoreConfigError("the database path is not valid")
+        return parsed
+
+    if caller_connects:
+        # The caller's hook decides where and as whom to connect; a URL that
+        # also said so would be a second, silently ignored, source of truth,
+        # and a password in it would go unused but stay in memory.
+        if parsed.host or parsed.port or parsed.username or parsed.password or parsed.database or parsed.query:
+            raise StoreConfigError(
+                "with a connect hook the Postgres URL must be bare: postgresql+asyncpg://"
+            )
         return parsed
 
     if not parsed.host or not parsed.username or not parsed.database:
@@ -277,6 +292,57 @@ def _postgres_creator(url: URL):
     return create
 
 
+def _hook_failure(stage: str, backend: str, name: str) -> StoreConnectionError:
+    return StoreConnectionError(f"the connect hook {stage} for the {backend} database ({name})")
+
+
+def _caller_postgres_creator(connect: Callable[[], Awaitable]):
+    """Wraps a caller's Postgres hook. Whatever the hook raises is reduced to
+    its class name outside the `except`, so no chained context carries the
+    driver's or the caller's message, which may hold a password."""
+
+    async def create():
+        import asyncpg
+
+        failed = None
+        try:
+            connection = await connect()
+        except Exception as exc:
+            failed = type(exc).__name__
+        if failed is not None:
+            raise _hook_failure("raised", "postgresql", failed)
+        if not isinstance(connection, asyncpg.Connection):
+            raise _hook_failure("returned the wrong type", "postgresql", type(connection).__name__)
+        return connection
+
+    return create
+
+
+def _caller_sqlite_creator(connect: Callable[[str], Awaitable], path: str):
+    """Wraps a caller's SQLite hook, which is handed the path this library has
+    already vetted and returns an `aiosqlite.Connection`. The pool setup (foreign
+    keys, busy timeout, isolation level) still runs on what it returns."""
+
+    def create(*_args, **_kwargs):
+        async def make():
+            import aiosqlite
+
+            failed = None
+            try:
+                connection = await connect(path)
+            except Exception as exc:
+                failed = type(exc).__name__
+            if failed is not None:
+                raise _hook_failure("raised", "sqlite", failed)
+            if not isinstance(connection, aiosqlite.Connection):
+                raise _hook_failure("returned the wrong type", "sqlite", type(connection).__name__)
+            return connection
+
+        return make()
+
+    return create
+
+
 def _is_memory(url: URL) -> bool:
     return url.get_backend_name() == "sqlite" and url.database in (None, "", ":memory:")
 
@@ -326,16 +392,46 @@ def _check_file(path: Path, *, create: bool) -> bool:
 class LocalStore:
     """A Libex database. See the module docstring for the lifecycle."""
 
-    def __init__(self, url: str | URL):
+    def __init__(self, url: str | URL, *, connect: Callable[..., Awaitable] | None = None):
+        """`connect=None` is the managed path: this library makes the
+        connection from the URL.
+
+        With a `connect` hook the caller makes it. On Postgres the hook takes
+        no argument and returns an awaited `asyncpg.Connection`, and the URL
+        must be bare (`postgresql+asyncpg://`). On SQLite the hook is called
+        with the path this library has already checked (symlinks refused, a new
+        file created 0600, write-ahead logging set) and returns an
+        `aiosqlite.Connection`. Every schema, migration, locking and
+        foreign-key guarantee still applies to what the hook returns.
+
+        What the hook takes over is the caller's to get right: for Postgres the
+        TLS mode and certificate verification, keeping `PG*` variables and
+        `~/.pgpass` from being read, never resending a password in plain text
+        after a failed encrypted attempt, `gsslib`, `krbsrvname` and
+        `server_settings`; for an encrypted SQLite build, any `PRAGMA key`.
+        This library cannot manage or check any of it, and says so in the log.
+        A hook that raises or returns the wrong type surfaces as
+        `StoreConnectionError` naming only the exception class."""
         require_storage()
-        self._url = _validate(url)
+        if connect is not None and not callable(connect):
+            raise StoreConfigError("connect must be a callable that makes a connection")
+        self._url = _validate(url, caller_connects=connect is not None)
         self._postgres = self._url.drivername == _POSTGRES
+        self._caller_connects = connect is not None
         if self._postgres and importlib.util.find_spec("asyncpg") is None:
             raise StorageUnavailable(
                 "Postgres needs the 'postgres' extra (missing: asyncpg); "
                 "install it with: pip install 'libex-core[postgres]'"
             )
-        options = {"async_creator": _postgres_creator(self._url)} if self._postgres else {}
+        options: dict = {}
+        if connect is None:
+            if self._postgres:
+                options = {"async_creator": _postgres_creator(self._url)}
+        elif self._postgres:
+            options = {"async_creator": _caller_postgres_creator(connect)}
+        else:
+            path = self._url.database or ":memory:"
+            options = {"connect_args": {"async_creator_fn": _caller_sqlite_creator(connect, path)}}
         self._engine: AsyncEngine = create_async_engine(
             self._url, hide_parameters=True, echo=False, **options
         )
@@ -348,13 +444,24 @@ class LocalStore:
         self._opened = False
         self._closed = False
         self._disposal: "asyncio.Future[None] | None" = None
+        if self._caller_connects:
+            logger.info(
+                "connections are supplied by the caller; "
+                "TLS and credentials are not managed by libex-core"
+            )
 
     def __repr__(self) -> str:
-        return f"LocalStore(backend={self.backend!r})"
+        return f"LocalStore(backend={self.backend!r}, connection_mode={self.connection_mode!r})"
 
     @property
     def backend(self) -> str:
         return "postgresql" if self._postgres else "sqlite"
+
+    @property
+    def connection_mode(self) -> str:
+        """`"managed"` when this library makes the connection, `"caller"` when
+        a `connect` hook does and TLS and credentials are the caller's."""
+        return "caller" if self._caller_connects else "managed"
 
     # -- connecting -----------------------------------------------------
 
@@ -363,6 +470,8 @@ class LocalStore:
             raise StoreClosed("the store is closed")
         try:
             connection = await self._engine.connect()
+        except StoreConnectionError:
+            raise
         except Exception as exc:
             raise StoreConnectionError(
                 f"could not connect to the {self.backend} database ({type(exc).__name__})"

@@ -187,6 +187,37 @@ store as above; without it nothing is persisted. Importing `libex_core`
 itself imports nothing else, and the storage libraries load only when
 `libex_core.storage` is used.
 
+### Supplying your own connection
+
+`LocalStore(url)` makes the database connection itself. If you need one it
+cannot make, such as a tunnel, a short-lived token or a custom connection
+class, pass a keyword-only `connect=` hook and make it yourself:
+
+```python
+store = LocalStore("postgresql+asyncpg://", connect=my_asyncpg_connect)  # () -> awaitable asyncpg.Connection
+store = LocalStore("sqlite+aiosqlite:///libex.db", connect=my_open)      # (path) -> awaitable aiosqlite.Connection
+```
+
+With a Postgres hook the URL must be bare, `postgresql+asyncpg://`: a host,
+user, password or option in it is refused. A SQLite hook is called with the
+path libex-core has already checked (a symbolic link is refused, a new file is
+created readable by you only, write-ahead logging is switched on). Schema
+checks, refusal of a database this package did not create, upgrades and write
+locking all apply to the connections you supply, and a hook that raises or
+returns the wrong type surfaces as `StoreConnectionError` naming only the
+exception class. `store.connection_mode` is `"managed"` or `"caller"`.
+
+With a hook, these become your responsibility, and libex-core can neither
+manage nor check them:
+
+- Postgres TLS mode and certificate verification.
+- Keeping `PG*` variables and `~/.pgpass` from being read, which asyncpg does for
+  anything you leave out.
+- Never resending a password in plain text after a failed encrypted attempt.
+- `gsslib`, `krbsrvname` and `server_settings`.
+- Any setup a custom SQLite connection needs, such as the key for an encrypted
+  build, which must be applied before the connection is returned.
+
 ## Links
 
 - Source and issues: <https://github.com/LibexHQ/Libex>

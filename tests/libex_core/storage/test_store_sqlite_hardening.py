@@ -11,6 +11,7 @@ import sqlite3
 from types import SimpleNamespace
 
 # Third party
+import aiosqlite
 import pytest
 from alembic import command
 from alembic.migration import MigrationContext
@@ -38,6 +39,17 @@ def db(tmp_path):
     return tmp_path / "libex.db"
 
 
+def _caller_connect(path):
+    return aiosqlite.connect(path)
+
+
+@pytest.fixture(params=["managed", "caller"])
+def kw(request):
+    """The keyword arguments that open a store the library connects, and one
+    the caller does: the foreign-key guarantees hold for both."""
+    return {} if request.param == "managed" else {"connect": _caller_connect}
+
+
 def _counts(path) -> tuple[int, int, int]:
     with sqlite3.connect(path) as conn:
         return tuple(
@@ -46,8 +58,8 @@ def _counts(path) -> tuple[int, int, int]:
         )
 
 
-async def _seed_linked_pair(path) -> None:
-    store = LocalStore(_url(path))
+async def _seed_linked_pair(path, kw=None) -> None:
+    store = LocalStore(_url(path), **(kw or {}))
     await store.upgrade()
     await store.open()
     try:
@@ -76,8 +88,8 @@ def _scratch_migration(monkeypatch, *, orphan: bool = False):
     monkeypatch.setattr(command, "upgrade", rebuild)
 
 
-async def _foreign_keys_on_a_new_connection(path) -> int:
-    async with LocalStore(_url(path)) as store:
+async def _foreign_keys_on_a_new_connection(path, kw=None) -> int:
+    async with LocalStore(_url(path), **(kw or {})) as store:
         async with store.session() as session:
             return (await session.execute(text("PRAGMA foreign_keys"))).scalar()
 
@@ -86,11 +98,11 @@ async def _foreign_keys_on_a_new_connection(path) -> int:
 # Foreign keys across a rebuild
 # ------------------------------------------------------------
 
-async def test_a_table_rebuild_keeps_the_rows_that_point_at_it(db, monkeypatch):
-    await _seed_linked_pair(db)
+async def test_a_table_rebuild_keeps_the_rows_that_point_at_it(db, monkeypatch, kw):
+    await _seed_linked_pair(db, kw)
     assert _counts(db) == (1, 1, 1)
     _scratch_migration(monkeypatch)
-    store = LocalStore(_url(db))
+    store = LocalStore(_url(db), **kw)
     try:
         await store.upgrade()
     finally:
@@ -99,13 +111,13 @@ async def test_a_table_rebuild_keeps_the_rows_that_point_at_it(db, monkeypatch):
     with sqlite3.connect(db) as conn:
         names = {r[1] for r in conn.execute("PRAGMA index_list(books)")}
     assert "ix_scratch_title" in names  # the rebuild really ran
-    assert await _foreign_keys_on_a_new_connection(db) == 1
+    assert await _foreign_keys_on_a_new_connection(db, kw) == 1
 
 
-async def test_a_rebuild_that_orphans_a_row_is_rolled_back_and_refused(db, monkeypatch):
-    await _seed_linked_pair(db)
+async def test_a_rebuild_that_orphans_a_row_is_rolled_back_and_refused(db, monkeypatch, kw):
+    await _seed_linked_pair(db, kw)
     _scratch_migration(monkeypatch, orphan=True)
-    store = LocalStore(_url(db))
+    store = LocalStore(_url(db), **kw)
     try:
         with pytest.raises(StoreMigrationError) as caught:
             await store.upgrade()
@@ -117,12 +129,12 @@ async def test_a_rebuild_that_orphans_a_row_is_rolled_back_and_refused(db, monke
     with sqlite3.connect(db) as conn:
         assert "ix_scratch_title" not in {r[1] for r in conn.execute("PRAGMA index_list(books)")}
         assert conn.execute("SELECT count(*) FROM author_book WHERE author_id = 999").fetchone()[0] == 0
-    assert await _foreign_keys_on_a_new_connection(db) == 1
+    assert await _foreign_keys_on_a_new_connection(db, kw) == 1
 
 
-async def test_the_migration_runner_refuses_to_run_with_foreign_keys_on(db):
-    await _seed_linked_pair(db)
-    async with LocalStore(_url(db)) as store:
+async def test_the_migration_runner_refuses_to_run_with_foreign_keys_on(db, kw):
+    await _seed_linked_pair(db, kw)
+    async with LocalStore(_url(db), **kw) as store:
         connection = await store._connect()
         try:
             assert (await connection.exec_driver_sql("PRAGMA foreign_keys")).scalar() == 1

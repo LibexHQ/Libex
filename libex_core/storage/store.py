@@ -51,9 +51,9 @@ import stat
 import sys
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Any
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 # Third party
 from sqlalchemy import event

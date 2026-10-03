@@ -222,6 +222,8 @@ manage nor check them:
   anything you leave out.
 - Never resending a password in plain text after a failed encrypted attempt.
 - `gsslib`, `krbsrvname` and `server_settings`.
+- Whether `SSLKEYLOGFILE`, if set, makes the driver write the connection's encryption
+  keys to a file.
 
 ## Links
 

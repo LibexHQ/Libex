@@ -4,18 +4,24 @@ the first read (a wrong key) or the pool's own setup is closed, and a
 connection of the wrong type is refused and closed."""
 
 # Standard library
+import asyncio
+import sqlite3
 import subprocess
 import sys
 import textwrap
+from unittest import mock
 
 # Third party
 import pytest
+from sqlalchemy import event, text
 
 # Local
 from libex_core.storage import store as store_module
 from libex_core.storage.store import LocalStore, StoreConnectionError
 
-pytest.importorskip("aiosqlite")
+# Skips the whole module when the storage extra is absent; everything below may
+# use aiosqlite.
+aiosqlite = pytest.importorskip("aiosqlite")
 
 _SCRIPT = textwrap.dedent(
     """
@@ -49,8 +55,6 @@ def test_a_hook_store_that_is_never_closed_still_exits(tmp_path):
 
 
 def test_the_worker_thread_is_a_daemon_before_it_starts(tmp_path, monkeypatch):
-    import aiosqlite
-
     seen = []
     real = aiosqlite.Connection.__await__
 
@@ -66,8 +70,6 @@ def test_the_worker_thread_is_a_daemon_before_it_starts(tmp_path, monkeypatch):
             await store.upgrade()
         finally:
             await store.close()
-
-    import asyncio
 
     asyncio.run(go())
     assert seen and all(seen)
@@ -109,15 +111,11 @@ class _Real:
 
 
 def _sqlite(path):
-    import sqlite3
-
     return sqlite3.connect(path)
 
 
 def _store(tmp_path, made, fail_on):
     def hook(path):
-        import sqlite3
-
         wrapped = _Real(sqlite3.connect(path, check_same_thread=False), fail_on=fail_on)
         made.append(wrapped)
         return wrapped
@@ -238,8 +236,6 @@ async def test_failure_to_close_a_refused_connection_is_not_reported():
 
 async def test_a_postgres_connection_that_fails_the_pool_setup_is_closed(monkeypatch):
     asyncpg = pytest.importorskip("asyncpg")
-    from unittest import mock
-
     connection = mock.create_autospec(asyncpg.Connection, instance=True)
     closed = []
 
@@ -278,9 +274,6 @@ class _FailingSetup:
     def __init__(self, monkeypatch):
         self.armed = True
         self.closed = []
-        import aiosqlite
-        from sqlalchemy import event
-
         real_configure = store_module.configure_sqlite
         real_close = aiosqlite.Connection.close
         outer = self
@@ -313,8 +306,6 @@ async def test_a_managed_sqlite_connection_that_fails_the_pool_setup_is_closed(t
 
 
 async def test_a_session_connection_that_fails_the_pool_setup_is_closed_at_once(tmp_path, monkeypatch):
-    from sqlalchemy import text
-
     failing = _FailingSetup(monkeypatch)
     failing.armed = False
     store = LocalStore(f"sqlite+aiosqlite:///{tmp_path / 'x.db'}")
@@ -338,8 +329,6 @@ async def test_a_session_connection_that_fails_the_pool_setup_is_closed_at_once(
 
 async def test_a_managed_postgres_connection_that_fails_the_pool_setup_is_closed(monkeypatch):
     asyncpg = pytest.importorskip("asyncpg")
-    from unittest import mock
-
     connection = mock.create_autospec(asyncpg.Connection, instance=True)
     closed = []
 

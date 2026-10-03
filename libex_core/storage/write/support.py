@@ -9,6 +9,7 @@ import logging
 from datetime import datetime, timezone
 
 # Third party
+from sqlalchemy import bindparam, text
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,6 +28,38 @@ def dialect_of(session: AsyncSession) -> str:
     """The name of the dialect the session's bind speaks ("postgresql",
     "sqlite", ...)."""
     return session.get_bind().dialect.name
+
+
+# One statement takes every lock: the distinct ASINs are sorted inside a
+# subquery that has an ORDER BY, which Postgres will not flatten away, so the
+# locks are acquired in ASIN order. Two writers whose ASIN sets overlap then
+# wait on each other one way round and cannot deadlock.
+_LOCK_ASINS = text(
+    "SELECT pg_advisory_xact_lock(hashtextextended(:kind || ':' || a, 0)) "
+    "FROM (SELECT DISTINCT a FROM unnest(CAST(:asins AS text[])) AS a ORDER BY a) AS sorted"
+).bindparams(bindparam("asins", type_=postgresql.ARRAY(postgresql.TEXT)))
+
+
+async def lock_asins(
+    session: AsyncSession, kind: str, asins: list[str], *, dialect: str | None = None
+) -> None:
+    """
+    Serializes writers that are about to insert rows for the same ASINs, until
+    the transaction ends.
+
+    Whether a new book or series row is the primary one depends on whether the
+    ASIN is already stored, and two transactions that each insert the ASIN
+    for a different region cannot see each other's uncommitted row, so both
+    would decide they are first. Taking this lock first makes the second wait
+    for the first to commit; its insert then sees the committed row and is
+    written as not primary. `kind` ("book" or "series") keeps the two tables'
+    ASINs from contending with each other.
+
+    A no-op on SQLite, where a write transaction already excludes every other.
+    """
+    if (dialect or dialect_of(session)) != POSTGRESQL or not asins:
+        return
+    await session.execute(_LOCK_ASINS, {"kind": kind, "asins": sorted(set(asins))})
 
 
 def check_dialect(dialect: str) -> str:

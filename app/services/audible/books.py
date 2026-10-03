@@ -43,7 +43,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 # Third party
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Database
@@ -838,7 +838,11 @@ async def fetch_and_store_chapters(
 
     Outcomes mirror the standalone backfill:
     - "stored":    chapters fetched and written to tracks; marked checked.
-    - "none":      resolved but Audible exposes no chapters; marked checked.
+    - "none":      resolved but Audible exposes no chapters; marked checked. Also
+                   returned, with nothing fetched or stamped, when the store has
+                   no book row for this (asin, region): a track belongs to that
+                   row by foreign key, and the row is not this function's to
+                   create, so there is nothing to attach chapters to.
     - "not_found": 404 — no chapter metadata anywhere (e.g. the ISBN-keyed
                    records); marked checked so it isn't retried.
     - "error":     transient failure (Audible 500/timeout/network) or a write
@@ -861,6 +865,31 @@ async def fetch_and_store_chapters(
     if not is_valid_asin(asin):
         await _mark_chapters_checked(session, asin, region)
         return "not_found"
+
+    # Checked before the Audible call: a track hangs off its book row in this
+    # region, so without the row the write would only fail the foreign key and
+    # surface as an error log for a case that is expected (the book stored under
+    # another region). Skipped, not fetched-and-stored, as the hosted chapters
+    # route does: it persists chapters for whatever book exists and never
+    # creates one.
+    try:
+        stored = await session.execute(
+            select(Book.asin).where(Book.asin == asin, Book.region == region).limit(1)
+        )
+        book_stored = stored.first() is not None
+    except Exception as e:
+        logger.warning(
+            "Seeder chapters: book lookup failed",
+            extra={"asin": asin, "region": region, "error_type": type(e).__name__},
+        )
+        await session.rollback()
+        return "error"
+    if not book_stored:
+        logger.info(
+            "Seeder chapters: no book row for this region, chapters skipped",
+            extra={"asin": asin, "region": region},
+        )
+        return "none"
 
     try:
         data = await fetch_chapter_metadata(audible_get, asin, region)

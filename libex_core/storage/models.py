@@ -27,6 +27,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     text,
+    true,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -139,9 +140,18 @@ class Book(Base):
     # shape.
     extras_withheld: Mapped[dict | None] = mapped_column(JSONDocument, nullable=True)
     chapters_checked_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    # True on the one row of an ASIN that a reader asked for no region answers
+    # with: the first stored. Set when the row is inserted and never changed
+    # after, so every ASIN stored before regions were part of the key (all of
+    # them, one row each) is primary, and only a row inserted for an ASIN that
+    # another region already holds is not. The writer serializes the insert
+    # per ASIN, which is what keeps two regions from both claiming it.
+    is_primary: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=true(), nullable=False
+    )
     # When Audible last confirmed this record, and its chapter listing (a
     # stored listing or a legitimate empty answer alike). NULL means never
-    # confirmed. Nothing reads or writes them yet.
+    # confirmed.
     confirmed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     chapters_confirmed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -222,7 +232,6 @@ class Author(Base):
     fetched_description: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     last_seeded_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     # When Audible last confirmed this record. NULL means never confirmed.
-    # Nothing reads or writes it yet.
     confirmed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime(),
@@ -287,8 +296,12 @@ class Series(Base):
     fetched_description: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     last_seeded_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     # When Audible last confirmed this record. NULL means never confirmed.
-    # Nothing reads or writes it yet.
     confirmed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    # The row an ASIN is answered with when no region is asked for; see
+    # Book.is_primary.
+    is_primary: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=true(), nullable=False
+    )
     # The series product's keys beyond asin, title and publisher_summary, and
     # the record of anything left out of them. Same meaning, NULL semantics and
     # merge as the books columns of the same names; libex_core.storage.merge.extras_union

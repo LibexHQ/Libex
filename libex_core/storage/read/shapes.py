@@ -74,47 +74,14 @@ async def series_positions(
     return {row[0]: row[1] for row in result.fetchall()}
 
 
-async def series_positions_batch(
-    session: AsyncSession, book_asins: list[str]
-) -> dict[str, dict[str, str | None]]:
-    """Returns {book_asin: {series_asin: position}} for many books at once.
-
-    The batched form of series_positions, for callers holding many books at
-    once: one round trip for the batch instead of one per book. A book with
-    no series rows is simply absent from the outer dict, so callers substitute
-    an empty dict — exactly what series_positions returns for that book.
-    """
-    positions: dict[str, dict[str, str | None]] = {}
-    if not book_asins:
-        return positions
-
-    # Postgres caps a single statement at 32767 bind parameters, so the IN list
-    # is chunked at the size the seeder already uses for the same reason. An
-    # author's stored catalogue can run to thousands of books and the caller
-    # below applies no LIMIT, so the list is not bounded by a page size.
-    for i in range(0, len(book_asins), 5000):
-        chunk = book_asins[i:i + 5000]
-        result = await session.execute(
-            select(
-                book_series.c.book_asin,
-                book_series.c.series_asin,
-                book_series.c.position,
-            )
-            .where(book_series.c.book_asin.in_(chunk))
-        )
-        for book_asin, series_asin, position in result.fetchall():
-            positions.setdefault(book_asin, {})[series_asin] = position
-    return positions
-
-
 async def series_positions_by_book(
     session: AsyncSession, books
 ) -> dict[tuple[str, str], dict[str, str | None]]:
     """Returns {(asin, region): {series_asin: position}} for many stored books.
 
-    The region-keyed form of series_positions_batch: one round trip per 5000
-    ASINs, and a link is attributed only to the record of the region it was
-    written for, so two regions' positions for one ASIN stay apart.
+    One round trip per 5000 ASINs, and a link is attributed only to the
+    record of the region it was written for, so two regions' positions for
+    one ASIN stay apart.
     """
     positions: dict[tuple[str, str], dict[str, str | None]] = {}
     asins = sorted({book.asin for book in books})

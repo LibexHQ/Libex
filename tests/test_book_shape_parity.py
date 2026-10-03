@@ -285,8 +285,12 @@ def test_the_reader_omits_the_same_one_conditional_key():
 # confirmed_at and chapters_confirmed_at are in the schema ahead of the change
 # that records Audible's confirmation; nothing writes them yet, and NULL means
 # never confirmed. The change that does write them removes them from this set.
+#
+# is_primary is set by the insert itself, from whether another region already
+# holds the ASIN, and the update never touches it, so no response value can
+# bind it.
 _COLUMNS_THE_BOOK_UPSERT_DOES_NOT_BIND = {
-    "chapters_checked_at", "confirmed_at", "chapters_confirmed_at",
+    "chapters_checked_at", "confirmed_at", "chapters_confirmed_at", "is_primary",
 }
 
 # asin and region are the conflict key -- setting either in the update clause

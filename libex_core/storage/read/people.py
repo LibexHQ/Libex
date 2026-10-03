@@ -221,8 +221,8 @@ async def get_author_books(
 ) -> list[dict[str, Any]]:
     """Fetches all books for an author from the DB.
 
-    An author's catalog is per marketplace, so the books are those of the
-    author's own region unless book_region names another.
+    Every stored book linked to the author is returned, whichever region's
+    record it is; book_region narrows the list to one marketplace's records.
     """
     stmt = (
         select(Book)
@@ -239,7 +239,7 @@ async def get_author_books(
         stmt,
         title=title,
         subtitle=subtitle,
-        region=book_region or region,
+        region=book_region,
         description=description,
         summary=summary,
         publisher=publisher,

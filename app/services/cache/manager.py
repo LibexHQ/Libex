@@ -200,7 +200,7 @@ async def get_many(session: AsyncSession, keys: list[str]) -> dict[str, Any]:
     hit/miss pair: at a thousand keys the per-key form buries every other
     line in the log for that request.
 
-    Chunked at 5000, the size reader._get_series_positions_batch and the
+    Chunked at 5000, the size the book readers and the
     seeder use against the same ceiling -- one bind per key against asyncpg's
     32,767 bind parameters, the limit that broke purge_expired (see below).
     The key list is not bounded by the bulk book route's 1000-ASIN cap. Both

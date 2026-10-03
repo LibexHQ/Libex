@@ -18,9 +18,12 @@ never ambiguous). It does not repair: a series with no region, or a link row
 whose parent is gone, raises with the count and the transaction rolls back,
 because inventing a region would be choosing what the data says.
 
-Also added, nothing reading or writing them yet: books.confirmed_at,
-books.chapters_confirmed_at, series.confirmed_at and authors.confirmed_at
-(nullable, NULL meaning never confirmed), and the walk_results table.
+Also added: books.confirmed_at, books.chapters_confirmed_at,
+series.confirmed_at and authors.confirmed_at (nullable, NULL meaning never
+confirmed), the walk_results table, and books.is_primary and series.is_primary
+(boolean NOT NULL DEFAULT true), which mark the one row of an ASIN that a
+reader asked for no region answers with. A store keyed on asin alone has one
+row per ASIN, so the default is already right for every row it holds.
 
 On Postgres this is plain DDL. On SQLite every table that changes keys is
 rebuilt in batch mode; the connection must have foreign keys off for that
@@ -149,6 +152,11 @@ def _add_confirmed_columns() -> None:
         ("authors", "confirmed_at"),
     ):
         op.add_column(table, sa.Column(column, sa.DateTime(timezone=True), nullable=True))
+    for table in ("books", "series"):
+        op.add_column(
+            table,
+            sa.Column("is_primary", sa.Boolean(), nullable=False, server_default=sa.true()),
+        )
 
 
 def _create_walk_results() -> None:
@@ -169,6 +177,15 @@ def _create_walk_results() -> None:
 def _backfill_and_check() -> None:
     bind = op.get_bind()
     inspector = sa.inspect(bind)
+    # Checked before any link row is backfilled: a series with no region is
+    # also what leaves its links with nothing to take a region from, and the
+    # error should name that cause rather than the symptom.
+    unknown = bind.execute(sa.text("SELECT count(*) FROM series WHERE region IS NULL")).scalar()
+    if unknown:
+        raise RuntimeError(
+            f"cannot key series by region: {unknown} series rows have no region. "
+            "Nothing was changed."
+        )
     for table, column, key, parent in _REGION_COLUMNS:
         # A downgrade keeps these columns, so a second upgrade finds them.
         # Only the type's name differs per dialect; the column is added bare.
@@ -187,12 +204,6 @@ def _backfill_and_check() -> None:
                 f"cannot key {table} by region: {missing} rows have no matching "
                 f"{parent} row to take a region from. Nothing was changed."
             )
-    unknown = bind.execute(sa.text("SELECT count(*) FROM series WHERE region IS NULL")).scalar()
-    if unknown:
-        raise RuntimeError(
-            f"cannot key series by region: {unknown} series rows have no region. "
-            "Nothing was changed."
-        )
 
 
 # --- Postgres ----------------------------------------------------------------
@@ -353,6 +364,8 @@ def _downgrade_postgresql() -> None:
         ("books", "chapters_confirmed_at"), ("books", "confirmed_at"),
     ):
         op.drop_column(table, column)
+    for table in ("series", "books"):
+        op.drop_column(table, "is_primary")
 
 
 def _downgrade_sqlite() -> None:
@@ -385,12 +398,14 @@ def _downgrade_sqlite() -> None:
         batch.create_index("books_asin_index", ["asin"])
         batch.drop_column("chapters_confirmed_at")
         batch.drop_column("confirmed_at")
+        batch.drop_column("is_primary")
 
     def _series(batch):
         batch.alter_column("region", existing_type=sa.String(2), nullable=True)
         batch.create_primary_key("series_pkey", ["asin"])
         batch.create_index("series_asin_index", ["asin"])
         batch.drop_column("confirmed_at")
+        batch.drop_column("is_primary")
 
     _rebuild("books", region_overrides=[], operations=_books)
     _rebuild("series", region_overrides=[], operations=_series)

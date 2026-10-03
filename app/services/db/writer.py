@@ -235,6 +235,13 @@ async def upsert_track(
         )
         await session.commit()
 
+        if stored_count is None:
+            logger.info(
+                "Chapters not stored: the book is not stored for the region",
+                extra={"asin": asin, "region": region},
+            )
+            return
+
         offered = chapters_data.get("chapters") if isinstance(chapters_data, dict) else None
         offered_count = len(offered) if isinstance(offered, list) else 0
 
@@ -289,7 +296,7 @@ async def upsert_author_profile(session: AsyncSession, data: dict) -> None:
 # SERIES PROFILE WRITER
 # ============================================================
 
-async def upsert_series_profile(session: AsyncSession, data: dict) -> None:
+async def upsert_series_profile(session: AsyncSession, data: dict) -> str | None:
     """
     Upserts a full series profile fetched from the series endpoint.
     Updates description which isn't always available from book relationship data.
@@ -298,16 +305,27 @@ async def upsert_series_profile(session: AsyncSession, data: dict) -> None:
     this adds is a transaction of its own and a stricter guard: a profile
     fetch that answered without a name has failed, where a book's series
     relationship may legitimately carry the title under either key.
+
+    Returns the series asin once it is written, and None when nothing was: the
+    profile names no asin, no name or no region (a series row is keyed by its
+    region, so one without it cannot be stored), or the write failed.
     """
     asin = data.get("asin")
     name = data.get("name")
     if not asin or not name:
-        return
+        return None
 
     try:
-        await _entities.write_series_profile(session, data, dialect=_DIALECT)
+        written = await _entities.write_series_profile(session, data, dialect=_DIALECT)
+        if not written:
+            logger.info(
+                "Series not stored: the profile names no region",
+                extra={"asin": asin},
+            )
+            return None
         await session.commit()
         logger.info(f"DB write: series {asin} ({name})")
+        return written
 
     except Exception as e:
         logger.warning(
@@ -315,6 +333,7 @@ async def upsert_series_profile(session: AsyncSession, data: dict) -> None:
             extra={"asin": asin, **_failure_fields(e)},
         )
         await session.rollback()
+        return None
 
 
 # ============================================================

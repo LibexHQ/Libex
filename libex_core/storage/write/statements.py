@@ -14,7 +14,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 # Third party
-from sqlalchemy import bindparam
+from sqlalchemy import bindparam, exists
+from sqlalchemy.orm import aliased
 
 # Local
 from libex_core.storage import merge
@@ -30,6 +31,16 @@ from libex_core.storage.models import (
     series_author,
 )
 from libex_core.storage.write.support import insert_for
+
+
+def _first_of_its_asin(model):
+    """
+    The value a new row's is_primary takes: true unless another region already
+    holds the ASIN. It is evaluated when the row is inserted and the update
+    below never sets it, so a row keeps the answer it was born with.
+    """
+    other = aliased(model)
+    return ~exists().where(other.asin == bindparam("asin"), other.region != bindparam("region"))
 
 
 @dataclass(frozen=True)
@@ -63,6 +74,7 @@ def _build_series_upsert(insert):
         title=bindparam("title"),
         description=bindparam("description"),
         region=bindparam("region"),
+        is_primary=_first_of_its_asin(Series),
         fetched_description=bindparam("fetched_description"),
         # none_as_null so an absent blob binds SQL NULL rather than the JSON
         # null scalar, which the NULL arms of extras_union could not tell
@@ -133,6 +145,9 @@ def _build_book_upsert(insert):
     - created_at is written on insert and absent from the update. Deriving the
       update from the insert's columns adds excluded.created_at and resets
       every book's real creation time on its next write, silently.
+    - is_primary is written on insert and absent from the update, like
+      created_at: it records whether the row was first of its ASIN when it was
+      stored, and a later write must not reconsider that.
     - region is in the conflict target and never in the update. A book is
       identified by (asin, region), so a response fetched for another region
       conflicts with nothing and lands as that region's own row; it can never
@@ -149,6 +164,7 @@ def _build_book_upsert(insert):
         title=merge.coalesce(bindparam("title"), ""),
         subtitle=bindparam("subtitle"),
         region=bindparam("region"),
+        is_primary=_first_of_its_asin(Book),
         description=bindparam("description"),
         summary=bindparam("summary"),
         publisher=bindparam("publisher"),

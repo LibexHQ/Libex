@@ -450,9 +450,9 @@ The library is built around preventing that from happening by accident:
   decides where that database is.
   When the application passes that store to a lookup, the lookup writes what
   Audible returned into it (books, chapter lists, and series and author
-  profiles) and returns the stored copy. A book or series already stored for
-  another region is left as it is and not written, and Audible's own answer is
-  returned for it. If Audible can't be reached, a lookup of a book, a chapter
+  profiles) and returns the stored copy. A book or series is stored once for
+  each region it is looked up in, so the same title looked up in two regions
+  is kept twice. If Audible can't be reached, a lookup of a book, a chapter
   list, a series, an author, or a series' or an author's books answers from
   what the store already holds for that region. A search, a narrator's books,
   or a new releases or coming soon scan that Audible can't run is reported as
@@ -624,8 +624,7 @@ The library is built around preventing that from happening by accident:
 
   From a local store, which is used only when an application passes one to a lookup or uses the storage part directly (on the command line, only when `LIBEX_CORE_STORAGE` is set):
   - books, a chapter list, a series or an author written (info): what was written, region, and for books, how many;
-  - a chapter list not stored because its book isn't in the store, or is stored for another region (info): title ASIN, region;
-  - books or a series not written because they are stored for another region (warning): what was skipped, region, how many;
+  - a chapter list not stored because the store doesn't hold its book for that region (info): title ASIN, region;
   - a write that failed (warning; the answer from Audible is still returned): what was being written, the kind of error, region, and for books, how many were in the batch;
   - a read that failed, which is treated as nothing stored (warning): what was being read, the kind of error. This includes the check, before a chapter list is stored, that its book is in the store; when that check fails, nothing is written;
   - an answer given from the store in place of Audible (warning, always "Answered from the store while Audible was unavailable"): what kind of answer it was and the region; for a chapter list, a series or an author, its ASIN; for a series' books, the series ASIN and how many books the store held; for books, how many were asked for and how many the store held; for a quick search split into an author and a title, how many stored books matched and whether Audible's search failed, since the same line is written when Audible's search worked but found nothing;

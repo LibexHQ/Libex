@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from libex_core.storage.write.entities import upsert_author
 from libex_core.storage.write.params import book_params, series_params
 from libex_core.storage.write.statements import statements_for
-from libex_core.storage.write.support import dialect_of, utc_now
+from libex_core.storage.write.support import dialect_of, lock_asins, utc_now
 
 
 async def resolve_author_ids(
@@ -122,6 +122,7 @@ async def write_books(
     statements = statements_for(dialect)
     now = utc_now()
 
+    await lock_asins(session, "book", [book["asin"] for book in books], dialect=dialect)
     await session.execute(statements.book_upsert, [book_params(book, now) for book in books])
 
     genres: dict[str, dict] = {}
@@ -187,6 +188,7 @@ async def write_books(
         await session.execute(statements.book_narrator_insert, list(book_narrators.values()))
 
     if series:
+        await lock_asins(session, "series", [asin for asin, _ in series], dialect=dialect)
         await session.execute(statements.series_upsert, list(series.values()))
         await session.execute(statements.book_series_upsert, list(book_series_links.values()))
 

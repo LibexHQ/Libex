@@ -44,10 +44,19 @@ What changes, on a prepared database:
         ALTER TABLE <table> VALIDATE CONSTRAINT <name>;
     with the names listed in _COMPOSITE_FKS.
 
-Also added, nothing reading or writing them yet: books.confirmed_at,
-books.chapters_confirmed_at, series.confirmed_at and authors.confirmed_at
-(nullable, no default, NULL meaning never confirmed), and the walk_results
-table.
+Also added: books.confirmed_at, books.chapters_confirmed_at,
+series.confirmed_at and authors.confirmed_at (nullable, no default, NULL
+meaning never confirmed), and the walk_results table.
+
+books.is_primary and series.is_primary, boolean NOT NULL DEFAULT true, mark the
+one row of an ASIN that a reader asked for no region answers with. Until now
+asin was unique, so every row that exists is the only one of its ASIN and the
+constant default is already right for all of them; a catalog-only change on
+Postgres 16, no rewrite. Only a row inserted afterwards for an ASIN that
+another region already holds is written false, by the writer. Region-less list
+readers filter on it instead of ranking every row of the table per ASIN, which
+the planner cannot estimate and which put the unfiltered list past the
+statement timeout.
 
 The downgrade restores the single-region keys, foreign keys and indexes, and
 refuses, with the count, once any ASIN has rows in more than one region: that
@@ -271,6 +280,11 @@ def upgrade() -> None:
         ("authors", "confirmed_at"),
     ):
         op.add_column(table, sa.Column(column, sa.DateTime(timezone=True), nullable=True))
+    for table in ("books", "series"):
+        op.add_column(
+            table,
+            sa.Column("is_primary", sa.Boolean(), nullable=False, server_default=sa.true()),
+        )
 
     op.create_table(
         'walk_results',
@@ -345,6 +359,8 @@ def downgrade() -> None:
     op.execute(f"SET LOCAL lock_timeout = '{_LOCK_TIMEOUT}'")
 
     op.drop_table('walk_results')
+    for table in ("series", "books"):
+        op.drop_column(table, "is_primary")
     for table, column in (
         ("authors", "confirmed_at"),
         ("series", "confirmed_at"),

@@ -39,7 +39,6 @@ from libex_core.storage.read.shapes import (
     book_to_dict as _book_to_dict,
     narrator_to_dict as _narrator_to_dict,
     series_positions as _get_series_positions,
-    series_positions_batch as _get_series_positions_batch,
     utc_z as _utc_z,
 )
 from libex_core.storage.read.stats import count_stored
@@ -75,7 +74,6 @@ __all__ = [
     "_audible_link",
     "_book_to_dict",
     "_get_series_positions",
-    "_get_series_positions_batch",
     "_narrator_to_dict",
     "_utc_z",
 ]

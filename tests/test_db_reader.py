@@ -7,6 +7,7 @@ All DB interactions are mocked — we test our logic not SQLAlchemy.
 # Standard library
 import logging
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 # Third party
@@ -14,10 +15,10 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 
 # Local
+from libex_core.storage.read.shapes import series_positions_by_book
 from app.services.db.reader import (
     _book_to_dict,
     _audible_link,
-    _get_series_positions_batch,
     get_book_from_db,
     get_books_from_db,
     get_author_from_db,
@@ -2170,7 +2171,7 @@ async def test_get_db_stats_refresh_scoped_keeps_its_own_key_and_key_set():
 
 
 # ============================================================
-# _get_series_positions_batch — chunked IN query
+# series_positions_by_book — chunked IN query
 # ============================================================
 # The batch reads series positions for every book its caller holds, and
 # get_author_books_from_db applies no limit, so the ASIN list is as long as
@@ -2195,6 +2196,11 @@ def _positions_session():
     return session
 
 
+def _books_of(asins):
+    """Stand-ins for stored books: the reader only reads their asin."""
+    return [SimpleNamespace(asin=asin) for asin in asins]
+
+
 def _executed_asin_chunks(session):
     """The ASIN list bound into each statement, one entry per execute call."""
     return [
@@ -2210,7 +2216,7 @@ async def test_series_positions_batch_fires_no_query_for_no_books():
     this path."""
     session = _positions_session()
 
-    assert await _get_series_positions_batch(session, []) == {}
+    assert await series_positions_by_book(session, []) == {}
     session.execute.assert_not_called()
 
 
@@ -2221,7 +2227,7 @@ async def test_series_positions_batch_sends_one_statement_at_the_chunk_ceiling()
     this function exists to replace one query per book."""
     session = _positions_session()
 
-    await _get_series_positions_batch(session, [f"B{i:09d}" for i in range(5000)])
+    await series_positions_by_book(session, _books_of([f"B{i:09d}" for i in range(5000)]))
 
     assert [len(chunk) for chunk in _executed_asin_chunks(session)] == [5000]
 
@@ -2238,7 +2244,7 @@ async def test_series_positions_batch_splits_the_list_one_past_the_ceiling():
     asins = [f"B{i:09d}" for i in range(5001)]
     session = _positions_session()
 
-    await _get_series_positions_batch(session, asins)
+    await series_positions_by_book(session, _books_of(asins))
 
     chunks = _executed_asin_chunks(session)
     assert [len(chunk) for chunk in chunks] == [5000, 1]

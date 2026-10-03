@@ -1850,12 +1850,40 @@ async def test_get_chapters_logs_warning_before_raising(raised, expected_upstrea
 # FETCH AND STORE CHAPTERS TESTS
 # ============================================================
 
+def _session_with_book(present: bool):
+    """An AsyncMock session whose book-row lookup finds (or misses) the row."""
+    from unittest.mock import MagicMock
+
+    session = AsyncMock()
+    found = MagicMock()
+    found.first.return_value = ("B08G9PRS1K",) if present else None
+    session.execute.return_value = found
+    return session
+
+
+@pytest.mark.asyncio
+async def test_fetch_and_store_chapters_skips_when_book_absent_in_region():
+    """No (asin, region) book row: no Audible call, no write, no stamp, 'none'."""
+    from app.services.audible.books import fetch_and_store_chapters
+
+    mock_session = _session_with_book(False)
+
+    with patch("app.services.audible.books.audible_get") as mock_get, \
+         patch("app.services.audible.books.upsert_track", new_callable=AsyncMock) as mock_upsert:
+        result = await fetch_and_store_chapters("B08G9PRS1K", "uk", mock_session)
+
+    assert result == "none"
+    mock_get.assert_not_called()
+    mock_upsert.assert_not_called()
+    mock_session.commit.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_fetch_and_store_chapters_stores_and_marks():
     """On success: stores the track, marks the book checked, returns 'stored'."""
     from app.services.audible.books import fetch_and_store_chapters
 
-    mock_session = AsyncMock()
+    mock_session = _session_with_book(True)
     data = {"content_metadata": {"chapter_info": {"chapters": []}}}
 
     with patch("app.services.audible.books.audible_get", return_value=data), \
@@ -1874,7 +1902,7 @@ async def test_fetch_and_store_chapters_none_when_no_chapter_info():
     """Resolved but no chapter_info: marks checked, stores nothing, returns 'none'."""
     from app.services.audible.books import fetch_and_store_chapters
 
-    mock_session = AsyncMock()
+    mock_session = _session_with_book(True)
     data = {"content_metadata": {}}
 
     with patch("app.services.audible.books.audible_get", return_value=data), \
@@ -1892,7 +1920,7 @@ async def test_fetch_and_store_chapters_not_found_marks_checked():
     from app.services.audible.books import fetch_and_store_chapters
     from libex_core.exceptions import NotFoundException
 
-    mock_session = AsyncMock()
+    mock_session = _session_with_book(True)
 
     with patch("app.services.audible.books.audible_get", side_effect=NotFoundException()), \
          patch("app.services.audible.books.upsert_track", new_callable=AsyncMock) as mock_upsert:
@@ -1908,7 +1936,7 @@ async def test_fetch_and_store_chapters_error_does_not_mark():
     """A transient error does NOT mark checked (so it retries) and returns 'error'."""
     from app.services.audible.books import fetch_and_store_chapters
 
-    mock_session = AsyncMock()
+    mock_session = _session_with_book(True)
 
     with patch("app.services.audible.books.audible_get", side_effect=Exception("Audible 500")), \
          patch("app.services.audible.books.upsert_track", new_callable=AsyncMock) as mock_upsert:
@@ -1924,7 +1952,7 @@ async def test_fetch_and_store_chapters_never_raises_on_store_failure():
     """A write failure is swallowed (returns 'error'), never propagates."""
     from app.services.audible.books import fetch_and_store_chapters
 
-    mock_session = AsyncMock()
+    mock_session = _session_with_book(True)
     data = {"content_metadata": {"chapter_info": {"chapters": []}}}
 
     with patch("app.services.audible.books.audible_get", return_value=data), \

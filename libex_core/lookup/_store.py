@@ -116,13 +116,24 @@ async def persist_books(
 
 
 async def _persist_one(
-    store: "LocalStore", what: str, write_one: Callable[[Any], Awaitable[Any]], **fields: Any
+    store: "LocalStore",
+    what: str,
+    write_one: Callable[[Any], Awaitable[Any]],
+    *,
+    refusal: str | None = None,
+    **fields: Any,
 ) -> bool:
+    """Runs one write in the store's write session. With `refusal`, a writer
+    that answers falsy has declined the data rather than failed: nothing was
+    written, so that is logged as such and reported as False."""
     try:
         async with store.write() as session:
-            await write_one(session)
+            result = await write_one(session)
     except Exception as exc:
         _log_write_failure(what, exc, **fields)
+        return False
+    if refusal is not None and not result:
+        logger.info("Not written to the store", extra={"what": what, "reason": refusal, **fields})
         return False
     logger.info("Wrote to the store", extra={"what": what, **fields})
     return True
@@ -130,11 +141,15 @@ async def _persist_one(
 
 async def persist_series(store: "LocalStore", data: dict[str, Any], region: str) -> bool:
     """Writes a series profile, which carries its own region. False when the
-    write failed."""
+    write failed or the profile names no region and so could not be keyed."""
     from libex_core.storage import write
 
     return await _persist_one(
-        store, "series", lambda s: write.write_series_profile(s, data), region=region
+        store,
+        "series",
+        lambda s: write.write_series_profile(s, data),
+        refusal="the series has no asin, name or region",
+        region=region,
     )
 
 

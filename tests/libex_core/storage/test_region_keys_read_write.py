@@ -60,7 +60,7 @@ def _book(asin, region, title, created, **kw):
 
 
 async def seed(session: AsyncSession) -> None:
-    """X1 stored in uk first and us three days later; Y1 in de only; Z1 in us
+    """X1 stored in uk first (the primary row) and us three days later; Y1 in de only; Z1 in us
     only. The uk and us records of X1 differ in every way the readers filter
     on, so a reader that picked the wrong one, or the wrong one's links, shows."""
     session.add_all([
@@ -69,7 +69,7 @@ async def seed(session: AsyncSession) -> None:
               rating=4.0),
         _book("X1", "us", "Shared title us", LATE, language="german", plans=["Premium"],
               release_date=NOW + 5 * DAY, is_vvab=True, sku_group="SG", length_minutes=200,
-              rating=2.0),
+              rating=2.0, is_primary=False),
         _book("Y1", "de", "Solo", EARLY, language="german", length_minutes=50),
         _book("Z1", "us", "Zed", LATE, language="english", length_minutes=60),
     ])
@@ -82,7 +82,8 @@ async def seed(session: AsyncSession) -> None:
         Genre(asin="G-us", name="Only in us", type="Tags", created_at=EARLY, updated_at=EARLY),
         Narrator(name="Nina", created_at=EARLY, updated_at=EARLY),
         Series(asin="S1", region="uk", title="Saga uk", created_at=EARLY, updated_at=EARLY),
-        Series(asin="S1", region="us", title="Saga us", created_at=LATE, updated_at=LATE),
+        Series(asin="S1", region="us", title="Saga us", created_at=LATE, updated_at=LATE,
+               is_primary=False),
         Series(asin="S2", region="de", title="Saga de", created_at=EARLY, updated_at=EARLY),
     ])
     await session.flush()
@@ -178,6 +179,71 @@ async def test_a_series_asked_for_without_a_region_is_the_first_stored(session):
     assert await series.get_series(session, "S1", region="de") is None
 
 
+async def test_the_writer_marks_the_first_stored_row_of_an_asin_primary():
+    """Rows written in one batch share a created_at, so the mark is what says
+    which was first: the one inserted first, whatever its region code. A later
+    write, for either region, never moves it."""
+    store = LocalStore("sqlite+aiosqlite://")
+    await store.upgrade()
+    await store.open()
+    try:
+        async with store.write() as writer:
+            await write_books(writer, [
+                {"asin": "T1", "region": "us", "title": "us, first in the batch",
+                 "series": [{"asin": "TS", "name": "Saga"}]},
+                {"asin": "T1", "region": "uk", "title": "uk, lower code, second",
+                 "series": [{"asin": "TS", "name": "Saga"}]},
+            ])
+        async with store.write() as writer:
+            await write_books(writer, [
+                {"asin": "T1", "region": "uk", "title": "uk again"},
+                {"asin": "T1", "region": "de", "title": "de, a later arrival"},
+            ])
+        async with store.session() as reader:
+            marks = {
+                r: p for r, p in (await reader.execute(
+                    select(Book.region, Book.is_primary).where(Book.asin == "T1")
+                )).all()
+            }
+            series_marks = {
+                r: p for r, p in (await reader.execute(
+                    select(Series.region, Series.is_primary).where(Series.asin == "TS")
+                )).all()
+            }
+            assert marks == {"us": True, "uk": False, "de": False}
+            assert series_marks == {"us": True, "uk": False}
+            assert (await books.get_book(reader, "T1"))["region"] == "us"
+            assert [r["region"] for r in await books.get_books(reader, ["T1"])] == ["us"]
+            assert [r["title"] for r in await books.search_books(reader, title="T")] == [
+                "us, first in the batch"
+            ]
+            assert (await series.get_series(reader, "TS"))["region"] == "us"
+    finally:
+        await store.close()
+
+
+async def test_a_book_stored_before_regions_were_keyed_is_primary(session):
+    """Every row of a store migrated from asin-only keys is the only one of its
+    ASIN, and the column's default makes it primary."""
+    rows = (await session.execute(select(Book.asin, Book.region, Book.is_primary))).all()
+    assert {(a, r): p for a, r, p in rows} == {
+        ("X1", "uk"): True, ("X1", "us"): False, ("Y1", "de"): True, ("Z1", "us"): True,
+    }
+
+
+async def test_an_author_asked_for_without_a_book_region_returns_every_linked_book(session):
+    """Narrowing to one marketplace is something the caller asks for; the
+    default is every linked record, a non-primary one included."""
+    await session.execute(
+        insert(author_book).values(author_id=2, book_asin="Y1", book_region="de")
+    )
+    await session.commit()
+    default = await people.get_author_books(session, "A1", "us")
+    assert sorted(_keys(default)) == [("X1", "us"), ("Y1", "de"), ("Z1", "us")]
+    narrowed = await people.get_author_books(session, "A1", "us", book_region="de")
+    assert _keys(narrowed) == [("Y1", "de")]
+
+
 async def test_chapters_follow_the_same_rule(session):
     assert await books.get_track(session, "X1") == {"chapters": [{"t": 1}]}
     assert await books.get_track(session, "X1", region="us") == {"chapters": [{"t": 1}, {"t": 2}]}
@@ -223,10 +289,14 @@ async def test_a_search_in_a_region_finds_only_that_regions_records(session):
     assert _keys(rows) == [("Z1", "us"), ("X1", "us")]
 
 
-async def test_a_filter_only_a_later_region_passes_still_finds_the_book_by_that_record(session):
+async def test_a_filter_is_tested_against_the_primary_record(session):
     # The uk record is first stored but is English; only the us one is German.
+    # A list shows the record a lookup shows, so X1 is an English book here
+    # and the German filter does not find it; asking for the us region does.
     rows = await books.search_books(session, language="german", sort="lengthMinutes")
-    assert _keys(rows) == [("Y1", "de"), ("X1", "us")]
+    assert _keys(rows) == [("Y1", "de")]
+    rows = await books.search_books(session, language="german", region="us")
+    assert _keys(rows) == [("X1", "us")]
 
 
 async def test_pages_count_asins_not_records(session):
@@ -238,18 +308,22 @@ async def test_pages_count_asins_not_records(session):
 async def test_a_relationship_filter_matches_the_record_the_link_belongs_to(session):
     # "Us Author" is linked to the us record of X1 and to Z1, not to the uk record.
     rows = await books.search_books(session, author_name="us author", sort="lengthMinutes")
+    assert _keys(rows) == [("Z1", "us")]
+    rows = await books.search_books(session, author_name="us author", region="us", sort="lengthMinutes")
     assert _keys(rows) == [("Z1", "us"), ("X1", "us")]
     rows = await books.search_books(session, genre="only in uk")
     assert _keys(rows) == [("X1", "uk")]
-    rows = await books.search_books(session, category="G-us")
+    assert _keys(await books.search_books(session, category="G-us")) == []
+    rows = await books.search_books(session, category="G-us", region="us")
     assert _keys(rows) == [("X1", "us")]
     rows = await books.search_books(session, series_name="saga us", sort="lengthMinutes")
-    assert _keys(rows) == [("Z1", "us"), ("X1", "us")]
+    assert _keys(rows) == [("Z1", "us")]
 
 
 async def test_plan_lists_find_a_book_by_the_record_that_has_the_plan(session):
     assert _keys(await books.get_books_by_plan(session, "Plus")) == [("X1", "uk")]
-    assert _keys(await books.get_books_by_plan(session, "Premium")) == [("X1", "us")]
+    assert _keys(await books.get_books_by_plan(session, "Premium")) == []
+    assert _keys(await books.get_books_by_plan(session, "Premium", region="us")) == [("X1", "us")]
     assert _keys(await books.get_books_by_plan(session, "Premium", region="uk")) == []
 
 
@@ -258,7 +332,8 @@ async def test_vvab_new_release_and_coming_soon_lists_are_one_record_per_asin(se
     assert _keys(await books.get_vvab_books(session, region="us")) == [("X1", "us")]
     # uk released five days ago, us releases in five.
     assert _keys(await books.get_new_releases(session, days=30)) == [("X1", "uk")]
-    assert _keys(await books.get_coming_soon(session, days=30)) == [("X1", "us")]
+    assert _keys(await books.get_coming_soon(session, days=30)) == []
+    assert _keys(await books.get_coming_soon(session, days=30, region="us")) == [("X1", "us")]
 
 
 async def test_a_series_lists_each_book_once_with_the_position_of_the_record_shown(session):
@@ -420,13 +495,15 @@ async def test_a_listing_needs_its_region(store):
             await write_track(session, "X1", {"chapters": []})
 
 
-async def test_a_listing_for_a_book_that_is_not_stored_in_that_region_is_refused(store):
-    from sqlalchemy.exc import IntegrityError
-
+async def test_a_listing_for_a_book_that_is_not_stored_in_that_region_is_skipped(store):
+    """Nothing is written and nothing raises: the check is part of the insert,
+    so a region the book is not stored in costs no failed statement."""
     await _write(store, _product("uk"))
     async with store.write() as session:
-        with pytest.raises(IntegrityError):
-            await write_track(session, "X1", {"chapters": []}, region="us")
+        assert await write_track(session, "X1", {"chapters": [{"t": 1}]}, region="us") is None
+        assert await write_track(session, "X1", {"chapters": [{"t": 1}]}, region="uk") == 1
+        await session.commit()
+    assert [r[1] for r in await _rows(store, Track.__table__, "asin", "region")] == ["uk"]
 
 
 async def test_deleting_one_region_takes_only_its_links(store):

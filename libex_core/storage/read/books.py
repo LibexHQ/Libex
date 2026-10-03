@@ -564,10 +564,16 @@ async def get_track(
     region, that listing or None; without one, the first-stored listing of the
     ASIN.
     """
-    stmt = select(Track).where(Track.asin == asin)
+    # Joined to the book it hangs off, so without a region the listing
+    # returned is the one of the record a lookup of the ASIN returns.
+    stmt = select(Track).join(
+        Book, (Book.asin == Track.asin) & (Book.region == Track.region)
+    ).where(Track.asin == asin)
     if region is not None:
         stmt = stmt.where(Track.region == region)
-    stmt = stmt.order_by(*first_stored_order(Track)).limit(1)
+    stmt = stmt.order_by(
+        Book.is_primary.desc(), Track.created_at.asc(), cast(Track.region, Text).asc()
+    ).limit(1)
     result = await session.execute(stmt)
     track = result.scalar_one_or_none()  # LIMIT 1: at most one row, however many regions
     if not track:

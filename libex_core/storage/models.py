@@ -518,7 +518,11 @@ book_genre = Table(
     ForeignKeyConstraint(
         ["book_asin", "book_region"], ["books.asin", "books.region"], ondelete="CASCADE"
     ),
-    Index("genre_book_index", "genre_asin", "book_asin"),
+    # Carries book_region because the genre and category filters read the
+    # (asin, region) of every linked book: without it each probe has to visit
+    # the table for the region, and past a few thousand links the planner
+    # prefers reading the whole of it.
+    Index("genre_book_index", "genre_asin", "book_asin", "book_region"),
     UniqueConstraint("book_asin", "book_region", "genre_asin", name="uq_book_genre"),
 )
 

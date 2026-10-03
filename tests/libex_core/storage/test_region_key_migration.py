@@ -304,6 +304,17 @@ def test_a_series_with_no_region_stops_the_upgrade_and_changes_nothing(old_store
     assert inspect(old_store).get_pk_constraint("books")["constrained_columns"] == ["asin"]
 
 
+def test_a_linked_series_with_no_region_is_reported_as_that_not_as_its_links(old_store):
+    """Its links cannot take a region from it either, but the cause is the
+    series, and the message has to say so."""
+    with old_store.begin() as c:
+        c.exec_driver_sql("UPDATE series SET region = NULL WHERE asin = 'S2'")
+    with pytest.raises(RuntimeError, match="1 series rows have no region") as raised:
+        _run(old_store, AFTER)
+    assert "no matching" not in str(raised.value)
+    assert _revision(old_store) == BEFORE
+
+
 def test_a_link_with_no_parent_stops_the_upgrade_and_changes_nothing(old_store):
     with old_store.connect() as c:
         set_foreign_keys(c, False)

@@ -24,6 +24,9 @@ confirmed), the walk_results table, and books.is_primary and series.is_primary
 (boolean NOT NULL DEFAULT true), which mark the one row of an ASIN that a
 reader asked for no region answers with. A store keyed on asin alone has one
 row per ASIN, so the default is already right for every row it holds.
+genre_book_index also widens from (genre_asin, book_asin) to (genre_asin,
+book_asin, book_region), because the genre and category filters read the
+region of every link they find.
 
 On Postgres this is plain DDL. On SQLite every table that changes keys is
 rebuilt in batch mode; the connection must have foreign keys off for that
@@ -216,6 +219,18 @@ def _drop_foreign_keys_onto_parents() -> None:
                 op.drop_constraint(fk["name"], table, type_="foreignkey")
 
 
+def _widen_genre_index() -> None:
+    op.drop_index("genre_book_index", table_name="book_genre")
+    op.create_index(
+        "genre_book_index", "book_genre", ["genre_asin", "book_asin", "book_region"]
+    )
+
+
+def _narrow_genre_index() -> None:
+    op.drop_index("genre_book_index", table_name="book_genre")
+    op.create_index("genre_book_index", "book_genre", ["genre_asin", "book_asin"])
+
+
 def _upgrade_postgresql() -> None:
     _backfill_and_check()
     for table, column, _key, _parent in _REGION_COLUMNS:
@@ -239,6 +254,7 @@ def _upgrade_postgresql() -> None:
             )
     for name, table, _columns in _DROPPED_INDEXES:
         op.drop_index(name, table_name=table)
+    _widen_genre_index()
 
 
 # --- SQLite ------------------------------------------------------------------
@@ -298,6 +314,9 @@ def _upgrade_sqlite() -> None:
             for name, index_table, _columns in _DROPPED_INDEXES:
                 if index_table == table:
                     batch.drop_index(name)
+            if table == "book_genre":
+                batch.drop_index("genre_book_index")
+                batch.create_index("genre_book_index", ["genre_asin", "book_asin", "book_region"])
 
         _rebuild(table, region_overrides=added, operations=_operations)
 
@@ -359,6 +378,7 @@ def _downgrade_postgresql() -> None:
             )
     for name, table, columns in _DROPPED_INDEXES:
         op.create_index(name, table, list(columns))
+    _narrow_genre_index()
     for table, column in (
         ("authors", "confirmed_at"), ("series", "confirmed_at"),
         ("books", "chapters_confirmed_at"), ("books", "confirmed_at"),
@@ -390,6 +410,9 @@ def _downgrade_sqlite() -> None:
             for name, index_table, columns in _DROPPED_INDEXES:
                 if index_table == table:
                     batch.create_index(name, list(columns))
+            if table == "book_genre":
+                batch.drop_index("genre_book_index")
+                batch.create_index("genre_book_index", ["genre_asin", "book_asin"])
 
         _rebuild(table, region_overrides=[], operations=_operations)
 

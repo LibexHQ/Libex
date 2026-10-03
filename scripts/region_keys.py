@@ -27,6 +27,7 @@ time:
     python -m scripts.region_keys verify [--pre-window]
     python -m scripts.region_keys finalize --i-have-stopped-writers
     python -m scripts.region_keys unfinalize --i-have-stopped-writers
+    python -m scripts.region_keys validate
 
 expand     ADD COLUMN IF NOT EXISTS, nullable, no default, type region_enum:
            book_region on author_book, book_narrator, book_genre and
@@ -42,7 +43,9 @@ backfill   Batched UPDATE..FROM books/series, keyset-paged on the asin column
            code inserts while this runs arrive with NULL and are picked up by
            the catch-up in finalize.
 index      CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS for the online
-           indexes: the six link-table keys and uq_tracks_asin_region (names
+           indexes: the six link-table keys and uq_tracks_asin_region, and
+           the one plain index, genre_book_region_index, which the schema
+           revision renames over genre_book_index (names
            in INDEXES below, which the schema revision that adopts them must
            reuse). The 2.1.x writer leaves the new columns NULL on those
            tables, and NULLs never conflict, so these indexes cannot make an
@@ -87,6 +90,19 @@ unfinalize ROLLBACK ONLY. Also refuses without --i-have-stopped-writers. Drops
            indexes has run; after that, roll back with that revision's
            downgrade, and an index owned by a constraint makes this mode fail
            rather than drop it.
+
+validate   AFTER the schema revision has run, with the application up. That
+           revision adds every composite foreign key onto books and series
+           NOT VALID, which enforces it for each new row and delete at once
+           but has not checked the rows already there. This mode runs ALTER
+           TABLE ... VALIDATE CONSTRAINT for each, one at a time, logging the
+           elapsed seconds. VALIDATE takes only SHARE UPDATE EXCLUSIVE, so
+           reads and writes carry on while it scans. A constraint that is
+           already validated is skipped, so it is safe to run again after a
+           stop; one that does not exist means the revision has not run and
+           the mode stops there. It changes no data and fails, naming the
+           constraint's SQLSTATE, if a row points at a book or series that is
+           not stored.
 
 SIZING (approximate magnitudes on the hosted instance): book_genre about 10M
 rows, author_book and book_narrator about 2.5M each, tracks about 2M,
@@ -250,6 +266,10 @@ class IndexSpec:
     # unique key there and its ON CONFLICT (asin) upsert stops being safe.
     # Those are built inside finalize, with writers stopped.
     window: bool = False
+    # False for the one plain index in the set, genre_book_region_index: not a
+    # key but the wider replacement for genre_book_index that the schema
+    # revision renames into place, so it is built the same way but not unique.
+    unique: bool = True
 
 
 # These names are the contract with the revision and models that adopt the
@@ -285,10 +305,33 @@ INDEXES: tuple[IndexSpec, ...] = (
         "series_author",
         ("series_asin", "series_region", "author_id"),
     ),
+    # The genre and category filters read the region of every link they find,
+    # and genre_book_index (genre_asin, book_asin) cannot answer that without
+    # visiting book_genre, which the planner avoids by reading all of it. The
+    # revision drops the old index and renames this one to genre_book_index.
+    IndexSpec(
+        "genre_book_region_index",
+        "book_genre",
+        ("genre_asin", "book_asin", "book_region"),
+        unique=False,
+    ),
 )
 
 ONLINE_INDEXES: tuple[IndexSpec, ...] = tuple(i for i in INDEXES if not i.window)
 WINDOW_INDEXES: tuple[IndexSpec, ...] = tuple(i for i in INDEXES if i.window)
+
+# The composite foreign keys the schema revision adds NOT VALID, by the names
+# it gives them: table, constraint. The names are a contract with that
+# revision, which is what the validate mode looks them up by.
+FOREIGN_KEYS: tuple[tuple[str, str], ...] = (
+    ("tracks", "tracks_asin_region_fkey"),
+    ("author_book", "author_book_book_asin_book_region_fkey"),
+    ("book_narrator", "book_narrator_book_asin_book_region_fkey"),
+    ("book_genre", "book_genre_book_asin_book_region_fkey"),
+    ("book_series", "book_series_book_asin_book_region_fkey"),
+    ("book_series", "book_series_series_asin_series_region_fkey"),
+    ("series_author", "series_author_series_asin_series_region_fkey"),
+)
 
 # Session advisory lock key held for the length of any mutating run.
 ADVISORY_LOCK_KEY = 0x52474B59
@@ -606,14 +649,14 @@ async def _build_index(engine: AsyncEngine, spec: IndexSpec) -> bool:
     await _ddl_concurrent(
         engine,
         f"build {spec.name}",
-        f"CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS {spec.name} "
+        f"CREATE {'UNIQUE ' if spec.unique else ''}INDEX CONCURRENTLY IF NOT EXISTS {spec.name} "
         f"ON {spec.table} ({', '.join(spec.columns)})",
     )
     async with engine.connect() as conn:
         state = await _index_state(conn, spec.name)
-    if state is None or not state[0] or not state[1]:
+    if state is None or not state[0] or (spec.unique and not state[1]):
         logger.error(
-            "RegionKeys: index not valid and unique after build",
+            "RegionKeys: index not valid after build",
             extra={"index": spec.name, "state": state},
         )
         return False
@@ -630,6 +673,46 @@ async def index(engine: AsyncEngine, stop: _Stop) -> int:
         if not await _build_index(engine, spec):
             return EXIT_FAILED
     logger.info("RegionKeys: index complete")
+    return EXIT_OK
+
+
+# --- validate ----------------------------------------------------------------
+
+async def _constraint_validated(conn: AsyncConnection, table: str, name: str) -> bool | None:
+    """True or False for pg_constraint.convalidated, or None if absent."""
+    result = await conn.execute(
+        text(
+            "SELECT c.convalidated FROM pg_constraint c JOIN pg_class r ON r.oid = c.conrelid "
+            "WHERE r.relname = :t AND c.conname = :n AND c.contype = 'f' "
+            "AND r.relnamespace = current_schema()::regnamespace"
+        ),
+        {"t": table, "n": name},
+    )
+    row = result.first()
+    return None if row is None else bool(row[0])
+
+
+async def validate(engine: AsyncEngine, stop: _Stop) -> int:
+    started = time.monotonic()
+    logger.info("RegionKeys: validate starting", extra={"constraints": len(FOREIGN_KEYS)})
+    for table, name in FOREIGN_KEYS:
+        if stop.requested:
+            logger.info("RegionKeys: validate stopped before finishing")
+            return EXIT_STOPPED
+        async with engine.connect() as conn:
+            state = await _constraint_validated(conn, table, name)
+        if state is None:
+            raise FinalizeAbort(
+                f"foreign key {name} on {table} does not exist; "
+                "the schema revision that adds it has not run"
+            )
+        if state:
+            logger.info("RegionKeys: already validated", extra={"constraint": name, "table": table})
+            continue
+        await _ddl(engine, f"validate {name}", f"ALTER TABLE {table} VALIDATE CONSTRAINT {name}", stop)
+        logger.info("RegionKeys: constraint validated", extra={"constraint": name, "table": table})
+    _log_elapsed("validate (total)", started)
+    logger.info("RegionKeys: validate complete")
     return EXIT_OK
 
 
@@ -675,7 +758,7 @@ async def verify(engine: AsyncEngine, pre_window: bool = False) -> int:
                 problems.append(f"index {spec.name} is missing")
             elif not state[0]:
                 problems.append(f"index {spec.name} is invalid")
-            elif not state[1]:
+            elif spec.unique and not state[1]:
                 problems.append(f"index {spec.name} is not unique")
         for col in FINAL_COLUMNS:
             if await _constraint_exists(conn, col.table, col.check_name):
@@ -840,6 +923,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_fin.add_argument("--i-have-stopped-writers", action="store_true", dest="writers_stopped")
     p_fin.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="asins per catch-up batch")
 
+    sub.add_parser("validate", help="after the schema revision: validate the NOT VALID foreign keys online")
+
     p_unfin = sub.add_parser(
         "unfinalize", help="rollback only: undo finalize so the 2.1.x application can run again"
     )
@@ -880,6 +965,8 @@ async def _dispatch(args: argparse.Namespace, engine: AsyncEngine, stop: _Stop) 
         return await finalize(engine, stop, args.batch_size)
     if args.mode == "unfinalize":
         return await unfinalize(engine, stop)
+    if args.mode == "validate":
+        return await validate(engine, stop)
     raise AssertionError(args.mode)
 
 

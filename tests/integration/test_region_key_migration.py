@@ -13,29 +13,40 @@ has already happened on the hosted database.
 """
 
 # Standard library
+import asyncio
 import importlib.util
-import os
 import uuid
-from pathlib import Path
 
 # Third party
 import pytest
-from alembic import command
-from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
-from sqlalchemy.engine import make_url
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
 
 # Local
-from app.core import config as app_config
+import scripts.region_keys as rk
 from libex_core.storage.base import Base
 from libex_core.storage.models import CORE_TABLES
+from tests.integration._scratch import (
+    ROOT,
+    admin,
+    build_template,
+    clone,
+    drop_database,
+    run_alembic,
+    urls,
+)
 
-pytestmark = pytest.mark.integration
+# The template fixture below upgrades the whole chain inside whichever test
+# asks for it first, and pytest-timeout counts fixture setup against that
+# test's budget. Idle that takes about 20 seconds; under the machine-wide load
+# of a full run it measured past the 30 second default, so the module carries
+# its own, still a tripwire for a hang.
+pytestmark = [pytest.mark.integration, pytest.mark.timeout(300)]
 
 PRE = "b8d2e5a71c46"
 POST = "e7c2a94d1f58"
-ROOT = Path(__file__).resolve().parent.parent.parent
 
 STAMP = "now()"
 BOOK_COLUMNS = (
@@ -60,60 +71,24 @@ _spec.loader.exec_module(revision)
 # SCRATCH DATABASES
 # ============================================================
 
-def _urls(database: str) -> tuple[str, str]:
-    url = make_url(os.environ["DATABASE_URL"]).set(database=database)
-    return (
-        url.set(drivername="postgresql+psycopg2").render_as_string(hide_password=False),
-        url.render_as_string(hide_password=False),
-    )
-
-
-def _admin():
-    engine = create_engine(_urls("postgres")[0], isolation_level="AUTOCOMMIT")
-    return engine
-
-
-def _alembic(async_url: str, action: str, target: str) -> None:
-    """Runs one alembic command against `async_url`. env.py reads the database
-    from settings, so the settings are pointed there for the duration."""
-    saved = os.environ["DATABASE_URL"]
-    os.environ["DATABASE_URL"] = async_url
-    app_config.get_settings.cache_clear()
-    try:
-        config = Config(str(ROOT / "alembic.ini"))
-        getattr(command, action)(config, target)
-    finally:
-        os.environ["DATABASE_URL"] = saved
-        app_config.get_settings.cache_clear()
+_alembic = run_alembic
 
 
 @pytest.fixture(scope="module")
 def template():
-    name = f"rk_template_{uuid.uuid4().hex[:8]}"
-    admin = _admin()
-    with admin.connect() as c:
-        c.execute(text(f'CREATE DATABASE "{name}"'))
-    _alembic(_urls(name)[1], "upgrade", PRE)
+    name = build_template(PRE)
     yield name
-    with admin.connect() as c:
-        c.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
-    admin.dispose()
+    drop_database(name)
 
 
 @pytest.fixture
 def scratch(template):
     """A fresh database at the revision before the swap."""
-    name = f"rk_{uuid.uuid4().hex[:10]}"
-    admin = _admin()
-    with admin.connect() as c:
-        c.execute(text(f'CREATE DATABASE "{name}" TEMPLATE "{template}"'))
-    sync_url, async_url = _urls(name)
+    name, sync_url, async_url = clone(template)
     engine = create_engine(sync_url)
     yield engine, async_url
     engine.dispose()
-    with admin.connect() as c:
-        c.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
-    admin.dispose()
+    drop_database(name)
 
 
 # ============================================================
@@ -186,6 +161,9 @@ def _prepare(engine, *, skip_index=None, leave_nullable=None, null_series=False)
         for name, (table, columns) in revision._INDEXES.items():
             if name != skip_index:
                 c.execute(text(f"CREATE UNIQUE INDEX {name} ON {table} ({', '.join(columns)})"))
+        for name, (table, columns) in revision._WIDENED.items():
+            if name != skip_index:
+                c.execute(text(f"CREATE INDEX {name} ON {table} ({', '.join(columns)})"))
     with engine.begin() as c:
         for table, column in revision._NOT_NULL:
             if (table, column) == leave_nullable or (null_series and table == "series"):
@@ -227,6 +205,11 @@ def test_the_revision_swaps_the_keys_and_keeps_every_row(scratch):
             "SELECT indexname FROM pg_indexes WHERE schemaname = 'public'"
         ))}
         assert not names & set(revision._INDEXES)
+        assert not names & set(revision._WIDENED)
+        # The wider index took the narrower one's name.
+        assert c.execute(text(
+            "SELECT pg_get_indexdef(indexrelid) FROM pg_index WHERE indexrelid = 'genre_book_index'::regclass"
+        )).scalar().endswith("(genre_asin, book_asin, book_region)")
         assert {"uq_author_book", "uq_book_narrator", "uq_book_genre", "uq_book_series",
                 "uq_series_author", "books_pkey", "series_pkey", "tracks_pkey"} <= names
         # The indexes the new keys make redundant are gone.
@@ -242,6 +225,31 @@ def test_the_revision_swaps_the_keys_and_keeps_every_row(scratch):
         assert c.execute(text(
             "SELECT book_asin, book_region FROM author_book ORDER BY 1"
         )).all() == [("B1", "uk"), ("B2", "us")]
+
+
+def test_every_row_that_exists_is_primary_and_the_column_is_catalog_only(scratch):
+    engine, url = scratch
+    _seed(engine)
+    _prepare(engine)
+    _alembic(url, "upgrade", POST)
+
+    with engine.connect() as c:
+        for table in ("books", "series"):
+            assert c.execute(text(
+                f"SELECT count(*) FROM {table} WHERE NOT is_primary"
+            )).scalar() == 0
+            column = c.execute(text(
+                "SELECT is_nullable, column_default FROM information_schema.columns "
+                f"WHERE table_name = '{table}' AND column_name = 'is_primary'"
+            )).one()
+            assert column == ("NO", "true")
+    # Inserted without naming it, as any older caller does: primary.
+    with engine.begin() as c:
+        c.execute(text(
+            f"INSERT INTO books (asin, title, region, {BOOK_COLUMNS}) "
+            f"VALUES ('B7', 'seven', 'fr', {BOOK_VALUES})"
+        ))
+        assert c.execute(text("SELECT is_primary FROM books WHERE asin = 'B7'")).scalar() is True
 
 
 def test_after_the_swap_the_same_asin_in_two_regions_is_two_books(scratch):
@@ -281,7 +289,67 @@ def test_the_revision_keeps_the_index_names_the_expand_script_builds():
     spec = importlib.util.spec_from_file_location("region_keys_script", scripts)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    assert {i.name: (i.table, tuple(i.columns)) for i in module.INDEXES} == revision._INDEXES
+    unique = {i.name: (i.table, tuple(i.columns)) for i in module.INDEXES if i.unique}
+    plain = {i.name: (i.table, tuple(i.columns)) for i in module.INDEXES if not i.unique}
+    assert unique == revision._INDEXES
+    assert plain == revision._WIDENED
+
+
+def test_the_validate_mode_names_the_foreign_keys_the_revision_adds():
+    assert set(rk.FOREIGN_KEYS) == {(table, name) for table, name, *_ in revision._COMPOSITE_FKS}
+
+
+def _validate(url):
+    async def run():
+        engine = create_async_engine(url, poolclass=NullPool)
+        try:
+            return await rk.validate(engine, rk._Stop())
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(run())
+
+
+def _validated(engine):
+    with engine.connect() as c:
+        return dict(c.execute(text(
+            "SELECT conname, convalidated FROM pg_constraint WHERE contype = 'f' "
+            "AND conname LIKE '%region%fkey'"
+        )).all())
+
+
+def test_validate_checks_every_added_key_online_and_can_run_again(scratch):
+    engine, url = scratch
+    _seed(engine)
+    _prepare(engine)
+    _alembic(url, "upgrade", POST)
+    assert not any(_validated(engine).values())
+
+    assert _validate(url) == rk.EXIT_OK
+
+    state = _validated(engine)
+    assert set(state) == {name for _t, name in rk.FOREIGN_KEYS}
+    assert all(state.values())
+    assert _validate(url) == rk.EXIT_OK  # already validated: skipped, not an error
+
+
+def test_validate_fails_on_a_link_that_points_at_no_stored_book(scratch):
+    engine, url = scratch
+    _seed(engine)
+    _prepare(engine)
+    with engine.begin() as c:
+        c.execute(text("UPDATE author_book SET book_region = 'fr' WHERE book_asin = 'B1'"))
+    _alembic(url, "upgrade", POST)
+
+    with pytest.raises(DBAPIError):
+        _validate(url)
+    assert not _validated(engine)["author_book_book_asin_book_region_fkey"]
+
+
+def test_validate_stops_when_the_revision_has_not_run(scratch):
+    _engine, url = scratch
+    with pytest.raises(rk.FinalizeAbort, match="has not run"):
+        _validate(url)
 
 
 # ============================================================
@@ -313,6 +381,10 @@ def test_a_database_that_was_never_prepared_is_refused(scratch):
 
 def test_a_missing_index_is_refused(scratch):
     _refused(scratch, "index uq_book_genre_region does not exist", skip_index="uq_book_genre_region")
+
+
+def test_a_missing_widened_genre_index_is_refused(scratch):
+    _refused(scratch, "index genre_book_region_index does not exist", skip_index="genre_book_region_index")
 
 
 def test_a_column_still_nullable_is_refused(scratch):
@@ -469,19 +541,19 @@ def test_the_package_chain_and_the_hosted_chain_build_the_same_schema(scratch):
     _alembic(url, "upgrade", "head")
 
     name = f"rk_pkg_{uuid.uuid4().hex[:8]}"
-    admin = _admin()
-    with admin.connect() as c:
+    server = admin()
+    with server.connect() as c:
         c.execute(text(f'CREATE DATABASE "{name}"'))
-    package = create_engine(_urls(name)[0])
+    package = create_engine(urls(name)[0])
     try:
         with package.begin() as connection:
             upgrade_to_head(connection)
         theirs, ours = _shape(package), _shape(hosted)
     finally:
         package.dispose()
-        with admin.connect() as c:
+        with server.connect() as c:
             c.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
-        admin.dispose()
+        server.dispose()
 
     for table in ours:
         for part in ("columns", "pk", "uniques", "fks", "indexes"):

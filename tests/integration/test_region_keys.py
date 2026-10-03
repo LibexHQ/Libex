@@ -13,90 +13,114 @@ the test and the shared truncation fixture only clears rows.
 # Standard library
 import argparse
 import asyncio
-import os
 
 # Third party
 import pytest
 import pytest_asyncio
-from sqlalchemy import insert, text
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 # Local
 import scripts.region_keys as rk
-from app.db.models import (
-    Author,
-    Book,
-    Genre,
-    Narrator,
-    Series,
-    Track,
-    author_book,
-    book_genre,
-    book_narrator,
-    book_series,
-    series_author,
-)
 from scripts.region_keys import (
     EXIT_FAILED,
     EXIT_OK,
     EXIT_STOPPED,
     FINAL_COLUMNS,
-    INDEXES,
     ONLINE_INDEXES,
     REGION_COLUMNS,
     WINDOW_INDEXES,
     FinalizeAbort,
     _Stop,
 )
+from tests.integration._scratch import build_template, clone, drop_database
 
-pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
+pytestmark = [pytest.mark.integration, pytest.mark.asyncio, pytest.mark.timeout(300)]
 
 
-async def _strip(engine) -> None:
-    async with engine.begin() as conn:
-        for col in FINAL_COLUMNS:
-            await conn.execute(text(f"ALTER TABLE {col.table} DROP CONSTRAINT IF EXISTS {col.check_name}"))
-        for col in REGION_COLUMNS:
-            await conn.execute(text(f"ALTER TABLE {col.table} DROP COLUMN IF EXISTS {col.column}"))
-        for spec in INDEXES:
-            await conn.execute(text(f"DROP INDEX IF EXISTS {spec.name}"))
-        await conn.execute(text("ALTER TABLE series ALTER COLUMN region DROP NOT NULL"))
+PRE = "b8d2e5a71c46"
+
+STAMP = "now()"
+BOOK_COLUMNS = (
+    "explicit, whisper_sync, has_pdf, is_listenable, is_buyable, is_vvab, created_at, updated_at"
+)
+BOOK_VALUES = f"false, false, false, true, true, false, {STAMP}, {STAMP}"
+
+
+# The script runs against the schema as it is before the revision that adopts
+# its work. The shared container sits at the current head, which is past that,
+# so every test gets its own database cloned from one built at that revision.
+# The template is built inside whichever test asks first, hence the longer
+# budget than the suite's default.
+@pytest.fixture(scope="module")
+def template():
+    name = build_template(PRE)
+    yield name
+    drop_database(name)
 
 
 @pytest_asyncio.fixture
-async def engine():
-    eng = create_async_engine(os.environ["DATABASE_URL"], poolclass=NullPool)
-    await _strip(eng)
+async def engine(template):
+    name, _sync_url, async_url = clone(template)
+    eng = create_async_engine(async_url, poolclass=NullPool)
     yield eng
-    await _strip(eng)
     await eng.dispose()
+    drop_database(name)
+
+
+@pytest_asyncio.fixture
+async def db_session(engine):
+    """A session on the same scratch database, shadowing the shared one."""
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as session:
+        yield session
+
+
+async def _add_old_book(db, asin: str, region: str = "us") -> None:
+    await db.execute(text(
+        f"INSERT INTO books (asin, title, region, {BOOK_COLUMNS}) "
+        f"VALUES ('{asin}', 'n', '{region}', {BOOK_VALUES})"
+    ))
 
 
 @pytest_asyncio.fixture
 async def seeded(db_session, engine):
-    """Five books across two regions, with every kind of link and a track."""
+    """Five books across two regions, with every kind of link and a track, in
+    the shape the schema had before region was part of any key."""
     s = db_session
-    s.add_all(
-        [Book(asin=f"B00RK00{i}", title=f"book {i}", region="us" if i % 2 else "uk") for i in range(5)]
-    )
-    s.add_all([Series(asin="B00RKSER1", title="s1", region="us"), Series(asin="B00RKSER2", title="s2", region="uk")])
-    author = Author(name="An Author", region="us")
-    s.add(author)
-    s.add(Narrator(name="A Narrator"))
-    s.add(Genre(asin="G1", name="g", type="Genres"))
-    await s.flush()
+    for i in range(5):
+        await _add_old_book(s, f"B00RK00{i}", "us" if i % 2 else "uk")
+    await s.execute(text(
+        "INSERT INTO series (asin, title, region, fetched_description, created_at, updated_at) "
+        f"VALUES ('B00RKSER1', 's1', 'us', false, {STAMP}, {STAMP}), "
+        f"('B00RKSER2', 's2', 'uk', false, {STAMP}, {STAMP})"
+    ))
+    await s.execute(text(
+        "INSERT INTO authors (id, name, region, fetched_description, created_at, updated_at) "
+        f"VALUES (1, 'An Author', 'us', false, {STAMP}, {STAMP})"
+    ))
+    await s.execute(text(
+        f"INSERT INTO narrators (name, created_at, updated_at) VALUES ('A Narrator', {STAMP}, {STAMP})"
+    ))
+    await s.execute(text(
+        f"INSERT INTO genres (asin, name, type, created_at, updated_at) VALUES ('G1', 'g', 'Genres', {STAMP}, {STAMP})"
+    ))
     for i in range(5):
         asin = f"B00RK00{i}"
-        await s.execute(insert(author_book).values(author_id=author.id, book_asin=asin))
-        await s.execute(insert(book_narrator).values(narrator_name="A Narrator", book_asin=asin))
-        await s.execute(insert(book_genre).values(genre_asin="G1", book_asin=asin))
-        await s.execute(insert(book_series).values(book_asin=asin, series_asin="B00RKSER1" if i < 3 else "B00RKSER2"))
-        s.add(Track(asin=asin, chapters={"chapters": []}))
-    await s.execute(insert(series_author).values(series_asin="B00RKSER1", author_id=author.id))
-    await s.execute(insert(series_author).values(series_asin="B00RKSER2", author_id=author.id))
+        await s.execute(text(f"INSERT INTO author_book (author_id, book_asin) VALUES (1, '{asin}')"))
+        await s.execute(text(f"INSERT INTO book_narrator (narrator_name, book_asin) VALUES ('A Narrator', '{asin}')"))
+        await s.execute(text(f"INSERT INTO book_genre (genre_asin, book_asin) VALUES ('G1', '{asin}')"))
+        await s.execute(text(
+            f"INSERT INTO book_series (book_asin, series_asin) VALUES ('{asin}', "
+            f"'{'B00RKSER1' if i < 3 else 'B00RKSER2'}')"
+        ))
+        await s.execute(text(
+            f"INSERT INTO tracks (asin, chapters, created_at, updated_at) VALUES ('{asin}', '[]', {STAMP}, {STAMP})"
+        ))
+    await s.execute(text("INSERT INTO series_author (series_asin, author_id) VALUES ('B00RKSER1', 1), ('B00RKSER2', 1)"))
     await s.commit()
-    return author.id
+    return 1
 
 
 class _StopAfter(_Stop):
@@ -224,7 +248,7 @@ async def test_index_builds_only_the_online_indexes_and_is_idempotent(engine, se
         assert await rk.index(engine, _Stop()) == EXIT_OK
     async with engine.connect() as conn:
         for spec in ONLINE_INDEXES:
-            assert await rk._index_state(conn, spec.name) == (True, True), spec.name
+            assert await rk._index_state(conn, spec.name) == (True, spec.unique), spec.name
         for spec in WINDOW_INDEXES:
             assert await rk._index_state(conn, spec.name) is None, spec.name
     assert {s.name for s in WINDOW_INDEXES} == {"uq_books_asin_region", "uq_series_asin_region"}
@@ -276,8 +300,8 @@ async def test_no_check_constraint_exists_before_finalize_and_old_inserts_still_
     await _full_cycle(engine)
     assert await _scalar(engine, "SELECT count(*) FROM pg_constraint WHERE conname LIKE 'chk\\_%'") == 0
     # What old code does: insert link rows that know nothing of the new columns.
-    await db_session.execute(insert(Book).values(asin="B00RKNEW0", title="n", region="us"))
-    await db_session.execute(insert(author_book).values(author_id=seeded, book_asin="B00RKNEW0"))
+    await _add_old_book(db_session, "B00RKNEW0")
+    await db_session.execute(text(f"INSERT INTO author_book (author_id, book_asin) VALUES ({seeded}, 'B00RKNEW0')"))
     await db_session.commit()
     assert await _scalar(engine, "SELECT count(*) FROM author_book WHERE book_region IS NULL") == 1
 
@@ -412,12 +436,17 @@ async def test_unfinalize_restores_what_a_2_1_x_writer_needs_and_finalize_can_re
         for spec in WINDOW_INDEXES:
             assert await rk._index_state(conn, spec.name) is None, spec.name
         for spec in ONLINE_INDEXES:
-            assert await rk._index_state(conn, spec.name) == (True, True), spec.name
+            assert await rk._index_state(conn, spec.name) == (True, spec.unique), spec.name
     # the old writer's shapes work again: NULL link rows, a region-less series, a new track
-    await db_session.execute(insert(Book).values(asin="B00RKNEW0", title="n", region="us"))
-    await db_session.execute(insert(author_book).values(author_id=seeded, book_asin="B00RKNEW0"))
-    await db_session.execute(insert(Series).values(asin="B00RKSER9", title="s9"))
-    db_session.add(Track(asin="B00RKNEW0", chapters={"chapters": []}))
+    await _add_old_book(db_session, "B00RKNEW0")
+    await db_session.execute(text(f"INSERT INTO author_book (author_id, book_asin) VALUES ({seeded}, 'B00RKNEW0')"))
+    await db_session.execute(text(
+        "INSERT INTO series (asin, title, fetched_description, created_at, updated_at) "
+        f"VALUES ('B00RKSER9', 's9', false, {STAMP}, {STAMP})"
+    ))
+    await db_session.execute(text(
+        f"INSERT INTO tracks (asin, chapters, created_at, updated_at) VALUES ('B00RKNEW0', '[]', {STAMP}, {STAMP})"
+    ))
     await db_session.commit()
 
 

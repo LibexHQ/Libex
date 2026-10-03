@@ -48,11 +48,11 @@ async def _seed(session, *, first="us", second="uk"):
     for region, stamp in ((first, FIRST), (second, SECOND)):
         await session.execute(insert(Book).values(
             asin=ASIN, region=region, title=f"Title {region}", sku_group=SKU,
-            created_at=stamp, updated_at=stamp,
+            created_at=stamp, updated_at=stamp, is_primary=region == first,
         ))
         await session.execute(insert(Series).values(
             asin=SERIES_ASIN, region=region, title=f"Series {region}",
-            created_at=stamp, updated_at=stamp,
+            created_at=stamp, updated_at=stamp, is_primary=region == first,
         ))
         await session.execute(insert(Track).values(
             asin=ASIN, region=region, chapters={"chapters": [{"title": region}]},
@@ -155,12 +155,12 @@ async def test_sku_route_returns_every_variant_ordered_by_region(client, db_sess
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_author_books_default_to_the_authors_region_with_override(client, db_session):
+async def test_author_books_default_to_every_linked_book_with_a_region_filter(client, db_session):
     await _seed(db_session)
     path = f"/db/author/{AUTHOR_ASIN}/books"
 
     default = await client.get(path)
-    assert [b["region"] for b in default.json()] == ["us"]
+    assert sorted(b["region"] for b in default.json()) == ["uk", "us"]
 
     override = await client.get(path, params={"book_region": "uk"})
     assert [b["region"] for b in override.json()] == ["uk"]

@@ -36,6 +36,12 @@ What changes, on a prepared database:
     non-unique indexes the new unique key now covers by prefix
     (book_narrator_index, book_genre_index, book_series_index,
     series_author_index) are dropped.
+  - genre_book_index, which serves the genre and category filters, widens from
+    (genre_asin, book_asin) to (genre_asin, book_asin, book_region), because
+    those filters now read the region of every link they find. Without it the
+    planner reads the whole of book_genre (about 11M rows) instead of probing
+    it. The script builds the wider index ahead of time under the name
+    genre_book_region_index; this revision drops the old one and renames it.
   - every foreign key onto books or series becomes the composite one,
     ON DELETE CASCADE, added NOT VALID: enforced for every new row and every
     delete at once, without a scan of the link tables while the table locks
@@ -107,6 +113,14 @@ _INDEXES = {
     ),
     "uq_series_author_region": ("series_author", ("series_asin", "series_region", "author_id")),
 }
+
+# The wider replacement for genre_book_index, built ahead of time by the
+# script under this name (non-unique): name -> table, columns. This revision
+# renames it to the old index's name once that is dropped.
+_WIDENED = {
+    "genre_book_region_index": ("book_genre", ("genre_asin", "book_asin", "book_region")),
+}
+_WIDENED_FINAL = "genre_book_index"
 
 # table -> (primary key constraint name, index adopted as it)
 _PRIMARY_KEYS = {
@@ -188,6 +202,9 @@ def _build_empty() -> None:
     for name, (table, columns) in _INDEXES.items():
         op.execute(f"DROP INDEX IF EXISTS {name}")
         op.execute(f"CREATE UNIQUE INDEX {name} ON {table} ({_cols(columns)})")
+    for name, (table, columns) in _WIDENED.items():
+        op.execute(f"DROP INDEX IF EXISTS {name}")
+        op.execute(f"CREATE INDEX {name} ON {table} ({_cols(columns)})")
 
 
 def _precondition_failures() -> list[str]:
@@ -224,8 +241,18 @@ def _precondition_failures() -> list[str]:
             "JOIN pg_class t ON t.oid = i.indrelid "
             "JOIN pg_namespace n ON n.oid = c.relnamespace "
             "WHERE n.nspname = current_schema() AND c.relname = ANY(:names)"
-        ), {"names": list(_INDEXES)})
+        ), {"names": [*_INDEXES, *_WIDENED]})
     }
+    for name, (table, columns) in _WIDENED.items():
+        row = indexes.get(name)
+        if row is None:
+            failures.append(f"index {name} does not exist")
+        elif row[1] != table or tuple(row[5]) != columns:
+            failures.append(f"index {name} is not on {table} ({_cols(columns)})")
+        elif not row[2]:
+            failures.append(f"index {name} is invalid")
+        elif row[3] or row[4]:
+            failures.append(f"index {name} is unique or partial")
     for name, (table, columns) in _INDEXES.items():
         row = indexes.get(name)
         if row is None:
@@ -337,6 +364,12 @@ def upgrade() -> None:
     for name, _table, _columns in _DROPPED_INDEXES:
         op.execute(f"DROP INDEX IF EXISTS {name}")
 
+    # The narrower genre_book_index gives way to the wider one built ahead of
+    # time; the rename is a catalog change.
+    for name in _WIDENED:
+        op.execute(f"DROP INDEX IF EXISTS {_WIDENED_FINAL}")
+        op.execute(f"ALTER INDEX {name} RENAME TO {_WIDENED_FINAL}")
+
 
 def _refuse_if_regions_diverge() -> None:
     bind = op.get_bind()
@@ -395,3 +428,8 @@ def downgrade() -> None:
 
     for name, table, columns in _DROPPED_INDEXES:
         op.execute(f"CREATE INDEX IF NOT EXISTS {name} ON {table} ({_cols(columns)})")
+
+    # Back to the narrower genre_book_index. Ordinary (blocking) DDL, like the
+    # rest of this downgrade.
+    op.execute(f"DROP INDEX IF EXISTS {_WIDENED_FINAL}")
+    op.execute(f"CREATE INDEX {_WIDENED_FINAL} ON book_genre (genre_asin, book_asin)")

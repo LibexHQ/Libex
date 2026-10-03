@@ -195,6 +195,15 @@ async def test_backfill_copies_the_source_region_in_batches_and_is_idempotent(en
     assert await _scalar(engine, "SELECT count(DISTINCT series_region) FROM series_author") == 2
 
 
+async def test_backfill_analyzes_every_touched_table_and_logs_it(engine, seeded, monkeypatch):
+    await rk.expand(engine, _Stop())
+    seen: list[dict] = []
+    monkeypatch.setattr(rk.logger, "info", lambda msg, *a, extra=None, **k: seen.append({"msg": msg, **(extra or {})}))
+    assert await rk.backfill(engine, _Stop(), 2) == EXIT_OK
+    steps = {e["step"] for e in seen if e["msg"] == "RegionKeys: step done" and e["step"].startswith("analyze ")}
+    assert steps == {f"analyze {t}" for t in {c.table for c in REGION_COLUMNS}}
+
+
 async def test_backfill_is_resumable_after_a_stop(engine, seeded):
     await rk.expand(engine, _Stop())
     assert await rk.backfill(engine, _StopAfter(2), 1) == EXIT_STOPPED
@@ -365,6 +374,21 @@ async def test_finalize_aborts_when_row_counts_change(engine, seeded, monkeypatc
     monkeypatch.setattr(rk, "_row_counts", counts)
     with pytest.raises(FinalizeAbort, match="row counts changed"):
         await rk.finalize(engine, _Stop(), 2)
+
+
+async def test_finalize_builds_the_window_indexes_before_any_column_is_made_not_null(engine, seeded, monkeypatch):
+    """A failed index build must leave the columns nullable, which 2.1.x can run against."""
+    await _full_cycle(engine)
+
+    async def failing_build(eng, spec):
+        return False
+
+    monkeypatch.setattr(rk, "_build_index", failing_build)
+    with pytest.raises(FinalizeAbort, match="could not be built"):
+        await rk.finalize(engine, _Stop(), 2)
+    async with engine.connect() as conn:
+        for col in FINAL_COLUMNS:
+            assert await rk._column_info(conn, col.table, col.column) == "YES", col.label
 
 
 # --- unfinalize --------------------------------------------------------------

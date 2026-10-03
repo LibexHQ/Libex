@@ -114,8 +114,8 @@ starting, because two runs can drop each other's in-progress index build.
 STOPPING. SIGTERM/SIGINT set a flag consulted between batches and between
 statements; a batch in flight commits first, a CONCURRENTLY build already
 running is left to finish (cancelling it is exactly what leaves an invalid
-index). A stop that arrives while a lock wait is backing off ends the run at
-once. Every mode is safe to run again after a stop.
+index). A stop that arrives while a lock wait is backing off wakes the wait
+within a fraction of a second and ends the run. Every mode is safe to run again after a stop.
 
 EXIT CODES.
 
@@ -181,6 +181,7 @@ BATCH_STATEMENT_TIMEOUT_MS = 120000
 LOCK_ATTEMPTS = 8
 BACKOFF_BASE_SECONDS = 1.0
 BACKOFF_MAX_SECONDS = 30.0
+STOP_POLL_SECONDS = 0.25
 
 # SQLSTATEs worth another attempt: lock_not_available, deadlock_detected.
 _RETRYABLE_SQLSTATES = frozenset({"55P03", "40P01"})
@@ -359,6 +360,16 @@ def _sqlstate(exc: BaseException) -> str | None:
     return None
 
 
+async def _sleep_unless_stopped(seconds: float, stop: _Stop) -> None:
+    """Sleeps in short slices so a stop signal ends a long backoff early."""
+    deadline = time.monotonic() + seconds
+    while not stop.requested:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        await asyncio.sleep(min(remaining, STOP_POLL_SECONDS))
+
+
 async def _retry[T](label: str, op: Callable[[], Awaitable[T]], stop: _Stop) -> T:
     """Runs op, retrying with backoff while it fails to get a lock."""
     for attempt in range(1, LOCK_ATTEMPTS + 1):
@@ -374,7 +385,9 @@ async def _retry[T](label: str, op: Callable[[], Awaitable[T]], stop: _Stop) -> 
             )
             if stop.requested:
                 raise StopRequested(label) from exc
-            await asyncio.sleep(delay)
+            await _sleep_unless_stopped(delay, stop)
+            if stop.requested:
+                raise StopRequested(label) from exc
     raise AssertionError("unreachable")
 
 
@@ -550,6 +563,14 @@ async def backfill(engine: AsyncEngine, stop: _Stop, batch_size: int = DEFAULT_B
         if not finished:
             logger.info("RegionKeys: backfill stopped before finishing")
             return EXIT_STOPPED
+    # The passes rewrote millions of rows: refresh planner statistics so the
+    # first queries after the cut-over are not planned from the old ones.
+    # ANALYZE only; a rewriting VACUUM would hold each table exclusively.
+    for table in sorted({c.table for c in REGION_COLUMNS}):
+        if stop.requested:
+            logger.info("RegionKeys: backfill stopped before analyzing")
+            return EXIT_STOPPED
+        await _ddl(engine, f"analyze {table}", f"ANALYZE {table}", stop)
     logger.info("RegionKeys: backfill complete")
     return EXIT_OK
 
@@ -837,9 +858,15 @@ async def _single_run_lock(engine: AsyncEngine) -> AsyncIterator[None]:
         try:
             yield
         finally:
-            # Closing the connection would release it too; being explicit
-            # keeps the lifetime readable.
-            await conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": ADVISORY_LOCK_KEY})
+            # A dead connection has already dropped the session lock, and a
+            # failed unlock must not turn the run's own result into a failure.
+            try:
+                await conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": ADVISORY_LOCK_KEY})
+            except Exception as exc:
+                logger.warning(
+                    "RegionKeys: could not release the run lock",
+                    extra={"error_type": type(exc).__name__, "sqlstate": _sqlstate(exc)},
+                )
 
 
 async def _dispatch(args: argparse.Namespace, engine: AsyncEngine, stop: _Stop) -> int:

@@ -2,14 +2,16 @@
 scripts/region_keys.py entry point and guards that need no database.
 
 What only the entry point can get wrong: setup_logging running before
-anything else (a standalone script emits nothing without it), finalize
-refusing to start without its maintenance-window flag, and the script refusing
+anything else (a standalone script emits nothing without it), finalize and
+unfinalize refusing to start without their maintenance-window flag, and the script refusing
 any backend but Postgres before it opens a connection. The behaviour against
 a real schema lives in tests/integration/test_region_keys.py.
 """
 
 # Standard library
+import asyncio
 import contextlib
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -138,6 +140,47 @@ async def test_a_stop_during_backoff_raises_stop_requested_not_the_db_error(monk
     with pytest.raises(rk.StopRequested):
         await rk._retry("x", op, stop)
     assert calls["n"] == 1
+
+
+async def test_a_stop_wakes_a_long_backoff_early(monkeypatch):
+    monkeypatch.setattr(rk, "BACKOFF_BASE_SECONDS", 30)
+    monkeypatch.setattr(rk, "STOP_POLL_SECONDS", 0.01)
+    stop = rk._Stop()
+
+    async def op():
+        asyncio.get_running_loop().call_later(0.05, stop.request)
+        raise _dbapi_error("55P03")
+
+    started = time.monotonic()
+    with pytest.raises(rk.StopRequested):
+        await rk._retry("x", op, stop)
+    assert time.monotonic() - started < 2
+
+
+async def test_a_failed_unlock_is_a_warning_not_a_failed_run(monkeypatch):
+    class Conn:
+        async def execution_options(self, **kw):
+            return self
+
+        async def execute(self, stmt, params=None):
+            if "unlock" in str(stmt):
+                raise _dbapi_error("08006")
+            return SimpleNamespace(scalar_one=lambda: True)
+
+    class Ctx:
+        async def __aenter__(self):
+            return Conn()
+
+        async def __aexit__(self, *a):
+            return False
+
+    eng = MagicMock()
+    eng.connect = lambda: Ctx()
+    warned: list[str] = []
+    monkeypatch.setattr(rk.logger, "warning", lambda msg, *a, **k: warned.append(msg))
+    async with rk._single_run_lock(eng):
+        pass
+    assert warned == ["RegionKeys: could not release the run lock"]
 
 
 def _args(mode: str):

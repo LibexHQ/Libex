@@ -10,6 +10,22 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [2.1.2]
+
+No endpoint, parameter, response shape, field or status code moved, and the application behaves exactly as before. This release adds an operator script and nothing else; there is no database migration.
+
+### Added
+- **An operator script prepares the database for region-aware keys.** Books and series are identified by ASIN and region, but the stored link tables point at the ASIN alone. `scripts/region_keys.py` does the slow, data-proportional part of widening that, against the running service, so the schema revision that adopts the new keys does not have to rewrite every link row while the API is down. Run it from the API image, one mode at a time, with `python -m scripts.region_keys <mode>`:
+  - `expand` adds nullable region columns to the link tables (`author_book`, `book_narrator`, `book_genre`, `book_series`, `series_author`) and to `tracks`. It waits for its lock under a timeout and retries, so it does not queue behind a long reader and stall other queries.
+  - `backfill` fills those columns in batches, one commit per batch. It is safe to stop and run again: what is left to do is read from the data, not from a saved position. When every column is filled it runs `ANALYZE` on each table it touched, so the planner has fresh statistics; that does not take an exclusive lock, and `finalize` does the same through its catch-up. Rows the running app inserts meanwhile arrive without a region and are picked up later by `finalize`.
+  - `index` builds the region-aware unique indexes on the link tables and `tracks` without blocking writes, checks each is valid afterwards, and rebuilds one that a failed build left invalid. The running application is unaffected: it leaves the new columns NULL there, and NULLs never conflict.
+  - `verify` is a read-only readiness report and exits `1` unless the database is ready. `--pre-window` relaxes that to columns present and the `index` indexes valid.
+  - `finalize` is for the maintenance window only and refuses to run without `--i-have-stopped-writers`. It catches up the backfill, builds the two unique indexes on `books` and `series` (`uq_books_asin_region`, `uq_series_asin_region`), makes the columns `NOT NULL`, and aborts if any row count changed or any NULL remains. Those two indexes are not built earlier because, while they exist, this release's upserts (`ON CONFLICT (asin)`) raise instead of merging when two first inserts of the same title land at once.
+  - `unfinalize` is the rollback, also behind `--i-have-stopped-writers`. It drops `NOT NULL` on exactly the columns `finalize` set and drops the two indexes `finalize` built, so this release's application can run again; the columns, their values and the `index` indexes stay, and `finalize` can be run again later.
+  - **`finalize` is a one-way door for the running application.** After it, this release's writer fails: it inserts link rows, new tracks and series without a region, and it upserts books and series against an index that is no longer the only unique key. The application must stay stopped until the schema revision that adopts the new keys is deployed, or `unfinalize` is run. To roll back: stop every writer, run `python -m scripts.region_keys unfinalize --i-have-stopped-writers`, then start the previous version. That works only until the schema revision has run; after that, use the revision's downgrade.
+  - Only one run at a time is allowed (a database advisory lock); a second exits `1` with a message. The script only works on Postgres and exits `2` on any other database. It exits `3` if stopped by a signal, including a stop that arrives while it waits to retry a lock. Its failure log lines carry the error type and SQLSTATE, never the database's error text.
+  - Through `expand`, `backfill` and `index` nothing in the application depends on the new columns, and an operator who does not run the script sees no difference from this release.
+
 ## [2.1.1]
 
 Only the text of the API description on `/docs` and `/redoc` changed. No endpoint, parameter, response shape, field or status code moved.

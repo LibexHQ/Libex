@@ -139,7 +139,7 @@ def _build_book_upsert(insert):
     guard: keeping returning() off is the part that holds no matter what the
     set_ is later rewritten to say.
 
-    Three asymmetries in the merge are load-bearing and must survive any edit
+    Four asymmetries in the merge are load-bearing and must survive any edit
     that regenerates this from the column list:
 
     - created_at is written on insert and absent from the update. Deriving the

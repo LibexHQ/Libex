@@ -431,24 +431,24 @@ ABS will then call `/us/search?title=...&author=...` which returns the `{"matche
 | GET | `/categories` | List Audible's genre categories for a region as a nested tree (up to five levels deep), or a flat list with `?flat=true`; limit the levels with `?depth=N` (`depth=1` for just the top-level parents) — the ids for the `category` param |
 | GET | `/{region}/search` | Regional search for Audiobookshelf compatibility |
 | GET | `/{region}/quick-search/search` | Regional quick search for Audiobookshelf compatibility |
-| GET | `/db/book` | Query the local indexed book library |
+| GET | `/db/book` | Query the local indexed book library. Without `?region=`, each ASIN appears once, as its first-stored record, and filters are tested against that record; pass a region to list that marketplace's records |
 | GET | `/db/book/{asin}` | Get a single book from local DB. Books are stored per region; `?region=xx` picks one, otherwise you get the record stored first |
 | GET | `/db/book/{asin}/chapters` | Get chapter data from local DB (optional `?region=xx`, as above) |
 | GET | `/db/book/sku/{sku}` | Get books by SKU group from local DB |
 | GET | `/db/plans` | Get all distinct Audible plan names from local DB |
-| GET | `/db/plans/{plan_name}` | Get all books under a specific plan from local DB |
+| GET | `/db/plans/{plan_name}` | Get all books under a specific plan from local DB (`region` as for `/db/book`) |
 | GET | `/db/genres` | Get all distinct genre/tag names from local DB |
-| GET | `/db/vvab` | Get all virtual voice audiobooks (AI-narrated) from local DB |
-| GET | `/db/new-releases` | Get recently released books from local DB, newest first |
-| GET | `/db/coming-soon` | Get upcoming books from local DB, soonest first |
+| GET | `/db/vvab` | Get all virtual voice audiobooks (AI-narrated) from local DB (`region` as for `/db/book`) |
+| GET | `/db/new-releases` | Get recently released books from local DB, newest first (`region` as for `/db/book`) |
+| GET | `/db/coming-soon` | Get upcoming books from local DB, soonest first (`region` as for `/db/book`) |
 | GET | `/db/stats` | Get counts of books, authors, narrators, series, and books with chapters in local DB. Pass `region` to scope books, authors, series, and booksWithChapters to one region — narrators has no region column so it stays global, `books` counts stored records, one per ASIN and region, while `distinctBookAsins` counts the ASINs among them; a scoped response also carries `seriesRegionUnknown`, kept for compatibility and always `0` |
 | GET | `/db/stats/badge/{metric}.svg` | The same counts drawn as an SVG badge, for embedding in a page. `metric` is one of `books`, `booksWithChapters`, `authors`, `narrators`, `series`; `region` scopes it the same way, and `label=false` draws the bare number with no label |
 | GET | `/db/author/{asin}` | Get author from local DB |
 | GET | `/db/author/{asin}/books` | Get author's books from local DB |
 | GET | `/db/narrator` | Search narrators by name from local DB |
-| GET | `/db/narrator/books` | Get books by narrator name from local DB |
+| GET | `/db/narrator/books` | Get books by narrator name from local DB (`region` as for `/db/book`) |
 | GET | `/db/series/{asin}` | Get series from local DB (optional `?region=xx`, as above) |
-| GET | `/db/series/{asin}/books` | Get series books from local DB |
+| GET | `/db/series/{asin}/books` | Get series books from local DB (`region` as for `/db/book`) |
 | GET | `/health` | Health check |
 
 Full interactive documentation available at `/docs` when running.
@@ -474,7 +474,7 @@ The same filter set is available on the other book-list DB endpoints too — `/d
 | `publisher` | string | ILIKE |
 | `copyright` | string | ILIKE |
 | `isbn` | string | ILIKE |
-| `region` | string | exact |
+| `region` | string | exact. Omitted: each ASIN appears once, as its first-stored record, and filters are tested against that record |
 | `language` | string | exact |
 | `book_format` | string | exact |
 | `content_type` | string | exact |
@@ -729,6 +729,16 @@ If you deployed Libex before the VPN requirement and the backup/backfill/refresh
 3. Backup moved out of `docker-compose.yml` into its own stack. Remove the old `libex-backup` container — `docker rm -f libex-backup`, or redeploy the API stack with `--remove-orphans` — then deploy `docker-compose.backup.yml` on its own.
 4. The old deployment's `libex-backup-spool` and `libex-backup-ca` volumes are safe to remove once the new backup stack is running, unless you'd put a certificate directly into the CA volume rather than mounting it from a host path.
 5. Relative paths (like `LOGS_PATH`) now resolve against each stack's own compose file rather than a shared project directory — if you relied on several stacks sharing one relative logs path, set the same absolute `LOGS_PATH` in each stack's `.env` instead.
+
+### Upgrading to 2.2.0
+
+2.2.0 stores a book or series once per region, which changes the database keys. An instance that already holds data has to be prepared first; a fresh, empty database needs none of this. On one that holds data, the 2.2.0 container refuses to start until `finalize` has run.
+
+1. With the API still up on 2.1.2 or newer, run these one at a time inside the running API container (`docker exec <api-container> python -m scripts.region_keys <mode>`): `expand`, `backfill`, `index`, then `verify --pre-window`. They are additive and the running API is unaffected.
+2. In a short maintenance window with every writer stopped (the API, seeder, backfill and refresh stacks): take a backup, run `finalize --i-have-stopped-writers`, then deploy 2.2.0. If `index` ran from a version before 2.2.0, the migration builds the genre index itself, which adds about a minute or two to the window.
+3. With 2.2.0 up, run `validate` from the 2.2.0 API container (it does not exist in 2.1.x). It checks the existing rows against the new foreign keys without blocking reads or writes.
+
+`unfinalize --i-have-stopped-writers` undoes `finalize` while still on 2.1.x. Rolling the schema back after 2.2.0 has started refuses once any ASIN is stored under more than one region.
 
 ---
 

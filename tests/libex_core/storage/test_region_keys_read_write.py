@@ -222,6 +222,40 @@ async def test_the_writer_marks_the_first_stored_row_of_an_asin_primary():
         await store.close()
 
 
+async def test_rewriting_the_primary_row_after_another_region_arrived_keeps_it_primary():
+    """The update path never reconsiders the mark. A rewrite of the primary
+    row sees another region holding the ASIN, which is the condition that
+    makes a new row non-primary, so an update that re-evaluated it would
+    demote the primary row and leave the ASIN with none."""
+    store = LocalStore("sqlite+aiosqlite://")
+    await store.upgrade()
+    await store.open()
+    try:
+        product = {"asin": "T2", "region": "us", "title": "us",
+                   "series": [{"asin": "TS2", "name": "Saga"}]}
+        async with store.write() as writer:
+            await write_books(writer, [product])
+        async with store.write() as writer:
+            await write_books(writer, [{**product, "region": "uk", "title": "uk"}])
+        async with store.write() as writer:
+            await write_books(writer, [{**product, "title": "us rewritten"}])
+        async with store.session() as reader:
+            marks = {
+                r: p for r, p in (await reader.execute(
+                    select(Book.region, Book.is_primary).where(Book.asin == "T2")
+                )).all()
+            }
+            series_marks = {
+                r: p for r, p in (await reader.execute(
+                    select(Series.region, Series.is_primary).where(Series.asin == "TS2")
+                )).all()
+            }
+            assert marks == {"us": True, "uk": False}
+            assert series_marks == {"us": True, "uk": False}
+    finally:
+        await store.close()
+
+
 async def test_a_book_stored_before_regions_were_keyed_is_primary(session):
     """Every row of a store migrated from asin-only keys is the only one of its
     ASIN, and the column's default makes it primary."""
@@ -371,6 +405,15 @@ async def test_a_narrators_books_are_one_record_per_asin(session):
 # ============================================================
 # COUNTS
 # ============================================================
+
+async def test_distinct_asins_equal_the_primary_count(session):
+    """distinctBookAsins counts primary rows; that must stay equal to counting
+    the distinct ASINs themselves."""
+    from sqlalchemy import distinct, func
+
+    expected = (await session.execute(select(func.count(distinct(Book.asin))))).scalar_one()
+    assert (await stats.count_stored(session))["distinctBookAsins"] == expected == 3
+
 
 async def test_stored_counts_separate_records_from_asins(session):
     counts = await stats.count_stored(session)
@@ -528,6 +571,21 @@ async def test_a_series_write_with_no_region_anywhere_is_refused_not_guessed(sto
         assert await write_series_profile(session, {"asin": "S1", "name": "No region"}) is None
         await session.commit()
     assert await _rows(store, Series.__table__, "asin", "region") == []
+
+
+async def test_a_series_entry_too_thin_to_store_gets_no_links_and_costs_the_chunk_nothing(store):
+    """An entry with an asin and no name makes no series row, so it must make no
+    link to one either: a link to a missing row breaks the key for the chunk."""
+    await _write(store, _product("us", series=[
+        {"asin": "THIN", "position": "1"},
+        {"asin": "S1", "name": "saga", "position": "2"},
+    ]))
+    assert await _rows(store, Series.__table__, "asin", "region") == [("S1", "us")]
+    assert await _rows(store, book_series, "book_asin", "book_region", "series_asin", "series_region") == [
+        ("X1", "us", "S1", "us"),
+    ]
+    assert await _rows(store, series_author, "series_asin", "series_region") == [("S1", "us")]
+    assert await _rows(store, Book.__table__, "asin", "region") == [("X1", "us")]
 
 
 async def test_a_series_inside_a_book_with_no_region_of_its_own_takes_the_books(store):

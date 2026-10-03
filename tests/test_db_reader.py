@@ -2210,7 +2210,7 @@ def _executed_asin_chunks(session):
 
 
 @pytest.mark.asyncio
-async def test_series_positions_batch_fires_no_query_for_no_books():
+async def test_series_positions_by_book_fires_no_query_for_no_books():
     """An empty book list short-circuits: an IN () query would cost a round
     trip to answer nothing, and every author with no stored books takes
     this path."""
@@ -2221,7 +2221,7 @@ async def test_series_positions_batch_fires_no_query_for_no_books():
 
 
 @pytest.mark.asyncio
-async def test_series_positions_batch_sends_one_statement_at_the_chunk_ceiling():
+async def test_series_positions_by_book_sends_one_statement_at_the_chunk_ceiling():
     """5000 ASINs is the chunk size, so they still travel as one statement.
     Chunking that started early would cost the batch its whole point --
     this function exists to replace one query per book."""
@@ -2233,7 +2233,7 @@ async def test_series_positions_batch_sends_one_statement_at_the_chunk_ceiling()
 
 
 @pytest.mark.asyncio
-async def test_series_positions_batch_splits_the_list_one_past_the_ceiling():
+async def test_series_positions_by_book_splits_the_list_one_past_the_ceiling():
     """One ASIN past the ceiling is two statements, split 5000 then 1. The
     boundary is the assertion: a huge list asserting merely 'more than one
     statement' passes against a chunk size of 2 and against one of 30000,

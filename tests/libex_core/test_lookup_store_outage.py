@@ -397,6 +397,21 @@ async def test_chapters_of_a_book_stored_only_for_another_marketplace_are_not_st
         assert await read_books.get_track(session, ASIN) is None
 
 
+async def test_a_chapter_write_the_store_declined_reports_false(store, caplog):
+    """The book was there when looked for and gone when written: the writer
+    answers None, which is a refusal and not a stored listing."""
+    from unittest.mock import AsyncMock, patch
+
+    await get_book(batch_get(**{ASIN: product(ASIN)}), ASIN, region="us", store=store)
+    caplog.set_level(logging.INFO, logger="libex")
+
+    with patch("libex_core.storage.write.write_track", new=AsyncMock(return_value=None)):
+        stored = await store_module.persist_track(store, ASIN, CHAPTERS, "us")
+
+    assert stored is False
+    assert any(r.getMessage() == "Not written to the store" for r in caplog.records)
+
+
 # Section: reads in chunks
 
 async def test_stored_books_are_read_in_chunks_of_the_read_size(store, monkeypatch):

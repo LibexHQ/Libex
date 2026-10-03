@@ -386,7 +386,7 @@ async def get_db_author_books(
     asin: Annotated[str, Depends(valid_asin("Author ASIN"))],
     region: str = Depends(valid_region),
     filters=Depends(book_filters(exclude={"region", "author_name"})),
-    book_region: Annotated[str | None, Query(description="Optional filter; without it every linked book is returned")] = None,
+    book_region: Annotated[str | None, Query(description="Optional filter; without it every linked book is returned, one per stored region, so an ASIN can appear more than once; pass a region to list only that marketplace's records")] = None,
     sort: Annotated[BookSortField | None, Query(description="Field to sort by")] = None,
     order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
     session: AsyncSession = Depends(get_session),

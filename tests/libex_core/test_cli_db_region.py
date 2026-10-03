@@ -33,9 +33,9 @@ async def _add_uk_rows(path: str) -> None:
         await store.open()
         async with store.write() as session:
             session.add(_book("B000000001", "the first quest, uk", region="uk",
-                              created_at=LATER, updated_at=LATER))
+                              created_at=LATER, updated_at=LATER, is_primary=False))
             session.add(Series(asin="S000000001", title="Quest Saga UK", region="uk",
-                               created_at=LATER, updated_at=LATER))
+                               created_at=LATER, updated_at=LATER, is_primary=False))
             await session.flush()
             session.add(Track(asin="B000000001", region="uk",
                               chapters={"chapters": [{"title": "Un"}], "n": 1},

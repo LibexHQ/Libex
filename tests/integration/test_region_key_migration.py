@@ -383,8 +383,61 @@ def test_a_missing_index_is_refused(scratch):
     _refused(scratch, "index uq_book_genre_region does not exist", skip_index="uq_book_genre_region")
 
 
-def test_a_missing_widened_genre_index_is_refused(scratch):
-    _refused(scratch, "index genre_book_region_index does not exist", skip_index="genre_book_region_index")
+def _widened_index_definition(engine):
+    with engine.connect() as c:
+        return c.execute(text(
+            "SELECT pg_get_indexdef(indexrelid) FROM pg_index "
+            "WHERE indexrelid = 'genre_book_index'::regclass"
+        )).scalar()
+
+
+def test_a_missing_widened_genre_index_is_built_by_the_revision(scratch, capsys):
+    """The one precondition repaired, not refused: a plain index that enforces
+    nothing, built while writers are stopped, logged with its elapsed time."""
+    engine, url = scratch
+    _seed(engine)
+    _prepare(engine, skip_index="genre_book_region_index")
+
+    _alembic(url, "upgrade", POST)
+
+    assert _head(engine) == POST
+    assert _widened_index_definition(engine).endswith("(genre_asin, book_asin, book_region)")
+    # alembic's logging setup writes to the stream that is current when it
+    # runs, which is the one captured here.
+    logged = capsys.readouterr().err
+    assert "building genre_book_region_index" in logged and "missing" in logged
+    assert "built genre_book_region_index in " in logged
+
+
+def test_an_invalid_widened_genre_index_is_rebuilt_by_the_revision(scratch):
+    engine, url = scratch
+    _seed(engine)
+    _prepare(engine)
+    with engine.begin() as c:
+        c.execute(text(
+            "UPDATE pg_index SET indisvalid = false "
+            "WHERE indexrelid = 'genre_book_region_index'::regclass"
+        ))
+
+    _alembic(url, "upgrade", POST)
+
+    assert _head(engine) == POST
+    with engine.connect() as c:
+        assert c.execute(text(
+            "SELECT indisvalid FROM pg_index WHERE indexrelid = 'genre_book_index'::regclass"
+        )).scalar() is True
+
+
+def test_a_prepared_widened_genre_index_is_not_rebuilt(scratch):
+    engine, url = scratch
+    _seed(engine)
+    _prepare(engine)
+    with engine.connect() as c:
+        oid = c.execute(text("SELECT 'genre_book_region_index'::regclass::oid")).scalar()
+    _alembic(url, "upgrade", POST)
+    with engine.connect() as c:
+        # Renamed into place, still the same relation: not dropped and rebuilt.
+        assert c.execute(text("SELECT 'genre_book_index'::regclass::oid")).scalar() == oid
 
 
 def test_a_column_still_nullable_is_refused(scratch):

@@ -42,6 +42,9 @@ What changes, on a prepared database:
     planner reads the whole of book_genre (about 11M rows) instead of probing
     it. The script builds the wider index ahead of time under the name
     genre_book_region_index; this revision drops the old one and renames it.
+    That index is the one precondition repaired rather than refused: if it is
+    missing or invalid the revision builds it with a plain CREATE INDEX (it
+    enforces nothing, and writers are stopped), logging the elapsed time.
   - every foreign key onto books or series becomes the composite one,
     ON DELETE CASCADE, added NOT VALID: enforced for every new row and every
     delete at once, without a scan of the link tables while the table locks
@@ -71,12 +74,16 @@ delete. It keeps the region columns, now nullable again so the older code can
 insert without them, and builds the old keys with ordinary (blocking) DDL, so
 run it with the writers stopped.
 """
+import logging
+import time
 from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
+
+logger = logging.getLogger("alembic.runtime.migration")
 
 revision: str = 'e7c2a94d1f58'
 down_revision: Union[str, Sequence[str], None] = 'b8d2e5a71c46'
@@ -207,6 +214,42 @@ def _build_empty() -> None:
         op.execute(f"CREATE INDEX {name} ON {table} ({_cols(columns)})")
 
 
+def _ensure_widened_indexes() -> None:
+    """Builds a missing or invalid wider index with a plain CREATE INDEX.
+
+    The one precondition this revision repairs rather than asserts. It is not
+    a key and enforces nothing, so building it cannot change what the data
+    says, and the revision runs with writers stopped, so the blocking build is
+    harmless: about 80 seconds on 10.6M link rows. Refusing to start over an
+    index the operator could simply have built later would leave the container
+    restarting. An index that exists and is valid is left alone, and one that
+    is on the wrong columns still fails the assertions below.
+    """
+    bind = op.get_bind()
+    for name, (table, columns) in _WIDENED.items():
+        state = bind.execute(sa.text(
+            "SELECT i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = current_schema() AND c.relname = :name"
+        ), {"name": name}).scalar()
+        if state:
+            continue
+        have = {row[0] for row in bind.execute(sa.text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = :t"
+        ), {"t": table})}
+        if not set(columns) <= have:
+            # An unprepared database: the column assertions report it, and
+            # there is nothing to build an index on yet.
+            continue
+        logger.info("building %s on %s (%s): %s", name, table, _cols(columns),
+                    "missing" if state is None else "invalid")
+        started = time.monotonic()
+        op.execute(f"DROP INDEX IF EXISTS {name}")
+        op.execute(f"CREATE INDEX {name} ON {table} ({_cols(columns)})")
+        logger.info("built %s in %.1fs", name, time.monotonic() - started)
+
+
 def _precondition_failures() -> list[str]:
     bind = op.get_bind()
     failures: list[str] = []
@@ -333,6 +376,7 @@ def upgrade() -> None:
     if _tables_are_empty():
         _build_empty()
 
+    _ensure_widened_indexes()
     failures = _precondition_failures()
     if failures:
         raise RuntimeError(

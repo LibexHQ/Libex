@@ -191,6 +191,7 @@ async def persist_track(
         store,
         "chapters",
         lambda s: write.write_track(s, asin, chapters, region=region),
+        refusal="the book is not stored for the region",
         region=region,
     )
 

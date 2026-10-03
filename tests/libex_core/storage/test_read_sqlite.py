@@ -97,10 +97,11 @@ async def test_a_missing_row_is_none_or_empty_not_an_error(sqlite_session):
 
 async def test_counts(sqlite_session):
     assert await stats.count_stored(sqlite_session) == {
-        "books": 15, "authors": 4, "narrators": 4, "series": 4, "booksWithChapters": 1,
+        "books": 15, "distinctBookAsins": 15, "authors": 4, "narrators": 4, "series": 4,
+        "booksWithChapters": 1,
     }
     scoped = await stats.count_stored(sqlite_session, "us")
-    assert scoped["seriesRegionUnknown"] == 1
+    assert scoped["seriesRegionUnknown"] == 0
 
 
 async def test_a_failing_read_raises_instead_of_answering_empty():

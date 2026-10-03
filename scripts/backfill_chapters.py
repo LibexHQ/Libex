@@ -95,7 +95,7 @@ from datetime import datetime, timezone
 
 # Third party
 import httpx
-from sqlalchemy import select, update
+from sqlalchemy import literal, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 # Database
@@ -610,13 +610,38 @@ class _NoneRateGuard:
 # One row of the corpus walk, in the order _read_page selects them.
 _PageRow = tuple[str, str, datetime | None, datetime | None]
 
+# The walk's position: the (asin, region) of the last book a page ended on.
+# Books are keyed by the pair, so an asin alone is not a position -- the same
+# asin stored for two regions is two rows, and a cursor naming only the asin
+# would step over the second.
+_Cursor = tuple[str, str]
+
+
+def _after(cursor: _Cursor):
+    """
+    The keyset condition: books strictly after `cursor` in (asin, region) order.
+
+    The cursor values are bound with the columns' own types. region is a
+    Postgres enum, and a plain string bind makes the row comparison an
+    unresolvable enum-against-varchar operator.
+    """
+    asin, region = cursor
+    return tuple_(Book.asin, Book.region) > tuple_(
+        literal(asin, Book.asin.type), literal(region, Book.region.type)
+    )
+
 
 async def _read_page(
-    session: AsyncSession, cursor: str | None, size: int
+    session: AsyncSession, cursor: _Cursor | None, size: int
 ) -> list[_PageRow]:
     """
     One keyset page of (asin, region, chapters_checked_at, release_date),
-    ordered by the primary key.
+    ordered by the primary key (asin, region).
+
+    The keyset test is the row comparison (asin, region) > cursor, which
+    Postgres plans as one range scan over the composite primary key. A bare
+    `asin > cursor` would skip every other region's row for the asin the
+    previous page ended on.
 
     The eligibility test happens after this call, in Python, not in the WHERE
     clause -- see _select_work for the rule, and this docstring for why it
@@ -652,11 +677,11 @@ async def _read_page(
     """
     stmt = (
         select(Book.asin, Book.region, Book.chapters_checked_at, Book.release_date)
-        .order_by(Book.asin)
+        .order_by(Book.asin, Book.region)
         .limit(size)
     )
     if cursor is not None:
-        stmt = stmt.where(Book.asin > cursor)
+        stmt = stmt.where(_after(cursor))
     result = await session.execute(stmt)
     return [(row[0], row[1], row[2], row[3]) for row in result.all()]
 
@@ -703,8 +728,8 @@ def _select_work(rows: list[_PageRow], now: datetime) -> list[tuple[str, str]]:
 
 
 def _advance_cursor(
-    rows: list[_PageRow], cursor: str | None, wrapped: bool
-) -> tuple[str | None, bool, bool]:
+    rows: list[_PageRow], cursor: _Cursor | None, wrapped: bool
+) -> tuple[_Cursor | None, bool, bool]:
     """
     Pure wrap-around policy: reached the end of the corpus once -> wrap the
     cursor back to the start for one more pass; reached it a second time,
@@ -716,10 +741,15 @@ def _advance_cursor(
         if wrapped:
             return cursor, wrapped, True
         return None, True, False
-    return rows[-1][0], wrapped, False
+    return (rows[-1][0], rows[-1][1]), wrapped, False
 
 
-async def _mark_checked(session: AsyncSession, asin: str) -> None:
+def _format_cursor(cursor: _Cursor | None) -> str:
+    """The RESUME CURSOR log text: "ASIN:region", or "(start)" before page one."""
+    return "(start)" if cursor is None else f"{cursor[0]}:{cursor[1]}"
+
+
+async def _mark_checked(session: AsyncSession, asin: str, region: str) -> None:
     """
     Stamps chapters_checked_at, recording that this book's chapters have been
     asked about.
@@ -730,16 +760,30 @@ async def _mark_checked(session: AsyncSession, asin: str) -> None:
     question was put, and _select_work re-admits the book once its release
     date has passed. So this write needs no condition of its own; writing it
     unconditionally is what makes the comparison there possible.
+
+    Keyed by (asin, region): the stamp belongs to the one marketplace's record
+    that was asked about, and an asin-only match would stamp the same title's
+    row in every other region as checked without a request ever having been
+    made for it.
     """
     await session.execute(
-        update(Book).where(Book.asin == asin).values(chapters_checked_at=_now())
+        update(Book)
+        .where(Book.asin == asin, Book.region == region)
+        .values(chapters_checked_at=_now())
     )
     await session.commit()
 
 
-async def _store_chapters(session: AsyncSession, asin: str, chapters: dict) -> None:
+async def _store_chapters(
+    session: AsyncSession, asin: str, chapters: dict, *, region: str
+) -> None:
     """
-    Writes the track row. Upserts by asin so a re-run just refreshes it --
+    Writes the track row. Upserts by (asin, region), the table's primary key,
+    so a re-run just refreshes it and never touches the same title's listing
+    in another marketplace. The region is required, with no default, for the
+    reason upsert_track's is: a listing filed under the wrong marketplace is a
+    silent error. Chapters are an Audible answer for one region's record.
+    Upserts so a re-run just refreshes it --
     except that a response carrying no chapters cannot erase a stored listing
     that has some.
 
@@ -768,12 +812,13 @@ async def _store_chapters(session: AsyncSession, asin: str, chapters: dict) -> N
 
     stmt = insert(Track).values(
         asin=asin,
+        region=region,
         chapters=chapters,
         created_at=_now(),
         updated_at=_now(),
     )
     stmt = stmt.on_conflict_do_update(
-        index_elements=["asin"],
+        index_elements=["asin", "region"],
         set_={
             "chapters": _chaptered_wins(stmt.excluded.chapters, Track.chapters),
             "updated_at": _now(),
@@ -795,7 +840,7 @@ async def _store_chapters(session: AsyncSession, asin: str, chapters: dict) -> N
         # says which path it came from.
         logger.warning(
             "Kept stored chapters over an empty response",
-            extra={"asin": asin, "stored_chapters": stored_count},
+            extra={"asin": asin, "region": region, "stored_chapters": stored_count},
         )
 
 
@@ -850,14 +895,14 @@ async def _process_one(
         # treat as an error. Settled for a book already out; for one asked ahead
         # of its release date the mark is exactly what lets _select_work bring it
         # back afterwards.
-        await _mark_checked(session, asin)
+        await _mark_checked(session, asin, region)
         return _Outcome.NOT_FOUND, False, False, elapsed
     except AudibleAPIException as e:
         elapsed = time.monotonic() - started
         if e.upstream_status in _PERMANENT_UPSTREAM_STATUSES:
             # Confirmed permanent per-ASIN fact -- see _PERMANENT_UPSTREAM_STATUSES.
             # Mark it and move on exactly like a 404: no retry, not an error.
-            await _mark_checked(session, asin)
+            await _mark_checked(session, asin, region)
             return _Outcome.PERMANENT, False, False, elapsed
         logger.warning(f"Backfill: fetch error for {asin} ({region}): {type(e).__name__}: {e}")
         is_auth_trouble = e.upstream_status in (401, 403)
@@ -875,13 +920,13 @@ async def _process_one(
 
     # Resolved, but no chapters present.
     if not data.get("content_metadata", {}).get("chapter_info"):
-        await _mark_checked(session, asin)
+        await _mark_checked(session, asin, region)
         return _Outcome.NONE, False, False, elapsed
 
     try:
         chapters = normalize_chapters(data, asin, region)
-        await _store_chapters(session, asin, chapters)
-        await _mark_checked(session, asin)
+        await _store_chapters(session, asin, chapters, region=region)
+        await _mark_checked(session, asin, region)
         return _Outcome.STORED, False, False, elapsed
     except Exception as e:
         # write failure -- leave unmarked so a later pass retries it. Not a
@@ -1126,7 +1171,7 @@ async def _run(limit: int | None) -> int:
     ramp = _Ramp(gate)
 
     active_until = time.monotonic() + ACTIVE_HOURS * 3600
-    cursor: str | None = None
+    cursor: _Cursor | None = None
     wrapped = False
 
     def _should_stop() -> bool:
@@ -1162,7 +1207,7 @@ async def _run(limit: int | None) -> int:
                 )
                 continue
             cursor = next_cursor
-            logger.info(f"RESUME CURSOR: {cursor}")
+            logger.info(f"RESUME CURSOR: {_format_cursor(cursor)}")
 
             work = _select_work(rows, _now())
             if not work:
@@ -1214,7 +1259,7 @@ async def _run(limit: int | None) -> int:
                 "ratchet_tripped": run.ratchet.tripped,
             },
         )
-        logger.info(f"RESUME CURSOR: {cursor or '(start)'}")
+        logger.info(f"RESUME CURSOR: {_format_cursor(cursor)}")
 
     # 0: clean (finished the corpus, hit --limit, or a plain stop request).
     # 1: aborted -- a second 429/401/403 after the ratchet's floor, sustained

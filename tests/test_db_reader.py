@@ -7,6 +7,7 @@ All DB interactions are mocked — we test our logic not SQLAlchemy.
 # Standard library
 import logging
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 # Third party
@@ -14,10 +15,10 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 
 # Local
+from libex_core.storage.read.shapes import series_positions_by_book
 from app.services.db.reader import (
     _book_to_dict,
     _audible_link,
-    _get_series_positions_batch,
     get_book_from_db,
     get_books_from_db,
     get_author_from_db,
@@ -1287,8 +1288,8 @@ class _TransactionAbortingSession:
 
 
 @pytest.mark.asyncio
-async def test_get_db_stats_returns_counts_for_all_five_metrics():
-    """Maps each of the five count queries to its own response key, in order."""
+async def test_get_db_stats_returns_counts_for_all_six_metrics():
+    """Maps each of the six count queries to its own response key, in order."""
     session = AsyncMock()
     session.execute = AsyncMock(side_effect=[
         _cache_miss_result(),      # cache read (miss)
@@ -1297,6 +1298,7 @@ async def test_get_db_stats_returns_counts_for_all_five_metrics():
         _stats_count_result(85),   # narrators
         _stats_count_result(18),   # series
         _stats_count_result(7),    # booksWithChapters
+        _stats_count_result(140),  # distinctBookAsins
         MagicMock(),                # cache write
     ])
 
@@ -1304,6 +1306,7 @@ async def test_get_db_stats_returns_counts_for_all_five_metrics():
 
     assert result.stats == {
         "books": 150,
+        "distinctBookAsins": 140,
         "authors": 42,
         "narrators": 85,
         "series": 18,
@@ -1336,6 +1339,7 @@ async def test_get_db_stats_books_with_chapters_counts_tracks_table():
         _stats_count_result(85),
         _stats_count_result(18),
         _stats_count_result(7),
+        _stats_count_result(140),
         MagicMock(),
     ])
 
@@ -1363,6 +1367,7 @@ async def test_get_db_stats_fallback_on_exception_includes_books_with_chapters()
 
     assert result.stats == {
         "books": 0,
+        "distinctBookAsins": 0,
         "authors": 0,
         "narrators": 0,
         "series": 0,
@@ -1380,6 +1385,7 @@ async def test_get_db_stats_returns_cached_value_without_querying_counts():
     session = AsyncMock()
     cached = {
         "books": 150,
+        "distinctBookAsins": 140,
         "authors": 42,
         "narrators": 85,
         "series": 18,
@@ -1417,6 +1423,7 @@ async def test_get_db_stats_stale_cache_shape_is_treated_as_miss():
         _stats_count_result(85),
         _stats_count_result(18),
         _stats_count_result(7),
+        _stats_count_result(140),
         MagicMock(),
     ])
 
@@ -1424,6 +1431,7 @@ async def test_get_db_stats_stale_cache_shape_is_treated_as_miss():
 
     assert result.stats == {
         "books": 150,
+        "distinctBookAsins": 140,
         "authors": 42,
         "narrators": 85,
         "series": 18,
@@ -1450,6 +1458,7 @@ async def test_get_db_stats_cache_read_error_falls_back_to_live_query():
             _stats_count_result(85),
             _stats_count_result(18),
             _stats_count_result(7),
+            _stats_count_result(140),
             MagicMock(),
         ],
     )
@@ -1458,6 +1467,7 @@ async def test_get_db_stats_cache_read_error_falls_back_to_live_query():
 
     assert result.stats == {
         "books": 150,
+        "distinctBookAsins": 140,
         "authors": 42,
         "narrators": 85,
         "series": 18,
@@ -1479,6 +1489,7 @@ async def test_get_db_stats_cache_write_error_still_returns_live_counts():
         _stats_count_result(85),
         _stats_count_result(18),
         _stats_count_result(7),
+        _stats_count_result(140),
         Exception("cache write unavailable"),
     ])
 
@@ -1487,6 +1498,7 @@ async def test_get_db_stats_cache_write_error_still_returns_live_counts():
     assert result.cache_expires_at is None
     assert result.stats == {
         "books": 150,
+        "distinctBookAsins": 140,
         "authors": 42,
         "narrators": 85,
         "series": 18,
@@ -1500,11 +1512,11 @@ async def test_get_db_stats_cache_write_error_still_returns_live_counts():
 
 
 def _region_stats_side_effect(books=100, authors=200, narrators=999, series=300,
-                               chapters=400, series_region_unknown=5):
+                               chapters=400, distinct=90):
     """The execute() side-effect queue for one full region-scoped live
-    query: cache miss, then books/authors/narrators/series/chapters in the
-    order get_db_stats issues them, then seriesRegionUnknown, then the
-    cache write."""
+    query: cache miss, then books/authors/narrators/series/chapters and the
+    distinct-ASIN count in the order get_db_stats issues them, then the
+    cache write. seriesRegionUnknown is a constant 0 and costs no query."""
     return [
         _cache_miss_result(),
         _stats_count_result(books),
@@ -1512,16 +1524,17 @@ def _region_stats_side_effect(books=100, authors=200, narrators=999, series=300,
         _stats_count_result(narrators),
         _stats_count_result(series),
         _stats_count_result(chapters),
-        _stats_count_result(series_region_unknown),
+        _stats_count_result(distinct),
         MagicMock(),
     ]
 
 
 @pytest.mark.asyncio
-async def test_get_db_stats_no_region_returns_exactly_the_original_five_keys():
+async def test_get_db_stats_no_region_returns_exactly_the_unscoped_keys():
     """
-    The unscoped guarantee: region=None must return precisely the key set
-    get_db_stats has always returned. seriesRegionUnknown only exists for a
+    The unscoped guarantee: region=None returns the five keys get_db_stats
+    has always returned plus distinctBookAsins, and nothing else.
+    seriesRegionUnknown only exists for a
     region-scoped call — its presence here would mean an unscoped caller
     silently gets a shape it never asked for and no schema pinned it against.
     """
@@ -1533,12 +1546,15 @@ async def test_get_db_stats_no_region_returns_exactly_the_original_five_keys():
         _stats_count_result(85),
         _stats_count_result(18),
         _stats_count_result(7),
+        _stats_count_result(140),
         MagicMock(),
     ])
 
     result = await get_db_stats(session, region=None)
 
-    assert set(result.stats.keys()) == {"books", "authors", "narrators", "series", "booksWithChapters"}
+    assert set(result.stats.keys()) == {
+        "books", "distinctBookAsins", "authors", "narrators", "series", "booksWithChapters",
+    }
     assert "seriesRegionUnknown" not in result.stats
 
 
@@ -1555,13 +1571,14 @@ async def test_get_db_stats_no_region_cache_key_is_unsuffixed():
         _stats_count_result(85),
         _stats_count_result(18),
         _stats_count_result(7),
+        _stats_count_result(140),
         MagicMock(),
     ])
 
     await get_db_stats(session, region=None)
 
     cache_read_stmt = session.execute.call_args_list[0][0][0]
-    cache_write_stmt = session.execute.call_args_list[6][0][0]
+    cache_write_stmt = session.execute.call_args_list[7][0][0]
     assert cache_read_stmt.compile().params["key_1"] == "db_stats"
     assert cache_write_stmt.compile().params["key"] == "db_stats"
 
@@ -1800,25 +1817,20 @@ async def test_get_db_stats_narrators_stays_global_when_region_given():
 
 
 @pytest.mark.asyncio
-async def test_get_db_stats_region_scoped_adds_series_region_unknown():
-    """A region-scoped response carries seriesRegionUnknown -- the count of
-    series rows with no recorded region, which fall out of every per-region
-    series count and so would otherwise disappear with nothing showing the
-    per-region total is short."""
+async def test_get_db_stats_region_scoped_carries_series_region_unknown_as_zero():
+    """A region-scoped response keeps seriesRegionUnknown so the shape does
+    not change under a caller. A series row has a region by construction now
+    -- it is part of the key -- so the count is a constant 0 and costs no
+    query."""
     session = AsyncMock()
-    session.execute = AsyncMock(side_effect=_region_stats_side_effect(
-        series=300, series_region_unknown=5,
-    ))
+    session.execute = AsyncMock(side_effect=_region_stats_side_effect(series=300))
 
     result = await get_db_stats(session, region="us")
 
-    assert result.stats["seriesRegionUnknown"] == 5
+    assert result.stats["seriesRegionUnknown"] == 0
     assert result.stats["series"] == 300
-
-    series_region_unknown_stmt = session.execute.call_args_list[6][0][0]
-    compiled = str(series_region_unknown_stmt.compile(compile_kwargs={"literal_binds": True}))
-    assert "FROM series" in compiled
-    assert "series.region IS NULL" in compiled
+    assert result.stats["distinctBookAsins"] == 90
+    assert session.execute.call_count == 8
 
 
 @pytest.mark.asyncio
@@ -1834,6 +1846,7 @@ async def test_get_db_stats_region_scoped_fallback_on_exception_includes_series_
 
     assert result.stats == {
         "books": 0,
+        "distinctBookAsins": 0,
         "authors": 0,
         "narrators": 0,
         "series": 0,
@@ -1865,6 +1878,7 @@ async def test_get_db_stats_refresh_false_is_the_unchanged_cache_aside_read():
     from "not passed" fails here."""
     cached = {
         "books": 150,
+        "distinctBookAsins": 140,
         "authors": 42,
         "narrators": 85,
         "series": 18,
@@ -1903,6 +1917,7 @@ async def test_get_db_stats_refresh_skips_the_cache_read_entirely():
         _stats_count_result(85),
         _stats_count_result(18),
         _stats_count_result(7),
+        _stats_count_result(140),
         MagicMock(),
     ])
 
@@ -1913,6 +1928,7 @@ async def test_get_db_stats_refresh_skips_the_cache_read_entirely():
     assert "cache" not in first_statement
     assert result.stats == {
         "books": 150,
+        "distinctBookAsins": 140,
         "authors": 42,
         "narrators": 85,
         "series": 18,
@@ -1934,15 +1950,17 @@ async def test_get_db_stats_refresh_writes_the_fresh_counts_over_the_stored_entr
         _stats_count_result(85),
         _stats_count_result(18),
         _stats_count_result(7),
+        _stats_count_result(140),
         MagicMock(),
     ])
 
     await get_db_stats(session, refresh=True)
 
-    write_params = session.execute.call_args_list[5][0][0].compile().params
+    write_params = session.execute.call_args_list[6][0][0].compile().params
     assert write_params["key"] == "db_stats"
     assert write_params["value"] == {
         "books": 150,
+        "distinctBookAsins": 140,
         "authors": 42,
         "narrators": 85,
         "series": 18,
@@ -1967,6 +1985,7 @@ async def test_get_db_stats_refresh_never_clears_the_key_first():
         _stats_count_result(85),
         _stats_count_result(18),
         _stats_count_result(7),
+        _stats_count_result(140),
         MagicMock(),
     ])
 
@@ -1996,6 +2015,7 @@ async def test_get_db_stats_refresh_failure_writes_nothing_at_all():
     assert result.cache_expires_at is None
     assert result.stats == {
         "books": 0,
+        "distinctBookAsins": 0,
         "authors": 0,
         "narrators": 0,
         "series": 0,
@@ -2063,6 +2083,7 @@ async def test_get_db_stats_cache_write_failure_rolls_the_session_back():
         _stats_count_result(85),
         _stats_count_result(18),
         _stats_count_result(7),
+        _stats_count_result(140),
         Exception("cache write unavailable"),
     ])
 
@@ -2091,6 +2112,7 @@ async def test_get_db_stats_cache_write_failure_leaves_the_session_usable_for_th
         _stats_count_result(85),
         _stats_count_result(18),
         _stats_count_result(7),
+        _stats_count_result(140),
         _CacheWriteAbortingSession.FAIL,
         # Second entry, on the same session, healthy throughout.
         _stats_count_result(151),
@@ -2098,6 +2120,7 @@ async def test_get_db_stats_cache_write_failure_leaves_the_session_usable_for_th
         _stats_count_result(86),
         _stats_count_result(19),
         _stats_count_result(8),
+        _stats_count_result(141),
         MagicMock(),
     ])
 
@@ -2108,6 +2131,7 @@ async def test_get_db_stats_cache_write_failure_leaves_the_session_usable_for_th
     assert session.rollback_count >= 1
     assert second.stats == {
         "books": 151,
+        "distinctBookAsins": 141,
         "authors": 43,
         "narrators": 86,
         "series": 19,
@@ -2131,7 +2155,7 @@ async def test_get_db_stats_refresh_scoped_keeps_its_own_key_and_key_set():
         _stats_count_result(999),
         _stats_count_result(300),
         _stats_count_result(400),
-        _stats_count_result(5),
+        _stats_count_result(90),
         MagicMock(),
     ])
 
@@ -2140,13 +2164,14 @@ async def test_get_db_stats_refresh_scoped_keeps_its_own_key_and_key_set():
     write_params = session.execute.call_args_list[6][0][0].compile().params
     assert write_params["key"] == "db_stats:us"
     assert set(result.stats) == {
-        "books", "authors", "narrators", "series", "booksWithChapters", "seriesRegionUnknown",
+        "books", "distinctBookAsins", "authors", "narrators", "series", "booksWithChapters",
+        "seriesRegionUnknown",
     }
-    assert result.stats["seriesRegionUnknown"] == 5
+    assert result.stats["seriesRegionUnknown"] == 0
 
 
 # ============================================================
-# _get_series_positions_batch — chunked IN query
+# series_positions_by_book — chunked IN query
 # ============================================================
 # The batch reads series positions for every book its caller holds, and
 # get_author_books_from_db applies no limit, so the ASIN list is as long as
@@ -2171,6 +2196,11 @@ def _positions_session():
     return session
 
 
+def _books_of(asins):
+    """Stand-ins for stored books: the reader only reads their asin."""
+    return [SimpleNamespace(asin=asin) for asin in asins]
+
+
 def _executed_asin_chunks(session):
     """The ASIN list bound into each statement, one entry per execute call."""
     return [
@@ -2180,30 +2210,30 @@ def _executed_asin_chunks(session):
 
 
 @pytest.mark.asyncio
-async def test_series_positions_batch_fires_no_query_for_no_books():
+async def test_series_positions_by_book_fires_no_query_for_no_books():
     """An empty book list short-circuits: an IN () query would cost a round
     trip to answer nothing, and every author with no stored books takes
     this path."""
     session = _positions_session()
 
-    assert await _get_series_positions_batch(session, []) == {}
+    assert await series_positions_by_book(session, []) == {}
     session.execute.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_series_positions_batch_sends_one_statement_at_the_chunk_ceiling():
+async def test_series_positions_by_book_sends_one_statement_at_the_chunk_ceiling():
     """5000 ASINs is the chunk size, so they still travel as one statement.
     Chunking that started early would cost the batch its whole point --
     this function exists to replace one query per book."""
     session = _positions_session()
 
-    await _get_series_positions_batch(session, [f"B{i:09d}" for i in range(5000)])
+    await series_positions_by_book(session, _books_of([f"B{i:09d}" for i in range(5000)]))
 
     assert [len(chunk) for chunk in _executed_asin_chunks(session)] == [5000]
 
 
 @pytest.mark.asyncio
-async def test_series_positions_batch_splits_the_list_one_past_the_ceiling():
+async def test_series_positions_by_book_splits_the_list_one_past_the_ceiling():
     """One ASIN past the ceiling is two statements, split 5000 then 1. The
     boundary is the assertion: a huge list asserting merely 'more than one
     statement' passes against a chunk size of 2 and against one of 30000,
@@ -2214,7 +2244,7 @@ async def test_series_positions_batch_splits_the_list_one_past_the_ceiling():
     asins = [f"B{i:09d}" for i in range(5001)]
     session = _positions_session()
 
-    await _get_series_positions_batch(session, asins)
+    await series_positions_by_book(session, _books_of(asins))
 
     chunks = _executed_asin_chunks(session)
     assert [len(chunk) for chunk in chunks] == [5000, 1]
@@ -2504,3 +2534,20 @@ async def test_get_stored_genres_returns_the_oldest_last_checked_not_the_newest(
 
     assert last_checked == oldest
     assert [g["genre_id"] for g in genres] == ["P1", "C1", "C2"]
+
+
+# ============================================================
+# REGION PASS-THROUGH
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_single_record_readers_log_the_region_they_were_asked_for(caplog):
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=Exception("boom"))
+    with caplog.at_level(logging.WARNING):
+        assert await get_book_from_db(session, "B0X", region="uk") is None
+        assert await get_track_from_db(session, "B0X", region="uk") is None
+        assert await get_series_from_db(session, "B0X", region="uk") is None
+    records = [r for r in caplog.records if "DB read failed" in r.getMessage()]
+    assert len(records) == 3
+    assert all(r.region == "uk" and r.asin == "B0X" for r in records)

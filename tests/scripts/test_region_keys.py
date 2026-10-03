@@ -52,6 +52,16 @@ def test_finalize_refuses_without_the_writers_stopped_flag(monkeypatch):
     run.assert_not_called()
 
 
+def test_validate_runs_with_the_application_up_so_it_needs_no_maintenance_flag(monkeypatch):
+    monkeypatch.setattr(rk, "setup_logging", lambda: None)
+    monkeypatch.setattr(rk, "get_settings", lambda: _settings("postgresql+asyncpg://x/y"))
+    monkeypatch.setattr(rk, "_make_engine", lambda url: MagicMock())
+    run = AsyncMock(return_value=0)
+    monkeypatch.setattr(rk, "_run", run)
+    rk.main(["validate"])
+    assert run.await_args.args[0].mode == "validate"
+
+
 @pytest.mark.parametrize("url", ["sqlite+aiosqlite:///x.db", "mysql+aiomysql://u@h/d"])
 def test_refuses_a_non_postgres_backend_before_connecting(monkeypatch, url):
     monkeypatch.setattr(rk, "setup_logging", lambda: None)

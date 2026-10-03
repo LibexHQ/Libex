@@ -14,15 +14,29 @@ from libex_core.storage.write.support import (
 )
 
 
-def series_params(series: dict, now: datetime) -> dict | None:
+def series_params(
+    series: dict, now: datetime, default_region: str | None = None
+) -> dict | None:
     """
     Binds one series for the series upsert, or None when it carries too little
     to write -- the same asin-and-name guard the series writer has always
     applied.
+
+    A series is identified by (asin, region). One that arrives through a
+    book's relationships and names no region of its own belongs to the book's
+    marketplace, which the caller passes as default_region; a series profile
+    names its own. With no region from either, None: the row cannot be keyed.
     """
     asin = series.get("asin")
     name = series.get("name") or series.get("title")
     if not asin or not name:
+        return None
+
+    region = series.get("region") or default_region
+    if not region:
+        # No marketplace to file it under, and a series row's region is part of
+        # its key. Refused rather than guessed: a standalone series write has
+        # no book to take one from.
         return None
 
     description = series.get("description")
@@ -30,7 +44,7 @@ def series_params(series: dict, now: datetime) -> dict | None:
         "asin": asin,
         "title": name,
         "description": description,
-        "region": series.get("region"),
+        "region": region,
         "fetched_description": bool(description),
         "audible_extras": series.get("audibleExtras"),
         "extras_withheld": series.get("extrasWithheld"),

@@ -146,6 +146,7 @@ def test_the_cli_region_list_is_the_library_region_list():
 _DB_REGION_UNSET = {
     ("db", "books"), ("db", "series-books"), ("db", "narrator-books"), ("db", "plan"),
     ("db", "vvab"), ("db", "new-releases"), ("db", "coming-soon"), ("db", "stats"),
+    ("db", "book"), ("db", "chapters"), ("db", "series"),
 }
 # The author's marketplace is part of an author's identity, so it defaults.
 _DB_REGION_DEFAULTED = {("db", "author"), ("db", "author-books")}

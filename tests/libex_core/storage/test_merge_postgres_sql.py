@@ -91,9 +91,12 @@ def test_blank_set_is_exactly_unicode_white_space():
 @pytest.mark.parametrize("dialect", [postgresql.dialect, asyncpg.dialect], ids=["pyformat", "asyncpg"])
 def test_json_bind_is_the_hosted_cast_bind(dialect):
     hosted_form = insert(Book).values(
-        asin=bindparam("asin"), plans=cast(bindparam("plans", type_=JSONB(none_as_null=True)), JSONB)
+        asin=bindparam("asin"), region=bindparam("region"),
+        plans=cast(bindparam("plans", type_=JSONB(none_as_null=True)), JSONB),
     )
-    core_form = insert(Book).values(asin=bindparam("asin"), plans=merge.json_bind("plans"))
+    core_form = insert(Book).values(
+        asin=bindparam("asin"), region=bindparam("region"), plans=merge.json_bind("plans")
+    )
     ours = core_form.compile(dialect=dialect())
     theirs = hosted_form.compile(dialect=dialect())
     assert str(ours) == str(theirs)
@@ -101,7 +104,9 @@ def test_json_bind_is_the_hosted_cast_bind(dialect):
 
 
 def test_json_bind_keeps_none_as_sql_null_on_postgres():
-    compiled = insert(Book).values(asin=bindparam("asin"), plans=merge.json_bind("plans")).compile(dialect=asyncpg.dialect())
+    compiled = insert(Book).values(
+        asin=bindparam("asin"), region=bindparam("region"), plans=merge.json_bind("plans")
+    ).compile(dialect=asyncpg.dialect())
     bind_type = compiled.binds["plans"].type
     assert bind_type.dialect_impl(asyncpg.dialect()).none_as_null is True
 

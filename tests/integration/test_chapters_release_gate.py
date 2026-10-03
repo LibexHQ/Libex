@@ -49,7 +49,7 @@ AHEAD = NOW + timedelta(days=30)        # releases in a month
 LONG_AGO = NOW - timedelta(days=400)
 RECENT = NOW - timedelta(days=1)
 
-# Both writers take (session, asin) and stamp the same column; the id is what
+# Both writers take (session, asin, region) and stamp the same column; the id is what
 # names the failing path in the report.
 WRITERS = [_mark_chapters_checked, _mark_checked]
 WRITER_IDS = ["service", "backfill"]
@@ -124,7 +124,7 @@ async def test_a_book_that_has_not_released_is_still_stamped(db_session, mark):
     nothing to compare against later and the book would be re-fetched on
     every single pass instead of once after release."""
     await _seed(db_session, "B00UNRELEAS", checked=None, release_date=AHEAD)
-    await mark(db_session, "B00UNRELEAS")
+    await mark(db_session, "B00UNRELEAS", "us")
     assert await _stamp(db_session, "B00UNRELEAS") is not None
 
 
@@ -134,7 +134,7 @@ async def test_a_book_that_has_not_released_is_still_stamped(db_session, mark):
 async def test_a_released_book_is_stamped(db_session, mark):
     """The ordinary case, unchanged, and settled by this write for good."""
     await _seed(db_session, "B00RELEASED", checked=None, release_date=OUT)
-    await mark(db_session, "B00RELEASED")
+    await mark(db_session, "B00RELEASED", "us")
     assert await _stamp(db_session, "B00RELEASED") is not None
 
 
@@ -146,7 +146,7 @@ async def test_a_book_with_no_release_date_is_stamped(db_session, mark):
     direction — not at the write, and not at selection, where it leaves the
     book settled by this first check."""
     await _seed(db_session, "B00NULLDATE", checked=None, release_date=None)
-    await mark(db_session, "B00NULLDATE")
+    await mark(db_session, "B00NULLDATE", "us")
     assert await _stamp(db_session, "B00NULLDATE") is not None
 
 

@@ -116,7 +116,9 @@ def _stale_cutoff() -> datetime:
     return _now() - timedelta(days=SEED_STALE_DAYS)
 
 
-async def _get_missing_asins(session: AsyncSession, asins: list[str]) -> list[str]:
+async def _get_missing_asins(
+    session: AsyncSession, asins: list[str], region: str
+) -> list[str]:
     if not asins:
         return []
     # Postgres caps a single query at 32767 bind parameters, so the IN list is
@@ -125,7 +127,7 @@ async def _get_missing_asins(session: AsyncSession, asins: list[str]) -> list[st
     for i in range(0, len(asins), 5000):
         chunk = asins[i:i + 5000]
         result = await session.execute(
-            select(Book.asin).where(Book.asin.in_(chunk))
+            select(Book.asin).where(Book.asin.in_(chunk), Book.region == region)
         )
         existing.update(row[0] for row in result.fetchall())
     return [a for a in asins if a not in existing]
@@ -139,10 +141,12 @@ async def _stamp_author(author_id: int) -> None:
         await session.commit()
 
 
-async def _stamp_series(series_asin: str) -> None:
+async def _stamp_series(series_asin: str, region: str) -> None:
     async with SessionFactory() as session:
         await session.execute(
-            update(Series).where(Series.asin == series_asin).values(last_seeded_at=_now())
+            update(Series)
+            .where(Series.asin == series_asin, Series.region == region)
+            .values(last_seeded_at=_now())
         )
         await session.commit()
 
@@ -199,6 +203,7 @@ async def _gather_chapters(asins: list[str], region: str, delay: float) -> None:
         result = await session.execute(
             select(Book.asin).where(
                 Book.asin.in_(asins),
+                Book.region == region,
                 or_(
                     Book.chapters_checked_at.is_(None),
                     (Book.chapters_checked_at < Book.release_date)
@@ -299,7 +304,7 @@ async def _expand_authors(region: str, delay: float) -> dict[str, int]:
             persisted = True
             if book_asins:
                 async with SessionFactory() as session:
-                    missing = await _get_missing_asins(session, book_asins)
+                    missing = await _get_missing_asins(session, book_asins, region)
                 if missing:
                     persisted = await _fetch_and_persist(missing, region, delay)
                     stats["books_discovered"] += len(missing)
@@ -390,6 +395,7 @@ async def _expand_series(region: str, delay: float) -> dict[str, int]:
             select(Series.asin)
             .where(
                 Series.asin.isnot(None),
+                Series.region == region,
                 or_(Series.last_seeded_at.is_(None), Series.last_seeded_at < cutoff),
             )
             .distinct()
@@ -427,7 +433,7 @@ async def _expand_series(region: str, delay: float) -> dict[str, int]:
             persisted = True
             if book_asins:
                 async with SessionFactory() as session:
-                    missing = await _get_missing_asins(session, book_asins)
+                    missing = await _get_missing_asins(session, book_asins, region)
                 if missing:
                     persisted = await _fetch_and_persist(missing, region, delay)
                     stats["books_discovered"] += len(missing)
@@ -437,7 +443,7 @@ async def _expand_series(region: str, delay: float) -> dict[str, int]:
                     )
 
             if persisted:
-                await _stamp_series(series_asin)
+                await _stamp_series(series_asin, region)
                 stats["series_processed"] += 1
             else:
                 # See _expand_authors' identical guard: a shed chunk means these
@@ -528,7 +534,7 @@ async def _expand_narrators(region: str, delay: float) -> dict[str, int]:
             persisted = True
             if book_asins:
                 async with SessionFactory() as session:
-                    missing = await _get_missing_asins(session, book_asins)
+                    missing = await _get_missing_asins(session, book_asins, region)
                 if missing:
                     persisted = await _fetch_and_persist(missing, region, delay)
                     stats["books_discovered"] += len(missing)
@@ -714,7 +720,7 @@ async def _scan_new_releases(region: str, delay: float) -> dict[str, int]:
     # Persist the books we don't already have, even if some genres failed above.
     try:
         async with SessionFactory() as session:
-            missing = await _get_missing_asins(session, all_asins) if all_asins else []
+            missing = await _get_missing_asins(session, all_asins, region) if all_asins else []
         if missing:
             await _fetch_and_persist(missing, region, delay)
             stats["books_discovered"] = len(missing)

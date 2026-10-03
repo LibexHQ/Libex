@@ -6,13 +6,13 @@ return it with extra WHERE clauses applied. Kept separate from the readers so
 the same filter logic can be reused across every list endpoint.
 
 Relationship filters (author name, series name, genre) use subqueries on
-Book.asin rather than joins, so they compose with each other, with sorting,
+the book's (asin, region) rather than joins, so they compose with each other, with sorting,
 and with pagination without producing duplicate rows or conflicting joins on
 endpoints that already join those tables.
 """
 
 # Third party
-from sqlalchemy import Select, select
+from sqlalchemy import Select, select, tuple_
 
 # Local
 from libex_core.storage.models import (
@@ -40,11 +40,11 @@ def apply_genre_filter(stmt: Select, genre: str | None) -> Select:
         return stmt
 
     matching_books = (
-        select(book_genre.c.book_asin)
+        select(book_genre.c.book_asin, book_genre.c.book_region)
         .join(Genre, Genre.asin == book_genre.c.genre_asin)
         .where(ILike(Genre.name, f"%{genre}%"))
     )
-    return stmt.where(Book.asin.in_(matching_books))
+    return stmt.where(tuple_(Book.asin, Book.region).in_(matching_books))
 
 
 def apply_category_filter(stmt: Select, category: str | None) -> Select:
@@ -63,11 +63,11 @@ def apply_category_filter(stmt: Select, category: str | None) -> Select:
     if not ids:
         return stmt
     matching_books = (
-        select(book_genre.c.book_asin)
+        select(book_genre.c.book_asin, book_genre.c.book_region)
         .join(Genre, Genre.asin == book_genre.c.genre_asin)
         .where(Genre.asin.in_(ids))
     )
-    return stmt.where(Book.asin.in_(matching_books))
+    return stmt.where(tuple_(Book.asin, Book.region).in_(matching_books))
 
 
 def apply_book_filters(
@@ -105,8 +105,9 @@ def apply_book_filters(
     Applies the full set of Book filters to a select statement.
 
     Every filter is optional; a None value is skipped. Relationship filters
-    (author_name, series_name, genre) use Book.asin subqueries so they can be
-    combined freely and used on endpoints that already join those tables.
+    (author_name, series_name, genre) use subqueries on the book's (asin,
+    region) so they can be combined freely and used on endpoints that already
+    join those tables; a link counts for its own region's record only.
     """
     if title is not None:
         stmt = stmt.where(ILike(Book.title, f"%{title}%"))
@@ -126,18 +127,22 @@ def apply_book_filters(
         stmt = stmt.where(ILike(Book.isbn, f"%{isbn}%"))
     if author_name is not None:
         matching = (
-            select(author_book.c.book_asin)
+            select(author_book.c.book_asin, author_book.c.book_region)
             .join(Author, Author.id == author_book.c.author_id)
             .where(ILike(Author.name, f"%{author_name}%"))
         )
-        stmt = stmt.where(Book.asin.in_(matching))
+        stmt = stmt.where(tuple_(Book.asin, Book.region).in_(matching))
     if series_name is not None:
         matching = (
-            select(book_series.c.book_asin)
-            .join(Series, Series.asin == book_series.c.series_asin)
+            select(book_series.c.book_asin, book_series.c.book_region)
+            .join(
+                Series,
+                (Series.asin == book_series.c.series_asin)
+                & (Series.region == book_series.c.series_region),
+            )
             .where(ILike(Series.title, f"%{series_name}%"))
         )
-        stmt = stmt.where(Book.asin.in_(matching))
+        stmt = stmt.where(tuple_(Book.asin, Book.region).in_(matching))
     if language is not None:
         stmt = stmt.where(Book.language == language)
     if rating_better_than is not None:

@@ -75,7 +75,7 @@ async def _seed_linked_pair(path, kw=None) -> None:
             session.add(Book(asin="B000000001", title="t", region="us"))
             session.add(Author(id=1, name="a", region="us"))
             await session.flush()
-            await session.execute(author_book.insert().values(author_id=1, book_asin="B000000001"))
+            await session.execute(author_book.insert().values(author_id=1, book_asin="B000000001", book_region="us"))
     finally:
         await store.close()
 
@@ -91,7 +91,10 @@ def _scratch_migration(monkeypatch, *, orphan: bool = False):
         with operations.batch_alter_table("books", recreate="always") as batch:
             batch.create_index("ix_scratch_title", ["title"])
         if orphan:
-            connection.exec_driver_sql("INSERT INTO author_book VALUES (999, 'B000000001')")
+            connection.exec_driver_sql(
+                "INSERT INTO author_book (author_id, book_asin, book_region) "
+                "VALUES (999, 'B000000001', 'us')"
+            )
 
     monkeypatch.setattr(command, "upgrade", rebuild)
 

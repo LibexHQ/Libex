@@ -41,15 +41,17 @@ drain back to back, up to DRAIN_TIMEOUT_SECONDS x 2 (600s worst case), and
 grace ends in SIGKILL before a drain finishes, which rewinds the resume
 cursor a page.
 
-Restart with `--resume-from <asin>` (or REFRESH_RESUME_FROM), using the ASIN
-from the last `RESUME CURSOR:` log line.
+Restart with `--resume-from <asin>:<region>` (or REFRESH_RESUME_FROM), using
+the value from the last `RESUME CURSOR:` log line. Books are keyed by
+(asin, region), so the cursor is the pair; a bare ASIN is refused rather than
+guessed at, because guessing a region would silently skip or repeat rows.
 
 ENVIRONMENT.
 
     DATABASE_URL                      required. Same database the app uses,
                                        host libex-postgres; see RUN IT above.
     AUDIBLE_PROXY_URL                 required. Hostname must contain "refresh".
-    REFRESH_RESUME_FROM        (unset) ASIN to resume after (exclusive).
+    REFRESH_RESUME_FROM        (unset) ASIN:region to resume after (exclusive).
     LOG_LEVEL                  INFO    WARNING+ drops the RESUME CURSOR line
                                        and both the 429 and 5xx aborts, which
                                        key off a WARNING-level log record.
@@ -97,7 +99,7 @@ from typing import Any
 
 # Third party
 import httpx
-from sqlalchemy import func, select
+from sqlalchemy import func, literal, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Database
@@ -116,6 +118,58 @@ from app.services.audible import books as books_service
 from app.services.db import persist_queue
 
 logger = get_logger()
+
+# The walk's position: the (asin, region) of the last book a page ended on.
+# Books are keyed by the pair; an asin alone is not a position, since the same
+# asin stored for two regions is two rows and a cursor naming only the asin
+# would step over the second.
+Cursor = tuple[str, str]
+
+_CURSOR_REGIONS = frozenset({"us", "uk", "ca", "au", "de", "fr", "it", "es", "jp", "in", "br"})
+
+
+def _after(cursor: Cursor):
+    """
+    The keyset condition: books strictly after `cursor` in (asin, region) order.
+
+    The cursor values are bound with the columns' own types. region is a
+    Postgres enum, and a plain string bind makes the row comparison an
+    unresolvable enum-against-varchar operator.
+    """
+    asin, region = cursor
+    return tuple_(Book.asin, Book.region) > tuple_(
+        literal(asin, Book.asin.type), literal(region, Book.region.type)
+    )
+
+
+def format_cursor(cursor: Cursor | None) -> str:
+    """The RESUME CURSOR text: "ASIN:region", or "(start)" before page one."""
+    return "(start)" if cursor is None else f"{cursor[0]}:{cursor[1]}"
+
+
+def parse_cursor(text: str) -> Cursor:
+    """
+    Reads an "ASIN:region" resume cursor, raising ValueError on anything else.
+
+    Strict on purpose. A bare ASIN is what this flag took before books were
+    keyed by (asin, region), and a restart pasted from an old log line must
+    stop, not be reinterpreted: any region chosen for it would silently skip
+    or repeat rows of a run that took hours.
+    """
+    asin, sep, region = text.strip().partition(":")
+    if not sep or not asin or region not in _CURSOR_REGIONS:
+        raise ValueError(
+            f"resume cursor {text!r} must be ASIN:region with a region from "
+            f"{', '.join(sorted(_CURSOR_REGIONS))}, as printed by the RESUME CURSOR line"
+        )
+    return asin, region
+
+
+def _cursor_arg(text: str) -> Cursor:
+    try:
+        return parse_cursor(text)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from e
 
 
 # ============================================================
@@ -469,7 +523,7 @@ class _Ramp:
 class _Run:
     """Counters, the abort flag, and the cursor the exit line reports."""
 
-    def __init__(self, cursor: str | None) -> None:
+    def __init__(self, cursor: Cursor | None) -> None:
         self.cursor = cursor
         self.stopping = False
         self.abort_reason: str | None = None
@@ -501,16 +555,18 @@ class _Run:
 # PAGING AND CHUNKING
 # ============================================================
 
-async def _read_page(session: AsyncSession, cursor: str | None, size: int) -> list[tuple[str, str]]:
+async def _read_page(session: AsyncSession, cursor: Cursor | None, size: int) -> list[tuple[str, str]]:
     """
     One keyset page of (asin, region), ordered by the primary key.
 
-    `asin > cursor` on the primary key is an index range scan with no sort, so
-    the cost of a page does not grow with how far into the corpus it is.
+    `(asin, region) > cursor` on the composite primary key is an index range
+    scan with no sort, so the cost of a page does not grow with how far into
+    the corpus it is. A bare `asin > cursor` would skip the other regions'
+    rows of the asin the previous page ended on.
     """
-    stmt = select(Book.asin, Book.region).order_by(Book.asin).limit(size)
+    stmt = select(Book.asin, Book.region).order_by(Book.asin, Book.region).limit(size)
     if cursor is not None:
-        stmt = stmt.where(Book.asin > cursor)
+        stmt = stmt.where(_after(cursor))
     result = await session.execute(stmt)
     return [(row[0], row[1]) for row in result.all()]
 
@@ -812,14 +868,14 @@ def _raise_process_limits() -> None:
 # THE RUN
 # ============================================================
 
-async def _remaining_books(session: AsyncSession, cursor: str | None) -> int:
+async def _remaining_books(session: AsyncSession, cursor: Cursor | None) -> int:
     stmt = select(func.count()).select_from(Book)
     if cursor is not None:
-        stmt = stmt.where(Book.asin > cursor)
+        stmt = stmt.where(_after(cursor))
     return int((await session.execute(stmt)).scalar_one())
 
 
-async def _dry_run(cursor: str | None, pages: int) -> None:
+async def _dry_run(cursor: Cursor | None, pages: int) -> None:
     """
     Prints what the pass would do, without a single Audible call.
 
@@ -831,7 +887,7 @@ async def _dry_run(cursor: str | None, pages: int) -> None:
         total = await _remaining_books(session, cursor)
         logger.info("Refresh dry run: corpus", extra={
             "books_remaining": total,
-            "cursor": cursor or "(start)",
+            "cursor": format_cursor(cursor),
             "page_size": PAGE_SIZE,
             "chunk_size": CHUNK_SIZE,
         })
@@ -853,11 +909,11 @@ async def _dry_run(cursor: str | None, pages: int) -> None:
                 "first_asin": rows[0][0],
                 "last_asin": rows[-1][0],
             })
-            cursor = rows[-1][0]
-        logger.info(f"RESUME CURSOR: {cursor}")
+            cursor = rows[-1]
+        logger.info(f"RESUME CURSOR: {format_cursor(cursor)}")
 
 
-async def _run(cursor: str | None) -> int:
+async def _run(cursor: Cursor | None) -> int:
     _verify_dedicated_proxy()
     _verify_backlog_headroom()
     _raise_process_limits()
@@ -879,7 +935,7 @@ async def _run(cursor: str | None) -> int:
 
     logger.info("Refresh: starting", extra={
         "books_remaining": remaining,
-        "resume_from": cursor or "(start)",
+        "resume_from": format_cursor(cursor),
         "concurrency_start": CONCURRENCY_START,
         "concurrency_max": CONCURRENCY_MAX,
         "ramp_step": RAMP_STEP,
@@ -904,7 +960,7 @@ async def _run(cursor: str | None) -> int:
                 logger.info("Refresh: end of corpus reached")
                 break
 
-            page_end = rows[-1][0]
+            page_end = rows[-1]
             chunks = _chunks_for_page(rows, CHUNK_SIZE)
             logger.info("Refresh: page", extra={
                 "page": run.pages + 1,
@@ -951,7 +1007,7 @@ async def _run(cursor: str | None) -> int:
             if page_landed:
                 run.pages += 1
                 run.cursor = page_end
-                logger.info(f"RESUME CURSOR: {run.cursor}")
+                logger.info(f"RESUME CURSOR: {format_cursor(run.cursor)}")
             elif page_dispatched:
                 # Every chunk fetched, but persistence didn't drain within
                 # DRAIN_TIMEOUT_SECONDS -- not a blip this run can wait out
@@ -960,11 +1016,11 @@ async def _run(cursor: str | None) -> int:
                 # than re-fetch the same page forever with the cursor pinned.
                 run.abort("persist queue failed to drain within DRAIN_TIMEOUT_SECONDS")
                 logger.warning("Refresh: page not confirmed complete, cursor held", extra={
-                    "cursor": run.cursor or "(start)",
+                    "cursor": format_cursor(run.cursor),
                 })
             else:
                 logger.info("Refresh: stop requested mid-page, cursor held at the previous boundary", extra={
-                    "cursor": run.cursor or "(start)",
+                    "cursor": format_cursor(run.cursor),
                 })
     finally:
         if inflight:
@@ -999,7 +1055,7 @@ async def _run(cursor: str | None) -> int:
             "elapsed_minutes": round(run.elapsed / 60, 1),
             "clean_exit": drained and run.abort_reason is None and run.books_shed == 0,
         })
-        logger.info(f"RESUME CURSOR: {run.cursor or '(start)'}")
+        logger.info(f"RESUME CURSOR: {format_cursor(run.cursor)}")
 
     if run.abort_reason:
         return 1
@@ -1014,8 +1070,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--resume-from",
+        type=_cursor_arg,
         default=os.environ.get("REFRESH_RESUME_FROM") or None,
-        help="ASIN to resume after, as printed by the RESUME CURSOR line.",
+        help="ASIN:region to resume after, as printed by the RESUME CURSOR line.",
     )
     parser.add_argument(
         "--dry-run",

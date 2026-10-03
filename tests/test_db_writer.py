@@ -6,6 +6,7 @@ All DB interactions are mocked — we test our logic not SQLAlchemy.
 
 # Standard library
 import asyncio
+import logging
 import re
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -32,6 +33,7 @@ from app.services.db.writer import (
     _series_params,
     upsert_author,
     upsert_book,
+    upsert_series_profile,
     upsert_track,
     reconcile_genres,
     upsert_genres,
@@ -1011,7 +1013,8 @@ def test_upsert_book_uses_the_guarded_comparison_for_its_text_columns(column):
         "description": "a description",
         "summary": "a summary",
     }))
-    clause = _set_clauses(_compiled(session.execute.call_args_list[0].args[0]))[column]
+    # The first statement is the per-ASIN advisory lock; the upsert follows it.
+    clause = _set_clauses(_compiled(session.execute.call_args_list[1].args[0]))[column]
 
     assert f"COALESCE(LENGTH(BOOKS.{column}), -1)" in clause
 
@@ -1036,9 +1039,9 @@ def _track_upsert_sql(payload=None):
     that inlines literals, and a JSONB bind has no literal renderer, so this
     keeps the binds and returns the compiled object for its params too."""
     result = MagicMock()
-    result.scalar = MagicMock(return_value=0)
+    result.first = MagicMock(return_value=(0,))
     session = _session(result)
-    asyncio.run(upsert_track(session, "B0TRACKSQL", payload or {"chapters": []}))
+    asyncio.run(upsert_track(session, "B0TRACKSQL", payload or {"chapters": []}, region="us"))
     return session.execute.call_args_list[0].args[0].compile()
 
 
@@ -1614,3 +1617,56 @@ def test_series_params_binds_none_for_a_series_that_carries_no_extras():
         datetime(2026, 1, 1, tzinfo=timezone.utc),
     )
     assert params["audible_extras"] is None and params["extras_withheld"] is None
+
+
+# ============================================================
+# upsert_track — the book row must exist for the region
+# ============================================================
+# The listing is a child of the (asin, region) book row. The insert is
+# conditional on that row in the same statement, so a region the book is not
+# stored in is a skipped write with an info line, not a foreign key failure
+# logged as an error.
+
+def test_the_track_insert_is_conditional_on_the_book_row_for_the_region():
+    sql = str(_track_upsert_sql())
+    assert "INSERT INTO tracks (asin, region, chapters, created_at, updated_at) SELECT" in sql
+    assert "WHERE EXISTS (SELECT * \nFROM books" in sql
+    assert "books.asin = " in sql and "books.region = " in sql
+
+
+def test_a_track_for_a_region_the_book_is_not_stored_in_is_skipped_quietly(caplog):
+    result = MagicMock()
+    result.first = MagicMock(return_value=None)
+    session = _session(result)
+    session.commit = AsyncMock()
+    with caplog.at_level(logging.INFO):
+        asyncio.run(upsert_track(session, "B0NOBOOK01", {"chapters": [{"t": 1}]}, region="de"))
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("not stored for the region" in r.getMessage() for r in caplog.records)
+    assert not any("DB write: track" in r.getMessage() for r in caplog.records)
+    session.rollback.assert_not_called()
+
+
+# ============================================================
+# upsert_series_profile — a profile with no region is refused, not logged
+# ============================================================
+
+def test_a_series_profile_with_no_region_returns_none_and_logs_no_write(caplog):
+    session = _session()
+    session.commit = AsyncMock()
+    with caplog.at_level(logging.INFO):
+        result = asyncio.run(upsert_series_profile(session, {"asin": "B0SERIES01", "name": "Saga"}))
+    assert result is None
+    session.commit.assert_not_called()
+    assert not any("DB write: series" in r.getMessage() for r in caplog.records)
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_a_series_profile_with_a_region_returns_its_asin_and_logs_the_write(caplog):
+    session = _session(MagicMock(), MagicMock())
+    session.commit = AsyncMock()
+    profile = {"asin": "B0SERIES01", "name": "Saga", "region": "us"}
+    with caplog.at_level(logging.INFO):
+        result = asyncio.run(upsert_series_profile(session, profile))
+    assert result == "B0SERIES01"
+    assert any("DB write: series" in r.getMessage() for r in caplog.records)

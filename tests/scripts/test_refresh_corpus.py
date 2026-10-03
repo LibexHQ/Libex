@@ -24,9 +24,10 @@ mirroring scripts/backfill_chapters.py's own tests for the same function.
 """
 
 # Standard library
+import argparse
 import asyncio
 import logging
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # Third party
 import pytest
@@ -41,7 +42,10 @@ from scripts.refresh_corpus import (
     _ThrottleSentinel,
     _check_abort,
     _chunks_for_page,
+    _read_page,
     _verify_dedicated_proxy,
+    format_cursor,
+    parse_cursor,
 )
 import scripts.refresh_corpus as refresh_corpus
 
@@ -641,3 +645,62 @@ def test_raise_process_limits_refuses_when_the_semaphore_is_already_built(monkey
 
     with pytest.raises(RuntimeError, match="Audible semaphore already built"):
         refresh_corpus._raise_process_limits()
+
+
+# ============================================================
+# Resume cursor -- books are keyed (asin, region)
+# ============================================================
+
+def test_cursor_round_trips_through_its_log_text():
+    assert parse_cursor(format_cursor(("B0US00001", "uk"))) == ("B0US00001", "uk")
+    assert format_cursor(None) == "(start)"
+
+
+@pytest.mark.parametrize("text", ["B0US00001", "B0US00001:", ":us", "B0US00001:xx", "(start)", ""])
+def test_a_cursor_without_a_valid_region_is_refused_not_guessed(text):
+    """A bare ASIN is what an old log line holds. Reinterpreting it under any
+    region would silently skip or repeat rows of an hours-long run."""
+    with pytest.raises(ValueError):
+        parse_cursor(text)
+
+
+def test_the_resume_flag_rejects_a_bare_asin_loudly():
+    with pytest.raises(argparse.ArgumentTypeError):
+        refresh_corpus._cursor_arg("B0US00001")
+
+
+@pytest.mark.asyncio
+async def test_read_page_keysets_on_the_composite_primary_key():
+    from sqlalchemy.dialects import postgresql
+
+    result = MagicMock()
+    result.all = MagicMock(return_value=[])
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=result)
+
+    await _read_page(session, ("B0US00001", "uk"), 10)
+
+    sql = str(session.execute.call_args.args[0].compile(dialect=postgresql.dialect()))
+    assert "ORDER BY books.asin, books.region" in sql
+    assert "(books.asin, books.region) > (%(param_1)s, %(param_2)s)" in sql
+
+
+@pytest.mark.asyncio
+async def test_remaining_books_counts_past_the_pair_not_the_asin():
+    from sqlalchemy.dialects import postgresql
+
+    result = MagicMock()
+    result.scalar_one = MagicMock(return_value=3)
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=result)
+
+    assert await refresh_corpus._remaining_books(session, ("B0US00001", "de")) == 3
+
+    sql = str(session.execute.call_args.args[0].compile(dialect=postgresql.dialect()))
+    assert "(books.asin, books.region) > " in sql
+
+
+def test_chunks_keep_the_same_asin_in_every_region_it_is_stored_under():
+    """Dedupe is per region: the same asin in two regions is two fetches."""
+    chunks = _chunks_for_page([("B0SAME001", "us"), ("B0SAME001", "uk")], size=50)
+    assert sorted(chunks) == [("uk", ["B0SAME001"]), ("us", ["B0SAME001"])]

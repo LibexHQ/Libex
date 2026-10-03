@@ -74,6 +74,7 @@ async def test_live_query_failure_leaves_no_stats_row_in_cache(db_session):
 
     assert result.stats == {
         "books": 0,
+        "distinctBookAsins": 0,
         "authors": 0,
         "narrators": 0,
         "series": 0,

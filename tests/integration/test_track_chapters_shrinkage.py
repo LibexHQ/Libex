@@ -53,7 +53,17 @@ from scripts.backfill_chapters import _store_chapters
 
 ASIN = "B0CHAPTERS"
 
-WRITERS = [upsert_track, _store_chapters]
+
+
+async def _service(session, asin, payload):
+    return await upsert_track(session, asin, payload, region="us")
+
+
+async def _backfill(session, asin, payload):
+    return await _store_chapters(session, asin, payload, region="us")
+
+
+WRITERS = [_service, _backfill]
 WRITER_IDS = ["service", "backfill"]
 
 SUPPRESSED = "Kept stored chapters over an empty response"
@@ -324,7 +334,7 @@ async def test_a_race_of_mixed_payloads_ends_with_the_listing(db_session):
 
     async def _write(payload):
         async with factory() as session:
-            await upsert_track(session, ASIN, payload)
+            await upsert_track(session, ASIN, payload, region="us")
 
     await asyncio.gather(*[_write(payload) for payload in payloads])
 

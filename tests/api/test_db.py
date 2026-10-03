@@ -1806,3 +1806,70 @@ async def test_get_db_series_books_no_truncation_above_threshold(async_client):
     data = response.json()
     assert len(data) == n
     assert {b["asin"] for b in data} == {b["asin"] for b in books}
+
+# ============================================================
+# Region-aware single-record reads and the distinctBookAsins stat
+# ============================================================
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path, target",
+    [
+        ("/db/book/B08G9PRS1K", "get_book_from_db"),
+        ("/db/book/B08G9PRS1K/chapters", "get_track_from_db"),
+        ("/db/series/B0SERIES01", "get_series_from_db"),
+    ],
+)
+async def test_single_record_routes_forward_region_or_none(async_client, path, target):
+    """No region reaches the reader as None (first-stored record); a given
+    one arrives validated and lowercased."""
+    with patch(f"app.api.routes.db.router.{target}", new_callable=AsyncMock) as mock:
+        mock.return_value = None
+        await async_client.get(path)
+        assert mock.call_args.kwargs["region"] is None
+        await async_client.get(path, params={"region": "UK"})
+        assert mock.call_args.kwargs["region"] == "uk"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path, target",
+    [
+        ("/db/book/B08G9PRS1K", "get_book_from_db"),
+        ("/db/book/B08G9PRS1K/chapters", "get_track_from_db"),
+        ("/db/series/B0SERIES01", "get_series_from_db"),
+    ],
+)
+async def test_single_record_routes_region_miss_is_404_and_bad_region_is_400(async_client, path, target):
+    with patch(f"app.api.routes.db.router.{target}", new_callable=AsyncMock) as mock:
+        mock.return_value = None
+        miss = await async_client.get(path, params={"region": "de"})
+        assert miss.status_code == 404
+        assert miss.json()["code"] == "not_in_libex"
+        bad = await async_client.get(path, params={"region": "zz"})
+        assert bad.status_code == 400
+
+
+def test_single_record_routes_document_the_region_param_in_openapi():
+    schema = app.openapi()
+    for path in ("/db/book/{asin}", "/db/book/{asin}/chapters", "/db/series/{asin}"):
+        params = schema["paths"][path]["get"]["parameters"]
+        region = next(p for p in params if p["name"] == "region")
+        assert region["required"] is False
+        assert "first-stored" in region["description"]
+
+
+@pytest.mark.asyncio
+async def test_get_db_stats_exposes_distinct_book_asins(async_client):
+    with patch("app.api.routes.db.router.get_db_stats", new_callable=AsyncMock) as mock:
+        mock.return_value = _stats_result({**MOCK_STATS, "distinctBookAsins": 120})
+        data = (await async_client.get("/db/stats")).json()
+        assert data["distinctBookAsins"] == 120
+        assert data["books"] == 150
+
+
+def test_stats_response_distinct_book_asins_is_a_non_negative_int():
+    props = app.openapi()["components"]["schemas"]["StatsResponse"]["properties"]
+    assert props["distinctBookAsins"]["type"] == "integer"
+    assert props["distinctBookAsins"]["minimum"] == 0

@@ -14,9 +14,9 @@ uniform "take the incoming value":
   created_at  written on insert, absent from the update. Flattened, every
               book's real creation time is reset on its next write, silently
               and unrecoverably.
-  region      written on insert, updates to itself. Flattened, a response
-              fetched for one marketplace moves a book into another, on a
-              NOT NULL enum.
+  region      part of the key (asin, region), so it is in the conflict target
+              and never in the update. Flattened, a response fetched for one
+              marketplace would be taken for another's record.
   title       falls back to '' on insert (NOT NULL) and to the stored title on
               update. Flattened either way, a response that omits the title
               blanks one already stored.
@@ -115,20 +115,25 @@ async def test_updated_at_does_move_on_a_later_write(db_session):
 
 
 # ============================================================
-# region — WRITTEN ONCE, UPDATES TO ITSELF
+# region — PART OF THE KEY
 # ============================================================
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_region_is_not_moved_by_a_write_carrying_another_region(db_session):
-    """A book ASIN belongs to one marketplace. Nothing in the writer may move
-    it to another, however the caller's payload is labelled."""
+async def test_a_write_carrying_another_region_is_that_regions_own_book(db_session):
+    """(asin, region) is the identity. A response for another marketplace
+    lands as its own row and leaves the first untouched."""
     await upsert_book(db_session, _book("B0REGION001"))
 
-    await upsert_book(db_session, _book("B0REGION001", region="de"))
+    await upsert_book(db_session, _book("B0REGION001", region="de", title="German title"))
 
     db_session.expire_all()
-    assert (await _stored(db_session, "B0REGION001")).region == REGION
+    rows = (await db_session.execute(
+        select(Book).where(Book.asin == "B0REGION001").order_by(Book.region)
+    )).scalars().all()
+    assert sorted((r.region, r.title) for r in rows) == sorted([
+        (REGION, "Original Title"), ("de", "German title"),
+    ])
 
 
 # ============================================================
@@ -665,7 +670,7 @@ _RICH_BOOK = {
 }
 
 _MERGED_COLUMNS = [
-    "title", "subtitle", "region", "description", "summary", "publisher", "copyright",
+    "title", "subtitle", "description", "summary", "publisher", "copyright",
     "isbn", "language", "rating", "release_date", "length_minutes", "image",
     "book_format", "content_type", "content_delivery_type", "episode_number",
     "episode_type", "sku", "sku_group", "is_listenable", "is_buyable", "is_vvab",

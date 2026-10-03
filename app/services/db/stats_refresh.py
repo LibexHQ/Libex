@@ -143,6 +143,12 @@ logger = get_logger()
 # network and origin are all inside it. What it settles beyond argument is
 # the direction and the order of magnitude.
 #
+# All of these figures were measured before the unscoped entry gained its
+# distinctBookAsins count (count(distinct asin), an index-only scan of the
+# books primary key) and have not been re-measured since, so the unscoped
+# 15.3s, and every sweep total built on it below, understates the current
+# cost by that count.
+#
 # A twelve-entry sweep reproduced from those three endpoints and nothing
 # else therefore spans:
 #   - 15.3 + (11 x 1.6) = 32.9s, every region at the cheapest measured;
@@ -259,8 +265,7 @@ _STATS_REFRESH_AHEAD_SECONDS = 150
 # Hard ceiling on one pass, serving two different failures with one number.
 #
 # Nothing else bounds a pass: statement_timeout is 30s (app/db/session.py),
-# an entry costs six or seven statements on the refresh path -- five counts,
-# a sixth for seriesRegionUnknown when the entry is region-scoped, and the
+# an entry costs seven statements on the refresh path -- six counts and the
 # cache upsert, with the cache read skipped because refresh=True
 # (services/db/reader.py) -- and up to twelve entries are possible, so a
 # degraded-but-alive database yields a pass measured in

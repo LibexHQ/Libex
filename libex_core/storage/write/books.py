@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from libex_core.storage.write.entities import upsert_author
 from libex_core.storage.write.params import book_params, series_params
 from libex_core.storage.write.statements import statements_for
-from libex_core.storage.write.support import dialect_of, utc_now
+from libex_core.storage.write.support import dialect_of, lock_asins, utc_now
 
 
 async def resolve_author_ids(
@@ -19,10 +19,12 @@ async def resolve_author_ids(
     *,
     dialect: str | None = None,
     conflict_errors: tuple[type[BaseException], ...] = (),
-) -> dict[str, list[int]]:
+) -> dict[tuple[str, str | None], list[int]]:
     """
-    Resolves every book's authors to DB ids, calling upsert_author once per
-    distinct author rather than once per book that names them.
+    Resolves every book's authors to DB ids, keyed by the book's (asin, region)
+    -- the same ASIN in two marketplaces is two books with their own authors --
+    calling upsert_author once per distinct author rather than once per book
+    that names them.
 
     upsert_author is the one write here that cannot be a bound row: it reads
     before it writes, upgrades null-asin rows in place, and opens SAVEPOINTs
@@ -38,7 +40,7 @@ async def resolve_author_ids(
     repeat is skipped.
     """
     memo: dict[tuple, int | None] = {}
-    ids_by_book: dict[str, list[int]] = {}
+    ids_by_book: dict[tuple[str, str | None], list[int]] = {}
 
     for data in books:
         ids: list[int] = []
@@ -67,8 +69,8 @@ async def resolve_author_ids(
         # the first copy lost their author_book link entirely: the author row
         # was written, the book row was written, and the relationship between
         # them silently was not. Every sibling pivot below already unions on
-        # an (asin, x) key; this was the one keyed by asin alone.
-        merged = ids_by_book.setdefault(data["asin"], [])
+        # an (asin, region, x) key.
+        merged = ids_by_book.setdefault((data["asin"], data.get("region")), [])
         merged.extend(i for i in ids if i not in merged)
 
     return ids_by_book
@@ -103,6 +105,11 @@ async def write_books(
     relationships (genres, narrators, authors) are additive -- never shrink.
     Series position is kept current via upsert.
 
+    A book is identified by (asin, region): every collection below keys on the
+    pair, and every link row carries the region of the book (and of the series)
+    it points at, so the same ASIN fetched for two marketplaces writes two
+    books with two sets of links rather than one overwriting the other.
+
     Rows are ordered so a table is written before anything referencing it, and
     duplicates are collapsed in Python before binding: the ON CONFLICT DO
     NOTHING sets keep the first of a repeat, matching what a per-row loop
@@ -115,17 +122,19 @@ async def write_books(
     statements = statements_for(dialect)
     now = utc_now()
 
+    await lock_asins(session, "book", [book["asin"] for book in books], dialect=dialect)
     await session.execute(statements.book_upsert, [book_params(book, now) for book in books])
 
     genres: dict[str, dict] = {}
     book_genres: dict[tuple, dict] = {}
     narrators: dict[str, dict] = {}
     book_narrators: dict[tuple, dict] = {}
-    series: dict[str, dict] = {}
+    series: dict[tuple, dict] = {}
     book_series_links: dict[tuple, dict] = {}
 
     for data in books:
         asin = data["asin"]
+        region = data.get("region")
 
         for genre in data.get("genres", []):
             g_asin = genre.get("asin")
@@ -139,28 +148,47 @@ async def write_books(
                 "created_at": now,
                 "updated_at": now,
             })
-            book_genres.setdefault((asin, g_asin), {"book_asin": asin, "genre_asin": g_asin})
+            book_genres.setdefault((asin, region, g_asin), {
+                "book_asin": asin, "book_region": region, "genre_asin": g_asin,
+            })
 
         for narrator in data.get("narrators", []):
             name = narrator.get("name", "").strip()
             if not name:
                 continue
             narrators.setdefault(name, {"name": name, "created_at": now, "updated_at": now})
-            book_narrators.setdefault((asin, name), {"book_asin": asin, "narrator_name": name})
+            book_narrators.setdefault((asin, region, name), {
+                "book_asin": asin, "book_region": region, "narrator_name": name,
+            })
 
         for entry in data.get("series", []):
-            params = series_params(entry, now)
+            params = series_params(entry, now, region)
             if params is None:
+                # Too thin to write a series row, but it may name one stored
+                # earlier, and the position it carries is data. The link's
+                # insert writes it only if that row exists.
+                s_asin = entry.get("asin")
+                s_region = entry.get("region") or region
+                if s_asin and s_region:
+                    book_series_links[(asin, region, s_asin, s_region)] = {
+                        "book_asin": asin,
+                        "book_region": region,
+                        "series_asin": s_asin,
+                        "series_region": s_region,
+                        "position": entry.get("position"),
+                    }
                 continue
             # Deduped like every sibling collection here. Fifty books of
             # one series otherwise issued fifty identical upserts against
             # the same row, each re-taking its row lock -- the exact case
             # book_series_links collapses a few lines below, and the case
             # the docstring above already claimed was collapsed.
-            series.setdefault(params["asin"], params)
-            book_series_links[(asin, params["asin"])] = {
+            series.setdefault((params["asin"], params["region"]), params)
+            book_series_links[(asin, region, params["asin"], params["region"])] = {
                 "book_asin": asin,
+                "book_region": region,
                 "series_asin": params["asin"],
+                "series_region": params["region"],
                 "position": entry.get("position"),
             }
 
@@ -173,7 +201,9 @@ async def write_books(
         await session.execute(statements.book_narrator_insert, list(book_narrators.values()))
 
     if series:
+        await lock_asins(session, "series", [asin for asin, _ in series], dialect=dialect)
         await session.execute(statements.series_upsert, list(series.values()))
+    if book_series_links:
         await session.execute(statements.book_series_upsert, list(book_series_links.values()))
 
     ids_by_book = await resolve_author_ids(
@@ -184,17 +214,22 @@ async def write_books(
     series_authors: dict[tuple, dict] = {}
     for data in books:
         asin = data["asin"]
-        author_ids = ids_by_book.get(asin, [])
+        region = data.get("region")
+        author_ids = ids_by_book.get((asin, region), [])
         for author_id in author_ids:
-            author_books.setdefault((author_id, asin), {"author_id": author_id, "book_asin": asin})
+            author_books.setdefault((author_id, asin, region), {
+                "author_id": author_id, "book_asin": asin, "book_region": region,
+            })
         for entry in data.get("series", []):
             s_asin = entry.get("asin")
             if not s_asin:
                 continue
+            s_region = entry.get("region") or region
+            # Whether the series row exists is decided by the insert itself.
             for author_id in author_ids:
-                series_authors.setdefault(
-                    (s_asin, author_id), {"series_asin": s_asin, "author_id": author_id}
-                )
+                series_authors.setdefault((s_asin, s_region, author_id), {
+                    "series_asin": s_asin, "series_region": s_region, "author_id": author_id,
+                })
 
     if author_books:
         await session.execute(statements.author_book_insert, list(author_books.values()))

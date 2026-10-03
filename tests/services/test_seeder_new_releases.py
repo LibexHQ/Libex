@@ -102,7 +102,7 @@ async def test_collect_all_grabs_every_asin_no_date_gate():
     )
     captured = {}
 
-    async def _missing(session, asins):
+    async def _missing(session, asins, region):
         captured["asins"] = list(asins)
         return list(asins)
 
@@ -123,7 +123,7 @@ async def test_walks_parent_and_leaf_and_unions():
     leaf_page = _page(_product("BSHARED", -2), _product("BLEAF", -3))  # BSHARED also under leaf
     captured = {}
 
-    async def _missing(session, asins):
+    async def _missing(session, asins, region):
         captured["asins"] = list(asins)
         return list(asins)
 
@@ -161,7 +161,7 @@ async def test_walks_deep_taxonomy_nodes():
     }
     captured = {}
 
-    async def _missing(session, asins):
+    async def _missing(session, asins, region):
         captured["asins"] = list(asins)
         return list(asins)
 
@@ -183,7 +183,7 @@ async def test_titleless_products_skipped():
     )
     captured = {}
 
-    async def _missing(session, asins):
+    async def _missing(session, asins, region):
         captured["asins"] = list(asins)
         return list(asins)
 
@@ -207,7 +207,7 @@ async def test_duplicate_page_wall_stops_node_walk():
     mock_get = _audible({"P1": [full, full], "G1": [full, full]}, categories=_parent_and_leaf())
     captured = {}
 
-    async def _missing(session, asins):
+    async def _missing(session, asins, region):
         captured["asins"] = list(asins)
         return []
 
@@ -299,7 +299,7 @@ async def test_one_failed_node_does_not_abort_scan():
     mock_persist = AsyncMock()
     captured = {}
 
-    async def _missing(session, asins):
+    async def _missing(session, asins, region):
         captured["asins"] = list(asins)
         return list(asins)
 
@@ -335,7 +335,7 @@ async def test_get_missing_asins_chunks_large_lists():
     session = AsyncMock()
     session.execute = AsyncMock(side_effect=_execute)
 
-    missing = await seeder._get_missing_asins(session, asins)
+    missing = await seeder._get_missing_asins(session, asins, "us")
 
     assert session.execute.await_count == 3          # chunked, not one giant query
     assert len(missing) == 12001                      # all missing (nothing existed)
@@ -362,7 +362,7 @@ async def test_get_missing_asins_filters_existing():
     session = AsyncMock()
     session.execute = AsyncMock(side_effect=_execute)
 
-    missing = await seeder._get_missing_asins(session, asins)
+    missing = await seeder._get_missing_asins(session, asins, "us")
 
     assert session.execute.await_count == 2          # 7000 -> 2 chunks
     assert "B000000003" not in missing
@@ -375,7 +375,7 @@ async def test_get_missing_asins_empty_short_circuits():
     """An empty input returns [] without touching the DB."""
     session = AsyncMock()
     session.execute = AsyncMock()
-    result = await seeder._get_missing_asins(session, [])
+    result = await seeder._get_missing_asins(session, [], "us")
     assert result == []
     session.execute.assert_not_awaited()
 
@@ -415,7 +415,7 @@ async def test_expand_authors_unpacks_book_asins_tuple_not_bare_list():
 
     captured = {}
 
-    async def _missing(session, asins):
+    async def _missing(session, asins, region):
         captured["asins"] = list(asins)
         return list(asins)
 
@@ -430,3 +430,21 @@ async def test_expand_authors_unpacks_book_asins_tuple_not_bare_list():
     assert stats["errors"] == 0
     assert stats["books_discovered"] == 1
     assert stats["authors_processed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_get_missing_asins_matches_on_the_region():
+    """An ASIN stored for another marketplace is still missing for this one."""
+    from sqlalchemy.dialects import postgresql
+    from unittest.mock import MagicMock
+
+    result = MagicMock()
+    result.fetchall.return_value = []
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=result)
+
+    await seeder._get_missing_asins(session, ["B000000001"], "uk")
+
+    compiled = session.execute.await_args.args[0].compile(dialect=postgresql.dialect())
+    assert "books.region = " in str(compiled)
+    assert "uk" in compiled.params.values()

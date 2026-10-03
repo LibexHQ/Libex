@@ -39,7 +39,6 @@ from libex_core.storage.read.shapes import (
     book_to_dict as _book_to_dict,
     narrator_to_dict as _narrator_to_dict,
     series_positions as _get_series_positions,
-    series_positions_batch as _get_series_positions_batch,
     utc_z as _utc_z,
 )
 from libex_core.storage.read.stats import count_stored
@@ -75,7 +74,6 @@ __all__ = [
     "_audible_link",
     "_book_to_dict",
     "_get_series_positions",
-    "_get_series_positions_batch",
     "_narrator_to_dict",
     "_utc_z",
 ]
@@ -132,8 +130,12 @@ def _error_type_only(e: BaseException) -> dict:
 # BOOK READERS
 # ============================================================
 
-get_book_from_db = _guarded("DB read failed for book", lambda: None, ("asin",))(_books.get_book)
-get_books_from_db = _guarded("DB read failed for books", list, ("asins",))(_books.get_books)
+get_book_from_db = _guarded(
+    "DB read failed for book", lambda: None, ("asin", "region")
+)(_books.get_book)
+get_books_from_db = _guarded(
+    "DB read failed for books", list, ("asins", "region")
+)(_books.get_books)
 search_books_from_db = _guarded("DB search failed for books", list)(_books.search_books)
 get_books_by_sku_from_db = _guarded(
     "DB read failed for sku_group", list, ("sku_group",)
@@ -156,7 +158,9 @@ get_new_releases_from_db = _guarded(
 get_coming_soon_from_db = _guarded(
     "DB read failed for coming soon", list
 )(_books.get_coming_soon)
-get_track_from_db = _guarded("DB read failed for track", lambda: None, ("asin",))(_books.get_track)
+get_track_from_db = _guarded(
+    "DB read failed for track", lambda: None, ("asin", "region")
+)(_books.get_track)
 
 
 # ============================================================
@@ -194,7 +198,9 @@ get_narrator_books_from_db = _guarded(
 # SERIES READER
 # ============================================================
 
-get_series_from_db = _guarded("DB read failed for series", lambda: None, ("asin",))(_series.get_series)
+get_series_from_db = _guarded(
+    "DB read failed for series", lambda: None, ("asin", "region")
+)(_series.get_series)
 # Series name is caller-supplied search text and is not logged, for the same
 # reason as the narrator reads above.
 search_series_from_db = _guarded("DB search failed for series", list)(_series.search_series)
@@ -222,7 +228,9 @@ STATS_CACHE_TTL_SECONDS = 300
 # papering over the gap. The region-scoped set carries one extra key —
 # seriesRegionUnknown — since a region-scoped cache entry has no meaning under
 # the global key set and vice versa.
-_STAT_KEYS = frozenset({"books", "authors", "narrators", "series", "booksWithChapters"})
+_STAT_KEYS = frozenset({
+    "books", "distinctBookAsins", "authors", "narrators", "series", "booksWithChapters",
+})
 _REGION_STAT_KEYS = _STAT_KEYS | {"seriesRegionUnknown"}
 
 
@@ -265,34 +273,29 @@ async def get_db_stats(
     session: AsyncSession, region: str | None = None, refresh: bool = False
 ) -> DbStatsResult:
     """
-    Returns counts of books, authors, narrators, series, and books with stored
+    Returns counts of books (stored records, one per asin and region),
+    distinctBookAsins, authors, narrators, series, and books with stored
     chapter data in the local DB, together with the cache expiry backing that
     value (see DbStatsResult). booksWithChapters counts rows in the tracks
     table (one per book that actually has chapters stored), not books that have
     merely been checked — checked includes ISBN-keyed records and bundle ASINs
     that will never have chapters, which would overstate what Libex holds.
 
-    `region=None` (the default) returns exactly what this function has always
-    returned: the same five keys, the same global counts, the same cache key.
+    `region=None` (the default) returns the global counts under the one global
+    cache key. The keys the figure has always had keep their meaning;
+    distinctBookAsins is the one added, the number of ASINs among the stored
+    book records, which is smaller than books whenever a book is stored under
+    more than one region.
 
     Passing a region scopes books, authors, booksWithChapters and series to
-    it. Two counts cannot follow:
+    it. narrators cannot follow: it has no region column at all — the name is
+    the primary key, and a narrator is not owned by any one marketplace — so
+    a region-scoped call still returns the global narrator count rather than
+    a wrong or empty per-region figure. A region-scoped response also carries
+    seriesRegionUnknown, always 0 now that a series row's region is part of
+    its key, so the shape does not change under a caller.
 
-    - narrators has no region column at all — the name is the primary key,
-      and a narrator is not owned by any one marketplace. A region-scoped
-      call still returns the global narrator count rather than a wrong or
-      empty per-region figure.
-    - series.region is nullable, so a per-region series count is a *subset*
-      of the global one — rows with no recorded region fall out of every
-      per-region total, and per-region counts will not sum to the global
-      count. That gap is surfaced rather than left to look like a complete
-      total: a region-scoped response carries an extra seriesRegionUnknown
-      key, the count of series rows with no region at all, so a caller can
-      see what its "series" figure is missing instead of trusting a number
-      that quietly means something narrower than it appears to.
-
-    booksWithChapters is scoped by joining tracks to books on asin, since
-    tracks itself carries no region column.
+    booksWithChapters is scoped by joining tracks to books on asin and region.
 
     Cached for STATS_CACHE_TTL_SECONDS, one entry per region plus one for the
     global figure — see cache.stats_key(). A cache miss falls back to the live
@@ -353,7 +356,14 @@ async def get_db_stats(
     except Exception as e:
         logger.warning("DB read failed for stats", extra={"region": region, **_failure_fields(e)})
         await session.rollback()
-        fallback = {"books": 0, "authors": 0, "narrators": 0, "series": 0, "booksWithChapters": 0}
+        fallback = {
+            "books": 0,
+            "distinctBookAsins": 0,
+            "authors": 0,
+            "narrators": 0,
+            "series": 0,
+            "booksWithChapters": 0,
+        }
         if region is not None:
             fallback["seriesRegionUnknown"] = 0
         return DbStatsResult(fallback, None)

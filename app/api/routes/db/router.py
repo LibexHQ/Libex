@@ -9,7 +9,7 @@ from typing import Annotated, Any
 
 # Third party
 from fastapi import APIRouter, Depends, Path, Query, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Local
@@ -61,20 +61,43 @@ router = APIRouter(prefix="/db", tags=["Database"])
 # the numbers they draw.
 router.include_router(badge_router)
 
+_RECORD_REGION_DESCRIPTION = (
+    "Audible region code. A book or series is stored once per region, so the "
+    "same ASIN can have a record in each. Omit to get the first-stored one; "
+    "an invalid region is a 400, and a region the ASIN was never stored "
+    "under is a 404 NOT_IN_LIBEX."
+)
+
+
+def optional_region(
+    region: Annotated[str | None, Query(description=_RECORD_REGION_DESCRIPTION)] = None,
+) -> str | None:
+    """Validated region for a single-record read, or None when not given.
+
+    Deliberately not valid_region: that one defaults to "us", and these reads
+    must tell "no region asked for" (first-stored record) from "us".
+    """
+    return validate_region(region) if region is not None else None
+
 
 class StatsResponse(BaseModel):
     """
     Counts of books, authors, narrators, series, and books with chapters.
 
     narrators has no region column and its PK is the name, so it is always a
-    global count, even when `region` scopes the rest. series.region is
-    nullable; a scoped series count excludes rows with no region, so
-    per-region series counts will not sum to the global series count.
-    seriesRegionUnknown is that excluded count -- present when `region` scopes
-    the response, null otherwise.
+    global count, even when `region` scopes the rest. Every series carries a
+    region, so per-region series counts sum to the global series count.
+    seriesRegionUnknown is kept for compatibility and is always 0 -- present
+    when `region` scopes the response, null otherwise.
+
+    books counts stored records, one per ASIN and region, so the per-region
+    counts sum to it. distinctBookAsins counts the ASINs among them: smaller
+    than books whenever a book is stored under more than one region, equal to
+    it when `region` scopes the response.
     """
 
     books: int = 0
+    distinctBookAsins: int = Field(default=0, ge=0)
     authors: int = 0
     narrators: int = 0
     series: int = 0
@@ -91,10 +114,10 @@ async def get_stats(
         Query(
             description=(
                 "Audible region code. Omit for global counts. When given, "
-                "scopes books/authors/series/booksWithChapters to that "
+                "scopes books/distinctBookAsins/authors/series/booksWithChapters to that "
                 "region; narrators stays global (no region column), and "
-                "series excludes rows with no region so it will not sum to "
-                "the global series count."
+                "series counts sum across regions to the global series "
+                "count, and seriesRegionUnknown is always 0."
             )
         ),
     ] = None,
@@ -327,10 +350,15 @@ async def get_db_books_by_sku(
 @router.get("/book/{asin}/chapters", response_model=ChapterResponse, responses=ERROR_RESPONSES)
 async def get_db_book_chapters(
     asin: Annotated[str, Depends(valid_asin("Book ASIN"))],
+    region: str | None = Depends(optional_region),
     session: AsyncSession = Depends(get_session),
 ) -> Any:
-    """Get chapter data for a book from the local DB."""
-    chapters = await get_track_from_db(session, asin)
+    """Get chapter data for a book from the local DB.
+
+    Without `region`, the first-stored region's chapters; with it, that
+    region's, or 404 when none are stored for it.
+    """
+    chapters = await get_track_from_db(session, asin, region=region)
     if chapters is None:
         raise NotFoundException("No chapter data found for this book", code=ErrorCode.NOT_IN_LIBEX)
     return chapters
@@ -339,10 +367,15 @@ async def get_db_book_chapters(
 @router.get("/book/{asin}", response_model=BookResponse, responses=ERROR_RESPONSES)
 async def get_db_book(
     asin: Annotated[str, Depends(valid_asin("Book ASIN"))],
+    region: str | None = Depends(optional_region),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    """Get a single book by ASIN from the local DB."""
-    book = await get_book_from_db(session, asin)
+    """Get a single book by ASIN from the local DB.
+
+    Without `region`, the first-stored region's record; with it, that
+    region's, or 404 when the book was never stored under it.
+    """
+    book = await get_book_from_db(session, asin, region=region)
     if not book:
         raise NotFoundException("Book not found in local database", code=ErrorCode.NOT_IN_LIBEX)
     return book
@@ -353,7 +386,7 @@ async def get_db_author_books(
     asin: Annotated[str, Depends(valid_asin("Author ASIN"))],
     region: str = Depends(valid_region),
     filters=Depends(book_filters(exclude={"region", "author_name"})),
-    book_region: Annotated[str | None, Query(description="Filter the author's books by their region")] = None,
+    book_region: Annotated[str | None, Query(description="Optional filter; without it every linked book is returned, one per stored region, so an ASIN can appear more than once; pass a region to list only that marketplace's records")] = None,
     sort: Annotated[BookSortField | None, Query(description="Field to sort by")] = None,
     order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
     session: AsyncSession = Depends(get_session),
@@ -467,10 +500,15 @@ async def get_db_series_books(
 @router.get("/series/{asin}", response_model=SeriesResponse, responses=ERROR_RESPONSES)
 async def get_db_series(
     asin: Annotated[str, Depends(valid_asin("Series ASIN"))],
+    region: str | None = Depends(optional_region),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    """Get a series by ASIN from the local DB."""
-    series = await get_series_from_db(session, asin)
+    """Get a series by ASIN from the local DB.
+
+    Without `region`, the first-stored region's record; with it, that
+    region's, or 404 when the series was never stored under it.
+    """
+    series = await get_series_from_db(session, asin, region=region)
     if not series:
         raise NotFoundException("Series not found in local database", code=ErrorCode.NOT_IN_LIBEX)
     return series

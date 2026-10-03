@@ -3,7 +3,7 @@ Row counts over the stored catalog.
 """
 
 # Third party
-from sqlalchemy import func, select
+from sqlalchemy import distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Local
@@ -18,34 +18,45 @@ async def count_stored(session: AsyncSession, region: str | None = None) -> dict
     checked includes ISBN-keyed records and bundle ASINs that will never have
     chapters, which would overstate what is held.
 
-    `region=None` returns the global counts under five keys. Passing a region
-    scopes books, authors, booksWithChapters and series to it. Two counts
-    cannot follow:
+    `region=None` returns the global counts. Passing a region scopes books,
+    authors, booksWithChapters and series to it. One count cannot follow:
+    narrators has no region column at all (the name is the primary key, and a
+    narrator is not owned by any one marketplace), so a region-scoped call
+    still returns the global narrator count.
 
-    - narrators has no region column at all (the name is the primary key, and
-      a narrator is not owned by any one marketplace), so a region-scoped call
-      still returns the global narrator count.
-    - series.region is nullable, so a per-region series count is a subset of
-      the global one: rows with no recorded region fall out of every
-      per-region total. A region-scoped result therefore carries a sixth key,
-      seriesRegionUnknown, the count of series rows with no region, so the
-      gap is visible instead of passing for a complete total.
+    books counts stored records, one per (asin, region), so the per-region
+    counts sum to it. distinctBookAsins counts the ASINs among them, which is
+    smaller whenever a book is stored under more than one region; scoped to a
+    region the two are equal. Likewise series counts (asin, region) records.
 
-    booksWithChapters is scoped by joining tracks to books on asin, since
-    tracks carries no region column.
+    A region-scoped result also carries seriesRegionUnknown, kept so the shape
+    does not change under a caller. It is always 0: a series row has a region
+    by construction now (the column is part of its key), so no series falls
+    out of the per-region totals.
+
+    booksWithChapters is scoped by joining tracks to books on the key, asin
+    and region together.
     """
     books_stmt = select(func.count()).select_from(Book)
+    # Counted from the key, not from the primary marker: on Postgres the
+    # distinct count is an index-only scan of the primary key, already in
+    # asin order and with no sort, where counting the marker reads the whole
+    # heap and can run past the statement timeout on a cold refresh. Within
+    # one region an ASIN has one row, so the scoped count below is the plain
+    # record count.
+    distinct_stmt = select(func.count(distinct(Book.asin))).select_from(Book)
     authors_stmt = select(func.count()).select_from(Author)
     series_stmt = select(func.count()).select_from(Series)
     chapters_stmt = select(func.count()).select_from(Track)
 
     if region is not None:
         books_stmt = books_stmt.where(Book.region == region)
+        distinct_stmt = select(func.count()).select_from(Book).where(Book.region == region)
         authors_stmt = authors_stmt.where(Author.region == region)
         series_stmt = series_stmt.where(Series.region == region)
         chapters_stmt = (
             chapters_stmt
-            .join(Book, Book.asin == Track.asin)
+            .join(Book, (Book.asin == Track.asin) & (Book.region == Track.region))
             .where(Book.region == region)
         )
 
@@ -54,9 +65,11 @@ async def count_stored(session: AsyncSession, region: str | None = None) -> dict
     narrators = await session.execute(select(func.count()).select_from(Narrator))
     series = await session.execute(series_stmt)
     books_with_chapters = await session.execute(chapters_stmt)
+    distinct_books = await session.execute(distinct_stmt)
 
     stats = {
         "books": books.scalar_one(),
+        "distinctBookAsins": distinct_books.scalar_one(),
         "authors": authors.scalar_one(),
         "narrators": narrators.scalar_one(),
         "series": series.scalar_one(),
@@ -64,9 +77,6 @@ async def count_stored(session: AsyncSession, region: str | None = None) -> dict
     }
 
     if region is not None:
-        series_region_unknown = await session.execute(
-            select(func.count()).select_from(Series).where(Series.region.is_(None))
-        )
-        stats["seriesRegionUnknown"] = series_region_unknown.scalar_one()
+        stats["seriesRegionUnknown"] = 0
 
     return stats

@@ -15,12 +15,13 @@ from sqlalchemy.orm import selectinload
 from libex_core.storage.filtering import apply_book_filters, apply_narrator_filters
 from libex_core.storage.models import Author, Book, Narrator, author_book, book_narrator
 from libex_core.storage.read._compat import ILike
+from libex_core.storage.read._regions import only_first_stored
 from libex_core.storage.read.shapes import (
     BOOK_RELATIONS,
     book_to_dict,
     hydrate_books,
     narrator_to_dict,
-    series_positions_batch,
+    series_positions_by_book,
 )
 from libex_core.storage.sorting import BOOK_SORT_FIELDS, NARRATOR_SORT_FIELDS, apply_sort
 
@@ -174,7 +175,10 @@ async def get_author_book_asins(
     """
     result = await session.execute(
         select(Book.asin)
-        .join(author_book, author_book.c.book_asin == Book.asin)
+        .join(
+            author_book,
+            (author_book.c.book_asin == Book.asin) & (author_book.c.book_region == Book.region),
+        )
         .join(Author, Author.id == author_book.c.author_id)
         .where(Author.asin == author_asin, Author.region == region)
         .distinct()
@@ -215,10 +219,17 @@ async def get_author_books(
     sort: str | None = None,
     order: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Fetches all books for an author from the DB."""
+    """Fetches all books for an author from the DB.
+
+    Every stored book linked to the author is returned, whichever region's
+    record it is; book_region narrows the list to one marketplace's records.
+    """
     stmt = (
         select(Book)
-        .join(author_book, author_book.c.book_asin == Book.asin)
+        .join(
+            author_book,
+            (author_book.c.book_asin == Book.asin) & (author_book.c.book_region == Book.region),
+        )
         .join(Author, Author.id == author_book.c.author_id)
         .where(Author.asin == author_asin, Author.region == region)
         .options(*BOOK_RELATIONS)
@@ -260,12 +271,10 @@ async def get_author_books(
     # catalogue, which for a prolific author is thousands of rows. Series
     # positions are fetched for all of them in one statement rather than
     # one per book; the ordering apply_sort established above is untouched.
-    positions_by_asin = await series_positions_batch(
-        session, [book.asin for book in books]
-    )
+    positions_by_book = await series_positions_by_book(session, books)
     results = []
     for book in books:
-        positions = positions_by_asin.get(book.asin, {})
+        positions = positions_by_book.get((book.asin, book.region), {})
         results.append(book_to_dict(book, positions))
     return results
 
@@ -338,9 +347,11 @@ async def get_narrator_books(
     """Fetches all books by a narrator name from the local DB."""
     stmt = (
         select(Book)
-        .join(book_narrator, Book.asin == book_narrator.c.book_asin)
+        .join(
+            book_narrator,
+            (Book.asin == book_narrator.c.book_asin) & (Book.region == book_narrator.c.book_region),
+        )
         .where(book_narrator.c.narrator_name == name)
-        .options(*BOOK_RELATIONS)
     )
     stmt = apply_book_filters(
         stmt,
@@ -372,6 +383,9 @@ async def get_narrator_books(
         genre=genre,
         category=category,
     )
+    if region is None:
+        stmt = only_first_stored(stmt)
+    stmt = stmt.options(*BOOK_RELATIONS)
     stmt = apply_sort(stmt, sort, order, BOOK_SORT_FIELDS)
     stmt = stmt.limit(limit).offset((page - 1) * limit)
     result = await session.execute(stmt)

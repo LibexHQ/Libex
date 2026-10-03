@@ -259,7 +259,7 @@ async def search_series(
             )
 
         if store is not None:
-            for stored in await _store.search_stored_series(store, name):
+            for stored in await _store.search_stored_series(store, name, region):
                 if stored.get("asin") and stored["asin"] not in seen_asins:
                     seen_asins.add(stored["asin"])
                     results.append(SeriesResponse(**stored))

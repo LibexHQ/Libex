@@ -591,13 +591,16 @@ show this help message and exit
 .SS db book
 \fBlibex\-core db book\fR \fIASIN\fR
 .PP
-Print one stored book as JSON.
+Print one stored book as JSON. A book is stored once per marketplace; \-\-region picks one, and without it the record stored first is printed.
 .TP
 \fIASIN\fR
 ASIN of the book
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 show this help message and exit
+.TP
+\fB\-\-region\fR
+the record of this marketplace, default the one stored first
 .SS db books
 \fBlibex\-core db books\fR
 .PP
@@ -701,13 +704,16 @@ page of results to return, counting from 1, default 1
 .SS db chapters
 \fBlibex\-core db chapters\fR \fIASIN\fR
 .PP
-Print a stored book's chapters as JSON.
+Print a stored book's chapters as JSON. \-\-region picks the marketplace's listing, and without it the one stored first is printed.
 .TP
 \fIASIN\fR
 ASIN of the book
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 show this help message and exit
+.TP
+\fB\-\-region\fR
+the record of this marketplace, default the one stored first
 .SS db sku
 \fBlibex\-core db sku\fR \fISKU\fR
 .PP
@@ -831,13 +837,16 @@ the direction of \-\-sort, default asc
 .SS db series
 \fBlibex\-core db series\fR \fIASIN\fR
 .PP
-Print one stored series as JSON.
+Print one stored series as JSON. \-\-region picks the marketplace's record, and without it the one stored first is printed.
 .TP
 \fIASIN\fR
 ASIN of the series
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 show this help message and exit
+.TP
+\fB\-\-region\fR
+the record of this marketplace, default the one stored first
 .SS db series\-books
 \fBlibex\-core db series\-books\fR \fIASIN\fR
 .PP
@@ -1495,7 +1504,7 @@ page of results to return, counting from 1, default 1
 .SS db stats
 \fBlibex\-core db stats\fR
 .PP
-Print how many books, authors, narrators, series and books with chapters the store holds, as JSON. \-\-region scopes all but narrators, and then seriesRegionUnknown counts the series that have no region.
+Print how many book records, distinct book ASINs, authors, narrators, series and books with chapters the store holds, as JSON. \-\-region scopes all but narrators. seriesRegionUnknown is kept for compatibility and is always 0, since every series carries a region.
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 show this help message and exit

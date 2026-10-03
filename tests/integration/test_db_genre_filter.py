@@ -43,13 +43,13 @@ async def _seed(db_session):
     await db_session.execute(insert(Book).values(asin="B00GENRE002", title="Murder Mansion", region="us", created_at=NOW, updated_at=NOW))
     await db_session.execute(insert(Book).values(asin="B00GENRE003", title="Space Wizards", region="us", created_at=NOW, updated_at=NOW))
     # Links: book1 -> SciFi&Fantasy (genre) + Epic Fantasy (tag)
-    await db_session.execute(insert(book_genre).values(book_asin="B00GENRE001", genre_asin="G001"))
-    await db_session.execute(insert(book_genre).values(book_asin="B00GENRE001", genre_asin="G003"))
+    await db_session.execute(insert(book_genre).values(book_region="us", book_asin="B00GENRE001", genre_asin="G001"))
+    await db_session.execute(insert(book_genre).values(book_region="us", book_asin="B00GENRE001", genre_asin="G003"))
     # book2 -> Mystery (genre) + Cozy Mystery (tag)
-    await db_session.execute(insert(book_genre).values(book_asin="B00GENRE002", genre_asin="G002"))
-    await db_session.execute(insert(book_genre).values(book_asin="B00GENRE002", genre_asin="G004"))
+    await db_session.execute(insert(book_genre).values(book_region="us", book_asin="B00GENRE002", genre_asin="G002"))
+    await db_session.execute(insert(book_genre).values(book_region="us", book_asin="B00GENRE002", genre_asin="G004"))
     # book3 -> SciFi&Fantasy (genre) only
-    await db_session.execute(insert(book_genre).values(book_asin="B00GENRE003", genre_asin="G001"))
+    await db_session.execute(insert(book_genre).values(book_region="us", book_asin="B00GENRE003", genre_asin="G001"))
     await db_session.commit()
 
 

@@ -281,14 +281,24 @@ def test_the_reader_omits_the_same_one_conditional_key():
 # says nothing about whether its chapters have been looked for, and binding
 # it here would stamp every book as checked on every write. It is the only
 # column on this table the book upsert deliberately does not carry.
-_COLUMNS_THE_BOOK_UPSERT_DOES_NOT_BIND = {"chapters_checked_at"}
+#
+# confirmed_at and chapters_confirmed_at are in the schema ahead of the change
+# that records Audible's confirmation; nothing writes them yet, and NULL means
+# never confirmed. The change that does write them removes them from this set.
+#
+# is_primary is set by the insert itself, from whether another region already
+# holds the ASIN, and the update never touches it, so no response value can
+# bind it.
+_COLUMNS_THE_BOOK_UPSERT_DOES_NOT_BIND = {
+    "chapters_checked_at", "confirmed_at", "chapters_confirmed_at", "is_primary",
+}
 
-# asin is the conflict key -- setting it in the update clause would assign a
-# row its own primary key, which is either a no-op or a rewrite of the key
-# being matched on. created_at is absent so a later write cannot reset a
+# asin and region are the conflict key -- setting either in the update clause
+# would assign a row its own primary key, which is either a no-op or a rewrite
+# of the key being matched on. created_at is absent so a later write cannot reset a
 # book's real creation time; tests/integration/test_book_merge_asymmetries.py
 # holds that behaviour against a real database.
-_BOUND_BUT_NEVER_UPDATED = {"asin", "created_at"}
+_BOUND_BUT_NEVER_UPDATED = {"asin", "region", "created_at"}
 
 
 def test_the_writer_binds_every_column_the_book_table_has():

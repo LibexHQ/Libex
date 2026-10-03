@@ -131,8 +131,9 @@ async def upsert_author(session: AsyncSession, author: dict) -> int | None:
 
 async def _resolve_author_ids(
     session: AsyncSession, books: list[dict]
-) -> dict[str, list[int]]:
-    """Resolves every book's authors to DB ids, once per distinct author."""
+) -> dict[tuple[str, str | None], list[int]]:
+    """Resolves every book's authors to DB ids, once per distinct author,
+    keyed by the book's (asin, region)."""
     return await _books.resolve_author_ids(
         session, books, dialect=_DIALECT, conflict_errors=_CONFLICT_ERRORS
     )
@@ -214,21 +215,37 @@ async def upsert_book(session: AsyncSession, data: dict) -> None:
 # TRACK WRITER
 # ============================================================
 
-async def upsert_track(session: AsyncSession, asin: str, chapters_data: dict) -> None:
+async def upsert_track(
+    session: AsyncSession, asin: str, chapters_data: dict, *, region: str
+) -> None:
     """
     Upserts chapter data for a book, keeping the richer of the two payloads.
+    The listing belongs to the book's record in `region`; there is no default,
+    because a listing filed under the wrong marketplace is a silent error.
 
     The merge is decided in the SET clause of one statement, against the row
     as postgresql has it locked — see libex_core.storage.write.entities.
     write_track. The stored count comes back so a suppressed overwrite can be
     logged: a write that silently declines is no easier to diagnose than the
     silent overwrite it replaces, and no one is watching this path.
+
+    The insert is conditional on the book's row for `region`. When it is not
+    stored nothing is written, and that is logged at info, not as a failure:
+    a chapters request for a region the book was never stored under is
+    ordinary.
     """
     try:
         stored_count = await _entities.write_track(
-            session, asin, chapters_data, dialect=_DIALECT
+            session, asin, chapters_data, region=region, dialect=_DIALECT
         )
         await session.commit()
+
+        if stored_count is None:
+            logger.info(
+                "Chapters not stored: the book is not stored for the region",
+                extra={"asin": asin, "region": region},
+            )
+            return
 
         offered = chapters_data.get("chapters") if isinstance(chapters_data, dict) else None
         offered_count = len(offered) if isinstance(offered, list) else 0
@@ -239,7 +256,7 @@ async def upsert_track(session: AsyncSession, asin: str, chapters_data: dict) ->
                 extra={"asin": asin, "stored_chapters": stored_count},
             )
         else:
-            logger.info(f"DB write: track {asin}")
+            logger.info(f"DB write: track {asin} ({region})")
 
     except Exception as e:
         logger.warning(
@@ -284,7 +301,7 @@ async def upsert_author_profile(session: AsyncSession, data: dict) -> None:
 # SERIES PROFILE WRITER
 # ============================================================
 
-async def upsert_series_profile(session: AsyncSession, data: dict) -> None:
+async def upsert_series_profile(session: AsyncSession, data: dict) -> str | None:
     """
     Upserts a full series profile fetched from the series endpoint.
     Updates description which isn't always available from book relationship data.
@@ -293,16 +310,27 @@ async def upsert_series_profile(session: AsyncSession, data: dict) -> None:
     this adds is a transaction of its own and a stricter guard: a profile
     fetch that answered without a name has failed, where a book's series
     relationship may legitimately carry the title under either key.
+
+    Returns the series asin once it is written, and None when nothing was: the
+    profile names no asin, no name or no region (a series row is keyed by its
+    region, so one without it cannot be stored), or the write failed.
     """
     asin = data.get("asin")
     name = data.get("name")
     if not asin or not name:
-        return
+        return None
 
     try:
-        await _entities.write_series_profile(session, data, dialect=_DIALECT)
+        written = await _entities.write_series_profile(session, data, dialect=_DIALECT)
+        if not written:
+            logger.info(
+                "Series not stored: the profile names no region",
+                extra={"asin": asin},
+            )
+            return None
         await session.commit()
         logger.info(f"DB write: series {asin} ({name})")
+        return written
 
     except Exception as e:
         logger.warning(
@@ -310,6 +338,7 @@ async def upsert_series_profile(session: AsyncSession, data: dict) -> None:
             extra={"asin": asin, **_failure_fields(e)},
         )
         await session.rollback()
+        return None
 
 
 # ============================================================

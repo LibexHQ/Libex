@@ -85,7 +85,7 @@ async def _stored(session):
 async def test_control_a_raw_nul_payload_does_fail_the_write(db_session, caplog):
     await _book(db_session)
     with caplog.at_level(logging.WARNING, logger="libex"):
-        await upsert_track(db_session, ASIN, {"chapters": [{"title": "a\x00b"}]})
+        await upsert_track(db_session, ASIN, {"chapters": [{"title": "a\x00b"}]}, region="us")
     assert [r for r in caplog.records if WRITE_FAILED in r.getMessage()]
     assert await _stored(db_session) is None
 
@@ -98,7 +98,7 @@ async def test_a_nul_and_nan_bearing_listing_is_stored_and_served(db_session, ca
 
     await _book(db_session)
     with caplog.at_level(logging.WARNING, logger="libex"):
-        await upsert_track(db_session, ASIN, normalized)
+        await upsert_track(db_session, ASIN, normalized, region="us")
     assert [r for r in caplog.records if WRITE_FAILED in r.getMessage()] == []
 
     db_session.expire_all()
@@ -136,9 +136,9 @@ def _withheld_empty():
 async def test_an_empty_response_carrying_extras_withheld_cannot_erase_a_stored_listing(db_session, caplog):
     await _book(db_session)
     stored = _listing(5)
-    await upsert_track(db_session, ASIN, stored)
+    await upsert_track(db_session, ASIN, stored, region="us")
     with caplog.at_level(logging.WARNING, logger="libex"):
-        await upsert_track(db_session, ASIN, _withheld_empty())
+        await upsert_track(db_session, ASIN, _withheld_empty(), region="us")
     held = await _stored(db_session)
     assert held == stored
     assert "extrasWithheld" not in held, "the refused payload's record must not be spliced in"
@@ -149,10 +149,10 @@ async def test_an_empty_response_carrying_extras_withheld_cannot_erase_a_stored_
 @pytest.mark.asyncio
 async def test_a_stored_payload_carrying_extras_withheld_is_replaced_whole_by_a_listing(db_session):
     await _book(db_session)
-    await upsert_track(db_session, ASIN, _withheld_empty())
+    await upsert_track(db_session, ASIN, _withheld_empty(), region="us")
     assert (await _stored(db_session))["extrasWithheld"] == {"contentReference": "size"}
     listing = _listing(3)
-    await upsert_track(db_session, ASIN, listing)
+    await upsert_track(db_session, ASIN, listing, region="us")
     held = await _stored(db_session)
     assert held == listing and "extrasWithheld" not in held
 
@@ -161,13 +161,13 @@ async def test_a_stored_payload_carrying_extras_withheld_is_replaced_whole_by_a_
 @pytest.mark.asyncio
 async def test_a_shorter_listing_with_extras_withheld_still_replaces_a_longer_stored_one(db_session):
     await _book(db_session)
-    await upsert_track(db_session, ASIN, _listing(5))
+    await upsert_track(db_session, ASIN, _listing(5), region="us")
     shorter = normalize_chapters(
         {"content_metadata": {"content_url": {"b": "x" * (65 * 1024)},
                               "chapter_info": {"chapters": [_ch("Only", 0)]}}},
         ASIN, "us",
     )
     assert shorter["extrasWithheld"] == {"contentUrl": "size"}
-    await upsert_track(db_session, ASIN, shorter)
+    await upsert_track(db_session, ASIN, shorter, region="us")
     held = await _stored(db_session)
     assert len(held["chapters"]) == 1 and held["extrasWithheld"] == {"contentUrl": "size"}

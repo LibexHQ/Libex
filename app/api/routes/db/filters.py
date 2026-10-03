@@ -35,7 +35,11 @@ class AudiobooksProduced(str, Enum):
 BOOK_FILTER_FIELDS: dict[str, tuple[type, str]] = {
     "title": (str, "Filter by title"),
     "subtitle": (str, "Filter by subtitle"),
-    "region": (str, "Filter by region"),
+    "region": (
+        str,
+        "Without it, each ASIN appears once, as its first-stored record, and filters are "
+        "tested against that record; pass a region to list that marketplace's records.",
+    ),
     "description": (str, "Filter by description"),
     "summary": (str, "Filter by summary"),
     "publisher": (str, "Filter by publisher"),

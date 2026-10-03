@@ -14,19 +14,20 @@ caller already knows it and passes `dialect`, which saves the lookup.
 """
 
 # Third party
-from sqlalchemy import select, update
+from sqlalchemy import exists, literal, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Local
 from libex_core.storage import merge
-from libex_core.storage.models import Author, Genre, Narrator, Track, author_genre
+from libex_core.storage.models import Author, Book, Genre, Narrator, Track, author_genre
 from libex_core.storage.write.params import series_params
 from libex_core.storage.write.statements import statements_for
 from libex_core.storage.write.support import (
     conflict_on_constraint,
     dialect_of,
     insert_for,
+    lock_asins,
     utc_now,
 )
 
@@ -101,8 +102,9 @@ async def upsert_series(
     params = series_params(series, utc_now())
     if params is None:
         return None
-    statements = statements_for(dialect or dialect_of(session))
-    await session.execute(statements.series_upsert, [params])
+    dialect = dialect or dialect_of(session)
+    await lock_asins(session, "series", [params["asin"]], dialect=dialect)
+    await session.execute(statements_for(dialect).series_upsert, [params])
     return params["asin"]
 
 
@@ -111,7 +113,8 @@ async def write_series_profile(
 ) -> str | None:
     """
     Writes a full series profile fetched from the series endpoint, returning
-    the series asin, or None when the profile carries no asin or no name.
+    the series asin, or None when the profile carries no asin, no name or no
+    region.
 
     Writes through the same statement the book path writes series with, so the
     two cannot drift apart on how a description or a region merges. All this
@@ -124,8 +127,12 @@ async def write_series_profile(
     if not asin or not name:
         return None
 
-    statements = statements_for(dialect or dialect_of(session))
-    await session.execute(statements.series_upsert, [series_params(data, utc_now())])
+    params = series_params(data, utc_now())
+    if params is None:
+        return None
+    dialect = dialect or dialect_of(session)
+    await lock_asins(session, "series", [params["asin"]], dialect=dialect)
+    await session.execute(statements_for(dialect).series_upsert, [params])
     return asin
 
 
@@ -396,11 +403,18 @@ async def write_track(
     asin: str,
     chapters_data: dict,
     *,
+    region: str,
     dialect: str | None = None,
-) -> int:
+) -> int | None:
     """
     Writes chapter data for a book, keeping the richer of the two payloads, and
-    returns how many chapters the row holds afterwards.
+    returns how many chapters the row holds afterwards, or None when the book
+    is not stored for the region and nothing was written.
+
+    The listing belongs to one marketplace's record of the book: (asin, region)
+    is the key and the foreign key to books. region is required, with no
+    default, so a caller that has not been taught it fails here rather than
+    writing a listing under the wrong marketplace.
 
     The merge is decided in the SET clause rather than by reading the row
     first: several fetch paths can be refreshing the same ASIN at once, and a
@@ -419,14 +433,25 @@ async def write_track(
     chapters offered than are held -- from an ordinary one.
     """
     insert = insert_for(dialect or dialect_of(session))
-    stmt = insert(Track).values(
-        asin=asin,
-        chapters=chapters_data,
-        created_at=utc_now(),
-        updated_at=utc_now(),
+    columns = Track.__table__.c
+    now = utc_now()
+    # INSERT ... SELECT ... WHERE EXISTS rather than VALUES: the listing is
+    # filed only under a book this store holds for the region, in the same
+    # statement, so a region where the book is not stored costs no extra read
+    # and no foreign key failure.
+    book_stored = exists().where(Book.asin == asin, Book.region == region)
+    source = select(
+        literal(asin, columns.asin.type),
+        literal(region, columns.region.type),
+        literal(chapters_data, columns.chapters.type),
+        literal(now, columns.created_at.type),
+        literal(now, columns.updated_at.type),
+    ).where(book_stored)
+    stmt = insert(Track).from_select(
+        ["asin", "region", "chapters", "created_at", "updated_at"], source
     )
     stmt = stmt.on_conflict_do_update(
-        index_elements=["asin"],
+        index_elements=["asin", "region"],
         set_={
             "chapters": merge.chaptered_wins(stmt.excluded.chapters, Track.chapters),
             "updated_at": utc_now(),
@@ -434,4 +459,7 @@ async def write_track(
     ).returning(merge.chapter_count(Track.chapters))
 
     result = await session.execute(stmt)
-    return result.scalar() or 0
+    row = result.first()
+    if row is None:
+        return None
+    return row[0] or 0

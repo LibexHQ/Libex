@@ -56,45 +56,47 @@ def utc_z(value: datetime | None) -> str | None:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-async def series_positions(session: AsyncSession, book_asin: str) -> dict[str, str | None]:
-    """Returns {series_asin: position} for a book."""
-    result = await session.execute(
-        select(book_series.c.series_asin, book_series.c.position)
-        .where(book_series.c.book_asin == book_asin)
+async def series_positions(
+    session: AsyncSession, book_asin: str, *, region: str | None = None
+) -> dict[str, str | None]:
+    """Returns {series_asin: position} for a book.
+
+    Positions belong to the book's record in one marketplace, so the readers
+    pass its region. Without one, the links of every region's record of the
+    ASIN are read together, which only a caller with no record in hand wants.
+    """
+    stmt = select(book_series.c.series_asin, book_series.c.position).where(
+        book_series.c.book_asin == book_asin
     )
+    if region is not None:
+        stmt = stmt.where(book_series.c.book_region == region)
+    result = await session.execute(stmt)
     return {row[0]: row[1] for row in result.fetchall()}
 
 
-async def series_positions_batch(
-    session: AsyncSession, book_asins: list[str]
-) -> dict[str, dict[str, str | None]]:
-    """Returns {book_asin: {series_asin: position}} for many books at once.
+async def series_positions_by_book(
+    session: AsyncSession, books
+) -> dict[tuple[str, str], dict[str, str | None]]:
+    """Returns {(asin, region): {series_asin: position}} for many stored books.
 
-    The batched form of series_positions, for callers holding many books at
-    once: one round trip for the batch instead of one per book. A book with
-    no series rows is simply absent from the outer dict, so callers substitute
-    an empty dict — exactly what series_positions returns for that book.
+    One round trip per 5000 ASINs, and a link is attributed only to the
+    record of the region it was written for, so two regions' positions for
+    one ASIN stay apart.
     """
-    positions: dict[str, dict[str, str | None]] = {}
-    if not book_asins:
-        return positions
-
-    # Postgres caps a single statement at 32767 bind parameters, so the IN list
-    # is chunked at the size the seeder already uses for the same reason. An
-    # author's stored catalogue can run to thousands of books and the caller
-    # below applies no LIMIT, so the list is not bounded by a page size.
-    for i in range(0, len(book_asins), 5000):
-        chunk = book_asins[i:i + 5000]
+    positions: dict[tuple[str, str], dict[str, str | None]] = {}
+    asins = sorted({book.asin for book in books})
+    for i in range(0, len(asins), 5000):
         result = await session.execute(
             select(
                 book_series.c.book_asin,
+                book_series.c.book_region,
                 book_series.c.series_asin,
                 book_series.c.position,
             )
-            .where(book_series.c.book_asin.in_(chunk))
+            .where(book_series.c.book_asin.in_(asins[i:i + 5000]))
         )
-        for book_asin, series_asin, position in result.fetchall():
-            positions.setdefault(book_asin, {})[series_asin] = position
+        for book_asin, book_region, series_asin, position in result.fetchall():
+            positions.setdefault((book_asin, book_region), {})[series_asin] = position
     return positions
 
 
@@ -266,6 +268,6 @@ async def hydrate_books(session: AsyncSession, books) -> list[dict[str, Any]]:
     """Builds the dict for each book, one series-position lookup per book."""
     results = []
     for book in books:
-        positions = await series_positions(session, book.asin)
+        positions = await series_positions(session, book.asin, region=book.region)
         results.append(book_to_dict(book, positions))
     return results

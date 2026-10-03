@@ -329,6 +329,7 @@ _libex-core() {
                         book)
                             _arguments \
                                 '(- *)'{-h,--help}'[show this help message and exit]' \
+                                '--region[the record of this marketplace, default the one stored first]:region:(us uk ca au de fr it es jp in br)' \
                                 '1:command:(book)' \
                                 '2:ASIN:'
                             ;;
@@ -371,6 +372,7 @@ _libex-core() {
                         chapters)
                             _arguments \
                                 '(- *)'{-h,--help}'[show this help message and exit]' \
+                                '--region[the record of this marketplace, default the one stored first]:region:(us uk ca au de fr it es jp in br)' \
                                 '1:command:(chapters)' \
                                 '2:ASIN:'
                             ;;
@@ -425,6 +427,7 @@ _libex-core() {
                         series)
                             _arguments \
                                 '(- *)'{-h,--help}'[show this help message and exit]' \
+                                '--region[the record of this marketplace, default the one stored first]:region:(us uk ca au de fr it es jp in br)' \
                                 '1:command:(series)' \
                                 '2:ASIN:'
                             ;;

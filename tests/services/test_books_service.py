@@ -1063,7 +1063,7 @@ async def test_get_books_by_asins_not_found_and_transient_together_backstop_scop
             raise RuntimeError("Audible 500")  # the bad_asins batch chunk
         raise NotFoundException()  # missing_asin's own single-ASIN chunk
 
-    async def _db_backstop(session, asins):
+    async def _db_backstop(session, asins, region):
         assert missing_asin not in asins, "not_found_asins leaked into the DB-backstop call"
         return [b for b in stale_bad_books + [stale_missing_book] if b["asin"] in asins]
 
@@ -1073,7 +1073,7 @@ async def test_get_books_by_asins_not_found_and_transient_together_backstop_scop
          patch("app.services.audible.books.cache.get", return_value=None):
         result = await get_books_by_asins(all_asins, "us", mock_session)
 
-    mock_backstop.assert_awaited_once_with(mock_session, bad_asins)
+    mock_backstop.assert_awaited_once_with(mock_session, bad_asins, region="us")
     assert set(bad_asins) <= {b["asin"] for b in result}
     assert stale_missing_book not in result
     assert missing_asin not in {b["asin"] for b in result}
@@ -1109,7 +1109,7 @@ async def test_get_books_by_asins_transient_chunk_failure_is_skipped_not_fatal()
          patch("app.services.audible.books.cache.get", return_value=None):
         result = await get_books_by_asins(all_asins, "us", mock_session)
 
-    mock_backstop.assert_awaited_once_with(mock_session, [bad_asin])
+    mock_backstop.assert_awaited_once_with(mock_session, [bad_asin], region="us")
     assert {b["asin"] for b in result} == set(good_asins) | {bad_asin}
     assert db_backstop_book in result
 
@@ -1346,7 +1346,7 @@ async def test_get_books_by_asins_facts_records_db_backstop_after_transient_fail
             return {"products": [_hydration_product(a) for a in asins]}
         raise RuntimeError("Audible 500")
 
-    async def _db_backstop(session, asins):
+    async def _db_backstop(session, asins, region):
         assert set(asins) == set(bad_asins)
         return [recovered_book]
 
@@ -1529,7 +1529,7 @@ async def test_get_books_by_asins_facts_records_outage_db_fallback():
 
     backstop_calls = []
 
-    async def _db_backstop(session, asins):
+    async def _db_backstop(session, asins, region):
         backstop_calls.append(list(asins))
         if len(backstop_calls) == 1:
             raise RuntimeError("DB backstop read failed")
@@ -1575,7 +1575,7 @@ async def test_get_books_by_asins_facts_records_outage_db_fallback_short_coverag
 
     backstop_calls = []
 
-    async def _db_backstop(session, asins):
+    async def _db_backstop(session, asins, region):
         backstop_calls.append(list(asins))
         if len(backstop_calls) == 1:
             raise RuntimeError("DB backstop read failed")
@@ -1626,7 +1626,7 @@ async def test_get_books_by_asins_facts_records_outage_cache_fallback_combining_
 
     db_backstop_calls = []
 
-    async def _db_backstop(session, asins):
+    async def _db_backstop(session, asins, region):
         db_backstop_calls.append(list(asins))
         if len(db_backstop_calls) == 1:
             raise RuntimeError("DB backstop read failed")
@@ -1676,7 +1676,7 @@ async def test_get_books_by_asins_facts_records_outage_cache_fallback_short_cove
 
     db_backstop_calls = []
 
-    async def _db_backstop(session, asins):
+    async def _db_backstop(session, asins, region):
         db_backstop_calls.append(list(asins))
         if len(db_backstop_calls) == 1:
             raise RuntimeError("DB backstop read failed")
@@ -1850,12 +1850,40 @@ async def test_get_chapters_logs_warning_before_raising(raised, expected_upstrea
 # FETCH AND STORE CHAPTERS TESTS
 # ============================================================
 
+def _session_with_book(present: bool):
+    """An AsyncMock session whose book-row lookup finds (or misses) the row."""
+    from unittest.mock import MagicMock
+
+    session = AsyncMock()
+    found = MagicMock()
+    found.first.return_value = ("B08G9PRS1K",) if present else None
+    session.execute.return_value = found
+    return session
+
+
+@pytest.mark.asyncio
+async def test_fetch_and_store_chapters_skips_when_book_absent_in_region():
+    """No (asin, region) book row: no Audible call, no write, no stamp, 'none'."""
+    from app.services.audible.books import fetch_and_store_chapters
+
+    mock_session = _session_with_book(False)
+
+    with patch("app.services.audible.books.audible_get") as mock_get, \
+         patch("app.services.audible.books.upsert_track", new_callable=AsyncMock) as mock_upsert:
+        result = await fetch_and_store_chapters("B08G9PRS1K", "uk", mock_session)
+
+    assert result == "none"
+    mock_get.assert_not_called()
+    mock_upsert.assert_not_called()
+    mock_session.commit.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_fetch_and_store_chapters_stores_and_marks():
     """On success: stores the track, marks the book checked, returns 'stored'."""
     from app.services.audible.books import fetch_and_store_chapters
 
-    mock_session = AsyncMock()
+    mock_session = _session_with_book(True)
     data = {"content_metadata": {"chapter_info": {"chapters": []}}}
 
     with patch("app.services.audible.books.audible_get", return_value=data), \
@@ -1874,7 +1902,7 @@ async def test_fetch_and_store_chapters_none_when_no_chapter_info():
     """Resolved but no chapter_info: marks checked, stores nothing, returns 'none'."""
     from app.services.audible.books import fetch_and_store_chapters
 
-    mock_session = AsyncMock()
+    mock_session = _session_with_book(True)
     data = {"content_metadata": {}}
 
     with patch("app.services.audible.books.audible_get", return_value=data), \
@@ -1892,7 +1920,7 @@ async def test_fetch_and_store_chapters_not_found_marks_checked():
     from app.services.audible.books import fetch_and_store_chapters
     from libex_core.exceptions import NotFoundException
 
-    mock_session = AsyncMock()
+    mock_session = _session_with_book(True)
 
     with patch("app.services.audible.books.audible_get", side_effect=NotFoundException()), \
          patch("app.services.audible.books.upsert_track", new_callable=AsyncMock) as mock_upsert:
@@ -1908,7 +1936,7 @@ async def test_fetch_and_store_chapters_error_does_not_mark():
     """A transient error does NOT mark checked (so it retries) and returns 'error'."""
     from app.services.audible.books import fetch_and_store_chapters
 
-    mock_session = AsyncMock()
+    mock_session = _session_with_book(True)
 
     with patch("app.services.audible.books.audible_get", side_effect=Exception("Audible 500")), \
          patch("app.services.audible.books.upsert_track", new_callable=AsyncMock) as mock_upsert:
@@ -1924,7 +1952,7 @@ async def test_fetch_and_store_chapters_never_raises_on_store_failure():
     """A write failure is swallowed (returns 'error'), never propagates."""
     from app.services.audible.books import fetch_and_store_chapters
 
-    mock_session = AsyncMock()
+    mock_session = _session_with_book(True)
     data = {"content_metadata": {"chapter_info": {"chapters": []}}}
 
     with patch("app.services.audible.books.audible_get", return_value=data), \
@@ -2767,3 +2795,80 @@ async def test_fetch_and_store_chapters_bad_body_is_error_and_not_marked(exc):
 
     assert outcome == "error"
     mark.assert_not_awaited()
+
+
+# ============================================================
+# REGION-SCOPED FALLBACKS AND WRITES
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_outage_fallback_reads_the_requests_region_never_the_first_stored():
+    """A uk request must reach the stored-book reader with region='uk', so a
+    row only the us marketplace stored cannot answer it."""
+    import app.services.audible.books as books_mod
+
+    session = AsyncMock()
+    session.rollback = AsyncMock()
+    reader = AsyncMock(return_value=[])
+
+    with patch.object(books_mod, "_fetch_chunk", new=AsyncMock(side_effect=RuntimeError("down"))), \
+         patch.object(books_mod, "get_books_from_db", new=reader), \
+         patch("app.services.audible.books.cache.get_many", new=AsyncMock(return_value={})):
+        with pytest.raises(Exception):
+            await books_mod.get_books_by_asins(["B08G9PRS1K"], "uk", session)
+
+    assert reader.await_args_list
+    for call in reader.await_args_list:
+        assert call.kwargs.get("region") == "uk"
+
+
+@pytest.mark.asyncio
+async def test_outage_fallback_cache_keys_carry_the_requests_region():
+    import app.services.audible.books as books_mod
+    from app.services.cache.manager import book_key
+
+    session = AsyncMock()
+    session.rollback = AsyncMock()
+    cache_read = AsyncMock(return_value={})
+
+    with patch.object(books_mod, "_fetch_chunk", new=AsyncMock(side_effect=RuntimeError("down"))), \
+         patch.object(books_mod, "get_books_from_db", new=AsyncMock(return_value=[])), \
+         patch("app.services.audible.books.cache.get_many", new=cache_read):
+        with pytest.raises(Exception):
+            await books_mod.get_books_by_asins(["B08G9PRS1K"], "uk", session)
+
+    keys = [k for call in cache_read.await_args_list for k in call.args[1]]
+    assert keys and set(keys) == {book_key("B08G9PRS1K", "uk")}
+
+
+@pytest.mark.asyncio
+async def test_chapters_fallback_reads_the_requests_region():
+    from app.services.audible.books import get_chapters
+
+    reader = AsyncMock(return_value={"chapters": [], "runtimeLengthMs": 0})
+    with patch("app.services.audible.books.audible_get", side_effect=Exception("down")), \
+         patch("app.services.audible.books.get_track_from_db", new=reader):
+        await get_chapters("B08G9PRS1K", "uk", AsyncMock())
+
+    reader.assert_awaited_once()
+    assert reader.await_args.kwargs == {"region": "uk"}
+
+
+@pytest.mark.asyncio
+async def test_fetch_and_store_chapters_writes_and_stamps_for_the_requests_region():
+    from sqlalchemy.dialects import postgresql
+
+    from app.services.audible.books import fetch_and_store_chapters
+
+    session = AsyncMock()
+    data = {"content_metadata": {"chapter_info": {"chapters": []}}}
+
+    with patch("app.services.audible.books.audible_get", return_value=data), \
+         patch("app.services.audible.books.upsert_track", new_callable=AsyncMock) as mock_upsert:
+        await fetch_and_store_chapters("B08G9PRS1K", "uk", session)
+
+    assert mock_upsert.await_args.kwargs == {"region": "uk"}
+    stamp = session.execute.await_args.args[0]
+    compiled = stamp.compile(dialect=postgresql.dialect())
+    assert "books.region = " in str(compiled)
+    assert "uk" in compiled.params.values()

@@ -85,8 +85,26 @@ from typing import Any
 from libex_core.audible.client import LibexClient
 from app.core.config import get_settings
 
+
+def _refuse_socks(proxy_url: str) -> None:
+    """The hosted service takes http and https proxies only. libex_core
+    itself accepts SOCKS5, but only with an optional extra the hosted image
+    does not install, so without this a SOCKS URL would fail with an
+    instruction to install something the operator cannot. The message is
+    fixed text and never carries any part of the value, which can hold
+    credentials."""
+    if proxy_url.strip().lower().startswith(("socks5://", "socks5h://")):
+        raise ValueError(
+            "AUDIBLE_PROXY_URL: the hosted service supports http and https "
+            "proxies only, not SOCKS"
+        )
+
+
+_proxy_url = get_settings().audible_proxy_url
+_refuse_socks(_proxy_url)
+
 _hosted_client = LibexClient(
-    proxy_url=get_settings().audible_proxy_url,
+    proxy_url=_proxy_url,
     allow_direct_egress=True,
 )
 

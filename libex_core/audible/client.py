@@ -39,6 +39,7 @@ how many instances exist.
 
 # Standard library
 import asyncio
+import importlib.util
 import logging
 import random
 from collections.abc import Coroutine
@@ -152,8 +153,17 @@ def get_region_headers(region: str) -> dict[str, str]:
 # guard against here the way there was under a single shared, replaceable,
 # module-level transport: each instance builds exactly one of these, once,
 # in its own constructor, and never replaces it.
-_VALID_PROXY_SCHEMES = ("http", "https")
+#
+# socks5 and socks5h are accepted and behave identically: httpcore's SOCKS
+# proxy sends the target hostname to the proxy for both spellings (it never
+# resolves the name locally), which is what socks5h promises and what socks5
+# would otherwise be read as not promising. socks4 and socks4a are refused.
+# SOCKS has no default port, so none is guessed -- a SOCKS URL must name one.
+_HTTP_PROXY_SCHEMES = ("http", "https")
+_SOCKS_PROXY_SCHEMES = ("socks5", "socks5h")
+_VALID_PROXY_SCHEMES = _HTTP_PROXY_SCHEMES + _SOCKS_PROXY_SCHEMES
 _DEFAULT_PROXY_PORTS = {"http": 80, "https": 443}
+_SCHEME_MESSAGE = "proxy URL must use the http, https, socks5 or socks5h scheme"
 
 
 @dataclass(frozen=True)
@@ -165,6 +175,7 @@ class _TransportSnapshot:
     or an exception message."""
     proxy: httpx.Proxy | None
     host: str | None
+    scheme: str | None
 
 
 @dataclass(frozen=True)
@@ -172,10 +183,12 @@ class TransportSummary:
     """Read-only view of one LibexClient instance's configured transport,
     safe to log or assert against: which of the two states ("direct" or
     "proxy") that instance was constructed with, and -- in the "proxy"
-    state only -- the hostname it resolves to. Never the URL, never any
-    credentials it might embed. Produced by LibexClient.transport_summary()."""
+    state only -- the hostname it resolves to and the proxy scheme ("http",
+    "https", "socks5" or "socks5h"). Never the URL, never any credentials it
+    might embed. Produced by LibexClient.transport_summary()."""
     mode: str
     host: str | None
+    scheme: str | None = None
 
 
 # ============================================================
@@ -494,7 +507,8 @@ class LibexClient:
     def __init__(self, *, proxy_url: str | None, allow_direct_egress: bool = False) -> None:
         """
         Decides, once, how this instance's Audible traffic egresses:
-        through an HTTP(S) proxy, or directly on this process's own IP.
+        through an HTTP(S) or SOCKS5 proxy, or directly on this process's
+        own IP.
         There is no default for proxy_url -- omitting it is a TypeError
         from Python's own argument checking, not a runtime guard this
         constructor has to remember to enforce, which is what makes
@@ -520,10 +534,25 @@ class LibexClient:
         address, with nothing here to stop it.
 
         Any other value for proxy_url is parsed eagerly, right here, as a
-        proxy URL, and must name an http or https scheme, a host, and a
-        port (explicit, or the scheme's own default); anything else raises
-        ValueError with a fixed message that never contains any part of the
-        supplied value. That's deliberate, not merely tidy: a scheme-less
+        proxy URL, and must name an http, https, socks5 or socks5h scheme, a
+        host, and a port (explicit, or for http and https the scheme's own
+        default -- a SOCKS URL must always carry its port, none is guessed);
+        anything else, socks4 and socks4a included, raises ValueError with a
+        fixed message that never contains any part of the supplied value.
+
+        socks5 and socks5h are handled the same: the hostname of the Audible
+        endpoint is always sent to the proxy to resolve, never resolved on
+        this machine. SOCKS support needs the optional socksio package
+        (`pip install "libex-core[socks]"`); a socks URL without it raises
+        ValueError here, at construction, not on the first request. TLS to
+        Audible stays end to end through the tunnel. A username and
+        password in a SOCKS5 URL travel to the proxy as RFC 1929
+        username/password authentication, which is cleartext on the wire
+        between this process and the proxy -- only the tunnelled TLS to
+        Audible is encrypted -- so use SOCKS5 credentials only over a path
+        you trust, such as a local or private network.
+
+        The fixed message is deliberate, not merely tidy: a scheme-less
         value such as a bare "user:pass@host:port" makes httpx's own proxy
         parser raise a ValueError whose message embeds the credentials, and
         that exception has reached a log field before -- eagerly validating
@@ -571,21 +600,33 @@ class LibexClient:
                     "came through empty by mistake fails loudly instead of "
                     "sending every request out on this process's own IP"
                 )
-            proxy, host = None, None
+            proxy, host, scheme = None, None, None
         else:
             try:
                 proxy = httpx.Proxy(proxy_url)
             except Exception:
+                # httpx.Proxy refuses a scheme it does not know (socks4, ftp)
+                # before this module sees it; naming the accepted schemes is
+                # kinder than "could not be parsed", and neither message
+                # carries any of the value.
+                given, separator, _rest = proxy_url.partition("://")
+                if separator and given.lower() not in _VALID_PROXY_SCHEMES and given.isalnum():
+                    raise ValueError(_SCHEME_MESSAGE) from None
                 raise ValueError("proxy URL could not be parsed") from None
             scheme = proxy.url.scheme
             if scheme not in _VALID_PROXY_SCHEMES:
-                raise ValueError("proxy URL must use the http or https scheme") from None
+                raise ValueError(_SCHEME_MESSAGE) from None
+            if scheme in _SOCKS_PROXY_SCHEMES and importlib.util.find_spec("socksio") is None:
+                raise ValueError(
+                    "a socks proxy URL needs the optional socksio package: "
+                    'pip install "libex-core[socks]"'
+                ) from None
             host = proxy.url.host
             port = proxy.url.port or _DEFAULT_PROXY_PORTS.get(scheme)
             if not host or not port or not (0 < port < 65536):
                 raise ValueError("proxy URL must include a host and a valid port") from None
 
-        self.__transport = _TransportSnapshot(proxy=proxy, host=host)
+        self.__transport = _TransportSnapshot(proxy=proxy, host=host, scheme=scheme)
         self._closed = False
         self.__http: httpx.AsyncClient | None = None
         self.__http_loop: asyncio.AbstractEventLoop | None = None
@@ -815,7 +856,9 @@ class LibexClient:
         unaffected by aclose() or by any loop-driven client rebuild, since
         neither one changes the transport itself."""
         mode = "proxy" if self.__transport.proxy is not None else "direct"
-        return TransportSummary(mode=mode, host=self.__transport.host)
+        return TransportSummary(
+            mode=mode, host=self.__transport.host, scheme=self.__transport.scheme
+        )
 
     async def aclose(self) -> None:
         """

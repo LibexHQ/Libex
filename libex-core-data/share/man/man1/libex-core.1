@@ -1522,7 +1522,7 @@ show this help message and exit
 .SH ENVIRONMENT
 .TP
 \fBLIBEX_CORE_PROXY_URL\fR
-URL of the http or https proxy that every request goes through. It may carry credentials, so it is read from the environment and never accepted as an option. Empty means unset.
+URL of the http, https, socks5 or socks5h proxy that every request goes through. It may carry credentials, so it is read from the environment and never accepted as an option. Empty means unset.
 .TP
 \fBLIBEX_CORE_ALLOW_DIRECT_EGRESS\fR
 Set to 1, true, yes or on to let requests leave on this machine's own address when no proxy is set. 0, false, no, off or empty keeps that refused. A proxy, when set, is always used.

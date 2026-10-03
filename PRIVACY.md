@@ -414,9 +414,18 @@ The library is built around preventing that from happening by accident:
   `ALL_PROXY`, `SSL_CERT_FILE` and `SSL_CERT_DIR`, so a setting left on a
   device by an employer, a local intercepting proxy or a forgotten tool cannot
   reroute its traffic or replace its trusted certificates.
-- **Proxy credentials stay out of errors and logs.** An error about an invalid
-  proxy URL contains none of the value supplied. The only view of the
-  connection settings it exposes is the mode and, for a proxy, its hostname.
+- **Proxy credentials stay out of its errors and its own logs.** An error
+  about an invalid proxy URL contains none of the value supplied. The only
+  view of the connection settings it exposes is the mode and, for a proxy,
+  its hostname and scheme. The proxy can be an HTTP, HTTPS or SOCKS5 proxy.
+  Two things about SOCKS5 credentials are outside the library's control. A
+  SOCKS5 username and password are sent to the proxy unencrypted, so anyone
+  on the network between the device and the proxy can read them. The
+  lookups themselves stay encrypted inside the tunnel to Audible. And the
+  network library underneath, `httpcore`, writes the SOCKS5 username and
+  password into its own debug log. That log is off unless the application
+  turns on debug logging for `httpcore`, for example by setting all logging
+  to debug. The `libex-core` command never does, even with `-vv`.
 - **It talks only to Audible.** Requests go only to Audible's API host for the
   requested region. The path and the finished URL (host, scheme and port) are
   checked so that a crafted path cannot redirect the request elsewhere.

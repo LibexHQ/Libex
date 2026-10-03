@@ -13,6 +13,16 @@ the first published version. Entries for earlier versions record changes made
 before publication: they are historical record for whoever embeds this package,
 not evidence that anyone consumed a given version at the time it was cut.
 
+## [0.21.0]
+
+### Added
+- **`LibexClient` can go through a SOCKS5 proxy.** A `socks5://` or `socks5h://` proxy URL is now accepted, and the two behave the same: the proxy is always handed Audible's hostname and resolves it, and the name is never resolved on this machine. TLS to Audible stays end to end through the tunnel. A SOCKS5 URL must name its port, because SOCKS has no default one and none is guessed. `socks4://`, `socks4a://` and any other scheme are still refused. A username and password in a SOCKS5 URL are sent to the proxy as RFC 1929 username/password authentication, which is cleartext between this machine and the proxy, so use them only on a network you trust.
+- **A `socks` extra installs what SOCKS needs.** `pip install "libex-core[socks]"` adds the SOCKS support for the HTTP client. Without it, building a client with a SOCKS5 URL raises `ValueError` at construction, naming the extra, rather than failing on the first request.
+- **`TransportSummary` has a `scheme` field.** It is the proxy's scheme (`http`, `https`, `socks5` or `socks5h`) when a proxy is configured and `None` for direct egress. It never carries the URL or credentials. Existing fields are unchanged.
+
+### Changed
+- **The proxy refusals now name the SOCKS5 schemes.** A proxy URL with an unsupported scheme raises `ValueError` saying it must use the http, https, socks5 or socks5h scheme, where it used to say only http or https. A `ValueError` still never contains any part of the URL. The `LIBEX_CORE_PROXY_URL` help, the command line's configuration error and the man page list the four schemes, and the error notes that a SOCKS5 URL needs its port and the `socks` extra.
+
 ## [0.20.0]
 
 ### Added

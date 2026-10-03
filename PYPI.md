@@ -195,13 +195,18 @@ class, pass a keyword-only `connect=` hook and make it yourself:
 
 ```python
 store = LocalStore("postgresql+asyncpg://", connect=my_asyncpg_connect)  # () -> awaitable asyncpg.Connection
-store = LocalStore("sqlite+aiosqlite:///libex.db", connect=my_open)      # (path) -> awaitable aiosqlite.Connection
+store = LocalStore("sqlite+aiosqlite:///libex.db", connect=my_open)      # (path) -> sqlite3.Connection
 ```
 
 With a Postgres hook the URL must be bare, `postgresql+asyncpg://`: a host,
 user, password or option in it is refused. A SQLite hook is called with the
 path libex-core has already checked (a symbolic link is refused, and on Linux
-and macOS a new file is created readable by you only). Write-ahead logging is
+and macOS a new file is created readable by you only) and is an ordinary
+function returning a DB-API connection: `sqlite3`, or a build with the same
+interface such as SQLCipher (`sqlcipher3`), with the key applied inside the
+hook. libex-core wraps the connection itself and reads it once before use, so a
+wrong key surfaces as `StoreConnectionError` with the connection already
+closed. Write-ahead logging is
 not set beforehand: `upgrade()` switches the file to it later, over the
 connections you supply. Schema checks, refusal of a database this package did not create, upgrades and write
 locking all apply to the connections you supply, and a hook that raises or
@@ -217,12 +222,6 @@ manage nor check them:
   anything you leave out.
 - Never resending a password in plain text after a failed encrypted attempt.
 - `gsslib`, `krbsrvname` and `server_settings`.
-- Any setup a custom SQLite connection needs, such as the key for an encrypted
-  build, which must be applied, and checked by reading `sqlite_master`, before
-  the connection is returned, so a wrong key fails inside your hook.
-- Closing the store. Use `async with` or `await store.close()`: the worker
-  thread of a connection your hook returns is not a daemon, so a store that is
-  never closed keeps the interpreter from exiting.
 
 ## Links
 

@@ -12,7 +12,6 @@ import sqlite3
 import ssl
 
 # Third party
-import aiosqlite
 import asyncpg
 import pytest
 from sqlalchemy import text
@@ -205,10 +204,10 @@ async def test_a_sqlite_hook_that_raises_or_returns_the_wrong_type_leaks_nothing
     path = tmp_path / "libex.db"
     path.touch()
 
-    async def raises(_path):
+    def raises(_path):
         raise Exception(SENTINEL)
 
-    async def wrong(_path):
+    def wrong(_path):
         return SENTINEL
 
     for hook, name in ((raises, "Exception"), (wrong, "str")):
@@ -252,7 +251,7 @@ async def test_a_sqlite_hook_receives_the_vetted_path_and_the_store_works(tmp_pa
 
     def connect(received):
         seen.append(received)
-        return aiosqlite.connect(received)
+        return sqlite3.connect(received)
 
     store = LocalStore(_url(path), connect=connect)
     try:
@@ -277,7 +276,7 @@ async def test_a_symlink_is_refused_before_a_sqlite_hook_is_called(tmp_path):
 
     def connect(path):
         called.append(path)
-        return aiosqlite.connect(path)
+        return sqlite3.connect(path)
 
     store = LocalStore(_url(link), connect=connect)
     try:
@@ -294,7 +293,7 @@ async def test_a_foreign_sqlite_database_is_refused_with_a_hook(tmp_path):
     path = tmp_path / "other.db"
     with sqlite3.connect(path) as db:
         db.execute("CREATE TABLE books (id INTEGER)")
-    store = LocalStore(_url(path), connect=lambda p: aiosqlite.connect(p))
+    store = LocalStore(_url(path), connect=lambda p: sqlite3.connect(p))
     try:
         with pytest.raises(ForeignDatabase):
             await store.upgrade()

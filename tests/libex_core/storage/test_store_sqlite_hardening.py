@@ -11,7 +11,6 @@ import sqlite3
 from types import SimpleNamespace
 
 # Third party
-import aiosqlite
 import pytest
 from alembic import command
 from alembic.migration import MigrationContext
@@ -52,7 +51,7 @@ def kw(request, db):
 
     def connect(path):
         seen.append(path)
-        return aiosqlite.connect(path)
+        return sqlite3.connect(path)
 
     yield {"connect": connect}
     assert seen, "the connect hook was never called"

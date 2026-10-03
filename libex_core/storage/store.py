@@ -51,10 +51,12 @@ import stat
 import sys
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import Any
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 # Third party
+from sqlalchemy import event
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
@@ -298,9 +300,9 @@ def _hook_failure(stage: str, backend: str, name: str) -> StoreConnectionError:
 
 
 async def _discard(connection) -> None:
-    """Closes a connection the hook returned that this library refuses, so it
-    is not left open. Best effort: whatever closing raises is ignored, since the
-    error worth reporting is the wrong type."""
+    """Closes a connection this library refuses or never took over, so it is
+    not left open. Best effort: whatever closing raises is ignored, since the
+    error worth reporting is the one that made it refuse."""
     try:
         closed = getattr(connection, "close", None)
         if callable(closed):
@@ -308,10 +310,47 @@ async def _discard(connection) -> None:
             if inspect.isawaitable(result):
                 await result
     except Exception:
-        pass
+        stop = getattr(connection, "stop", None)
+        if callable(stop):
+            try:
+                stop()
+            except Exception:
+                pass
 
 
-def _caller_postgres_creator(connect: Callable[[], Awaitable]):
+class _Handoff:
+    """Connections the pool has opened that SQLAlchemy has not yet finished
+    setting up. SQLAlchemy runs its own setup on a new connection after the
+    creator returns and does not close the connection when that setup raises,
+    so each connection is held from before any setup runs and closed unless a
+    listener registered after every other one confirms the setup finished.
+    Each is tied to the task that made it, so one task's failure never closes
+    a connection another task is still setting up."""
+
+    def __init__(self) -> None:
+        self._held: list[tuple[object, "asyncio.Task | None"]] = []
+
+    def hold(self, connection) -> None:
+        if any(held is connection for held, _ in self._held):
+            return
+        self._held.append((connection, asyncio.current_task()))
+
+    def hold_adapted(self, dbapi_connection, _record=None) -> None:
+        self.hold(getattr(dbapi_connection, "_connection", dbapi_connection))
+
+    def claim(self, dbapi_connection, _record=None) -> None:
+        raw = getattr(dbapi_connection, "_connection", dbapi_connection)
+        self._held = [(c, t) for c, t in self._held if c is not raw]
+
+    async def reclaim(self, *, everything: bool = False) -> None:
+        task = asyncio.current_task()
+        mine = [c for c, t in self._held if everything or t is task]
+        self._held = [(c, t) for c, t in self._held if not (everything or t is task)]
+        for connection in mine:
+            await _discard(connection)
+
+
+def _caller_postgres_creator(connect: Callable[[], Awaitable], handoff: _Handoff):
     """Wraps a caller's Postgres hook. Whatever the hook raises is reduced to
     its class name outside the `except`, so no chained context carries the
     driver's or the caller's message, which may hold a password."""
@@ -329,30 +368,70 @@ def _caller_postgres_creator(connect: Callable[[], Awaitable]):
         if not isinstance(connection, asyncpg.Connection):
             await _discard(connection)
             raise _hook_failure("returned the wrong type", "postgresql", type(connection).__name__)
+        handoff.hold(connection)
         return connection
 
     return create
 
 
-def _caller_sqlite_creator(connect: Callable[[str], Awaitable], path: str):
+_DBAPI_METHODS = ("cursor", "execute", "close", "create_function")
+
+
+def _caller_sqlite_creator(connect: Callable[[str], "sqlite3.Connection"], path: str, handoff: _Handoff):
     """Wraps a caller's SQLite hook, which is handed the path this library has
-    already vetted and returns an `aiosqlite.Connection`. The pool setup (foreign
-    keys, busy timeout, isolation level) still runs on what it returns."""
+    already vetted and returns a DB-API connection (`sqlite3`, or an encrypted
+    build with the same interface). This library, not the caller, wraps it in
+    the async connection, so it marks the worker thread a daemon before the
+    thread starts, as SQLAlchemy does for a connection it opens itself, and
+    reads `sqlite_master` before handing the connection on, so a wrong key or a
+    file that is not a database fails here, with the connection closed."""
+
+    def connector():
+        failed = None
+        try:
+            raw = connect(path)
+        except Exception as exc:
+            failed = type(exc).__name__
+        if failed is not None:
+            raise _hook_failure("raised", "sqlite", failed)
+        if not all(callable(getattr(raw, name, None)) for name in _DBAPI_METHODS):
+            try:
+                raw.close()
+            except Exception:
+                pass
+            raise _hook_failure("returned the wrong type", "sqlite", type(raw).__name__)
+        return raw
 
     def create(*_args, **_kwargs):
         async def make():
             import aiosqlite
 
+            connection = aiosqlite.Connection(connector, iter_chunk_size=64)
+            connection._thread.daemon = True
+            error = None
+            try:
+                await connection
+            except StoreConnectionError as exc:
+                error = exc
+            except Exception as exc:
+                error = _hook_failure("raised", "sqlite", type(exc).__name__)
+            if error is not None:
+                # aiosqlite stops its worker on a failed connect without
+                # waiting for it, and the worker answers on the event loop; wait
+                # so it cannot outlive the loop that is about to close.
+                await asyncio.to_thread(connection._thread.join, 5)
+                raise error
+            handoff.hold(connection)
             failed = None
             try:
-                connection = await connect(path)
+                cursor = await connection.execute("SELECT count(*) FROM sqlite_master")
+                await cursor.fetchall()
+                await cursor.close()
             except Exception as exc:
                 failed = type(exc).__name__
             if failed is not None:
-                raise _hook_failure("raised", "sqlite", failed)
-            if not isinstance(connection, aiosqlite.Connection):
-                await _discard(connection)
-                raise _hook_failure("returned the wrong type", "sqlite", type(connection).__name__)
+                await handoff.reclaim()
+                raise _hook_failure("returned a connection that failed its first read", "sqlite", failed)
             return connection
 
         return make()
@@ -409,37 +488,37 @@ def _check_file(path: Path, *, create: bool) -> bool:
 class LocalStore:
     """A Libex database. See the module docstring for the lifecycle."""
 
-    def __init__(self, url: str | URL, *, connect: Callable[..., Awaitable] | None = None):
+    def __init__(self, url: str | URL, *, connect: Callable[..., Any] | None = None):
         """`connect=None` is the managed path: this library makes the
         connection from the URL.
 
         With a `connect` hook the caller makes it. On Postgres the hook takes
         no argument and returns an awaited `asyncpg.Connection`, and the URL
-        must be bare (`postgresql+asyncpg://`). On SQLite the hook is called
-        with the path this library has already checked (symlinks refused, and on
-        Linux and macOS a new file created readable by you only) and returns an
-        `aiosqlite.Connection`. Write-ahead logging is not set on the path
-        beforehand: `upgrade()` switches the file to it later, over connections
-        the hook returns. Every schema, migration, locking and foreign-key
-        guarantee still applies to what the hook returns.
+        must be bare (`postgresql+asyncpg://`). On SQLite the hook is a plain
+        function, `(path) -> sqlite3.Connection`: it is called with the path
+        this library has already checked (symlinks refused, and on Linux and
+        macOS a new file created readable by you only) and returns a DB-API
+        connection, `sqlite3` or a build with the same interface such as an
+        encrypted one. This library wraps it in the async connection itself, so
+        the worker thread is a daemon and a store never closed does not keep
+        the interpreter from exiting. Write-ahead logging is not set on the
+        path beforehand: `upgrade()` switches the file to it later, over
+        connections the hook returns. Every schema, migration, locking and
+        foreign-key guarantee still applies to what the hook returns.
+
+        Before a SQLite connection is used it is read once (`sqlite_master`), so
+        a wrong encryption key is a `StoreConnectionError` and the connection is
+        closed; apply any `PRAGMA key` inside the hook. A connection that fails
+        while SQLAlchemy sets it up is closed too.
 
         What the hook takes over is the caller's to get right: for Postgres the
         TLS mode and certificate verification, keeping `PG*` variables and
         `~/.pgpass` from being read, never resending a password in plain text
         after a failed encrypted attempt, `gsslib`, `krbsrvname` and
-        `server_settings`; for an encrypted SQLite build, any `PRAGMA key`,
-        applied and verified (a read of `sqlite_master`) before returning, so
-        a wrong key fails inside the hook, where the connection can be closed.
-        This library cannot manage or check any of it, and says so in the log.
-        A hook that raises or returns the wrong type surfaces as
-        `StoreConnectionError` naming only the exception class; a connection
-        of the wrong type is closed first.
-
-        Close a store that has a hook, with `await store.close()` or
-        `async with`. SQLAlchemy marks the worker thread of a connection it
-        opens itself as a daemon, but cannot for one the hook returns, as the
-        thread has already started; a hook store never closed keeps the
-        interpreter from exiting."""
+        `server_settings`. This library cannot manage or check any of it, and
+        says so in the log. A hook that raises or returns the wrong type
+        surfaces as `StoreConnectionError` naming only the exception class; a
+        connection of the wrong type is closed first."""
         require_storage()
         if connect is not None and not callable(connect):
             raise StoreConfigError("connect must be a callable that makes a connection")
@@ -452,14 +531,15 @@ class LocalStore:
                 "install it with: pip install 'libex-core[postgres]'"
             )
         options: dict = {}
+        self._handoff = _Handoff()
         if connect is None:
             if self._postgres:
                 options = {"async_creator": _postgres_creator(self._url)}
         elif self._postgres:
-            options = {"async_creator": _caller_postgres_creator(connect)}
+            options = {"async_creator": _caller_postgres_creator(connect, self._handoff)}
         else:
             path = self._url.database or ":memory:"
-            options = {"connect_args": {"async_creator_fn": _caller_sqlite_creator(connect, path)}}
+            options = {"connect_args": {"async_creator_fn": _caller_sqlite_creator(connect, path, self._handoff)}}
         self._engine: AsyncEngine = create_async_engine(
             self._url, hide_parameters=True, echo=False, **options
         )
@@ -468,6 +548,12 @@ class LocalStore:
             # is known to be ours; connecting to a database that is somebody
             # else's must not change how it journals.
             configure_sqlite(self._engine, wal=False)
+        # First and last among the connect listeners: the first holds the new
+        # connection before any setup runs, the last confirms every setup
+        # succeeded. Whatever is still held after a failure is closed; see
+        # `_Handoff`. Hook creators hold theirs too, before either runs.
+        event.listen(self._engine.sync_engine, "connect", self._handoff.hold_adapted, insert=True)
+        event.listen(self._engine.sync_engine, "connect", self._handoff.claim)
         self._sessions = async_sessionmaker(self._engine, expire_on_commit=False)
         self._opened = False
         self._closed = False
@@ -499,8 +585,10 @@ class LocalStore:
         try:
             connection = await self._engine.connect()
         except StoreConnectionError:
+            await self._handoff.reclaim()
             raise
         except Exception as exc:
+            await self._handoff.reclaim()
             raise StoreConnectionError(
                 f"could not connect to the {self.backend} database ({type(exc).__name__})"
             ) from None
@@ -628,13 +716,17 @@ class LocalStore:
         self._opened = True
         return self
 
+    async def _release(self) -> None:
+        await self._handoff.reclaim(everything=True)
+        await self._engine.dispose()
+
     async def close(self) -> None:
         """Releases the engine. Safe to call twice, and on a store never opened;
         a second call made while the first is still releasing waits for it."""
         self._opened = False
         if self._disposal is None:
             self._closed = True
-            self._disposal = asyncio.ensure_future(self._engine.dispose())
+            self._disposal = asyncio.ensure_future(self._release())
         await asyncio.shield(self._disposal)
 
     async def __aenter__(self) -> "LocalStore":
@@ -658,18 +750,26 @@ class LocalStore:
         """A short read session. Nothing is committed; leaving the block
         releases it."""
         self._require_open()
-        async with self._sessions() as session:
-            yield session
+        try:
+            async with self._sessions() as session:
+                yield session
+        except BaseException:
+            await self._handoff.reclaim()
+            raise
 
     @asynccontextmanager
     async def write(self) -> AsyncIterator[AsyncSession]:
         """A write session: serialised against other writers, committed when
         the block ends, rolled back if it raises."""
         self._require_open()
-        async with self._sessions() as session:
-            async with exclusive_write(session):
-                yield session
-                await session.commit()
+        try:
+            async with self._sessions() as session:
+                async with exclusive_write(session):
+                    yield session
+                    await session.commit()
+        except BaseException:
+            await self._handoff.reclaim()
+            raise
 
 
 def _switch_to_wal(sync_connection) -> None:

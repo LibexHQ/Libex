@@ -7,7 +7,10 @@ that the value, which may be a database password, never reaches any output.
 
 # Standard library
 import os
+import socket
+import struct
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -286,8 +289,44 @@ def test_a_directory_that_cannot_be_made_is_a_config_failure_that_keeps_the_path
     assert SECRET not in result.out + result.err
 
 
+@pytest.fixture
+def resetting_listener():
+    """A real local port that accepts every connection and resets it at once,
+    so a driver pointed at it fails in milliseconds on any host. A port that
+    merely is not listening is not enough: on some hosts (WSL with mirrored
+    networking) a connect to a closed loopback port hangs to its timeout
+    instead of being refused."""
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(16)
+
+    def serve():
+        while True:
+            try:
+                conn, _ = server.accept()
+            except OSError:
+                return
+            conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            conn.close()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        yield server.getsockname()[1]
+    finally:
+        # close() alone does not wake an accept() blocked in another thread.
+        try:
+            server.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        server.close()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+
 @pytest.mark.parametrize("value", _SECRET_VALUES[:6])
-def test_the_value_does_not_leave_the_process_in_a_real_run_either(value):
+def test_the_value_does_not_leave_the_process_in_a_real_run_either(value, resetting_listener):
+    value = value.replace("127.0.0.1:1/", f"127.0.0.1:{resetting_listener}/")
     done = run_python(
         ["-m", "libex_core", "-vv", "db", "status"],
         env=clean_env(**{STORAGE_VARIABLE: value}),

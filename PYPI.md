@@ -187,6 +187,44 @@ store as above; without it nothing is persisted. Importing `libex_core`
 itself imports nothing else, and the storage libraries load only when
 `libex_core.storage` is used.
 
+### Supplying your own connection
+
+`LocalStore(url)` makes the database connection itself. If you need one it
+cannot make, such as a tunnel, a short-lived token or a custom connection
+class, pass a keyword-only `connect=` hook and make it yourself:
+
+```python
+store = LocalStore("postgresql+asyncpg://", connect=my_asyncpg_connect)  # () -> awaitable asyncpg.Connection
+store = LocalStore("sqlite+aiosqlite:///libex.db", connect=my_open)      # (path) -> sqlite3.Connection
+```
+
+With a Postgres hook the URL must be bare, `postgresql+asyncpg://`: a host,
+user, password or option in it is refused. A SQLite hook is called with the
+path libex-core has already checked (a symbolic link is refused, and on Linux
+and macOS a new file is created readable by you only) and is an ordinary
+function returning a DB-API connection: `sqlite3`, or a build with the same
+interface such as SQLCipher (`sqlcipher3`), with the key applied inside the
+hook. libex-core wraps the connection itself and reads it once before use, so a
+wrong key surfaces as `StoreConnectionError` with the connection already
+closed. Write-ahead logging is
+not set beforehand: `upgrade()` switches the file to it later, over the
+connections you supply. Schema checks, refusal of a database this package did not create, upgrades and write
+locking all apply to the connections you supply, and a hook that raises or
+returns the wrong type surfaces as `StoreConnectionError` naming only the
+exception class; a connection of the wrong type is closed first.
+`store.connection_mode` is `"managed"` or `"caller"`.
+
+With a hook, these become your responsibility, and libex-core can neither
+manage nor check them:
+
+- Postgres TLS mode and certificate verification.
+- Keeping `PG*` variables and `~/.pgpass` from being read, which asyncpg does for
+  anything you leave out.
+- Never resending a password in plain text after a failed encrypted attempt.
+- `gsslib`, `krbsrvname` and `server_settings`.
+- Whether `SSLKEYLOGFILE`, if set, makes the driver write the connection's encryption
+  keys to a file.
+
 ## Links
 
 - Source and issues: <https://github.com/LibexHQ/Libex>

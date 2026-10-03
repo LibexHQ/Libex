@@ -17,6 +17,7 @@ import uuid
 from pathlib import Path
 
 # Third party
+import asyncpg
 import pytest
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import make_url
@@ -75,6 +76,64 @@ async def test_upgrade_on_a_fresh_postgres_database_then_open_and_round_trip(url
         async with store.session() as session:
             book = await books.get_book(session, "B0PGROUND1")
     assert book["title"] == "Round"
+
+
+async def test_a_caller_supplied_connection_round_trips_and_keeps_the_guarantees(url):
+    target = make_url(url)
+    made = []
+
+    async def connect():
+        made.append(1)
+        return await asyncpg.connect(
+            host=target.host,
+            port=target.port,
+            user=target.username,
+            password=target.password,
+            database=target.database,
+            ssl=False,
+        )
+
+    store = LocalStore("postgresql+asyncpg://", connect=connect)
+    try:
+        assert store.connection_mode == "caller"
+        assert (await store.status()).state == "empty"
+        revision = await store.upgrade()
+        await store.open()
+        async with store.write() as session:
+            await write_books(session, [cases.mk("B0PGHOOK001", title="Hooked")])
+        async with store.session() as session:
+            book = await books.get_book(session, "B0PGHOOK001")
+    finally:
+        await store.close()
+    assert made and book["title"] == "Hooked" and revision
+    async with LocalStore(url) as managed:
+        async with managed.session() as session:
+            assert (await books.get_book(session, "B0PGHOOK001"))["title"] == "Hooked"
+
+
+async def test_a_caller_connection_to_a_foreign_database_is_refused_untouched(url):
+    target = make_url(url)
+    plain = await asyncpg.connect(
+        host=target.host, port=target.port, user=target.username,
+        password=target.password, database=target.database, ssl=False,
+    )
+    try:
+        await plain.execute("CREATE TABLE somebody_elses (id int)")
+    finally:
+        await plain.close()
+
+    async def connect():
+        return await asyncpg.connect(
+            host=target.host, port=target.port, user=target.username,
+            password=target.password, database=target.database, ssl=False,
+        )
+
+    store = LocalStore("postgresql+asyncpg://", connect=connect)
+    try:
+        with pytest.raises(ForeignDatabase):
+            await store.upgrade()
+    finally:
+        await store.close()
 
 
 async def test_a_second_upgrade_is_a_no_op(url):

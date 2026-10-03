@@ -228,6 +228,11 @@ async def upsert_track(
     write_track. The stored count comes back so a suppressed overwrite can be
     logged: a write that silently declines is no easier to diagnose than the
     silent overwrite it replaces, and no one is watching this path.
+
+    The insert is conditional on the book's row for `region`. When it is not
+    stored nothing is written, and that is logged at info, not as a failure:
+    a chapters request for a region the book was never stored under is
+    ordinary.
     """
     try:
         stored_count = await _entities.write_track(

@@ -588,6 +588,16 @@ async def test_a_series_entry_too_thin_to_store_gets_no_links_and_costs_the_chun
     assert await _rows(store, Book.__table__, "asin", "region") == [("X1", "us")]
 
 
+async def test_a_thin_entry_naming_an_already_stored_series_keeps_its_author_link(store):
+    """The row exists from an earlier write, so the link is good even though
+    this call wrote no series row."""
+    await _write(store, _product("us"))
+    async with store.write() as session:
+        await session.execute(series_author.delete())
+    await _write(store, _product("us", series=[{"asin": "S1", "position": "3"}]))
+    assert await _rows(store, series_author, "series_asin", "series_region") == [("S1", "us")]
+
+
 async def test_a_series_inside_a_book_with_no_region_of_its_own_takes_the_books(store):
     await _write(store, _product("de", series=[{"asin": "S7", "name": "Inside", "position": "1"}]))
     assert await _rows(store, Series.__table__, "asin", "region") == [("S7", "de")]

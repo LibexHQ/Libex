@@ -3,7 +3,7 @@ Row counts over the stored catalog.
 """
 
 # Third party
-from sqlalchemy import func, select
+from sqlalchemy import distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Local
@@ -38,10 +38,13 @@ async def count_stored(session: AsyncSession, region: str | None = None) -> dict
     and region together.
     """
     books_stmt = select(func.count()).select_from(Book)
-    # One primary row per ASIN, so this is the number of distinct ASINs and
-    # needs no sort or hash of 1.8M values. Within one region an ASIN has one
-    # row, so the scoped count is the plain record count.
-    distinct_stmt = select(func.count()).select_from(Book).where(Book.is_primary.is_(True))
+    # Counted from the key, not from the primary marker: on Postgres the
+    # distinct count is an index-only scan of the primary key, already in
+    # asin order and with no sort, where counting the marker reads the whole
+    # heap and can run past the statement timeout on a cold refresh. Within
+    # one region an ASIN has one row, so the scoped count below is the plain
+    # record count.
+    distinct_stmt = select(func.count(distinct(Book.asin))).select_from(Book)
     authors_stmt = select(func.count()).select_from(Author)
     series_stmt = select(func.count()).select_from(Series)
     chapters_stmt = select(func.count()).select_from(Track)

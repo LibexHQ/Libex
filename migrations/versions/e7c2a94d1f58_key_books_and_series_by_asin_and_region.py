@@ -15,13 +15,17 @@ NOT NULL) is done ahead of time by scripts/region_keys.py against the running
 service, so what is left here swaps constraints onto indexes that already
 exist, under lock_timeout, and takes no longer than the catalog changes need.
 
-It never repairs. Every precondition is asserted first and any failure raises
-with the full list, because a migration that quietly fixed a half-prepared
-database would be choosing, on its own, what the data should say. The one
-exception is a database with no rows in any of the eight tables, where there
-is nothing to backfill and nothing to protect: a fresh install or a test
-database runs the whole chain from the start and has never seen the script,
-so the columns and indexes are built here, instantly.
+It does not repair data. Every precondition is asserted first and any failure
+raises with the full list, because a migration that quietly fixed a
+half-prepared database would be choosing, on its own, what the data should
+say. There are two exceptions, both where nothing is being decided. A database
+with no rows in any of the eight tables has nothing to backfill and nothing to
+protect: a fresh install or a test database runs the whole chain from the
+start and has never seen the script, so the columns and indexes are built
+here, instantly. And genre_book_region_index, a plain index that enforces
+nothing, is built here when it is missing or invalid, because the revision
+runs with writers stopped and refusing to start over an index it can build in
+about a minute would leave the container restarting.
 
 What changes, on a prepared database:
 
@@ -42,9 +46,8 @@ What changes, on a prepared database:
     planner reads the whole of book_genre (about 11M rows) instead of probing
     it. The script builds the wider index ahead of time under the name
     genre_book_region_index; this revision drops the old one and renames it.
-    That index is the one precondition repaired rather than refused: if it is
-    missing or invalid the revision builds it with a plain CREATE INDEX (it
-    enforces nothing, and writers are stopped), logging the elapsed time.
+    If that index is missing or invalid the revision builds it with a plain
+    CREATE INDEX, logging the elapsed time (see above).
   - every foreign key onto books or series becomes the composite one,
     ON DELETE CASCADE, added NOT VALID: enforced for every new row and every
     delete at once, without a scan of the link tables while the table locks

@@ -412,6 +412,16 @@ async def test_a_chapter_write_the_store_declined_reports_false(store, caplog):
     assert any(r.getMessage() == "Not written to the store" for r in caplog.records)
 
 
+async def test_a_chapter_write_that_stored_an_empty_listing_reports_true(store):
+    """write_track answers 0 for a written row holding no chapters; only None
+    is a refusal."""
+    await get_book(batch_get(**{ASIN: product(ASIN)}), ASIN, region="us", store=store)
+
+    stored = await store_module.persist_track(store, ASIN, {"chapters": []}, "us")
+
+    assert stored is True
+
+
 # Section: reads in chunks
 
 async def test_stored_books_are_read_in_chunks_of_the_read_size(store, monkeypatch):

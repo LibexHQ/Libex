@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 # Third party
-from sqlalchemy import bindparam, exists
+from sqlalchemy import bindparam, exists, select
 from sqlalchemy.orm import aliased
 
 # Local
@@ -465,6 +465,30 @@ def _build_pivot_insert(insert, table, *columns):
     ).on_conflict_do_nothing()
 
 
+def _build_series_author_insert(insert):
+    """
+    The series-to-author link, written only when the series row it names is
+    stored.
+
+    The check is part of the statement: a series entry too thin to have been
+    written has no row, and a link to a missing row breaks the composite key
+    for every other row in the chunk. Testing the table rather than the
+    series written in this call keeps the link for a thin entry that names a
+    series stored earlier, and costs no extra round trip.
+    """
+    stored = exists().where(
+        Series.asin == bindparam("series_asin"), Series.region == bindparam("series_region")
+    )
+    source = select(
+        bindparam("series_asin", type_=series_author.c.series_asin.type),
+        bindparam("series_region", type_=series_author.c.series_region.type),
+        bindparam("author_id", type_=series_author.c.author_id.type),
+    ).where(stored)
+    return insert(series_author).from_select(
+        ["series_asin", "series_region", "author_id"], source
+    ).on_conflict_do_nothing()
+
+
 def _build_book_series_upsert(insert):
     """
     The book-to-series link, which unlike the other pivots carries a value:
@@ -503,8 +527,6 @@ def statements_for(dialect: str) -> Statements:
         author_book_insert=_build_pivot_insert(
             insert, author_book, "author_id", "book_asin", "book_region"
         ),
-        series_author_insert=_build_pivot_insert(
-            insert, series_author, "series_asin", "series_region", "author_id"
-        ),
+        series_author_insert=_build_series_author_insert(insert),
         book_series_upsert=_build_book_series_upsert(insert),
     )

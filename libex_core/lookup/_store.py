@@ -124,7 +124,7 @@ async def _persist_one(
     **fields: Any,
 ) -> bool:
     """Runs one write in the store's write session. With `refusal`, a writer
-    that answers falsy has declined the data rather than failed: nothing was
+    that answers None has declined the data rather than failed: nothing was
     written, so that is logged as such and reported as False."""
     try:
         async with store.write() as session:
@@ -132,7 +132,7 @@ async def _persist_one(
     except Exception as exc:
         _log_write_failure(what, exc, **fields)
         return False
-    if refusal is not None and not result:
+    if refusal is not None and result is None:
         logger.info("Not written to the store", extra={"what": what, "reason": refusal, **fields})
         return False
     logger.info("Wrote to the store", extra={"what": what, **fields})

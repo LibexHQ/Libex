@@ -211,10 +211,7 @@ async def write_books(
             if not s_asin:
                 continue
             s_region = entry.get("region") or region
-            # A series entry too thin to write has no row to link to, and a
-            # link to a missing row breaks the foreign key for the whole chunk.
-            if (s_asin, s_region) not in series:
-                continue
+            # Whether the series row exists is decided by the insert itself.
             for author_id in author_ids:
                 series_authors.setdefault((s_asin, s_region, author_id), {
                     "series_asin": s_asin, "series_region": s_region, "author_id": author_id,

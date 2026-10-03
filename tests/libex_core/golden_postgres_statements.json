@@ -154,13 +154,13 @@
   "pyformat": "INSERT INTO narrators (name, fetched_description, created_at, updated_at) VALUES (%(name)s, %(fetched_description)s, %(created_at)s, %(updated_at)s) ON CONFLICT DO NOTHING"
  },
  "series_author_insert": {
-  "asyncpg": "INSERT INTO series_author (series_asin, series_region, author_id) VALUES ($1::VARCHAR, $2::region_enum, $3::INTEGER) ON CONFLICT DO NOTHING",
+  "asyncpg": "INSERT INTO series_author (series_asin, series_region, author_id) SELECT $1::VARCHAR AS anon_1, $2::region_enum AS anon_2, $3::INTEGER AS anon_3 \nWHERE EXISTS (SELECT * \nFROM series \nWHERE series.asin = $1::VARCHAR AND series.region = $2::region_enum) ON CONFLICT DO NOTHING",
   "asyncpg_positions": [
    "series_asin",
    "series_region",
    "author_id"
   ],
-  "pyformat": "INSERT INTO series_author (series_asin, series_region, author_id) VALUES (%(series_asin)s, %(series_region)s, %(author_id)s) ON CONFLICT DO NOTHING"
+  "pyformat": "INSERT INTO series_author (series_asin, series_region, author_id) SELECT %(series_asin)s AS anon_1, %(series_region)s AS anon_2, %(author_id)s AS anon_3 \nWHERE EXISTS (SELECT * \nFROM series \nWHERE series.asin = %(series_asin)s AND series.region = %(series_region)s) ON CONFLICT DO NOTHING"
  },
  "series_upsert": {
   "asyncpg": "INSERT INTO series (asin, title, description, region, fetched_description, is_primary, audible_extras, extras_withheld, created_at, updated_at) VALUES ($1::VARCHAR, $2::VARCHAR, $3::VARCHAR, $4::region_enum, $5::BOOLEAN, (NOT (EXISTS (SELECT * \nFROM series AS series_1 \nWHERE series_1.asin = $1::VARCHAR AND series_1.region != $4::region_enum))), CAST($6::JSONB AS JSONB), CAST($7::JSONB AS JSONB), $8::TIMESTAMP WITH TIME ZONE, $9::TIMESTAMP WITH TIME ZONE) ON CONFLICT (asin, region) DO UPDATE SET title = coalesce($2, series.title), description = CASE WHEN (coalesce(length(nullif(btrim($3, $10::VARCHAR), $11::VARCHAR)), $12::INTEGER) > coalesce(length(series.description), $13::INTEGER)) THEN $3 ELSE series.description END, fetched_description = (series.fetched_description OR excluded.fetched_description), audible_extras = CASE WHEN (excluded.audible_extras IS NULL) THEN series.audible_extras WHEN (series.audible_extras IS NULL) THEN excluded.audible_extras WHEN (series.audible_extras @> excluded.audible_extras) THEN series.audible_extras ELSE series.audible_extras || excluded.audible_extras END, extras_withheld = CASE WHEN (excluded.extras_withheld IS NULL) THEN series.extras_withheld WHEN (series.extras_withheld IS NULL) THEN excluded.extras_withheld WHEN (series.extras_withheld @> excluded.extras_withheld) THEN series.extras_withheld ELSE series.extras_withheld || excluded.extras_withheld END, updated_at = excluded.updated_at",

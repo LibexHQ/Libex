@@ -6,7 +6,8 @@ them on asin alone and the link tables point at asin alone. Widening that in
 one migration would mean rewriting every link row while the API is down, so
 the slow, data-proportional work is done here against the running service, and
 the schema revision that adopts the new keys has only catalog changes left to
-make. Every step before finalize is additive and changes no application
+make (plus building genre_book_region_index, a plain index, if `index` has not
+already). Every step before finalize is additive and changes no application
 behaviour: the 2.1.x application keeps running unmodified through expand,
 backfill and index.
 

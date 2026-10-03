@@ -7,12 +7,15 @@ import asyncio
 
 # Third party
 import pytest
+from sqlalchemy import event, text
 
 # Local
 from libex_core.storage import store as store_module
 from libex_core.storage.store import LocalStore, StoreConnectionError
 
-pytest.importorskip("aiosqlite")
+# Skips the whole module when the storage extra is absent; everything below may
+# use aiosqlite.
+aiosqlite = pytest.importorskip("aiosqlite")
 
 
 class _Conn:
@@ -48,9 +51,6 @@ async def test_one_tasks_reclaim_leaves_another_tasks_pending_connection_alone()
 
 
 async def test_a_write_session_connection_that_fails_the_pool_setup_is_closed_at_once(tmp_path, monkeypatch):
-    from sqlalchemy import event, text
-    import aiosqlite
-
     store = LocalStore(f"sqlite+aiosqlite:///{tmp_path / 'x.db'}")
     await store.upgrade()
     await store.open()
@@ -89,7 +89,6 @@ async def test_a_write_session_connection_that_fails_the_pool_setup_is_closed_at
 
 
 async def test_a_failed_hook_connect_leaves_no_worker_thread_running(tmp_path, monkeypatch):
-    import aiosqlite
 
     made = []
     real_init = aiosqlite.Connection.__init__

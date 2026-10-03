@@ -164,6 +164,19 @@ async def write_books(
         for entry in data.get("series", []):
             params = series_params(entry, now, region)
             if params is None:
+                # Too thin to write a series row, but it may name one stored
+                # earlier, and the position it carries is data. The link's
+                # insert writes it only if that row exists.
+                s_asin = entry.get("asin")
+                s_region = entry.get("region") or region
+                if s_asin and s_region:
+                    book_series_links[(asin, region, s_asin, s_region)] = {
+                        "book_asin": asin,
+                        "book_region": region,
+                        "series_asin": s_asin,
+                        "series_region": s_region,
+                        "position": entry.get("position"),
+                    }
                 continue
             # Deduped like every sibling collection here. Fifty books of
             # one series otherwise issued fifty identical upserts against
@@ -190,6 +203,7 @@ async def write_books(
     if series:
         await lock_asins(session, "series", [asin for asin, _ in series], dialect=dialect)
         await session.execute(statements.series_upsert, list(series.values()))
+    if book_series_links:
         await session.execute(statements.book_series_upsert, list(book_series_links.values()))
 
     ids_by_book = await resolve_author_ids(

@@ -25,7 +25,8 @@ start and has never seen the script, so the columns and indexes are built
 here, instantly. And genre_book_region_index, a plain index that enforces
 nothing, is built here when it is missing or invalid, because the revision
 runs with writers stopped and refusing to start over an index it can build in
-about a minute would leave the container restarting.
+about 80 seconds on roughly 10.6 million rows would leave the container
+restarting.
 
 What changes, on a prepared database:
 
@@ -43,7 +44,7 @@ What changes, on a prepared database:
   - genre_book_index, which serves the genre and category filters, widens from
     (genre_asin, book_asin) to (genre_asin, book_asin, book_region), because
     those filters now read the region of every link they find. Without it the
-    planner reads the whole of book_genre (about 11M rows) instead of probing
+    planner reads the whole of book_genre (roughly 10.6 million rows) instead of probing
     it. The script builds the wider index ahead of time under the name
     genre_book_region_index; this revision drops the old one and renames it.
     If that index is missing or invalid the revision builds it with a plain
@@ -223,7 +224,7 @@ def _ensure_widened_indexes() -> None:
     The one precondition this revision repairs rather than asserts. It is not
     a key and enforces nothing, so building it cannot change what the data
     says, and the revision runs with writers stopped, so the blocking build is
-    harmless: about 80 seconds on 10.6M link rows. Refusing to start over an
+    harmless: about 80 seconds on roughly 10.6 million link rows. Refusing to start over an
     index the operator could simply have built later would leave the container
     restarting. An index that exists and is valid is left alone, and one that
     is on the wrong columns still fails the assertions below.

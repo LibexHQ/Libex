@@ -495,13 +495,25 @@ def _build_book_series_upsert(insert):
     position moves as Audible restates it, so this one updates rather than
     ignoring the conflict -- but only from a non-null incoming position, so a
     response that omits it leaves the stored one standing.
+
+    Written only when the series row it names is stored, checked in the
+    statement like the series-to-author link: an entry too thin to write a
+    series row can still name a series stored earlier, and its position is
+    kept; one that names no stored series makes no link, which would
+    otherwise break the composite key for the whole chunk.
     """
-    stmt = insert(book_series).values(
-        book_asin=bindparam("book_asin"),
-        book_region=bindparam("book_region"),
-        series_asin=bindparam("series_asin"),
-        series_region=bindparam("series_region"),
-        position=bindparam("position"),
+    stored = exists().where(
+        Series.asin == bindparam("series_asin"), Series.region == bindparam("series_region")
+    )
+    source = select(
+        bindparam("book_asin", type_=book_series.c.book_asin.type),
+        bindparam("book_region", type_=book_series.c.book_region.type),
+        bindparam("series_asin", type_=book_series.c.series_asin.type),
+        bindparam("series_region", type_=book_series.c.series_region.type),
+        bindparam("position", type_=book_series.c.position.type),
+    ).where(stored)
+    stmt = insert(book_series).from_select(
+        ["book_asin", "book_region", "series_asin", "series_region", "position"], source
     )
     return stmt.on_conflict_do_update(
         index_elements=["book_asin", "book_region", "series_asin", "series_region"],

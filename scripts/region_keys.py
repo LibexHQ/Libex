@@ -310,6 +310,7 @@ INDEXES: tuple[IndexSpec, ...] = (
     # and genre_book_index (genre_asin, book_asin) cannot answer that without
     # visiting book_genre, which the planner avoids by reading all of it. The
     # revision drops the old index and renames this one to genre_book_index.
+    # About 80 seconds on roughly 10.6 million book_genre rows.
     IndexSpec(
         "genre_book_region_index",
         "book_genre",

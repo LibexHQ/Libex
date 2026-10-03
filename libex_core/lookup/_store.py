@@ -172,8 +172,9 @@ async def persist_track(
     from libex_core.storage import write
 
     # A chapter listing hangs off its book's row, so one for a book the store
-    # does not hold for this region cannot be written; the hosted service meets
-    # the same limit and only logs the failure. A read that fails is not the
+    # does not hold for this region cannot be written; the hosted writer
+    # meets the same limit inside its insert, which then writes nothing and
+    # logs an info line instead of failing. A read that fails is not the
     # same as the book being absent: it is logged as a failed read and nothing
     # is written.
     stored = await _read(

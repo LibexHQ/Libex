@@ -407,12 +407,19 @@ async def test_a_narrators_books_are_one_record_per_asin(session):
 # ============================================================
 
 async def test_distinct_asins_equal_the_primary_count(session):
-    """distinctBookAsins counts primary rows; that must stay equal to counting
-    the distinct ASINs themselves."""
+    """The count comes from the key, the marker says which row is first; over
+    a catalogue with a second-region row they have to agree, or one of them
+    has drifted."""
     from sqlalchemy import distinct, func
 
-    expected = (await session.execute(select(func.count(distinct(Book.asin))))).scalar_one()
-    assert (await stats.count_stored(session))["distinctBookAsins"] == expected == 3
+    distinct_asins = (await session.execute(select(func.count(distinct(Book.asin))))).scalar_one()
+    primaries = (await session.execute(
+        select(func.count()).select_from(Book).where(Book.is_primary.is_(True))
+    )).scalar_one()
+    total = (await session.execute(select(func.count()).select_from(Book))).scalar_one()
+    assert total > distinct_asins  # the fixture does hold a second-region row
+    assert distinct_asins == primaries == 3
+    assert (await stats.count_stored(session))["distinctBookAsins"] == primaries
 
 
 async def test_stored_counts_separate_records_from_asins(session):
@@ -596,6 +603,48 @@ async def test_a_thin_entry_naming_an_already_stored_series_keeps_its_author_lin
         await session.execute(series_author.delete())
     await _write(store, _product("us", series=[{"asin": "S1", "position": "3"}]))
     assert await _rows(store, series_author, "series_asin", "series_region") == [("S1", "us")]
+
+
+async def _thin_book(session, asin, thin_series):
+    await write_books(session, [{
+        "asin": asin, "region": "us", "title": "thin",
+        "authors": [{"asin": "A1", "name": "Uk Author", "region": "uk"}],
+        "series": thin_series,
+    }])
+    await session.commit()
+
+
+async def _links(session, asin):
+    rows = await session.execute(
+        select(book_series.c.series_asin, book_series.c.series_region, book_series.c.position)
+        .where(book_series.c.book_asin == asin)
+    )
+    return sorted(rows.all())
+
+
+async def test_a_thin_entry_naming_a_stored_series_keeps_its_position_and_author_link(session):
+    """S1 is stored for us. The entry has an asin and a position and no name:
+    no series row is written, but the link and the position are."""
+    await _thin_book(session, "N1", [{"asin": "S1", "position": "7"}])
+    assert await _links(session, "N1") == [("S1", "us", "7")]
+    # The seeded us series has only the us author; the book's author is the uk
+    # one, so this link is new and exists only because the entry was linked.
+    linked = (await session.execute(
+        select(series_author.c.author_id)
+        .where(series_author.c.series_asin == "S1", series_author.c.series_region == "us")
+    )).scalars().all()
+    assert sorted(linked) == [1, 2]
+
+
+async def test_a_thin_entry_naming_no_stored_series_makes_no_link_and_loses_nothing_else(session):
+    """Under a plain insert the link to a series that is not stored breaks the
+    composite key and takes the whole chunk with it."""
+    await _thin_book(session, "N2", [
+        {"asin": "NOPE", "position": "1"},
+        {"asin": "S1", "name": "saga", "position": "2"},
+    ])
+    assert await _links(session, "N2") == [("S1", "us", "2")]
+    assert (await books.get_book(session, "N2", region="us"))["title"] == "thin"
 
 
 async def test_a_series_inside_a_book_with_no_region_of_its_own_takes_the_books(store):

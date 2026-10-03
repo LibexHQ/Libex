@@ -143,6 +143,12 @@ logger = get_logger()
 # network and origin are all inside it. What it settles beyond argument is
 # the direction and the order of magnitude.
 #
+# All of these figures were measured before the unscoped entry gained its
+# distinctBookAsins count (count(distinct asin), an index-only scan of the
+# books primary key) and have not been re-measured since, so the unscoped
+# 15.3s, and every sweep total built on it below, understates the current
+# cost by that count.
+#
 # A twelve-entry sweep reproduced from those three endpoints and nothing
 # else therefore spans:
 #   - 15.3 + (11 x 1.6) = 32.9s, every region at the cheapest measured;

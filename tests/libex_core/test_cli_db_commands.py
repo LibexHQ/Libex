@@ -427,14 +427,14 @@ def test_days_outside_the_offered_windows_is_a_usage_error(db, days):
 
 def test_stats_counts_the_whole_store(db):
     assert ok(db("db", "stats")) == {
-        "books": 15, "authors": 4, "narrators": 4, "series": 4,
+        "books": 15, "distinctBookAsins": 15, "authors": 4, "narrators": 4, "series": 4,
         "booksWithChapters": 1, "region": None, "seriesRegionUnknown": None,
     }
 
 
 def test_stats_scoped_to_a_region_counts_that_region_and_no_series_without_one(db):
     assert ok(db("db", "stats", "--region", "us")) == {
-        "books": 12, "authors": 3, "narrators": 4, "series": 4,
+        "books": 12, "distinctBookAsins": 12, "authors": 3, "narrators": 4, "series": 4,
         "booksWithChapters": 1, "region": "us", "seriesRegionUnknown": 0,
     }
     assert ok(db("db", "stats", "--region", "de"))["books"] == 1
@@ -444,7 +444,7 @@ def test_stats_of_an_upgraded_empty_store_is_zeros_not_a_failure(run_cli, empty_
     result = run_cli(["db", "stats"], env={STORAGE_VARIABLE: empty_store})
     assert result.code == 0
     assert loads(result.out) == {
-        "books": 0, "authors": 0, "narrators": 0, "series": 0,
+        "books": 0, "distinctBookAsins": 0, "authors": 0, "narrators": 0, "series": 0,
         "booksWithChapters": 0, "region": None, "seriesRegionUnknown": None,
     }
 

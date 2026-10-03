@@ -221,7 +221,12 @@ _libex_core() {
                 case "${COMP_WORDS[ci + 1]}" in
                     upgrade) candidates=(-h --help) ;;
                     status) candidates=(-h --help) ;;
-                    book) candidates=(-h --help) ;;
+                    book)
+                        case "${COMP_WORDS[COMP_CWORD - 1]}" in
+                            --region) candidates=(us uk ca au de fr it es jp in br) ;;
+                            *) candidates=(-h --help --region) ;;
+                        esac
+                        ;;
                     books)
                         case "${COMP_WORDS[COMP_CWORD - 1]}" in
                             --region) candidates=(us uk ca au de fr it es jp in br) ;;
@@ -236,7 +241,12 @@ _libex_core() {
                             *) candidates=(-h --help --title --subtitle --region --description --summary --publisher --copyright --isbn --author-name --series-name --language --rating-better-than --rating-worse-than --longer-than --shorter-than --explicit --whisper-sync --has-pdf --book-format --content-type --content-delivery-type --is-listenable --is-buyable --is-vvab --plan-name --genre --category --sort --order --limit --page) ;;
                         esac
                         ;;
-                    chapters) candidates=(-h --help) ;;
+                    chapters)
+                        case "${COMP_WORDS[COMP_CWORD - 1]}" in
+                            --region) candidates=(us uk ca au de fr it es jp in br) ;;
+                            *) candidates=(-h --help --region) ;;
+                        esac
+                        ;;
                     sku) candidates=(-h --help) ;;
                     author)
                         case "${COMP_WORDS[COMP_CWORD - 1]}" in
@@ -259,7 +269,12 @@ _libex_core() {
                             *) candidates=(-h --help --region --book-region --title --subtitle --description --summary --publisher --copyright --isbn --series-name --language --rating-better-than --rating-worse-than --longer-than --shorter-than --explicit --whisper-sync --has-pdf --book-format --content-type --content-delivery-type --is-listenable --is-buyable --is-vvab --plan-name --genre --category --sort --order) ;;
                         esac
                         ;;
-                    series) candidates=(-h --help) ;;
+                    series)
+                        case "${COMP_WORDS[COMP_CWORD - 1]}" in
+                            --region) candidates=(us uk ca au de fr it es jp in br) ;;
+                            *) candidates=(-h --help --region) ;;
+                        esac
+                        ;;
                     series-books)
                         case "${COMP_WORDS[COMP_CWORD - 1]}" in
                             --region) candidates=(us uk ca au de fr it es jp in br) ;;

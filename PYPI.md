@@ -142,8 +142,10 @@ The other `db` commands read what is stored without contacting Audible:
 `books`, `chapters`, `author`, `author-books`, `series`, `series-books`,
 `narrators`, `narrator-books`, `genres`, `plans`, `plan`, `vvab`,
 `new-releases`, `coming-soon` and `stats`. Each prints the shape of the hosted
-API's `/db` route of the same name and exits 3 when it finds nothing. The
-store is never upgraded implicitly, and a database that holds tables this
+API's `/db` route of the same name and exits 3 when it finds nothing. A book
+or series is stored once per marketplace: `db book`, `db chapters` and
+`db series` print the record stored first, and `--region` picks a
+marketplace's own (exit 3 if it has none). The store is never upgraded implicitly, and a database that holds tables this
 package did not create is refused untouched.
 
 **The store is a plaintext record of what you have looked up.** On Linux and

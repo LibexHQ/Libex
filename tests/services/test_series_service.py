@@ -598,3 +598,19 @@ async def test_search_series_skips_a_malformed_relationship_asin_without_countin
     assert [r["asin"] for r in results] == [good]
     for call in log.warning.call_args_list:
         assert "skipped_asins" not in (call.kwargs.get("extra") or {})
+
+
+@pytest.mark.asyncio
+async def test_get_series_outage_fallback_reads_the_requests_region():
+    """A uk request reaches the stored-series reader with region='uk'."""
+    from app.services.audible.series import get_series
+
+    reader = AsyncMock(return_value=None)
+    with patch("app.services.audible.series.audible_get", side_effect=Exception("Audible down")), \
+         patch("app.services.audible.series.get_series_from_db", new=reader), \
+         patch("app.services.audible.series.cache.get", return_value=None):
+        with pytest.raises(Exception):
+            await get_series("B00SERIES1", "uk", AsyncMock())
+
+    reader.assert_awaited_once()
+    assert reader.await_args.kwargs == {"region": "uk"}

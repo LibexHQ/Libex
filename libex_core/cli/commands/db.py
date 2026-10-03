@@ -23,6 +23,7 @@ from libex_core.cli._db_args import (
 from libex_core.cli.commands.releases import WINDOWS
 
 _REGION_HELP = "the marketplace of the author, default us"
+_RECORD_REGION_HELP = "the record of this marketplace, default the one stored first"
 _AUTHOR_BOOKS_EXCLUDED = frozenset({"region", "author_name"})
 _SERIES_BOOKS_EXCLUDED = frozenset({"series_name"})
 
@@ -35,6 +36,10 @@ def asin_argument(text: str) -> str:
     if not is_valid_asin(text):
         raise argparse.ArgumentTypeError("must be an ASIN")
     return normalise_asin(text)
+
+
+def _add_record_region(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--region", choices=REGIONS, help=_RECORD_REGION_HELP)
 
 
 def register(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
@@ -73,8 +78,10 @@ def register(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") 
     )
     status.set_defaults(handler=run_status)
 
-    book = add_command(db, "book", "one stored book", "Print one stored book as JSON.")
+    book = add_command(db, "book", "one stored book", "Print one stored book as JSON. A book is stored once per marketplace; "
+        "--region picks one, and without it the record stored first is printed.")
     book.add_argument("asin", metavar="ASIN", type=asin_argument, help="ASIN of the book")
+    _add_record_region(book)
     book.set_defaults(handler=run_book)
 
     books = add_command(
@@ -90,9 +97,11 @@ def register(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") 
     books.set_defaults(handler=run_books)
 
     chapters = add_command(
-        db, "chapters", "the stored chapters of a book", "Print a stored book's chapters as JSON."
+        db, "chapters", "the stored chapters of a book", "Print a stored book's chapters as JSON. --region picks the marketplace's "
+        "listing, and without it the one stored first is printed."
     )
     chapters.add_argument("asin", metavar="ASIN", type=asin_argument, help="ASIN of the book")
+    _add_record_region(chapters)
     chapters.set_defaults(handler=run_chapters)
 
     sku = add_command(
@@ -127,8 +136,10 @@ def register(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") 
     add_book_sort(author_books)
     author_books.set_defaults(handler=run_author_books)
 
-    series = add_command(db, "series", "one stored series", "Print one stored series as JSON.")
+    series = add_command(db, "series", "one stored series", "Print one stored series as JSON. --region picks the marketplace's "
+        "record, and without it the one stored first is printed.")
     series.add_argument("asin", metavar="ASIN", type=asin_argument, help="ASIN of the series")
+    _add_record_region(series)
     series.set_defaults(handler=run_series)
 
     series_books = add_command(
@@ -239,7 +250,7 @@ def register(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") 
         db,
         "stats",
         "counts of what the store holds",
-        "Print how many books, authors, narrators, series and books with "
+        "Print how many book records, distinct book ASINs, authors, narrators, series and books with "
         "chapters the store holds, as JSON. --region scopes all but "
         "narrators, and then seriesRegionUnknown counts the series that have "
         "no region.",
@@ -329,7 +340,7 @@ def run_book(args: argparse.Namespace) -> int:
         from libex_core.models import BookResponse
         from libex_core.storage.read.books import get_book
 
-        return BookResponse(**_found(await get_book(session, args.asin), "book not in the local store"))
+        return BookResponse(**_found(await get_book(session, args.asin, region=args.region), "book not in the local store"))
 
     return run_stored(read)
 
@@ -357,7 +368,7 @@ def run_chapters(args: argparse.Namespace) -> int:
         from libex_core.models import ChapterResponse
         from libex_core.storage.read.books import get_track
 
-        return ChapterResponse(**_found(await get_track(session, args.asin), "no chapter data in the local store for this book"))
+        return ChapterResponse(**_found(await get_track(session, args.asin, region=args.region), "no chapter data in the local store for this book"))
 
     return run_stored(read)
 
@@ -411,7 +422,7 @@ def run_series(args: argparse.Namespace) -> int:
         from libex_core.models import SeriesResponse
         from libex_core.storage.read.series import get_series
 
-        return SeriesResponse(**_found(await get_series(session, args.asin), "series not in the local store"))
+        return SeriesResponse(**_found(await get_series(session, args.asin, region=args.region), "series not in the local store"))
 
     return run_stored(read)
 
@@ -561,6 +572,7 @@ def run_stats(args: argparse.Namespace) -> int:
         # may not have counted null.
         return {
             "books": counts["books"],
+            "distinctBookAsins": counts["distinctBookAsins"],
             "authors": counts["authors"],
             "narrators": counts["narrators"],
             "series": counts["series"],

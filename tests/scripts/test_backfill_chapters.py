@@ -115,7 +115,7 @@ async def test_process_one_400_is_permanent_and_marked_checked_no_signals():
     assert is_backoff is False
     assert is_ratchet is False
     assert elapsed >= 0
-    mark_checked.assert_awaited_once_with(session, "B00TEST0400")
+    mark_checked.assert_awaited_once_with(session, "B00TEST0400", "us")
 
 
 @pytest.mark.asyncio
@@ -132,7 +132,7 @@ async def test_process_one_404_is_not_found_and_marked_checked_no_signals():
     assert outcome == _Outcome.NOT_FOUND
     assert is_backoff is False
     assert is_ratchet is False
-    mark_checked.assert_awaited_once_with(session, "B00TEST0404")
+    mark_checked.assert_awaited_once_with(session, "B00TEST0404", "us")
 
 
 @pytest.mark.parametrize("upstream_status", [401, 403])
@@ -863,10 +863,12 @@ async def test_store_chapters_puts_the_guard_in_the_conflict_clause():
     session = AsyncMock()
     session.execute = AsyncMock(return_value=result)
 
-    await backfill_chapters._store_chapters(session, "B00STORESQL", {"chapters": []})
+    await backfill_chapters._store_chapters(
+        session, "B00STORESQL", {"chapters": []}, region="us"
+    )
 
     sql = str(session.execute.call_args_list[0].args[0].compile())
-    assert "ON CONFLICT (asin) DO UPDATE SET chapters = CASE WHEN" in sql
+    assert "ON CONFLICT (asin, region) DO UPDATE SET chapters = CASE WHEN" in sql
     assert "jsonb_array_length(CASE WHEN (jsonb_typeof(excluded.chapters[" in sql
     assert "jsonb_array_length(CASE WHEN (jsonb_typeof(tracks.chapters[" in sql
 
@@ -877,14 +879,14 @@ async def test_store_chapters_puts_the_guard_in_the_conflict_clause():
 
 def test_advance_cursor_moves_forward_on_a_non_empty_page():
     rows = [("B001", "us", None, None), ("B002", "us", None, None)]
-    next_cursor, wrapped, done = _advance_cursor(rows, cursor="B000", wrapped=False)
-    assert next_cursor == "B002"
+    next_cursor, wrapped, done = _advance_cursor(rows, cursor=("B000", "us"), wrapped=False)
+    assert next_cursor == ("B002", "us")
     assert wrapped is False
     assert done is False
 
 
 def test_advance_cursor_wraps_once_on_first_empty_page():
-    next_cursor, wrapped, done = _advance_cursor([], cursor="B999", wrapped=False)
+    next_cursor, wrapped, done = _advance_cursor([], cursor=("B999", "us"), wrapped=False)
     assert next_cursor is None
     assert wrapped is True
     assert done is False
@@ -902,7 +904,7 @@ def test_advance_cursor_a_row_between_two_wraps_resets_the_wrap_state():
     proves the wrap doesn't prematurely end the pass."""
     rows = [("B001", "us", None, None)]
     next_cursor, wrapped, done = _advance_cursor(rows, cursor=None, wrapped=True)
-    assert next_cursor == "B001"
+    assert next_cursor == ("B001", "us")
     assert wrapped is True
     assert done is False
 
@@ -1457,3 +1459,93 @@ async def test_run_proceeds_past_the_check_when_correctly_named(
     with patch("scripts.backfill_chapters._log_exit_ip", new=AsyncMock()):
         with pytest.raises(KeyError, match="DATABASE_URL"):
             await _run(limit=1)
+
+
+# ============================================================
+# Region-keyed paths -- books and tracks are keyed (asin, region)
+# ============================================================
+
+def _compiled(stmt) -> str:
+    from sqlalchemy.dialects import postgresql
+    return str(stmt.compile(dialect=postgresql.dialect()))
+
+
+@pytest.mark.asyncio
+async def test_read_page_orders_and_pages_by_the_composite_key():
+    """A bare `asin > cursor` would step over the other regions' rows of the
+    asin the previous page ended on; the cursor has to be the pair."""
+    result = MagicMock()
+    result.all = MagicMock(return_value=[])
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=result)
+
+    await backfill_chapters._read_page(session, ("B00CURSOR1", "uk"), 10)
+    first = _compiled(session.execute.call_args_list[0].args[0])
+    assert "ORDER BY books.asin, books.region" in first
+    assert "(books.asin, books.region) > (%(param_1)s, %(param_2)s)" in first
+
+    await backfill_chapters._read_page(session, None, 10)
+    unfiltered = _compiled(session.execute.call_args_list[1].args[0])
+    assert "WHERE" not in unfiltered
+
+
+@pytest.mark.asyncio
+async def test_mark_checked_stamps_only_the_asked_regions_row():
+    session = AsyncMock()
+
+    await backfill_chapters._mark_checked(session, "B00MARKSQL", "de")
+
+    stmt = session.execute.call_args_list[0].args[0]
+    sql = _compiled(stmt)
+    assert "books.asin = %(asin_1)s AND books.region = %(region_1)s" in sql
+    assert stmt.compile().params["region_1"] == "de"
+
+
+@pytest.mark.asyncio
+async def test_store_chapters_files_the_listing_under_the_books_region():
+    result = MagicMock()
+    result.scalar = MagicMock(return_value=0)
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=result)
+
+    await backfill_chapters._store_chapters(
+        session, "B00STOREREG", {"chapters": []}, region="jp"
+    )
+
+    stmt = session.execute.call_args_list[0].args[0]
+    assert stmt.compile().params["region"] == "jp"
+    assert "ON CONFLICT (asin, region)" in _compiled(stmt)
+
+
+def test_store_chapters_has_no_default_region():
+    """A listing filed under the wrong marketplace is a silent error, so the
+    region is keyword-only and required."""
+    param = inspect.signature(backfill_chapters._store_chapters).parameters["region"]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+    assert param.default is inspect.Parameter.empty
+
+
+@pytest.mark.asyncio
+async def test_process_one_stores_and_stamps_under_the_books_own_region():
+    session = AsyncMock()
+    data = {"content_metadata": {"chapter_info": {"chapters": []}}}
+    with patch("scripts.backfill_chapters.audible_get", new=AsyncMock(return_value=data)), \
+         patch("scripts.backfill_chapters.normalize_chapters", return_value={"chapters": []}), \
+         patch("scripts.backfill_chapters._store_chapters", new=AsyncMock()) as store, \
+         patch("scripts.backfill_chapters._mark_checked", new=AsyncMock()) as mark:
+        outcome, *_ = await _process_one(session, "B00REGIONAL", "fr")
+
+    assert outcome == _Outcome.STORED
+    store.assert_awaited_once_with(session, "B00REGIONAL", {"chapters": []}, region="fr")
+    mark.assert_awaited_once_with(session, "B00REGIONAL", "fr")
+
+
+def test_advance_cursor_carries_the_region_so_a_second_region_is_not_skipped():
+    rows = [("B001", "de", None, None), ("B001", "us", None, None)]
+    next_cursor, _wrapped, _done = _advance_cursor(rows, cursor=None, wrapped=False)
+    assert next_cursor == ("B001", "us")
+
+
+def test_format_cursor_names_both_halves_or_the_start():
+    assert backfill_chapters._format_cursor(("B001", "us")) == "B001:us"
+    assert backfill_chapters._format_cursor(None) == "(start)"

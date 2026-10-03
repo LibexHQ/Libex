@@ -312,7 +312,7 @@ async def test_expand_series_stamps_and_counts_when_persist_is_admitted():
          patch.object(seeder, "_stamp_series", new=AsyncMock()) as mock_stamp:
         stats = await seeder._expand_series("us", delay=0)
 
-    mock_stamp.assert_awaited_once_with(series_asin)
+    mock_stamp.assert_awaited_once_with(series_asin, "us")
     assert stats["series_processed"] == 1
     assert stats["books_discovered"] == 1
     assert stats["errors"] == 0

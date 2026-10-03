@@ -314,17 +314,11 @@ async def test_a_failed_chunk_is_not_answered_from_another_regions_row(store):
     assert sorted(same.from_store) == sorted(tail)
 
 
-async def test_a_series_stored_for_another_region_is_not_served_nor_one_with_none(store):
+async def test_a_series_stored_for_another_region_is_not_served(store):
     await get_series(fake_get, SERIES, region="us", store=store)
+
     with pytest.raises(AudibleAPIException):
         await get_series(outage_get, SERIES, region="de", store=store)
-
-    from libex_core.storage import write
-    async with store.write() as session:
-        await write.write_series_profile(session, {"asin": "B0NOREG001", "name": "Regionless"})
-    assert await store_module.stored_series(store, "B0NOREG001", "de") is None
-    with pytest.raises(AudibleAPIException):
-        await get_series(outage_get, "B0NOREG001", region="de", store=store)
     assert await store_module.stored_series(store, SERIES, "de") is None
 
 
@@ -367,8 +361,6 @@ async def test_the_quick_search_stored_leg_is_limited_to_the_region(store):
 
 
 async def test_a_book_another_marketplace_stored_is_not_served_for_this_one(store):
-    # Rows are keyed by ASIN alone, so the row a de fetch merges onto is the
-    # one the us fetch made; it is never served for de, the live answer is.
     await get_book(
         batch_get(**{ASIN: product(ASIN, subtitle="Kept")}), ASIN, region="us", store=store
     )
@@ -390,7 +382,9 @@ async def test_a_series_another_marketplace_stored_is_not_served_for_this_one(st
     assert served.region == "de"
 
 
-async def test_chapters_are_not_written_onto_another_marketplaces_book(store, caplog):
+async def test_chapters_of_a_book_stored_only_for_another_marketplace_are_not_stored(
+    store, caplog
+):
     await get_book(batch_get(**{ASIN: product(ASIN)}), ASIN, region="us", store=store)
     caplog.set_level(logging.INFO, logger="libex")
 
@@ -398,8 +392,7 @@ async def test_chapters_are_not_written_onto_another_marketplaces_book(store, ca
 
     assert len(served.chapters) == 2
     messages = [r.getMessage() for r in caplog.records]
-    assert "Chapters not stored: the book is stored for another marketplace" in messages
-    assert "Chapters not stored: the book is not in the store" not in messages
+    assert "Chapters not stored: the book is not in the store" in messages
     async with store.session() as session:
         assert await read_books.get_track(session, ASIN) is None
 
@@ -433,10 +426,10 @@ async def test_a_failed_read_of_the_chapter_book_is_logged_and_writes_nothing(
 ):
     await get_book(batch_get(**{ASIN: product(ASIN)}), ASIN, store=store)
 
-    async def broken(session, asin):
+    async def broken(session, asin, region):
         raise RuntimeError("secret detail")
 
-    monkeypatch.setattr(store_module, "_book_region", broken)
+    monkeypatch.setattr(store_module, "_book_stored", broken)
     caplog.set_level(logging.INFO, logger="libex")
 
     chapters = await get_chapters(chapter_get(CHAPTERS), ASIN, store=store)
@@ -460,223 +453,136 @@ async def test_an_absent_chapter_book_keeps_its_own_message(store, caplog):
     assert not [r for r in caplog.records if r.getMessage() == "Store read failed"]
 
 
-# Section: a row stored for another marketplace is never written through
+# Section: one record per marketplace
 
-FOREIGN_SKIP = "Store write skipped: stored for another region"
 DE_SUMMARY = "A much longer German summary that would win the description merge outright."
 
 
-async def row_snapshot(store, table, key_column, key):
+async def row_snapshot(store, table, key_column, key, region):
     async with store.session() as session:
         result = await session.execute(
-            text(f"SELECT * FROM {table} WHERE {key_column} = :k"), {"k": key}
+            text(f"SELECT * FROM {table} WHERE {key_column} = :k AND region = :r"),
+            {"k": key, "r": region},
         )
         return dict(result.mappings().one())
 
 
-async def link_count(store, asin):
+async def stored_regions(store, table, asin):
     async with store.session() as session:
         result = await session.execute(
-            text("SELECT (SELECT count(*) FROM author_book WHERE book_asin = :a)"
-                 " + (SELECT count(*) FROM book_narrator WHERE book_asin = :a)"
-                 " + (SELECT count(*) FROM book_genre WHERE book_asin = :a)"
-                 " + (SELECT count(*) FROM book_series WHERE book_asin = :a)"),
-            {"a": asin},
-        )
-        return result.scalar_one()
-
-
-async def test_a_book_stored_for_another_region_is_left_byte_identical(store, caplog):
-    rel = [{**SERIES_RELATION}]
-    await get_book(batch_get(**{ASIN: product(ASIN, relationships=rel)}), ASIN,
-                   region="us", store=store)
-    before = await row_snapshot(store, "books", "asin", ASIN)
-    links_before = await link_count(store, ASIN)
-    assert links_before > 0
-    caplog.set_level(logging.INFO, logger="libex")
-
-    de_product = product(
-        ASIN, subtitle="Untertitel", publisher_summary=DE_SUMMARY,
-        authors=[{"asin": "B0DEAUTH01", "name": "Hans Test"}],
-    )
-    live = await get_book(batch_get(**{ASIN: de_product}), ASIN, region="de", store=store)
-
-    assert live.summary == DE_SUMMARY
-    assert live.subtitle == "Untertitel"
-    assert await row_snapshot(store, "books", "asin", ASIN) == before
-    assert await link_count(store, ASIN) == links_before
-    skipped = [r for r in caplog.records if r.getMessage() == FOREIGN_SKIP]
-    assert len(skipped) == 1
-    assert fields_of(skipped[0]) == {"what": "books", "region": "de", "skipped_num": 1}
-
-
-async def test_only_the_foreign_book_in_a_mixed_chunk_is_skipped(store, caplog):
-    await get_book(batch_get(**{ASIN: product(ASIN)}), ASIN, region="us", store=store)
-    await get_book(batch_get(**{OTHER: product(OTHER)}), OTHER, region="de", store=store)
-    before = await row_snapshot(store, "books", "asin", ASIN)
-    new = "B0SCR00099"
-    caplog.set_level(logging.INFO, logger="libex")
-
-    got = await get_books(
-        batch_get(**{
-            ASIN: product(ASIN, subtitle="Untertitel"),
-            OTHER: product(OTHER, subtitle="Now Known"),
-            new: product(new),
-        }),
-        [ASIN, OTHER, new], region="de", store=store,
-    )
-
-    assert [b.asin for b in got.books] == [ASIN, OTHER, new]
-    assert await row_snapshot(store, "books", "asin", ASIN) == before
-    assert (await row_snapshot(store, "books", "asin", OTHER))["region"] == "de"
-    assert (await row_snapshot(store, "books", "asin", OTHER))["subtitle"] == "Now Known"
-    new_row = await row_snapshot(store, "books", "asin", new)
-    assert new_row["region"] == "de"
-    skipped = [r for r in caplog.records if r.getMessage() == FOREIGN_SKIP]
-    assert [fields_of(r) for r in skipped] == [{"what": "books", "region": "de", "skipped_num": 1}]
-
-
-async def test_a_series_stored_for_another_region_is_left_byte_identical(store, caplog):
-    await get_series(fake_get, SERIES, region="us", store=store)
-    before = await row_snapshot(store, "series", "asin", SERIES)
-    caplog.set_level(logging.INFO, logger="libex")
-
-    async def de_series(region, path, params=None, extra_headers=None):
-        record = await fake_get(region, path, params, extra_headers)
-        record["product"]["title"] = "Die Serie"
-        record["product"]["publisher_summary"] = DE_SUMMARY
-        return record
-
-    live = await get_series(de_series, SERIES, region="de", store=store)
-
-    assert (live.name, live.region) == ("Die Serie", "de")
-    assert await row_snapshot(store, "series", "asin", SERIES) == before
-    skipped = [r for r in caplog.records if r.getMessage() == FOREIGN_SKIP]
-    assert [fields_of(r) for r in skipped] == [{"what": "series", "region": "de", "skipped_num": 1}]
-
-
-async def test_a_series_stored_with_no_region_is_not_written_through(store):
-    async with store.write() as session:
-        await session.execute(text(
-            "INSERT INTO series (asin, title, fetched_description, created_at, updated_at)"
-            " VALUES (:a, 'Old', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
-        ), {"a": SERIES})
-    before = await row_snapshot(store, "series", "asin", SERIES)
-
-    await get_series(fake_get, SERIES, region="us", store=store)
-
-    assert await row_snapshot(store, "series", "asin", SERIES) == before
-
-
-async def test_a_failed_region_read_fails_the_chunk_without_writing(store, monkeypatch, caplog):
-    async def broken(session, asins, region):
-        raise RuntimeError("secret detail")
-
-    monkeypatch.setattr(store_module, "_foreign_book_asins", broken)
-    caplog.set_level(logging.WARNING, logger="libex")
-
-    written, failed = await store_module.persist_books(
-        store, [{"asin": ASIN, "region": "us"}], "us"
-    )
-
-    assert (written, failed) == (set(), True)
-    failures = [r for r in caplog.records if r.getMessage() == "Store write failed, serving the live answer"]
-    assert len(failures) == 1 and failures[0].error_type == "RuntimeError"
-    assert "secret detail" not in caplog.text
-    assert await stored_asins(store) == []
-
-
-async def stored_asins(store):
-    async with store.session() as session:
-        return [r[0] for r in (await session.execute(text("SELECT asin FROM books"))).all()]
-
-
-async def series_links(store, asin):
-    async with store.session() as session:
-        result = await session.execute(
-            text("SELECT series_asin FROM book_series WHERE book_asin = :a ORDER BY series_asin"),
-            {"a": asin},
+            text(f"SELECT region FROM {table} WHERE asin = :a ORDER BY region"), {"a": asin}
         )
         return [r[0] for r in result.all()]
 
 
-async def test_a_series_stored_for_another_region_is_not_touched_through_a_book(store, caplog):
-    await get_series(fake_get, SERIES, region="us", store=store)
-    before = await row_snapshot(store, "series", "asin", SERIES)
-    caplog.set_level(logging.INFO, logger="libex")
-
-    de_book = product(ASIN, relationships=[{**SERIES_RELATION, "title": "Die Serie (DE)"}])
-    live = await get_book(batch_get(**{ASIN: de_book}), ASIN, region="de", store=store)
-
-    assert live.asin == ASIN
-    assert await row_snapshot(store, "series", "asin", SERIES) == before
-    assert await series_links(store, ASIN) == []
-    assert (await row_snapshot(store, "books", "asin", ASIN))["region"] == "de"
-    skipped = [r for r in caplog.records if r.getMessage() == FOREIGN_SKIP]
-    assert [fields_of(r) for r in skipped] == [
-        {"what": "series link", "region": "de", "skipped_num": 1}
-    ]
+async def series_links(store, asin, region):
+    async with store.session() as session:
+        result = await session.execute(
+            text("SELECT series_asin, series_region FROM book_series"
+                 " WHERE book_asin = :a AND book_region = :r ORDER BY series_asin"),
+            {"a": asin, "r": region},
+        )
+        return [tuple(r) for r in result.all()]
 
 
 def series_of(book):
     return [(e.asin, e.name, e.region, e.position) for e in book.series]
 
 
-async def test_a_book_is_served_the_series_link_left_out_of_its_write(store):
+async def test_a_book_written_for_de_after_us_stores_both_and_changes_neither(store, caplog):
+    await get_book(
+        batch_get(**{ASIN: product(ASIN, subtitle="Kept")}), ASIN, region="us", store=store
+    )
+    before = await row_snapshot(store, "books", "asin", ASIN, "us")
+    caplog.set_level(logging.INFO, logger="libex")
+
+    de_product = product(ASIN, subtitle="Untertitel", publisher_summary=DE_SUMMARY)
+    live = await get_book(batch_get(**{ASIN: de_product}), ASIN, region="de", store=store)
+
+    assert live.summary == DE_SUMMARY
+    assert await stored_regions(store, "books", ASIN) == ["de", "us"]
+    assert await row_snapshot(store, "books", "asin", ASIN, "us") == before
+    assert (await row_snapshot(store, "books", "asin", ASIN, "de"))["subtitle"] == "Untertitel"
+    assert not [r for r in caplog.records if "skipped" in r.getMessage()]
+
+
+async def test_a_book_stored_in_us_and_uk_serves_each_region_its_own_row(store):
+    await get_book(
+        batch_get(**{ASIN: product(ASIN, subtitle="Colour")}), ASIN, region="us", store=store
+    )
+    await get_book(
+        batch_get(**{ASIN: product(ASIN, subtitle="Colourful")}), ASIN, region="uk", store=store
+    )
+
+    us = await get_book(outage_get, ASIN, region="us", store=store)
+    uk = await get_book(outage_get, ASIN, region="uk", store=store)
+
+    assert (us.region, us.subtitle) == ("us", "Colour")
+    assert (uk.region, uk.subtitle) == ("uk", "Colourful")
+    assert [b["subtitle"] for b in await store_module.stored_books(store, [ASIN], "uk")] \
+        == ["Colourful"]
+    assert [b["subtitle"] for b in await store_module.stored_books(store, [ASIN], "us")] \
+        == ["Colour"]
+
+
+async def test_stored_books_without_a_region_answers_the_first_stored_row(store):
+    await get_book(batch_get(**{ASIN: product(ASIN, subtitle="First")}), ASIN,
+                   region="us", store=store)
+    await get_book(batch_get(**{ASIN: product(ASIN, subtitle="Second")}), ASIN,
+                   region="uk", store=store)
+
+    rows = await store_module.stored_books(store, [ASIN])
+
+    assert [(b["region"], b["subtitle"]) for b in rows] == [("us", "First")]
+
+
+async def test_the_outage_fallback_never_serves_another_regions_copy(store):
+    await get_book(batch_get(**{ASIN: product(ASIN)}), ASIN, region="us", store=store)
+
+    with pytest.raises(AudibleAPIException):
+        await get_book(outage_get, ASIN, region="uk", store=store)
+    with pytest.raises(AudibleAPIException):
+        await get_books(outage_get, [ASIN], region="uk", store=store)
+
+
+async def test_chapters_are_kept_for_each_marketplaces_book(store):
+    de_chapters = {"content_metadata": {"chapter_info": {
+        "runtime_length_ms": 500,
+        "chapters": [{"length_ms": 500, "start_offset_ms": 0, "title": "Eins"}],
+    }}}
+    for region in ("us", "de"):
+        await get_book(batch_get(**{ASIN: product(ASIN)}), ASIN, region=region, store=store)
+    await get_chapters(chapter_get(CHAPTERS), ASIN, region="us", store=store)
+    await get_chapters(chapter_get(de_chapters), ASIN, region="de", store=store)
+
+    us = await get_chapters(outage_get, ASIN, region="us", store=store)
+    de = await get_chapters(outage_get, ASIN, region="de", store=store)
+
+    assert [c.title for c in us.chapters] == ["One", "Two"]
+    assert [c.title for c in de.chapters] == ["Eins"]
+
+
+async def test_a_series_is_kept_per_region_and_each_book_links_its_own(store):
     await get_series(fake_get, SERIES, region="us", store=store)
-    before = await row_snapshot(store, "series", "asin", SERIES)
-    own = "B0SERIES02"
-    de_book = product(ASIN, relationships=[
-        {**SERIES_RELATION, "title": "Die Serie (DE)"},
-        {**SERIES_RELATION, "asin": own, "title": "Meine Serie", "sequence": "2"},
-    ])
-    get = batch_get(**{ASIN: de_book})
+    before = await row_snapshot(store, "series", "asin", SERIES, "us")
+    de_book = product(ASIN, relationships=[{**SERIES_RELATION, "title": "Die Serie (DE)"}])
+
+    served = await get_book(batch_get(**{ASIN: de_book}), ASIN, region="de", store=store)
+
+    assert await stored_regions(store, "series", SERIES) == ["de", "us"]
+    assert await row_snapshot(store, "series", "asin", SERIES, "us") == before
+    assert await series_links(store, ASIN, "de") == [(SERIES, "de")]
+    assert await series_links(store, ASIN, "us") == []
+    assert series_of(served) == [(SERIES, "Die Serie (DE)", "de", "1")]
+
+
+async def test_a_book_is_served_the_series_entries_it_cannot_store(store):
+    unnamed = {**SERIES_RELATION, "asin": None, "title": "No Id", "sequence": "2"}
+    book = product(ASIN, relationships=[{**SERIES_RELATION}, unnamed])
+    get = batch_get(**{ASIN: book})
 
     served = await get_book(get, ASIN, region="de", store=store)
     unstored = await get_book(get, ASIN, region="de")
 
-    assert (SERIES, "Die Serie (DE)", "de", "1") in series_of(served)
     assert series_of(served) == series_of(unstored)
-    assert await series_links(store, ASIN) == [own]
-    assert await row_snapshot(store, "series", "asin", SERIES) == before
-
-
-async def test_books_are_served_the_series_link_left_out_of_their_write(store):
-    await get_series(fake_get, SERIES, region="us", store=store)
-    before = await row_snapshot(store, "series", "asin", SERIES)
-    de_book = product(ASIN, relationships=[{**SERIES_RELATION, "title": "Die Serie (DE)"}])
-    get = batch_get(**{ASIN: de_book, OTHER: product(OTHER)})
-
-    served = await get_books(get, [ASIN, OTHER], region="de", store=store)
-    unstored = await get_books(get, [ASIN, OTHER], region="de")
-
-    assert [series_of(b) for b in served.books] == [series_of(b) for b in unstored.books]
-    assert series_of(served.books[0]) == [(SERIES, "Die Serie (DE)", "de", "1")]
-    assert await series_links(store, ASIN) == []
-    assert await row_snapshot(store, "series", "asin", SERIES) == before
-
-
-async def test_only_the_foreign_series_of_a_book_is_left_out_of_the_write(store, caplog):
-    await get_series(fake_get, SERIES, region="us", store=store)
-    before = await row_snapshot(store, "series", "asin", SERIES)
-    own = "B0SERIES02"
-    caplog.set_level(logging.INFO, logger="libex")
-
-    de_book = product(ASIN, relationships=[
-        {**SERIES_RELATION, "title": "Die Serie (DE)"},
-        {**SERIES_RELATION, "asin": own, "title": "Meine Serie", "sequence": "2"},
-    ])
-    await get_book(batch_get(**{ASIN: de_book}), ASIN, region="de", store=store)
-
-    assert await row_snapshot(store, "series", "asin", SERIES) == before
-    assert await series_links(store, ASIN) == [own]
-    own_row = await row_snapshot(store, "series", "asin", own)
-    assert (own_row["region"], own_row["title"]) == ("de", "Meine Serie")
-    skipped = [r for r in caplog.records if r.getMessage() == FOREIGN_SKIP]
-    assert [fields_of(r)["skipped_num"] for r in skipped] == [1]
-
-    again = product(ASIN, relationships=[
-        {**SERIES_RELATION, "asin": own, "title": "Meine Serie", "sequence": "3"},
-    ])
-    await get_book(batch_get(**{ASIN: again}), ASIN, region="de", store=store)
-    assert await series_links(store, ASIN) == [own]
+    assert await series_links(store, ASIN, "de") == [(SERIES, "de")]

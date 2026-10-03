@@ -617,7 +617,7 @@ async def _get_books_by_asins_unsettled(
         # both used to.
         db_backstop_results: list[dict[str, Any]] = []
         if transient_failed_asins:
-            db_backstop_results = await get_books_from_db(session, transient_failed_asins)
+            db_backstop_results = await get_books_from_db(session, transient_failed_asins, region=region)
             # The backstop covers what the DB actually had; anything still
             # missing after it is a real shortfall the caller has to be told
             # about, not just an internal retry detail -- and which reason it
@@ -671,7 +671,7 @@ async def _get_books_by_asins_unsettled(
         )
 
         # Try relational DB first for the misses
-        db_results = await get_books_from_db(session, fetch_asins)
+        db_results = await get_books_from_db(session, fetch_asins, region=region)
         if db_results:
             record_source_keys(facts, SOURCE_CACHE, [b["asin"] for b in cached_results])
             record_source_keys(facts, SOURCE_DB, [b["asin"] for b in db_results])
@@ -799,7 +799,7 @@ async def get_chapters(
 
     except Exception as e:
         # Try DB first
-        db_result = await get_track_from_db(session, asin)
+        db_result = await get_track_from_db(session, asin, region=region)
         if db_result:
             record_source(facts, SOURCE_DB)
             return db_result
@@ -859,13 +859,13 @@ async def fetch_and_store_chapters(
     # Screened here, not by catching ValueError, because a malformed body on a
     # 200 also raises ValueError (JSONDecodeError) and that is transient.
     if not is_valid_asin(asin):
-        await _mark_chapters_checked(session, asin)
+        await _mark_chapters_checked(session, asin, region)
         return "not_found"
 
     try:
         data = await fetch_chapter_metadata(audible_get, asin, region)
     except NotFoundException:
-        await _mark_chapters_checked(session, asin)
+        await _mark_chapters_checked(session, asin, region)
         return "not_found"
     except Exception as e:
         logger.warning(
@@ -880,13 +880,13 @@ async def fetch_and_store_chapters(
         return "error"
 
     if not has_chapter_info(data):
-        await _mark_chapters_checked(session, asin)
+        await _mark_chapters_checked(session, asin, region)
         return "none"
 
     try:
         chapters = normalize_chapters(data, asin, region)
-        await upsert_track(session, asin, chapters)
-        await _mark_chapters_checked(session, asin)
+        await upsert_track(session, asin, chapters, region=region)
+        await _mark_chapters_checked(session, asin, region)
         return "stored"
     except Exception as e:
         logger.warning(
@@ -897,7 +897,9 @@ async def fetch_and_store_chapters(
         return "error"
 
 
-async def _mark_chapters_checked(session: AsyncSession, asin: str) -> None:
+async def _mark_chapters_checked(
+    session: AsyncSession, asin: str, region: str
+) -> None:
     """
     Stamps chapters_checked_at on a book, recording that its chapters have
     been asked about.
@@ -914,7 +916,7 @@ async def _mark_chapters_checked(session: AsyncSession, asin: str) -> None:
     """
     await session.execute(
         update(Book)
-        .where(Book.asin == asin)
+        .where(Book.asin == asin, Book.region == region)
         .values(chapters_checked_at=datetime.now(timezone.utc))
     )
     await session.commit()

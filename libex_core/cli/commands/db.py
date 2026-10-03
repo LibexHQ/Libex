@@ -252,8 +252,8 @@ def register(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") 
         "counts of what the store holds",
         "Print how many book records, distinct book ASINs, authors, narrators, series and books with "
         "chapters the store holds, as JSON. --region scopes all but "
-        "narrators, and then seriesRegionUnknown counts the series that have "
-        "no region.",
+        "narrators. seriesRegionUnknown is kept for compatibility and is always "
+        "0, since every series carries a region.",
     )
     stats.add_argument("--region", choices=REGIONS, help="count only this marketplace, default all")
     stats.set_defaults(handler=run_stats)

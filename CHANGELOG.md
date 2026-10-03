@@ -10,6 +10,28 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [2.2.0]
+
+Books, series and chapters are now stored once per marketplace instead of once per ASIN, which comes with a database migration, a stricter startup and a few changes to what the `/db` routes return when the same ASIN is stored under more than one region. Operators must read the migration and startup notes below before deploying. Existing fields, status codes and parameters are otherwise unchanged; the additions are the `region` parameter on three routes and one field on `/db/stats`.
+
+### Added
+- **`GET /db/book/{asin}`, `GET /db/book/{asin}/chapters` and `GET /db/series/{asin}` take an optional `region`.** With it, you get that marketplace's record. Without it, you get the record stored first for the ASIN, which is the same one every time. A region the ASIN was never stored under is a `404` with `code: "not_in_libex"`, and an invalid region is a `400`. Before, these routes had no region and returned whatever single record the ASIN had.
+- **`GET /db/stats` has `distinctBookAsins`.** It counts the ASINs among the stored books. `books` still counts stored records, so it is larger than `distinctBookAsins` whenever a book is stored under more than one region; scoped to one `region` the two are equal.
+
+### Changed
+- **A book, a series and a book's chapters are stored per ASIN and region.** The same ASIN returned by two marketplaces, which is what ISBN-style ASINs do, is now two records, each with its own authors, narrators, genres, series links and chapters. Until now the second marketplace's response was merged into the record the first one had created, which kept the first marketplace's region. The stored corpus will grow as books are fetched for more regions, and `books` in `/db/stats` counts those records, not distinct ASINs.
+- **Unfiltered `/db` lists still return one row per ASIN, and that row is the one stored first.** Give a `region` to a list that takes one and you get that region's records instead. The series-books, narrator-books, plan, VVAB, new-releases and coming-soon lists, and the book search, all work this way.
+- **`GET /db/author/{asin}/books` and the `/db` SKU routes changed which regions they return.** The author's books are now those of the author's own `region` (which defaults to `us`) unless you pass `book_region` to name another; before, books stored under any region were returned. A SKU group returns every stored variant, ordered by region and then ASIN, so a variant stored under two regions appears twice and the order is now fixed.
+- **`seriesRegionUnknown` on a region-scoped `/db/stats` is always `0`.** A series now always has a region, so none falls out of the per-region totals. The field is kept for compatibility and is always `0`.
+- **The seeder works per region.** It decides whether a book, series or chapter listing is already stored by looking at the region it is seeding, so a book held for `us` is fetched again for `uk`.
+- **The API container refuses to start if the database migration fails.** It exits with the migration's status and serves nothing against a schema that is not current, where it used to log the failure and carry on. Under a restart policy that is a restart loop until the migration succeeds or the previous image is put back. Only the API container migrates now: the seeder, backfill, refresh and other operator scripts started from the same image no longer run it, so deploy the API first.
+- **`REFRESH_RESUME_FROM` and `--resume-from` take `ASIN:region`.** The refresh's `RESUME CURSOR` log line now prints that pair, because a book is identified by both. A bare ASIN is refused with an error rather than guessed at. The chapters backfill logs its cursor the same way.
+- **The migration needs the database prepared first.** Run `expand`, `backfill`, `index` and then `finalize` of `python -m scripts.region_keys` (added in 2.1.2) before deploying this release. On a database that holds any rows, the migration checks that preparation and stops with a list of what is missing, changing nothing, rather than repairing it. A database with no rows, such as a new install, needs nothing and builds everything itself. The migration adds its foreign keys without checking existing rows so it stays short; afterwards run `ALTER TABLE <table> VALIDATE CONSTRAINT <name>` for each (`tracks_asin_region_fkey` and the `*_book_asin_book_region_fkey` and `*_series_asin_series_region_fkey` keys on the link tables), which does not block reads or writes. Rolling back refuses once any ASIN is stored under more than one region, and deletes nothing.
+- **New columns and a table are created and not used yet.** `confirmed_at` on books, series and authors, `chapters_confirmed_at` on books, and a `walk_results` table. They are empty, nothing reads or writes them, and no response carries them.
+
+### Fixed
+- **A request for one region is no longer answered from another region's stored copy during an Audible outage.** The stored-copy fallbacks for a book (single and bulk), its chapters, a series and a series search now read only the requested region's record. Before, a `uk` request that Audible could not answer could come back with the copy stored for another region. With nothing stored for that region it now falls through to the cache and then to the `503` described in 2.0.0.
+
 ## [2.1.2]
 
 No endpoint, parameter, response shape, field or status code moved, and the application behaves exactly as before. This release adds an operator script and nothing else; there is no database migration.

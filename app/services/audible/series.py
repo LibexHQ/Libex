@@ -250,7 +250,7 @@ async def search_series(
             )
 
         # Also check DB for additional matches not found via Audible
-        db_results = await search_series_from_db(session, name)
+        db_results = await search_series_from_db(session, name, region=region)
         for db_series in db_results:
             db_asin = db_series.get("asin")
             if db_asin and db_asin not in seen_asins:

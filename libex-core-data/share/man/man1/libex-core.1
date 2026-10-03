@@ -1504,7 +1504,7 @@ page of results to return, counting from 1, default 1
 .SS db stats
 \fBlibex\-core db stats\fR
 .PP
-Print how many book records, distinct book ASINs, authors, narrators, series and books with chapters the store holds, as JSON. \-\-region scopes all but narrators, and then seriesRegionUnknown counts the series that have no region.
+Print how many book records, distinct book ASINs, authors, narrators, series and books with chapters the store holds, as JSON. \-\-region scopes all but narrators. seriesRegionUnknown is kept for compatibility and is always 0, since every series carries a region.
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 show this help message and exit

@@ -314,8 +314,14 @@ def resetting_listener():
     try:
         yield server.getsockname()[1]
     finally:
+        # close() alone does not wake an accept() blocked in another thread.
+        try:
+            server.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
         server.close()
         thread.join(timeout=5)
+        assert not thread.is_alive()
 
 
 @pytest.mark.parametrize("value", _SECRET_VALUES[:6])
@@ -328,6 +334,7 @@ def test_the_value_does_not_leave_the_process_in_a_real_run_either(value, resett
     )
     assert done.returncode == 5
     assert SECRET.encode() not in done.stdout + done.stderr
+
 
 def test_this_module_sees_the_platform_it_is_run_on():
     # The monkeypatched platform tests above are about branches, not this host.

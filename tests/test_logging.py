@@ -7,7 +7,7 @@ off-loop delivery (queue + listener), bounded queue, and circuit breaker.
 # Standard library
 import logging
 import queue
-import time
+import threading
 from types import SimpleNamespace
 
 # Third party
@@ -99,17 +99,23 @@ def test_resolve_level_defaults_to_info_when_empty():
 # Axiom: off-loop delivery, bounded queue, circuit breaker
 # ============================================================
 
-class _SlowClient:
-    """Stands in for axiom_py's Client: ingest_events blocks for `delay`
-    seconds, the way an untimed, stalled HTTPS call would."""
+class _StalledClient:
+    """Stands in for axiom_py's Client: ingest_events blocks until the test
+    releases it, the way an untimed, stalled HTTPS call would. A gate rather
+    than a sleep, so how long the stall lasts never depends on the machine.
+    `finished` stays None while the call is still stuck, then records whether
+    it was let go (True) or gave up waiting (False)."""
 
-    def __init__(self, delay):
-        self.delay = delay
+    def __init__(self):
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.finished = None
         self.calls = 0
 
     def ingest_events(self, dataset, events):
         self.calls += 1
-        time.sleep(self.delay)
+        self.entered.set()
+        self.finished = self.release.wait(timeout=10)
 
 
 class _FailingClient:
@@ -152,7 +158,7 @@ def _fake_settings(**overrides):
 
 
 def test_axiom_handler_emit_does_not_block_the_caller():
-    client = _SlowClient(delay=0.3)
+    client = _StalledClient()
     direct_handler = DirectAxiomHandler(client=client, dataset="test")
     queue_handler = logging_module._start_axiom_listener(direct_handler)
 
@@ -161,19 +167,19 @@ def test_axiom_handler_emit_does_not_block_the_caller():
     logger.setLevel(logging.INFO)
     logger.propagate = False
 
-    start = time.monotonic()
-    logger.info("hello")
-    elapsed = time.monotonic() - start
+    try:
+        logger.info("hello")
 
-    assert elapsed < 0.1, "logging call blocked on the simulated network delay"
+        # The background thread does make the call, and it is still stuck in
+        # it: had the caller run the call itself, it would have sat in it
+        # until the gate timed out and recorded that.
+        assert client.entered.wait(timeout=10)
+        assert client.finished is None, "logging call blocked on the stalled network call"
+    finally:
+        client.release.set()
+        logger.handlers = []
 
-    # The background thread does eventually make the call.
-    deadline = time.monotonic() + 2
-    while client.calls == 0 and time.monotonic() < deadline:
-        time.sleep(0.01)
     assert client.calls == 1
-
-    logger.handlers = []
 
 
 def test_full_axiom_queue_drops_rather_than_blocks():
@@ -186,11 +192,22 @@ def test_full_axiom_queue_drops_rather_than_blocks():
         msg="dropped", args=(), exc_info=None,
     )
 
-    start = time.monotonic()
-    handler.emit(record)  # must not raise and must not block on the full queue
-    elapsed = time.monotonic() - start
+    # A blocking put on a full queue never returns, so the emit runs on a
+    # thread the test can give up on instead of timing the call.
+    errors: list[BaseException] = []
 
-    assert elapsed < 0.1
+    def emit():
+        try:
+            handler.emit(record)
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=emit, daemon=True)
+    worker.start()
+    worker.join(timeout=10)
+
+    assert not worker.is_alive(), "emit blocked on the full queue"
+    assert errors == []
     assert record_queue.qsize() == 1
     assert record_queue.get_nowait() == "placeholder"
 

@@ -361,6 +361,11 @@ def test_gzip_at_or_above_offload_threshold_compresses_off_the_loop_thread(monke
     client = TestClient(app)
 
     _, gzip_headers, gzip_raw = _raw_get(client, "/big", {"Accept-Encoding": "gzip"})
+    # Snapshot before the second request: each request runs on its own
+    # short-lived thread, and the OS reuses the ids of finished threads, so
+    # the identity request's handler can land on the id the compression
+    # worker had. Only a thread alive alongside the worker proves anything.
+    gzip_request_handler_threads = list(handler_thread_log)
     _, _, identity_raw = _raw_get(client, "/big", {"Accept-Encoding": "identity"})
 
     assert gzip_headers["content-encoding"] == "gzip"
@@ -369,7 +374,8 @@ def test_gzip_at_or_above_offload_threshold_compresses_off_the_loop_thread(monke
     assert gzip.decompress(gzip_raw) == identity_raw
 
     assert len(compression_thread_log) == 1
-    assert compression_thread_log[0] not in handler_thread_log
+    assert len(gzip_request_handler_threads) == 1
+    assert compression_thread_log[0] not in gzip_request_handler_threads
 
 
 def test_gzip_below_offload_threshold_compresses_on_the_loop_thread(monkeypatch):
@@ -417,6 +423,7 @@ async def _drive_offloading_responder_and_cancel(monkeypatch, body: bytes) -> li
     a hand-held gate can land in it reliably."""
     worker_started = threading.Event()
     release_worker = threading.Event()
+    worker_finished = threading.Event()
     worker_exceptions: list[BaseException] = []
 
     real_compress = middleware_module.gzip.compress
@@ -429,6 +436,8 @@ async def _drive_offloading_responder_and_cancel(monkeypatch, body: bytes) -> li
         except BaseException as exc:
             worker_exceptions.append(exc)
             raise
+        finally:
+            worker_finished.set()
 
     monkeypatch.setattr(middleware_module.gzip, "compress", blocking_compress)
 
@@ -466,8 +475,11 @@ async def _drive_offloading_responder_and_cancel(monkeypatch, body: bytes) -> li
     assert responder.gzip_buffer.closed
     assert responder.gzip_file.closed
 
+    # Wait on the worker itself, not a fixed pause: a loaded machine can
+    # take longer than any guess, and returning early would report "raised
+    # nothing" for a worker that had not yet run.
     release_worker.set()
-    await asyncio.sleep(0.1)
+    assert await asyncio.to_thread(worker_finished.wait, 30), "worker never finished"
 
     return worker_exceptions
 

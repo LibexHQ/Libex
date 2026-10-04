@@ -93,27 +93,28 @@ NEW_HOST_HEADER_VARIANTS = [
 
 
 @pytest.fixture
-def app_with_env():
+def app_with_env(monkeypatch):
     """
     Factory fixture: reloads `app.main` with the given env vars applied,
-    yields the app, and restores afterwards. `get_settings` is `lru_cache`d,
-    so it is cleared both before the reload (so the fresh env vars are read)
-    and after restoring (so the disabled Settings this leaves behind, rather
-    than whatever the test set, is what `get_settings()` returns for anything
-    that calls it afterwards).
+    yields the app, and restores afterwards. The env vars go through
+    monkeypatch, so a variable that was already set comes back to its prior
+    value rather than being deleted. `get_settings` is `lru_cache`d, so it is
+    cleared both before the reload (so the fresh env vars are read) and after
+    the environment is restored (so the disabled Settings this leaves behind,
+    rather than whatever the test set, is what `get_settings()` returns for
+    anything that calls it afterwards).
     """
 
     @contextmanager
     def _reload(env: dict):
-        for key, value in env.items():
-            os.environ[key] = value
-        get_settings.cache_clear()
-        importlib.reload(main_module)
         try:
-            yield main_module.app
+            with monkeypatch.context() as patched:
+                for key, value in env.items():
+                    patched.setenv(key, value)
+                get_settings.cache_clear()
+                importlib.reload(main_module)
+                yield main_module.app
         finally:
-            for key in env:
-                os.environ.pop(key, None)
             get_settings.cache_clear()
             importlib.reload(main_module)
             get_settings.cache_clear()
@@ -434,6 +435,24 @@ def test_partial_config_produces_consistent_silence_everywhere(app_with_env, cap
     assert "Migration notice" not in spec["info"]["description"]
     assert "libexdb.com" not in spec["info"]["description"]
     assert any("migration_sunset" in record.getMessage() for record in caplog.records)
+
+
+def test_app_with_env_restores_a_prior_value_and_removes_an_unset_one(app_with_env, monkeypatch):
+    """The fixture hands the environment back as it found it: a variable that
+    was already set returns to that value, one that was not set is gone."""
+    monkeypatch.setenv("MIGRATION_NEW_HOST", "https://prior.example.net")
+    monkeypatch.delenv("MIGRATION_SUNSET", raising=False)
+
+    with app_with_env(ENABLED_ENV):
+        assert os.environ["MIGRATION_NEW_HOST"] == "https://libexdb.com"
+        assert os.environ["MIGRATION_SUNSET"] == "2026-11-04"
+
+    assert os.environ["MIGRATION_NEW_HOST"] == "https://prior.example.net"
+    assert "MIGRATION_SUNSET" not in os.environ
+    monkeypatch.delenv("MIGRATION_NEW_HOST")
+    get_settings.cache_clear()
+    importlib.reload(main_module)
+    get_settings.cache_clear()
 
 
 # ============================================================

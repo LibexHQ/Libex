@@ -18,9 +18,18 @@ links from 170 ms to 2 ms. The build took 4.5 s.
 
 Plain CREATE INDEX, not CONCURRENTLY: migrations/env.py runs the whole chain in
 one transaction, and CONCURRENTLY cannot run inside one. The SHARE lock it
-takes blocks writes to book_series, not reads, for those few seconds, and the
-revision runs with writers stopped. IF NOT EXISTS keeps a rerun against a
-database that already has the index harmless.
+takes lasts the few seconds the build takes. Reads of book_series proceed;
+writes to it queue behind the lock, including the cascades from deleting a
+series or a book. The API runs this revision at startup while the seeder, the
+backfill and the persist queue may be writing, and their connections carry a
+30s statement_timeout, which the build fits inside.
+
+lock_timeout is set first, as in e7c2a94d1f58, and is transaction-scoped so it
+holds whatever revision the chain starts from. If a long-held lock on
+book_series keeps the build from starting, the revision fails after 5s rather
+than waiting, which would stall every writer queued behind its pending
+request; the container restarts and retries. IF NOT EXISTS keeps a rerun
+against a database that already has the index harmless.
 """
 from typing import Sequence, Union
 
@@ -34,6 +43,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    op.execute("SET LOCAL lock_timeout = '5s'")
     op.create_index(
         'book_series_series_index', 'book_series', ['series_asin', 'series_region'],
         unique=False, if_not_exists=True,

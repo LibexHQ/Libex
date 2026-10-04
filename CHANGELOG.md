@@ -10,6 +10,13 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [2.2.3]
+
+No endpoint, parameter, response shape, field or status code moved, and the application behaves exactly as before. This release corrects the operator script's runbook and nothing else; there is no database migration.
+
+### Fixed
+- **The repair script's runbook no longer sends its list and backup to a directory the container cannot write.** It told operators to write them under `/data/`, which the container user cannot write to, so `plan` failed with a permission error. The runbook now has `plan` write to `/tmp` inside the API container and copy the list out, and has `run` and `restore` use a one-off container with a writable host directory mounted at `/work`, attached to the borrowed VPN's network and to the `libex-db` network.
+
 ## [2.2.2]
 
 No endpoint, parameter, response shape, field or status code moved. This release adds a database migration that makes two operations on series faster, and nothing else.

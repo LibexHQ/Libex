@@ -102,23 +102,45 @@ The run borrows the refresh or backfill VPN, so that job MUST be stopped
 first; two jobs on one exit is the fan-out the guard exists to prevent.
 `plan` and `restore` make no Audible request and need no proxy.
 
-RUNBOOK. From the API image, DATABASE_URL set, one step at a time:
+RUNBOOK. From the API image, DATABASE_URL set, one step at a time. The
+container user cannot write to the mounted /app/data, so nothing here is
+written under it: `plan` writes to /tmp inside the API container, and `run`
+and `restore` use a host directory the container user can write, mounted at
+/work.
 
-  1. Plan. Read-only; writes the frozen list and prints the counts.
+  1. Plan. Read-only against the database; writes the frozen list and prints
+     the counts. Run it inside the running API container, then copy the list
+     out to the host:
 
-         python -m scripts.repair_region_pollution plan --out /data/repair.list.json
+         docker exec <api-container> python -m scripts.repair_region_pollution \\
+             plan --out /tmp/repair.list.json
+         docker cp <api-container>:/tmp/repair.list.json <host-dir>/repair.list.json
 
      Check the counts before going further. The list never changes
      after this; `plan` refuses to overwrite a file.
   2. Take a fresh database backup (scripts/backup.py) and confirm it landed.
      Stop the job whose exit will be borrowed (the refresh or backfill
-     stack), then run this script as a one-off container on that stack's
-     network with AUDIBLE_PROXY_URL pointed at its VPN, for example
-     http://libex-refresh-vpn:8888, and DATABASE_URL as the stack has it.
+     stack's job container), leaving that stack's VPN container running.
+     Make <host-dir> (holding the list) writable by the container user.
+     Then create a one-off container from the API image, mounting <host-dir>
+     at /work, with AUDIBLE_PROXY_URL pointed at the borrowed VPN, for
+     example http://libex-refresh-vpn:8888, and DATABASE_URL as the stack
+     has it. Create it on that stack's network, connect it to the external
+     libex-db network so it reaches Postgres, then start it attached:
+
+         docker create --name <repair-container> --network <borrowed-stack-network> \\
+             -v <host-dir>:/work -e AUDIBLE_PROXY_URL=<vpn-proxy-url> \\
+             -e DATABASE_URL=<database-url> <api-image> \\
+             python -m scripts.repair_region_pollution <mode and arguments>
+         docker network connect libex-db <repair-container>
+         docker start -a <repair-container>
+
+     Each of the commands below is one such container's command: create it
+     with that command, connect libex-db, start it attached.
   3. Rehearse. Real Audible requests, no writes, no backup file touched:
 
-         python -m scripts.repair_region_pollution run --list /data/repair.list.json \\
-             --backup /data/repair.backup.jsonl --dry-run --limit 20
+         python -m scripts.repair_region_pollution run --list /work/repair.list.json \\
+             --backup /work/repair.backup.jsonl --dry-run --limit 20
 
   4. Run in batches, reading the log between them:
 
@@ -140,7 +162,7 @@ RUNBOOK. From the API image, DATABASE_URL set, one step at a time:
      a transaction per book, deleting what the repair wrote (records with no
      commit marker are books that were never changed and are left alone):
 
-         python -m scripts.repair_region_pollution restore --backup /data/repair.backup.jsonl
+         python -m scripts.repair_region_pollution restore --backup /work/repair.backup.jsonl
          python -m scripts.repair_region_pollution restore --backup ... --dry-run --limit 20
 
      It needs the authors, series, narrators and genres the backup names to

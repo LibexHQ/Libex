@@ -378,8 +378,26 @@ def test_a_corrupt_line_that_is_not_the_last_is_an_error(tmp_path):
 # THE CURSOR
 # ============================================================
 
-def _records(*indexes, sha="s"):
-    return [{"format": 1, "type": "book", "list_sha": sha, "index": i} for i in indexes]
+def _records(*indexes, sha="s", committed=True):
+    out = []
+    for i in indexes:
+        out.append({"format": 1, "type": "book", "list_sha": sha, "index": i})
+        if committed:
+            out.append({"format": 1, "type": "commit", "list_sha": sha, "index": i})
+    return out
+
+
+def test_a_record_with_no_commit_marker_never_moves_the_resume_point():
+    # A failure after the backup line was written leaves a record for a book
+    # that did not change. Counting it would send the operator past it.
+    uncommitted = _records(0, 1, 2, 3, committed=False)
+    check_resume(uncommitted, "s", 0)
+    check_pair_unrepaired(uncommitted, "s", 3)
+
+    mixed = _records(0, 1) + _records(2, committed=False)
+    with pytest.raises(ValueError, match="--resume-from 2"):
+        check_resume(mixed, "s", 0)
+    check_resume(mixed, "s", 2)
 
 
 def test_a_start_that_would_repeat_repaired_books_is_refused_not_run_from_zero():
@@ -572,7 +590,7 @@ def test_sustained_5xx_ends_the_run_and_a_few_do_not():
 
 @pytest.mark.usefixtures("restore_audible_transport")
 class TestDedicatedExitGuard:
-    def test_refuses_the_shared_exit_and_logs_why(self, caplog):
+    def test_refuses_the_api_exit_and_logs_why(self, caplog):
         set_hosted_transport("socks5://user:secret@libex-vpn:1080")
 
         with caplog.at_level(logging.ERROR), pytest.raises(SystemExit) as stop:
@@ -583,8 +601,8 @@ class TestDedicatedExitGuard:
         assert "secret" not in caplog.text
         assert "refusing to start" in caplog.text
 
-    def test_refuses_another_jobs_exit(self):
-        set_hosted_transport("socks5://libex-refresh-vpn:1080")
+    def test_refuses_the_seeder_exit(self):
+        set_hosted_transport("socks5://libex-seeder-vpn:1080")
         with pytest.raises(SystemExit):
             _verify_dedicated_proxy()
 
@@ -596,3 +614,71 @@ class TestDedicatedExitGuard:
     def test_accepts_an_exit_named_repair(self):
         set_hosted_transport("socks5://libex-repair-vpn:1080")
         _verify_dedicated_proxy()
+
+    @pytest.mark.parametrize("host", ["libex-repair-vpn", "libex-refresh-vpn", "libex-backfill-vpn"])
+    def test_accepts_a_borrowed_job_exit(self, host):
+        set_hosted_transport(f"http://user:secret@{host}:8888")
+        _verify_dedicated_proxy()
+
+
+# ============================================================
+# THE BACKUP'S DURABILITY, THE 5XX WINDOW, A MALFORMED BODY, THE CACHE
+# ============================================================
+
+def test_every_backup_line_is_fsynced_before_append_returns(tmp_path):
+    backup = BackupFile(tmp_path / "b.jsonl")
+    with patch.object(repair.os, "fsync") as fsync:
+        fsync.reset_mock()
+        backup.append({"format": 1, "type": "book", "list_sha": "s", "index": 0})
+        assert fsync.call_count == 1
+        backup.append({"format": 1, "type": "commit", "list_sha": "s", "index": 0})
+        assert fsync.call_count == 2
+    backup.close()
+
+
+def test_5xx_errors_age_out_of_the_window():
+    sentinel = _ThrottleSentinel()
+    now = [1000.0]
+
+    def emit_503():
+        record = logging.LogRecord("libex", logging.WARNING, __file__, 1, "x", None, None)
+        record.status_code = 503
+        record.attempts_left = 1
+        sentinel.emit(record)
+
+    with patch.object(repair.time, "monotonic", side_effect=lambda: now[0]):
+        for _ in range(repair.ABORT_5XX_WITHIN - 1):
+            emit_503()
+        assert not sentinel.sustained_server_errors
+
+        # The old ones fall out of the window, so one more is not a sustained run.
+        now[0] += repair.ABORT_5XX_WINDOW_SECONDS + 1
+        emit_503()
+        assert not sentinel.sustained_server_errors
+
+        # Still inside the window of the newest: the count does reach the bar.
+        for _ in range(repair.ABORT_5XX_WITHIN - 1):
+            emit_503()
+        assert sentinel.sustained_server_errors
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", ["not a dict", {"content_metadata": "x"}, [1, 2]])
+async def test_a_malformed_chapters_body_is_a_run_failure_not_a_traceback(body):
+    with pytest.raises(repair._RunFailure, match="unreadable"):
+        await _fetch_track(FakeAudible(chapters=body), ASIN, "us")
+
+
+@pytest.mark.asyncio
+async def test_each_cache_key_is_dropped_in_its_own_try():
+    calls = []
+
+    async def invalidate(session, key):
+        calls.append(key)
+        if len(calls) == 1:
+            raise RuntimeError("cache table locked")
+
+    with patch.object(repair.cache_manager, "invalidate", new=invalidate):
+        await repair._invalidate(_factory(), ASIN, "jp")
+
+    assert calls == [f"book:jp:{ASIN}", f"chapters:jp:{ASIN}"]

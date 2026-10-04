@@ -8,8 +8,8 @@ gained the other region's authors, series, scalars, texts and extras. Nothing
 in the merged row says which of its values came from where, so the only honest
 repair is to throw the row away and take Audible's answer for the region the
 row says it belongs to. Everything else Libex does is "less data is never
-accepted"; this script is the scoped, recorded exception to that (decision
-0f020f65): it replaces, never merges, and only for the books `plan` selects.
+accepted"; this script is the scoped, recorded exception to that: it replaces, never
+merges, and only for the books `plan` selects.
 
 What it is and is not. It re-reads books already stored, one request per
 fifty of them plus one chapters request each, from the marketplace each row
@@ -48,16 +48,34 @@ WHAT ONE BOOK GOES THROUGH. For each pair in the frozen list:
      the cursor held at that book, so nothing hammers a failing exit.
      A chapters 404, or a 200 with no chapter listing, is a legitimate empty
      answer: the old track is backed up anyway and none is written.
-  3. In ONE transaction: lock the book row, append the whole prior state to
-     the backup file and fsync it, delete the book (the cascade takes its
-     links and its track), write the fresh answer through the normal writers
-     (write_books, write_track), then put back the two things the rewrite
-     cannot infer: is_primary and created_at. The backup is durable before
-     the delete can commit, so a crash between the two leaves a backup line
-     for a book that was not changed, which restores to the same state.
+  3. In ONE transaction: take the per-ASIN advisory lock (before the row
+     lock, the order the app's own writer takes them in), lock the book row,
+     append the whole prior state to the backup file and fsync it, delete the
+     book (the cascade takes its links and its track), write the fresh answer
+     through the normal writers (write_books, write_track), re-add the clean
+     own-region author and series links the answer lacks (see THIN ANSWERS),
+     then put back the two things the rewrite cannot infer: is_primary and
+     created_at. After the commit a COMMIT MARKER record is appended. The
+     backup record is durable before the delete can commit, so a failure
+     after it leaves a record for a book that was not changed; only the
+     marker says the replacement happened. Resume and restore count only
+     marked records, and a record without one whose book is no longer
+     polluted (a crash between the commit and the marker) is marked on the
+     next start, so neither case can skip a still-polluted book or repeat a
+     repaired one.
   4. The cache keys book:{region}:{asin} and chapters:{region}:{asin} are
-     invalidated after the commit. Bulk keys cannot be enumerated and expire
-     on their TTL.
+     invalidated after the commit, each in its own try so one failing does
+     not spare the other.
+
+THIN ANSWERS. A real answer can carry fewer authors or series than the row
+stored. The foreign links are the pollution, but the clean ones (author_book
+whose author.region equals the book's region, book_series whose series_region
+equals it) were that region's own data, and dropping them would be less data
+accepted for no reason. After the rewrite every such link in the backup that
+the answer lacks is inserted again, do-nothing on conflict, and the count is
+logged. Narrator and genre links are NOT re-added: nothing says which region
+they came from, so they stay exactly as the fresh answer has them. That is a
+deliberate decision, not an omission.
 
 is_primary. The writer decides it when it inserts a row: true unless another
 region already holds the ASIN. The polluted rows were the first stored, so
@@ -78,10 +96,11 @@ at about 1.35 s is under four hours, and a ramp would be machinery that earns
 nothing here. Any 429, or five 5xx within two minutes, ends the run.
 
 The run refuses to start unless AUDIBLE_PROXY_URL names a proxy whose
-hostname contains "repair" (_verify_dedicated_proxy), so its traffic never
-shares the API's exit or another job's. Give the exit that name through a
-container name or a network alias. `plan` and `restore` make no Audible
-request and need no proxy.
+hostname contains "repair", "refresh" or "backfill" (_verify_dedicated_proxy):
+a job exit that is not the API's or the seeder's, and never direct egress.
+The run borrows the refresh or backfill VPN, so that job MUST be stopped
+first; two jobs on one exit is the fan-out the guard exists to prevent.
+`plan` and `restore` make no Audible request and need no proxy.
 
 RUNBOOK. From the API image, DATABASE_URL set, one step at a time:
 
@@ -89,9 +108,13 @@ RUNBOOK. From the API image, DATABASE_URL set, one step at a time:
 
          python -m scripts.repair_region_pollution plan --out /data/repair.list.json
 
-     Send Shane the counts before going further. The list never changes
+     Check the counts before going further. The list never changes
      after this; `plan` refuses to overwrite a file.
   2. Take a fresh database backup (scripts/backup.py) and confirm it landed.
+     Stop the job whose exit will be borrowed (the refresh or backfill
+     stack), then run this script as a one-off container on that stack's
+     network with AUDIBLE_PROXY_URL pointed at its VPN, for example
+     http://libex-refresh-vpn:8888, and DATABASE_URL as the stack has it.
   3. Rehearse. Real Audible requests, no writes, no backup file touched:
 
          python -m scripts.repair_region_pollution run --list /data/repair.list.json \\
@@ -105,14 +128,17 @@ RUNBOOK. From the API image, DATABASE_URL set, one step at a time:
      A stop (SIGTERM, SIGINT, docker stop) finishes the book in flight and
      exits 3 after printing `RESUME CURSOR: N`. The cursor is the index into
      the frozen list. A restart that would begin at or before a book the
-     backup already holds is refused, naming the index to resume from: a lost
-     cursor stops the run, it never silently repeats the work from zero.
-     `--pair ASIN:region` repairs one listed pair; a pair not in the list is
-     refused. When the whole list is done the foreign series_author rows go.
+     backup holds a committed replacement for is refused, naming the index to
+     resume from: a lost cursor stops the run, it never silently repeats the
+     work from zero. `--pair ASIN:region` repairs one listed pair; a pair not
+     in the list is refused. The foreign series_author rows go only when
+     every pair in the list has a committed replacement, so a list with
+     books left unrepaired defers them.
   5. Books left unrepaired (placeholder, 404, empty) are logged and exit
      code 2. Run `plan` again to a new file to list what is still polluted.
-  6. Restore. Puts back the first backed-up state of each pair, in a
-     transaction per book, deleting what the repair wrote:
+  6. Restore. Puts back the first committed backed-up state of each pair, in
+     a transaction per book, deleting what the repair wrote (records with no
+     commit marker are books that were never changed and are left alone):
 
          python -m scripts.repair_region_pollution restore --backup /data/repair.backup.jsonl
          python -m scripts.repair_region_pollution restore --backup ... --dry-run --limit 20
@@ -123,7 +149,8 @@ RUNBOOK. From the API image, DATABASE_URL set, one step at a time:
 ENVIRONMENT.
 
     DATABASE_URL        required.
-    AUDIBLE_PROXY_URL   required for `run`. Hostname must contain "repair".
+    AUDIBLE_PROXY_URL   required for `run`. Hostname must contain "repair",
+                        "refresh" or "backfill".
     REPAIR_DELAY_MIN    0.7     pause floor in seconds, raise only.
     REPAIR_DELAY_MAX    2.0     pause ceiling in seconds, raise only.
     LOG_LEVEL           INFO    WARNING+ drops the RESUME CURSOR line.
@@ -188,6 +215,7 @@ from libex_core.audible.chapters import (
 from libex_core.exceptions import NotFoundException
 from libex_core.storage.types import UTCDateTime
 from libex_core.storage.write import entities
+from libex_core.storage.write.support import lock_asins
 
 # Services
 import app.services.audible as audible_service
@@ -215,6 +243,10 @@ REGIONS = frozenset({"us", "uk", "ca", "au", "de", "fr", "it", "es", "jp", "in",
 
 # The dialect the hosted writers are fixed to; write_track takes it by name.
 _DIALECT = "postgresql"
+
+# Hostname words that mark an exit as a job's own. The run borrows one of the
+# refresh or backfill exits while that job is stopped.
+_EXIT_WORDS = ("repair", "refresh", "backfill")
 
 # The link tables keyed by the book, in the order they are backed up and put
 # back. Every one carries book_asin and book_region.
@@ -375,12 +407,14 @@ _FOREIGN_SERIES_AUTHORS = text(
 async def build_plan(session) -> RepairList:
     """
     Reads the polluted books and the foreign series_author rows and returns
-    them as a RepairList. Read-only: the transaction is declared so, and given
+    them as a RepairList. Read-only and one REPEATABLE READ snapshot, and given
     long enough to scan the link tables, which the app's 30 s statement
     timeout would not allow.
     """
     async with session.begin():
-        await session.execute(text("SET TRANSACTION READ ONLY"))
+        # One snapshot for all three reads, so the counts agree with each other
+        # while the API keeps writing.
+        await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
         await session.execute(text("SET LOCAL statement_timeout = '900s'"))
         author_rows = (await session.execute(_FOREIGN_AUTHOR_LINKS)).all()
         series_rows = (await session.execute(_FOREIGN_SERIES_LINKS)).all()
@@ -643,20 +677,42 @@ def read_backup(path: Path) -> list[dict[str, Any]]:
                 logger.warning("Repair: ignoring a torn final backup line", extra={"line": number})
                 continue
             raise ValueError(f"backup line {number} is not valid JSON: {exc}") from exc
-        if record.get("format") != BACKUP_FORMAT or record.get("type") not in ("book", "series_author"):
+        if record.get("format") != BACKUP_FORMAT or record.get("type") not in ("book", "commit", "series_author"):
             raise ValueError(f"backup line {number} is not a recognised record")
         records.append(record)
     return records
 
 
-def check_pair_unrepaired(records: list[dict[str, Any]], list_sha: str, index: int) -> None:
-    """Refuses a single-pair run for a book the backup already holds, and a
-    backup taken against a different list."""
+def _commit_record(list_sha: str, index: int, asin: str, region: str) -> dict[str, Any]:
+    """The marker appended after a replacement's transaction has committed."""
+    return {
+        "format": BACKUP_FORMAT,
+        "type": "commit",
+        "list_sha": list_sha,
+        "index": index,
+        "asin": asin,
+        "region": region,
+        "committed_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def committed_indexes(records: list[dict[str, Any]]) -> set[int]:
+    """The list indexes whose replacement is known to have committed."""
+    return {r["index"] for r in records if r["type"] == "commit"}
+
+
+def _check_one_list(records: list[dict[str, Any]], list_sha: str) -> None:
     for record in records:
         if record["list_sha"] != list_sha:
             raise ValueError("the backup holds records from a different list; refusing to mix them")
-        if record["type"] == "book" and record["index"] == index:
-            raise ValueError(f"index {index} is already repaired in the backup; refusing to repeat it")
+
+
+def check_pair_unrepaired(records: list[dict[str, Any]], list_sha: str, index: int) -> None:
+    """Refuses a single-pair run for a book whose replacement the backup
+    records as committed, and a backup taken against a different list."""
+    _check_one_list(records, list_sha)
+    if index in committed_indexes(records):
+        raise ValueError(f"index {index} is already repaired in the backup; refusing to repeat it")
 
 
 def check_resume(records: list[dict[str, Any]], list_sha: str, start: int) -> None:
@@ -664,21 +720,49 @@ def check_resume(records: list[dict[str, Any]], list_sha: str, start: int) -> No
     Refuses a start that is not safe against what the backup already holds.
 
     The backup is the durable record of how far a run got, so it, not a
-    remembered cursor, decides: a start at or before a repaired index would
+    remembered cursor, decides: a start at or before a committed index would
     repeat finished work, which is what a lost cursor looks like, and a backup
-    taken against a different list is the wrong file altogether.
+    taken against a different list is the wrong file altogether. Only commit
+    markers count. A book record with none is a book whose replacement failed
+    or never committed, still polluted, and a start at it is exactly right;
+    counting it would send the operator past a book that was never repaired.
     """
-    highest = -1
-    for record in records:
-        if record["list_sha"] != list_sha:
-            raise ValueError("the backup holds records from a different list; refusing to mix them")
-        if record["type"] == "book":
-            highest = max(highest, record["index"])
+    _check_one_list(records, list_sha)
+    committed = committed_indexes(records)
+    highest = max(committed, default=-1)
     if start <= highest:
         raise ValueError(
-            f"the backup already holds repaired books up to index {highest}; starting at {start} "
-            f"would repeat them. Pass --resume-from {highest + 1} (or later)"
+            f"the backup already holds committed replacements up to index {highest}; starting at "
+            f"{start} would repeat them. Pass --resume-from {highest + 1} (or later)"
         )
+
+
+async def reconcile_commits(
+    factory, backup: BackupFile, records: list[dict[str, Any]], list_sha: str
+) -> int:
+    """
+    Marks the replacements that committed but whose marker never reached the
+    file (a crash between the two). A book record with no marker is told apart
+    by the store: a book that is stored and no longer has a foreign link was
+    replaced; one that still has them was not. Returns how many were marked.
+    """
+    committed = committed_indexes(records)
+    latest: dict[int, dict[str, Any]] = {}
+    for record in records:
+        if record["type"] == "book" and record["index"] not in committed:
+            latest[record["index"]] = record
+    marked = 0
+    for index, record in sorted(latest.items()):
+        async with factory() as session:
+            snapshot = await _snapshot(session, record["asin"], record["region"], lock=False)
+        if snapshot is None or snapshot["foreign"]["author_ids"] or snapshot["foreign"]["series"]:
+            continue
+        backup.append(_commit_record(list_sha, index, record["asin"], record["region"]))
+        marked += 1
+        logger.info("Repair: marked a replacement that committed before its marker was written", extra={
+            "asin": record["asin"], "region": record["region"], "index": index,
+        })
+    return marked
 
 
 # ============================================================
@@ -823,9 +907,40 @@ async def _fetch_track(audible: _Audible, asin: str, region: str) -> dict[str, A
         raise
     except Exception as exc:
         raise _RunFailure(f"chapters request failed: {type(exc).__name__}") from exc
-    if not has_chapter_info(data):
-        return None
-    return normalize_chapters(data, asin, region)
+    try:
+        if not has_chapter_info(data):
+            return None
+        return normalize_chapters(data, asin, region)
+    except Exception as exc:
+        raise _RunFailure(f"chapters response unreadable: {type(exc).__name__}") from exc
+
+
+async def _readd_clean_links(session, before: dict[str, Any], region: str) -> dict[str, int]:
+    """
+    Inserts again the backed-up links that were this region's own and that
+    the fresh answer did not carry: author_book rows whose author is not
+    foreign, and book_series rows whose series_region is the book's region.
+    Do-nothing on conflict, so a link the answer did carry is left alone.
+    Narrator and genre links are deliberately not touched: nothing says which
+    region they came from.
+    """
+    foreign_authors = set(before["foreign"]["author_ids"])
+    clean = {
+        "author_book": [
+            r for r in before["links"]["author_book"] if r["author_id"] not in foreign_authors
+        ],
+        "book_series": [r for r in before["links"]["book_series"] if r["series_region"] == region],
+    }
+    counts: dict[str, int] = {}
+    for name, table in _LINK_TABLES:
+        rows = clean.get(name)
+        if not rows:
+            continue
+        result = await session.execute(
+            pg_insert(table).values([_decode_row(table, r) for r in rows]).on_conflict_do_nothing()
+        )
+        counts[name] = result.rowcount or 0
+    return counts
 
 
 async def _replace_in_transaction(
@@ -837,14 +952,22 @@ async def _replace_in_transaction(
     region: str,
     book: dict[str, Any],
     track: dict[str, Any] | None,
-) -> tuple[dict[str, int], dict[str, int]] | None:
+) -> tuple[dict[str, int], dict[str, int], dict[str, int], bool] | None:
     """
-    The one transaction. Returns the before and after summaries, or None when
-    the book is no longer stored. Raises, rolled back, on any failure; the
-    backup line written first is then for a book that did not change.
+    The one transaction. Returns the before and after summaries, the links
+    re-added from the backup, and whether the commit marker reached the file;
+    None when the book is no longer stored. Raises, rolled back, on any
+    failure; the backup record written first is then for a book that did not
+    change and carries no marker.
+
+    The advisory lock comes before the row lock, the order the app's writer
+    takes them in (write_books locks the ASIN before it inserts). The other
+    order lets this transaction hold the row while a writer holds the ASIN
+    and waits for the row.
     """
     async with factory() as session:
         async with session.begin():
+            await lock_asins(session, "book", [asin], dialect=_DIALECT)
             before = await _snapshot(session, asin, region, lock=True)
             if before is None:
                 return None
@@ -859,6 +982,7 @@ async def _replace_in_transaction(
                 stored = await entities.write_track(session, asin, track, region=region, dialect=_DIALECT)
                 if stored is None:
                     raise RuntimeError("the rewritten book is not stored, so its chapters have nowhere to go")
+            readded = await _readd_clean_links(session, before, region)
             await session.execute(
                 update(book_table)
                 .where(book_table.c.asin == asin, book_table.c.region == region)
@@ -867,21 +991,31 @@ async def _replace_in_transaction(
             after = await _snapshot(session, asin, region, lock=False)
             if after is None:
                 raise RuntimeError("the rewrite left no book stored")
-    return _summary(before), _summary(after)
+    # Committed. The marker is what tells resume and restore so.
+    try:
+        backup.append(_commit_record(list_sha, index, asin, region))
+        marked = True
+    except OSError as exc:
+        logger.error("Repair: replaced, but the commit marker could not be written", extra={
+            "asin": asin, "region": region, "index": index, "error_type": type(exc).__name__,
+        })
+        marked = False
+    return _summary(before), _summary(after), readded, marked
 
 
 async def _invalidate(factory, asin: str, region: str) -> None:
-    """Drops the two single-book cache entries. A failure is logged and left:
-    the rows are right, and an entry expires on its TTL."""
-    try:
-        async with factory() as session:
-            for key in (book_key(asin, region), chapters_key(asin, region)):
+    """Drops the two single-book cache entries, each in its own try so one
+    failing does not spare the other. A failure is logged and left: the rows
+    are right, and an entry expires on its TTL."""
+    for key in (book_key(asin, region), chapters_key(asin, region)):
+        try:
+            async with factory() as session:
                 await cache_manager.invalidate(session, key)
-    except Exception as exc:
-        logger.warning(
-            "Repair: cache invalidation failed, the entries will expire on their TTL",
-            extra={"asin": asin, "region": region, "error_type": type(exc).__name__},
-        )
+        except Exception as exc:
+            logger.warning(
+                "Repair: cache invalidation failed, the entry will expire on its TTL",
+                extra={"asin": asin, "region": region, "error_type": type(exc).__name__},
+            )
 
 
 async def _repair_one(
@@ -962,13 +1096,17 @@ async def _repair_one(
         run.leave_alone("not_stored")
         return "not_stored"
 
-    before, after = result
+    before, after, readded, marked = result
     run.repaired += 1
     logger.info("Repair: replaced", extra={
         "asin": asin, "region": region, "index": index, "before": before, "after": after,
-        "chapters_written": offered,
+        "chapters_written": offered, "clean_links_readded": readded,
     })
     await _invalidate(factory, asin, region)
+    if not marked:
+        # The book is replaced and the next start will mark it; but a file
+        # that cannot be appended to is not one to keep running against.
+        run.abort(f"the commit marker for {asin}:{region} could not be written")
     return "replaced"
 
 
@@ -1050,16 +1188,18 @@ async def process(
 
 
 async def _delete_foreign_series_authors(
-    factory, backup: BackupFile | None, list_: RepairList, dry_run: bool
+    factory, backup: BackupFile | None, list_: RepairList, dry_run: bool, run: _Run | None = None
 ) -> int:
     """
     Removes the listed series_author rows that still have a foreign author,
     each backed up first. They hang off a series, so replacing books does not
     touch them. The predicate is checked again here: a row that no longer
-    matches is not deleted.
+    matches is not deleted. A stop is honoured between rows.
     """
     removed = 0
     for series_asin, series_region, author_id in list_.series_authors:
+        if run is not None and run.stopping:
+            break
         async with factory() as session:
             async with session.begin():
                 row = (await session.execute(
@@ -1094,11 +1234,33 @@ async def _delete_foreign_series_authors(
     return removed
 
 
+async def _series_author_pass(
+    factory, backup: BackupFile, list_: RepairList, backup_path: Path, run: _Run
+) -> int | None:
+    """
+    The foreign series_author deletion, run only when every pair in the list
+    has a committed replacement in the backup, however many segments it took
+    to get there. A list with a book left unrepaired defers it: those rows
+    belong to series the unrepaired book may still be linked to. Returns the
+    rows removed, or None when deferred.
+    """
+    committed = committed_indexes(read_backup(backup_path))
+    if not all(i in committed for i in range(len(list_.pairs))):
+        logger.info("Repair: foreign series author rows deferred until every listed book is replaced", extra={
+            "committed": len(committed), "of": len(list_.pairs),
+        })
+        return None
+    return await _delete_foreign_series_authors(factory, backup, list_, False, run)
+
+
 def _verify_dedicated_proxy() -> None:
     """
     Refuses to start unless the configured transport is a proxy whose
-    hostname contains "repair", so this run's requests never leave by the
-    API's exit, another job's, or the container's own address. Reads the
+    hostname contains "repair", "refresh" or "backfill": an exit that belongs
+    to a job, never the API's or the seeder's and never the container's own
+    address. The run borrows the refresh or backfill exit, and that job must
+    be stopped first (see the runbook); nothing here can check that it is.
+    Reads the
     hosted client's transport_summary() rather than AUDIBLE_PROXY_URL: the
     value the client was actually built from, checked by hostname alone,
     because the real value may carry credentials and must never reach a log
@@ -1110,16 +1272,17 @@ def _verify_dedicated_proxy() -> None:
     """
     summary = audible_service._hosted_client.transport_summary()
     host = summary.host or ""
-    if summary.mode != "proxy" or "repair" not in host:
+    if summary.mode != "proxy" or not any(word in host for word in _EXIT_WORDS):
         detail = f"host {host!r}" if summary.mode == "proxy" else summary.mode
         logger.error(
-            "Repair: refusing to start, AUDIBLE_PROXY_URL does not name a repair-dedicated exit",
+            "Repair: refusing to start, AUDIBLE_PROXY_URL does not name a job-dedicated exit",
             extra={"proxy_host": host or "unset", "proxy_configured": summary.mode == "proxy"},
         )
         raise SystemExit(
-            f"AUDIBLE_PROXY_URL ({detail}) does not name a repair-dedicated exit. Refusing to "
-            "start against what may be a shared exit -- point this at an exit whose hostname "
-            "contains 'repair' before starting."
+            f"AUDIBLE_PROXY_URL ({detail}) does not name a job-dedicated exit. Refusing to "
+            "start against what may be the API's or the seeder's exit -- point this at an exit "
+            "whose hostname contains 'repair', 'refresh' or 'backfill' (with that job stopped) "
+            "before starting."
         )
 
 
@@ -1136,18 +1299,25 @@ async def _run(args: argparse.Namespace) -> int:
         start = args.resume_from
     if args.limit is not None:
         end = min(end, start + args.limit)
-    whole_list_done = args.pair is None and end == len(pairs)
 
     _verify_dedicated_proxy()
 
+    factory = db_session.AsyncSessionFactory
     backup: BackupFile | None = None
     if not args.dry_run:
         records = read_backup(args.backup) if args.backup.exists() else []
-        if args.pair is None:
-            check_resume(records, list_.sha, start)
-        else:
-            check_pair_unrepaired(records, list_.sha, start)
         backup = BackupFile(args.backup)
+        try:
+            if await reconcile_commits(factory, backup, records, list_.sha):
+                records = read_backup(args.backup)
+            if args.pair is None:
+                check_resume(records, list_.sha, start)
+            else:
+                check_pair_unrepaired(records, list_.sha, start)
+        except BaseException:
+            backup.close()
+            await db_session.engine.dispose()
+            raise
 
     run = _Run()
     sentinel = _ThrottleSentinel()
@@ -1161,14 +1331,13 @@ async def _run(args: argparse.Namespace) -> int:
         "delay_min": DELAY_MIN, "delay_max": DELAY_MAX, "batch_size": BATCH_SIZE,
         "proxy": audible_service._hosted_client.transport_summary().mode == "proxy",
     })
-    factory = db_session.AsyncSessionFactory
     try:
         await process(
             factory, backup, list_, _Audible(run), run, sentinel,
             start=start, end=end, dry_run=args.dry_run,
         )
-        if whole_list_done and not run.stopping:
-            await _delete_foreign_series_authors(factory, backup, list_, args.dry_run)
+        if not run.stopping and not args.dry_run:
+            await _series_author_pass(factory, backup, list_, args.backup, run)
     except Exception as exc:
         run.abort(f"unexpected {type(exc).__name__}")
         logger.exception("Repair: unexpected failure, stopping with the cursor held")
@@ -1223,12 +1392,15 @@ async def restore(
     """
     Puts back the first backed-up state of each pair (the polluted original,
     should a book have been repaired twice) and every backed-up series_author
-    row. One transaction per book; a failure rolls that book back and stops.
-    Returns how many books were restored.
+    row. Only records with a commit marker are used: one without it is a book
+    that was never changed, so there is nothing to put back, and counting it
+    would restore a book twice over. One transaction per book; a failure rolls
+    that book back and stops. Returns how many books were restored.
     """
+    committed = committed_indexes(records)
     first: dict[Pair, dict[str, Any]] = {}
     for record in records:
-        if record["type"] == "book":
+        if record["type"] == "book" and record["index"] in committed:
             first.setdefault((record["asin"], record["region"]), record)
     restored = 0
     for (asin, region), record in first.items():
@@ -1258,9 +1430,9 @@ async def restore(
 
     if limit is None and not run.stopping:
         for record in records:
-            if record["type"] != "series_author":
-                continue
-            if dry_run:
+            if run.stopping:
+                break
+            if record["type"] != "series_author" or dry_run:
                 continue
             table_row = _decode_row(series_author, record["row"])
             async with factory() as session:
@@ -1271,6 +1443,20 @@ async def restore(
 
 async def _restore(args: argparse.Namespace) -> int:
     records = read_backup(args.backup)
+    if not args.dry_run:
+        # A replacement that committed before its marker was written is
+        # marked first, or it would be taken for a book that never changed.
+        backup = BackupFile(args.backup)
+        try:
+            lists = {r["list_sha"] for r in records}
+            for list_sha in lists:
+                await reconcile_commits(
+                    db_session.AsyncSessionFactory, backup,
+                    [r for r in records if r["list_sha"] == list_sha], list_sha,
+                )
+        finally:
+            backup.close()
+        records = read_backup(args.backup)
     run = _Run()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):

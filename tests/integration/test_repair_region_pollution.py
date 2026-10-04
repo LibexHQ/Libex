@@ -43,6 +43,9 @@ from libex_core.exceptions import AudibleAPIException, NotFoundException
 from scripts.repair_region_pollution import (
     BackupFile,
     RepairList,
+    check_resume,
+    committed_indexes,
+    reconcile_commits,
     _Audible,
     _Run,
     _snapshot,
@@ -280,7 +283,7 @@ async def test_the_backup_holds_the_whole_prior_state_and_restores_it_exactly(db
     assert await _state(db_session) != before
 
     records = read_backup(tmp_path / "backup.jsonl")
-    assert len(records) == 1
+    assert [r["type"] for r in records] == ["book", "commit"]
     assert records[0]["book"] == before["book"]
     assert records[0]["links"] == before["links"]
     assert len(records[0]["track"]["chapters"]["chapters"]) == 5
@@ -390,3 +393,173 @@ async def test_the_foreign_series_author_rows_are_backed_up_removed_and_restorab
         db_session_module.AsyncSessionFactory, records, _Run(), dry_run=False, limit=None
     )
     assert len((await db_session.execute(select(series_author))).all()) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failure_after_the_backup_line_leaves_the_book_resumable_at_its_own_index(db_session, tmp_path):
+    await _seed(db_session)
+    before = await _state(db_session)
+    path = tmp_path / "backup.jsonl"
+
+    with patch.object(repair.writer, "write_books", side_effect=RuntimeError("boom")):
+        run = await _repair(
+            tmp_path, _fake_get(product=_fresh_product(), chapters_error=NotFoundException("none"))
+        )
+    assert run.abort_reason and run.cursor == 0
+    records = read_backup(path)
+    assert [r["type"] for r in records] == ["book"]
+    assert committed_indexes(records) == set()
+    assert await _state(db_session) == before
+
+    # The record exists but marks nothing done: resuming at index 0 is allowed
+    # and the retry repairs the book.
+    check_resume(records, RepairList([(ASIN, "us")], [], {}, "now").sha, 0)
+    run = await _repair(
+        tmp_path, _fake_get(product=_fresh_product(), chapters_error=NotFoundException("none"))
+    )
+    assert run.repaired == 1
+    assert (await _state(db_session))["foreign"] == {"author_ids": [], "series": []}
+    assert committed_indexes(read_backup(path)) == {0}
+
+
+@pytest.mark.asyncio
+async def test_restore_ignores_a_record_that_never_committed(db_session, tmp_path):
+    await _seed(db_session)
+    before = await _state(db_session)
+    with patch.object(repair.writer, "write_books", side_effect=RuntimeError("boom")):
+        await _repair(tmp_path, _fake_get(product=_fresh_product(), chapters_error=NotFoundException("none")))
+
+    restored = await restore(
+        db_session_module.AsyncSessionFactory, read_backup(tmp_path / "backup.jsonl"),
+        _Run(), dry_run=False, limit=None,
+    )
+
+    assert restored == 0
+    assert await _state(db_session) == before
+
+
+@pytest.mark.asyncio
+async def test_a_commit_that_lost_its_marker_is_marked_and_a_still_polluted_book_is_not(db_session, tmp_path):
+    await _seed(db_session)
+    path = tmp_path / "backup.jsonl"
+    sha = RepairList([(ASIN, "us")], [], {}, "now").sha
+
+    # Still polluted: the record is for a book that did not change.
+    with patch.object(repair.writer, "write_books", side_effect=RuntimeError("boom")):
+        await _repair(tmp_path, _fake_get(product=_fresh_product(), chapters_error=NotFoundException("none")))
+    backup = BackupFile(path)
+    assert await reconcile_commits(
+        db_session_module.AsyncSessionFactory, backup, read_backup(path), sha
+    ) == 0
+    backup.close()
+
+    # Replaced, then the marker is lost as if the process died after the commit.
+    await _repair(tmp_path, _fake_get(product=_fresh_product(), chapters_error=NotFoundException("none")))
+    lines = path.read_text().splitlines()
+    path.write_text("\n".join(line for line in lines if '"type":"commit"' not in line) + "\n")
+    assert committed_indexes(read_backup(path)) == set()
+
+    backup = BackupFile(path)
+    assert await reconcile_commits(
+        db_session_module.AsyncSessionFactory, backup, read_backup(path), sha
+    ) == 1
+    backup.close()
+    assert committed_indexes(read_backup(path)) == {0}
+
+
+@pytest.mark.asyncio
+async def test_a_thin_answer_does_not_drop_the_clean_own_region_links(db_session, tmp_path):
+    await _seed(db_session)
+    thin = {**_fresh_product(), "authors": [], "relationships": [], "narrators": []}
+
+    run = await _repair(tmp_path, _fake_get(product=thin, chapters_error=NotFoundException("none")))
+
+    assert run.repaired == 1
+    after = await _state(db_session)
+    # The clean us author and us series come back; the foreign ones do not.
+    assert [r["series_asin"] for r in after["links"]["book_series"]] == ["B0SERIES01"]
+    assert after["links"]["book_series"][0]["position"] == "1"
+    us_author = (await db_session.execute(select(Author.id).where(Author.region == "us"))).scalar_one()
+    assert [r["author_id"] for r in after["links"]["author_book"]] == [us_author]
+    assert after["foreign"] == {"author_ids": [], "series": []}
+    # Narrators are not attributable, so the thin answer's none stands.
+    assert after["links"]["book_narrator"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_jp_book_is_repaired_from_its_own_region(db_session, tmp_path):
+    asin = "4087203123"
+    jp_author = (await db_session.execute(
+        insert(Author).values(name="Nihon", asin="B0AUTHJP01", region="jp").returning(Author.id)
+    )).scalar_one()
+    us_author = (await db_session.execute(
+        insert(Author).values(name="Gaijin", asin="B0AUTHUS01", region="us").returning(Author.id)
+    )).scalar_one()
+    await db_session.execute(insert(Book.__table__).values(
+        asin=asin, region="jp", title="jp old", created_at=OLD_CREATED, updated_at=OLD_CREATED
+    ))
+    await db_session.execute(insert(author_book), [
+        {"author_id": jp_author, "book_asin": asin, "book_region": "jp"},
+        {"author_id": us_author, "book_asin": asin, "book_region": "jp"},
+    ])
+    await db_session.commit()
+
+    plan = await build_plan(db_session)
+    assert plan.pairs == [(asin, "jp")]
+
+    requested = []
+
+    async def get(region, path, params=None, extra_headers=None):
+        requested.append(region)
+        if path.startswith("/1.0/catalog/products"):
+            return {"product": {**AUDIBLE_PRODUCT, "asin": asin, "title": "jp fresh",
+                                "authors": [{"asin": "B0AUTHJP01", "name": "Nihon"}]}}
+        raise NotFoundException("none")
+
+    run = _Run()
+    backup = BackupFile(tmp_path / "backup.jsonl")
+    with patch.object(repair, "DELAY_MIN", 0.0), patch.object(repair, "DELAY_MAX", 0.0):
+        await process(
+            db_session_module.AsyncSessionFactory, backup, plan, _Audible(run, get=get),
+            run, _ThrottleSentinel(), start=0, end=1, dry_run=False,
+        )
+    backup.close()
+
+    assert requested == ["jp", "jp"]
+    await db_session.rollback()
+    after = await _snapshot(db_session, asin, "jp", lock=False)
+    assert after["book"]["title"] == "jp fresh"
+    assert [r["author_id"] for r in after["links"]["author_book"]] == [jp_author]
+    assert after["foreign"]["author_ids"] == []
+
+
+@pytest.mark.asyncio
+async def test_the_series_author_pass_waits_until_every_listed_book_is_replaced(db_session, tmp_path):
+    await _seed(db_session)
+    plan = await build_plan(db_session)
+    path = tmp_path / "backup.jsonl"
+    factory = db_session_module.AsyncSessionFactory
+
+    backup = BackupFile(path)
+    assert await repair._series_author_pass(factory, backup, plan, path, _Run()) is None
+    backup.close()
+    assert len((await db_session.execute(select(series_author))).all()) == 1
+
+    await _repair(tmp_path, _fake_get(product=_fresh_product(), chapters_error=NotFoundException("none")))
+
+    # A stop is honoured between rows: nothing is removed.
+    stopping = _Run()
+    stopping.request_stop()
+    backup = BackupFile(path)
+    assert await repair._series_author_pass(factory, backup, plan, path, stopping) == 0
+    backup.close()
+    await db_session.rollback()
+    assert len((await db_session.execute(select(series_author))).all()) == 2
+
+    backup = BackupFile(path)
+    assert await repair._series_author_pass(factory, backup, plan, path, _Run()) == 1
+    backup.close()
+    await db_session.rollback()
+    # Only the foreign link went; the rewrite's own us author link stays.
+    us_author = (await db_session.execute(select(Author.id).where(Author.region == "us"))).scalar_one()
+    assert [r.author_id for r in (await db_session.execute(select(series_author))).all()] == [us_author]

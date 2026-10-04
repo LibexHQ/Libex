@@ -98,7 +98,7 @@ async def test_upgrade_on_a_fresh_file_creates_the_schema(db):
 async def test_the_head_is_one_of_the_revisions_the_package_ships(upgraded):
     versions = REPO_ROOT / "libex_core" / "storage" / "migrations" / "versions"
     names = sorted(p.name for p in versions.glob("*.py"))
-    assert len(names) == 2
+    assert len(names) == 3
     store = LocalStore(_url(upgraded))
     try:
         state = await store.status()

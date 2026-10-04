@@ -24,6 +24,7 @@ from libex_core.storage.upgrade import _config, set_foreign_keys, upgrade_to_hea
 
 BEFORE = "438dbe70d041"
 AFTER = "a4d91f7c3b26"
+HEAD = "9d2f6b4e8a17"
 
 STAMP = "2026-01-01 00:00:00"
 BOOK_COLUMNS = (
@@ -395,8 +396,24 @@ def _drift(engine):
 
 
 def test_the_migrated_schema_is_the_models_schema(engine):
-    _run(engine, AFTER)
+    _run(engine, HEAD)
     assert _drift(engine) == []
+
+
+def test_the_series_index_is_added_and_dropped_by_its_revision(engine):
+    def names():
+        return {i["name"] for i in inspect(engine).get_indexes("book_series")}
+
+    _run(engine, AFTER)
+    assert "book_series_series_index" not in names()
+    _run(engine, HEAD)
+    assert _revision(engine) == HEAD
+    assert next(
+        i["column_names"] for i in inspect(engine).get_indexes("book_series")
+        if i["name"] == "book_series_series_index"
+    ) == ["series_asin", "series_region"]
+    _run(engine, AFTER, down=True)
+    assert "book_series_series_index" not in names()
 
 
 def test_the_new_columns_are_nullable_and_have_no_default(engine):
@@ -417,4 +434,4 @@ def test_upgrade_to_head_runs_the_revision_the_way_the_store_does(engine):
         set_foreign_keys(connection, False)
         with connection.begin():
             upgrade_to_head(connection)
-    assert _revision(engine) == AFTER
+    assert _revision(engine) == HEAD

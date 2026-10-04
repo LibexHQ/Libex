@@ -507,6 +507,9 @@ book_series = Table(
     UniqueConstraint(
         "book_asin", "book_region", "series_asin", "series_region", name="uq_book_series"
     ),
+    # The unique key leads with the book, so the books of a series and the
+    # cascade from series would otherwise read the whole table.
+    Index("book_series_series_index", "series_asin", "series_region"),
 )
 
 book_genre = Table(

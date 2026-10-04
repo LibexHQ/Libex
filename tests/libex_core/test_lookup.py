@@ -608,3 +608,15 @@ async def test_only_the_abs_quick_search_route_rejects_missing_terms():
         await abs_quick_search(never, "", "", "")
     assert info.value.code == ErrorCode.INVALID_REQUEST
     never.assert_not_called()
+
+
+def test_the_explicit_nulls_lookups_are_public():
+    import libex_core.lookup as lookup
+
+    assert {
+        "get_book_with_nulls",
+        "get_books_with_nulls",
+        "BookLookup",
+        "BooksLookup",
+    } <= set(lookup.__all__)
+    assert all(hasattr(lookup, name) for name in lookup.__all__)

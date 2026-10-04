@@ -506,10 +506,11 @@ async def get_books_with_nulls(
     """
     get_books, returning the response together with each book's explicit nulls.
 
-    Same arguments, errors and response as get_books, all documented below. BooksLookup.explicit_nulls maps the ASIN of each book in the
-    response to the published fields Audible sent as an explicit null rather
-    than omitting; a book answered from the store has no entry, which means
-    unknown and is not the same as ().
+    Same arguments, errors and response as get_books, all documented below.
+    BooksLookup.explicit_nulls maps the ASIN of each book in the response to
+    the published fields Audible sent as an explicit null rather than
+    omitting; a book answered from the store has no entry, which means unknown
+    and is not the same as ().
 
     Fetches up to 1000 books by ASIN.
 

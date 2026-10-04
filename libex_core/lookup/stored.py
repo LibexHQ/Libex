@@ -11,8 +11,9 @@ BookResponse, ChapterResponse, SeriesResponse or AuthorResponse.
 confirmed_at is the moment a real Audible answer for that very record was
 last written: a product fetch for a book, a series profile fetch for a series,
 an author profile fetch for an author, a chapters answer (a listing, or a
-404 or empty answer) for a book's chapters. None means no such answer has
-been recorded, which is not the same as the record being stale or wrong; a
+404 or empty answer) for a book's chapters, readable through
+chapters_confirmed_at even when there is no listing to return. None means no
+such answer has been recorded, which is not the same as the record being stale or wrong; a
 record a book merely mentioned, or one stored before the stamp existed, is
 None. It is read from the store as it stands, so it never says more than the
 store knows.
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "Stored",
+    "chapters_confirmed_at",
     "stored_author",
     "stored_book",
     "stored_books",
@@ -151,6 +153,21 @@ async def stored_chapters(
         return None
     stamps = await _stamps(store, "chapters", [canonical], region, "chapters_confirmed_at")
     return Stored(ChapterResponse(**listing), region, stamps.get(canonical))
+
+
+async def chapters_confirmed_at(
+    store: "LocalStore", asin: str, *, region: str
+) -> datetime | None:
+    """When Audible last answered for the book's chapters in this region, or
+    None when it never has or the book is not stored. Unlike stored_chapters
+    it also speaks for an empty answer: a stamp with no stored listing is a
+    confirmed absence of chapters, None is a question never asked."""
+    region = await _prepare(store, region)
+    canonical = _canonical(asin)
+    if canonical is None:
+        return None
+    stamps = await _stamps(store, "chapters", [canonical], region, "chapters_confirmed_at")
+    return stamps.get(canonical)
 
 
 async def stored_series(

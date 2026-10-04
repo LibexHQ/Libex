@@ -30,6 +30,7 @@ from libex_core.lookup import (
 )
 from libex_core.lookup.stored import (
     Stored,
+    chapters_confirmed_at,
     stored_author,
     stored_book,
     stored_books,
@@ -189,6 +190,50 @@ async def test_chapters_never_written_are_none_even_when_an_empty_answer_was_rec
         await get_chapters(not_found_get, ASIN, store=store)
 
     assert await stored_chapters(store, ASIN, region="us") is None
+
+
+async def test_chapters_confirmed_at_reads_the_stamp_of_a_listing(store):
+    await get_book(batch_get(**{ASIN: product(ASIN)}), ASIN, store=store)
+    await get_chapters(chapter_get(CHAPTERS), ASIN, store=store)
+
+    found = await chapters_confirmed_at(store, ASIN, region="us")
+
+    assert found == (await stored_chapters(store, ASIN, region="us")).confirmed_at
+    assert found is not None
+
+
+async def test_chapters_confirmed_at_speaks_for_an_empty_answer(store):
+    await get_book(batch_get(**{ASIN: product(ASIN)}), ASIN, store=store)
+    with pytest.raises(NotFoundException):
+        await get_chapters(not_found_get, ASIN, store=store)
+
+    assert await stored_chapters(store, ASIN, region="us") is None
+    assert await chapters_confirmed_at(store, ASIN, region="us") is not None
+
+
+async def test_chapters_confirmed_at_is_none_when_never_asked(store):
+    assert await chapters_confirmed_at(store, ASIN, region="us") is None
+    await get_book(batch_get(**{ASIN: product(ASIN)}), ASIN, store=store)
+    assert await chapters_confirmed_at(store, ASIN, region="us") is None
+    assert await chapters_confirmed_at(store, "not an asin", region="us") is None
+
+
+async def test_chapters_confirmed_at_is_the_region_asked_and_required(store):
+    await get_book(batch_get(**{ASIN: product(ASIN)}), ASIN, store=store)
+    await get_chapters(chapter_get(CHAPTERS), ASIN, store=store)
+
+    assert await chapters_confirmed_at(store, ASIN, region="uk") is None
+    with pytest.raises(TypeError):
+        await chapters_confirmed_at(store, ASIN)
+    with pytest.raises(Exception) as raised:
+        await chapters_confirmed_at(store, ASIN, region="zz")
+    assert type(raised.value).__name__ == "RegionException"
+
+
+async def test_chapters_confirmed_at_on_a_closed_store_raises(store):
+    await store.close()
+    with pytest.raises(StoreClosed):
+        await chapters_confirmed_at(store, ASIN, region="us")
 
 
 async def test_a_stored_series_is_the_series_the_live_lookup_served(store):

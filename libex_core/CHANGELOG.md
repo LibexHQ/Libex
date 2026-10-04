@@ -13,6 +13,13 @@ the first published version. Entries for earlier versions record changes made
 before publication: they are historical record for whoever embeds this package,
 not evidence that anyone consumed a given version at the time it was cut.
 
+## [Unreleased]
+
+Next version: 0.22.0.
+
+### Changed
+- **A store migration adds an index on the series of a book's series links; run `libex-core db upgrade`.** Until the store is upgraded, `open()` refuses it as `StoreOutdated`, as for any older schema. The upgrade is one `CREATE INDEX` on the series-to-book link table, and rerunning it is harmless. Reading the books of a series, and deleting a series together with its links, filtered the whole link table because every existing index on it started with the book; they now use the index. Nothing in the package's public surface, and no stored data, changes. Downgrading drops the index.
+
 ## [0.21.0]
 
 ### Added

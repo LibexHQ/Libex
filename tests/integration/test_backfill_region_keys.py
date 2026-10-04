@@ -104,3 +104,71 @@ async def test_a_chapterless_answer_in_one_region_keeps_that_regions_listing_onl
     )
     stored = {region: len(chapters["chapters"]) for region, chapters in rows.all()}
     assert stored == {"de": 2, "us": 1}
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_listing_confirms_chapters_for_its_own_region_only(db_session):
+    await _seed_two_regions(db_session)
+
+    await _store_chapters(db_session, ASIN, _listing(["Eins"]), region="de")
+
+    rows = await db_session.execute(
+        select(Book.region, Book.chapters_confirmed_at).order_by(Book.region)
+    )
+    stamps = dict(rows.all())
+    assert stamps["de"] is not None
+    assert stamps["us"] is None
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_an_empty_answer_confirms_chapters_for_its_own_region_only(db_session):
+    await _seed_two_regions(db_session)
+
+    await _mark_checked(db_session, ASIN, "de", confirmed=True)
+
+    rows = await db_session.execute(
+        select(Book.region, Book.chapters_checked_at, Book.chapters_confirmed_at).order_by(
+            Book.region
+        )
+    )
+    by_region = {region: (checked, confirmed) for region, checked, confirmed in rows.all()}
+    assert by_region["de"][0] is not None and by_region["de"][1] is not None
+    assert by_region["us"] == (None, None)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_plain_mark_checked_confirms_nothing(db_session):
+    await _seed_two_regions(db_session)
+
+    await _mark_checked(db_session, ASIN, "us")
+
+    rows = await db_session.execute(
+        select(Book.chapters_checked_at, Book.chapters_confirmed_at).where(Book.region == "us")
+    )
+    checked, confirmed = rows.one()
+    assert checked is not None
+    assert confirmed is None
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_the_confirmation_stamp_never_moves_backwards(db_session):
+    await _seed_two_regions(db_session)
+    await _mark_checked(db_session, ASIN, "de", confirmed=True)
+    first = (
+        await db_session.execute(
+            select(Book.chapters_confirmed_at).where(Book.region == "de")
+        )
+    ).scalar_one()
+
+    await _store_chapters(db_session, ASIN, _listing(["Eins"]), region="de")
+
+    later = (
+        await db_session.execute(
+            select(Book.chapters_confirmed_at).where(Book.region == "de")
+        )
+    ).scalar_one()
+    assert later >= first

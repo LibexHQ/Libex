@@ -99,18 +99,18 @@ from sqlalchemy import literal, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 # Database
-from app.db.models import Book, Track
+from app.db.models import Book
 
 # Core
 from libex_core.audible import client as audible_client
 from libex_core.audible.chapters import normalize_chapters
 from libex_core.exceptions import AudibleAPIException, NotFoundException
+from libex_core.storage.write import confirm_chapters, write_track
 from app.core.logging import get_logger, setup_logging
 
 # Services
 import app.services.audible as audible_service
 from app.services.audible import audible_get
-from app.services.db.writer import _chapter_count, _chaptered_wins
 
 
 logger = get_logger()
@@ -749,7 +749,9 @@ def _format_cursor(cursor: _Cursor | None) -> str:
     return "(start)" if cursor is None else f"{cursor[0]}:{cursor[1]}"
 
 
-async def _mark_checked(session: AsyncSession, asin: str, region: str) -> None:
+async def _mark_checked(
+    session: AsyncSession, asin: str, region: str, *, confirmed: bool = False
+) -> None:
     """
     Stamps chapters_checked_at, recording that this book's chapters have been
     asked about.
@@ -761,16 +763,27 @@ async def _mark_checked(session: AsyncSession, asin: str, region: str) -> None:
     date has passed. So this write needs no condition of its own; writing it
     unconditionally is what makes the comparison there possible.
 
+    confirmed also stamps chapters_confirmed_at, in the same transaction, for
+    a legitimately empty answer from Audible (a 404, or a response with no
+    listing). That is an answer, and it is how a book with no chapters is told
+    apart from one nobody has asked about. It is False by default and for a
+    confirmed-permanent status (400), which says something about the record
+    but is not a chapters answer; a listing is confirmed by _store_chapters,
+    not here.
+
     Keyed by (asin, region): the stamp belongs to the one marketplace's record
     that was asked about, and an asin-only match would stamp the same title's
     row in every other region as checked without a request ever having been
     made for it.
     """
+    now = _now()
     await session.execute(
         update(Book)
         .where(Book.asin == asin, Book.region == region)
-        .values(chapters_checked_at=_now())
+        .values(chapters_checked_at=now)
     )
+    if confirmed:
+        await confirm_chapters(session, asin, region=region, at=now)
     await session.commit()
 
 
@@ -778,56 +791,47 @@ async def _store_chapters(
     session: AsyncSession, asin: str, chapters: dict, *, region: str
 ) -> None:
     """
-    Writes the track row. Upserts by (asin, region), the table's primary key,
-    so a re-run just refreshes it and never touches the same title's listing
-    in another marketplace. The region is required, with no default, for the
-    reason upsert_track's is: a listing filed under the wrong marketplace is a
-    silent error. Chapters are an Audible answer for one region's record.
-    Upserts so a re-run just refreshes it --
-    except that a response carrying no chapters cannot erase a stored listing
-    that has some.
+    Writes the track row through the storage layer's own track writer and
+    stamps the book's chapters_confirmed_at, since a listing Audible just
+    returned is a confirmed answer. Upserts by (asin, region), the table's
+    primary key, so a re-run just refreshes it and never touches the same
+    title's listing in another marketplace. The region is required, with no
+    default, for the reason write_track's is: a listing filed under the wrong
+    marketplace is a silent error.
 
-    The guard is _chaptered_wins, imported from the service writer rather than
-    restated here. One rule expressed twice is a drift surface, and this is
-    the second of the two sites that write this column; borrowing the
-    expression is what keeps them from disagreeing later. The statement around
-    it mirrors upsert_track deliberately, down to bumping updated_at either
-    way and reporting a suppressed overwrite -- but it is a separate statement
-    rather than a call to upsert_track, because that one swallows its own
-    write failures. Best-effort is right on the request path and wrong here,
-    where a failed write has to reach _process_one as an ERROR so the book is
-    left unstamped and tried again.
+    A response carrying no chapters cannot erase a stored listing that has
+    some. That guard lives in write_track, decided inside the one statement,
+    and is borrowed by calling it rather than restated here: one rule
+    expressed twice is a drift surface. This is not upsert_track, because that
+    one swallows its own write failures. Best-effort is right on the request
+    path and wrong here, where a failed write has to reach _process_one as an
+    ERROR so the book is left unstamped and tried again. write_track raises,
+    and does not commit; this commits.
 
-    Why this walk is the traffic that makes it matter: the fall-through in
-    _process_one tests chapter_info for truthiness, not for containing
+    Why this walk is the traffic that makes the guard matter: the fall-through
+    in _process_one tests chapter_info for truthiness, not for containing
     chapters, so a chapter_info of {"brandIntroDurationMs": 2000} is not a
     NONE outcome. It reaches normalize_chapters, which faithfully turns it
     into a payload whose chapters list is empty. That is not a response to
     reject wholesale -- Audible sent those durations and they are real -- so
-    the refusal belongs here, on the one value that would shrink. And the
-    books it protects are not hypothetical: the ones _select_work re-admits
-    were fetched before release, and some already hold a full listing.
+    the refusal belongs on the one value that would shrink. And the books it
+    protects are not hypothetical: the ones _select_work re-admits were
+    fetched before release, and some already hold a full listing.
+
+    A book the store does not hold for the region writes nothing (write_track
+    returns None) and stamps nothing; there is no row to record either on.
     """
-    from sqlalchemy.dialects.postgresql import insert
-
-    stmt = insert(Track).values(
-        asin=asin,
-        region=region,
-        chapters=chapters,
-        created_at=_now(),
-        updated_at=_now(),
+    stored_count = await write_track(
+        session, asin, chapters, region=region, confirm=True
     )
-    stmt = stmt.on_conflict_do_update(
-        index_elements=["asin", "region"],
-        set_={
-            "chapters": _chaptered_wins(stmt.excluded.chapters, Track.chapters),
-            "updated_at": _now(),
-        },
-    ).returning(_chapter_count(Track.chapters))
-
-    result = await session.execute(stmt)
-    stored_count = result.scalar() or 0
     await session.commit()
+
+    if stored_count is None:
+        logger.info(
+            "Chapters not stored: the book is not stored for the region",
+            extra={"asin": asin, "region": region},
+        )
+        return
 
     offered = chapters.get("chapters") if isinstance(chapters, dict) else None
     offered_count = len(offered) if isinstance(offered, list) else 0
@@ -894,8 +898,9 @@ async def _process_one(
         # 404 -- nothing to fetch. Mark it and move on; do not retry and do not
         # treat as an error. Settled for a book already out; for one asked ahead
         # of its release date the mark is exactly what lets _select_work bring it
-        # back afterwards.
-        await _mark_checked(session, asin, region)
+        # back afterwards. A 404 is also a real answer for the chapters, so it
+        # confirms them too.
+        await _mark_checked(session, asin, region, confirmed=True)
         return _Outcome.NOT_FOUND, False, False, elapsed
     except AudibleAPIException as e:
         elapsed = time.monotonic() - started
@@ -920,7 +925,7 @@ async def _process_one(
 
     # Resolved, but no chapters present.
     if not data.get("content_metadata", {}).get("chapter_info"):
-        await _mark_checked(session, asin, region)
+        await _mark_checked(session, asin, region, confirmed=True)
         return _Outcome.NONE, False, False, elapsed
 
     try:

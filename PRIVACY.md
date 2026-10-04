@@ -205,10 +205,11 @@ that can be searched by name. Some are worth describing individually:
   that calls Audible log whether they connect to Audible directly or through a
   proxy. The API, the seeder and the chapter backfill also log the proxy's
   hostname, in the fields `audible_transport_host` (API) and `proxy_host`
-  (seeder and backfill). The corpus refresh logs only whether a proxy is in
-  use, unless it refuses to start because the proxy isn't the one set aside
-  for it, in which case it logs the hostname it was given. The proxy's full
-  address is never logged, because it can contain a password.
+  (seeder and backfill). The corpus refresh and the region repair script log
+  only whether a proxy is in use, unless one refuses to start because the
+  proxy isn't one it is allowed to use, in which case it logs the hostname it
+  was given. The proxy's full address is never logged, because it can contain
+  a password.
 
 ### IP addresses
 

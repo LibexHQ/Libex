@@ -142,8 +142,10 @@ async def stored_chapters(
     store: "LocalStore", asin: str, *, region: str
 ) -> Stored[ChapterResponse] | None:
     """The stored chapter listing of the book in this region, or None when
-    there is none. confirmed_at is when Audible last answered for the book's
-    chapters, whether or not it had a listing to give."""
+    there is none. confirmed_at is when Audible last answered with that
+    listing. A confirmed absence (an answer with nothing to list) has no
+    listing to return here; it is recorded in chapters_confirmed_at on the
+    book and is read from there."""
     region = await _prepare(store, region)
     canonical = _canonical(asin)
     if canonical is None:

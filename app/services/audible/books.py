@@ -895,7 +895,7 @@ async def fetch_and_store_chapters(
     try:
         data = await fetch_chapter_metadata(audible_get, asin, region)
     except NotFoundException:
-        await _mark_chapters_checked(session, asin, region)
+        await _mark_chapters_checked(session, asin, region, confirmed=True)
         return "not_found"
     except Exception as e:
         logger.warning(
@@ -910,7 +910,7 @@ async def fetch_and_store_chapters(
         return "error"
 
     if not has_chapter_info(data):
-        await _mark_chapters_checked(session, asin, region)
+        await _mark_chapters_checked(session, asin, region, confirmed=True)
         return "none"
 
     try:
@@ -928,7 +928,7 @@ async def fetch_and_store_chapters(
 
 
 async def _mark_chapters_checked(
-    session: AsyncSession, asin: str, region: str
+    session: AsyncSession, asin: str, region: str, *, confirmed: bool = False
 ) -> None:
     """
     Stamps chapters_checked_at on a book, recording that its chapters have
@@ -941,23 +941,27 @@ async def _mark_chapters_checked(
     what keeps an early 404 -- Audible has no chapters for audio that does not
     exist yet -- from retiring a title before release day, and it needs no
     condition here, because the stamp itself is the record of when the
-    question was asked.
-
-    It also stamps chapters_confirmed_at, which only ever moves forward. Every
-    caller reaches here after Audible answered, with a listing or with nothing
-    to list, and an answer of either kind is what that column records. See _gather_chapters in the seeder and _select_work in
+    question was asked. See _gather_chapters in the seeder and _select_work in
     scripts/backfill_chapters.py.
+
+    confirmed also stamps chapters_confirmed_at, which only ever moves
+    forward, for a legitimately empty answer from Audible (a 404, or a
+    response with no listing): that is an answer, and it is how a book with no
+    chapters is told apart from one nobody has asked about. It is False by
+    default, and stays False for a value never sent to Audible and for a
+    listing, which is confirmed by the track write itself so that the stamp
+    follows whether the write succeeded.
     """
     now = datetime.now(timezone.utc)
+    values = {"chapters_checked_at": now}
+    params: dict = {}
+    if confirmed:
+        values["chapters_confirmed_at"] = merge.latest(
+            merge.stamp_bind("stamp"), Book.chapters_confirmed_at
+        )
+        params["stamp"] = now
     await session.execute(
-        update(Book)
-        .where(Book.asin == asin, Book.region == region)
-        .values(
-            chapters_checked_at=now,
-            chapters_confirmed_at=merge.latest(
-                merge.stamp_bind("stamp"), Book.chapters_confirmed_at
-            ),
-        ),
-        {"stamp": now},
+        update(Book).where(Book.asin == asin, Book.region == region).values(**values),
+        params,
     )
     await session.commit()

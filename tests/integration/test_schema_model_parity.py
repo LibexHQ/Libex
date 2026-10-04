@@ -157,3 +157,27 @@ async def test_mapped_column_types_and_nullability_match_the_migration(db_sessio
             )
 
     assert disagreements == [], f"{table_name}: " + "; ".join(disagreements)
+
+
+# ============================================================
+# THE SERIES-LEADING INDEX ON book_series
+# ============================================================
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_book_series_has_the_index_that_leads_with_the_series(db_session):
+    """The migrated database and the model agree on the one index that makes
+    the books of a series, and the cascade from series, a probe instead of a
+    scan of the whole link table."""
+    connection = await db_session.connection()
+    reflected = await connection.run_sync(
+        lambda sync_connection: inspect(sync_connection).get_indexes("book_series")
+    )
+    migrated = {i["name"]: i["column_names"] for i in reflected}
+    mapped = {
+        i.name: [c.name for c in i.columns]
+        for i in Base.metadata.tables["book_series"].indexes
+    }
+
+    assert migrated.get("book_series_series_index") == ["series_asin", "series_region"]
+    assert mapped == {"book_series_series_index": ["series_asin", "series_region"]}

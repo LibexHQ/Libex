@@ -10,6 +10,18 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [2.2.1]
+
+No endpoint, parameter, response shape, field or status code moved, and the application behaves exactly as before. This release adds an operator script and nothing else; there is no database migration.
+
+### Added
+- **An operator script repairs books that picked up another marketplace's data before 2.2.0.** Until 2.2.0, books were keyed by ASIN alone, so when an ISBN-10 ASIN existed in more than one region, the second marketplace's answer was merged into the first-stored row, which kept its own region but gained the other region's authors, series and values. Nothing in such a row says which values came from where, so the script replaces each affected book with a fresh answer from the region the row names, instead of merging. That is a deliberate, scoped exception to Libex never accepting less data, and it applies only to the books `plan` selects: roughly ten thousand ISBN-10 books. Run it from the API image with `python -m scripts.repair_region_pollution <mode>`:
+  - `plan` is read-only. It writes a frozen, checksummed list of `(asin, region)` pairs and prints the counts, including any affected books outside the ISBN-10 shape, which it reports and never touches. It refuses to overwrite an existing list.
+  - `run --list <list> --backup <file>` repairs the listed books one at a time. Each book's old state is written to the backup file, as JSONL and synced to disk, before the book is deleted, and the delete and the rewrite are one transaction per book. A book's primary-record marker and creation time are kept, and the cached copies of that book and its chapters are dropped afterwards. A book Audible does not answer for, or answers with a placeholder, is left as it was; an outage or throttling response stops the run. `--dry-run` fetches and writes nothing, `--limit` and `--resume-from` run it in batches, and `--pair ASIN:region` repairs one listed pair. A stop finishes the book in flight and prints a resume cursor.
+  - `restore --backup <file>` puts back the first backed-up state of each book, one transaction per book.
+  - Requests run one at a time with a random 0.7 to 2.0 second pause before each, which the environment can only lengthen. The run refuses to start unless `AUDIBLE_PROXY_URL` names a dedicated proxy exit whose hostname contains `repair`. `plan` and `restore` make no Audible request and need no proxy.
+  - It changes nothing until an operator runs it. An operator who does not run the script sees no difference from this release.
+
 ## [2.2.0]
 
 Books, series and chapters are now stored once per marketplace instead of once per ASIN, which comes with a database migration, a stricter startup and a few changes to what the `/db` routes return when the same ASIN is stored under more than one region. Operators must read the migration and startup notes below before deploying. Existing fields, status codes and parameters are otherwise unchanged; the additions are the `region` parameter on three routes and one field on `/db/stats`.

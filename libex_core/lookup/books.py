@@ -294,7 +294,9 @@ async def hydrate_books(
         write_failed = False
         served = settle_flags_list(normalized)
         if store is not None and normalized:
-            written, write_failed = await _store.persist_books(store, normalized, region)
+            written, write_failed = await _store.persist_books(
+                store, normalized, region, confirm=True
+            )
             served = await _store.serve_merged(store, normalized, written, region)
 
         # What the failed chunks left uncovered is answered from the store
@@ -552,6 +554,10 @@ async def get_chapters(
             "region": region,
         })
     except NotFoundException:
+        # Audible answered, with nothing to list; that is recorded, and is
+        # never served as a stored answer.
+        if store is not None:
+            await _store.persist_chapters_confirmed_absent(store, canonical, region)
         raise
     except Exception as e:
         logger.warning("Audible unavailable for chapters", extra={
@@ -566,6 +572,8 @@ async def get_chapters(
                 _store.log_served_from_store("chapters", region, asin=canonical)
                 return ChapterResponse(**stored)
         raise as_audible_failure(e, OUTAGE_MESSAGE) from e
-    if store is not None and await _store.persist_track(store, canonical, result, region):
+    if store is not None and await _store.persist_track(
+        store, canonical, result, region, confirm=True
+    ):
         result = await _store.stored_track(store, canonical, region) or result
     return ChapterResponse(**result)

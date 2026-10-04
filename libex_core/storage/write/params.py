@@ -15,7 +15,11 @@ from libex_core.storage.write.support import (
 
 
 def series_params(
-    series: dict, now: datetime, default_region: str | None = None
+    series: dict,
+    now: datetime,
+    default_region: str | None = None,
+    *,
+    confirm: bool = False,
 ) -> dict | None:
     """
     Binds one series for the series upsert, or None when it carries too little
@@ -26,6 +30,10 @@ def series_params(
     book's relationships and names no region of its own belongs to the book's
     marketplace, which the caller passes as default_region; a series profile
     names its own. With no region from either, None: the row cannot be keyed.
+
+    confirm stamps the row as confirmed by Audible at `now`. Only a series
+    profile fetch may pass it: a series named by a book is a mention, and a
+    mention confirms nothing.
     """
     asin = series.get("asin")
     name = series.get("name") or series.get("title")
@@ -48,12 +56,13 @@ def series_params(
         "fetched_description": bool(description),
         "audible_extras": series.get("audibleExtras"),
         "extras_withheld": series.get("extrasWithheld"),
+        "confirmed_at": now if confirm else None,
         "created_at": now,
         "updated_at": now,
     }
 
 
-def book_params(data: dict, now: datetime) -> dict:
+def book_params(data: dict, now: datetime, *, confirm: bool = False) -> dict:
     """
     Binds one book for the book upsert.
 
@@ -65,6 +74,9 @@ def book_params(data: dict, now: datetime) -> dict:
     whisper_sync, has_pdf -- are the deliberate exception: their None is
     answered by a coalesce on both sides of the statement and never reaches
     the column.
+
+    confirm stamps the book as confirmed by Audible at `now`, and is for a
+    product answer for this book itself; the default leaves the stamp alone.
     """
     return {
         "asin": data["asin"],
@@ -112,6 +124,7 @@ def book_params(data: dict, now: datetime) -> dict:
         # withheld, rather than present and empty, so None is the ordinary
         # case here rather than a sign anything went wrong.
         "extras_withheld": data.get("extrasWithheld"),
+        "confirmed_at": now if confirm else None,
         "created_at": now,
         "updated_at": now,
     }

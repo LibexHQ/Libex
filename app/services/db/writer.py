@@ -139,7 +139,9 @@ async def _resolve_author_ids(
     )
 
 
-async def write_books(session: AsyncSession, books: list[dict]) -> None:
+async def write_books(
+    session: AsyncSession, books: list[dict], *, confirm: bool = False
+) -> None:
     """
     Issues every statement for a list of books — their rows plus their genre,
     narrator, series and author relationships — and nothing else.
@@ -153,13 +155,17 @@ async def write_books(session: AsyncSession, books: list[dict]) -> None:
     Existing non-null values are never overwritten with null. Pivot
     relationships (genres, narrators, authors) are additive — never shrink.
     Series position is kept current via upsert.
+
+    confirm stamps the books' own rows as confirmed by Audible, and is for a
+    product fetch of those books; the series and authors they name are never
+    stamped.
     """
     await _books.write_books(
-        session, books, dialect=_DIALECT, conflict_errors=_CONFLICT_ERRORS
+        session, books, dialect=_DIALECT, conflict_errors=_CONFLICT_ERRORS, confirm=confirm
     )
 
 
-async def _write_book(session: AsyncSession, data: dict) -> None:
+async def _write_book(session: AsyncSession, data: dict, *, confirm: bool = False) -> None:
     """
     Issues every statement for one book, as a batch of one.
 
@@ -167,10 +173,10 @@ async def _write_book(session: AsyncSession, data: dict) -> None:
     and routed through write_books so the one-book and fifty-book paths cannot
     drift apart in what they write or how they merge it.
     """
-    await write_books(session, [data])
+    await write_books(session, [data], confirm=confirm)
 
 
-async def upsert_book(session: AsyncSession, data: dict) -> None:
+async def upsert_book(session: AsyncSession, data: dict, *, confirm: bool = False) -> None:
     """
     Upserts a book and all its relationships to the relational DB, in a
     transaction of its own.
@@ -193,13 +199,15 @@ async def upsert_book(session: AsyncSession, data: dict) -> None:
     Existing non-null values are never overwritten with null.
     Pivot relationships (genres, narrators, authors) are additive — never shrink.
     Series position is kept current via upsert.
+
+    confirm is passed through to write_books.
     """
     asin = data.get("asin")
     if not asin:
         return
 
     try:
-        await _write_book(session, data)
+        await _write_book(session, data, confirm=confirm)
         await session.commit()
         logger.info(f"DB write: book {asin}")
 
@@ -216,7 +224,12 @@ async def upsert_book(session: AsyncSession, data: dict) -> None:
 # ============================================================
 
 async def upsert_track(
-    session: AsyncSession, asin: str, chapters_data: dict, *, region: str
+    session: AsyncSession,
+    asin: str,
+    chapters_data: dict,
+    *,
+    region: str,
+    confirm: bool = False,
 ) -> None:
     """
     Upserts chapter data for a book, keeping the richer of the two payloads.
@@ -233,10 +246,13 @@ async def upsert_track(
     stored nothing is written, and that is logged at info, not as a failure:
     a chapters request for a region the book was never stored under is
     ordinary.
+
+    confirm also stamps the book's chapters_confirmed_at, for a listing
+    Audible just answered with.
     """
     try:
         stored_count = await _entities.write_track(
-            session, asin, chapters_data, region=region, dialect=_DIALECT
+            session, asin, chapters_data, region=region, dialect=_DIALECT, confirm=confirm
         )
         await session.commit()
 
@@ -270,12 +286,16 @@ async def upsert_track(
 # AUTHOR PROFILE WRITER
 # ============================================================
 
-async def upsert_author_profile(session: AsyncSession, data: dict) -> None:
+async def upsert_author_profile(
+    session: AsyncSession, data: dict, *, confirm: bool = False
+) -> None:
     """
     Upserts a full author profile fetched from the contributors endpoint.
     Updates description and image which aren't available from book data alone.
     Also writes author genres to author_genre pivot.
     Author genres are additive — never delete.
+
+    confirm stamps the author as confirmed by Audible, for a profile fetch.
     """
     asin = data.get("asin")
     name = data.get("name", "").strip()
@@ -285,7 +305,9 @@ async def upsert_author_profile(session: AsyncSession, data: dict) -> None:
         return
 
     try:
-        await _entities.write_author_profile(session, data, dialect=_DIALECT)
+        await _entities.write_author_profile(
+            session, data, dialect=_DIALECT, confirm=confirm
+        )
         await session.commit()
         logger.info(f"DB write: author {asin} ({name})")
 
@@ -301,7 +323,9 @@ async def upsert_author_profile(session: AsyncSession, data: dict) -> None:
 # SERIES PROFILE WRITER
 # ============================================================
 
-async def upsert_series_profile(session: AsyncSession, data: dict) -> str | None:
+async def upsert_series_profile(
+    session: AsyncSession, data: dict, *, confirm: bool = False
+) -> str | None:
     """
     Upserts a full series profile fetched from the series endpoint.
     Updates description which isn't always available from book relationship data.
@@ -314,6 +338,8 @@ async def upsert_series_profile(session: AsyncSession, data: dict) -> str | None
     Returns the series asin once it is written, and None when nothing was: the
     profile names no asin, no name or no region (a series row is keyed by its
     region, so one without it cannot be stored), or the write failed.
+
+    confirm stamps the series as confirmed by Audible, for a profile fetch.
     """
     asin = data.get("asin")
     name = data.get("name")
@@ -321,7 +347,9 @@ async def upsert_series_profile(session: AsyncSession, data: dict) -> str | None
         return None
 
     try:
-        written = await _entities.write_series_profile(session, data, dialect=_DIALECT)
+        written = await _entities.write_series_profile(
+            session, data, dialect=_DIALECT, confirm=confirm
+        )
         if not written:
             logger.info(
                 "Series not stored: the profile names no region",

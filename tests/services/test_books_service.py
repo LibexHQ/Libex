@@ -2867,7 +2867,7 @@ async def test_fetch_and_store_chapters_writes_and_stamps_for_the_requests_regio
          patch("app.services.audible.books.upsert_track", new_callable=AsyncMock) as mock_upsert:
         await fetch_and_store_chapters("B08G9PRS1K", "uk", session)
 
-    assert mock_upsert.await_args.kwargs == {"region": "uk"}
+    assert mock_upsert.await_args.kwargs == {"region": "uk", "confirm": True}
     stamp = session.execute.await_args.args[0]
     compiled = stamp.compile(dialect=postgresql.dialect())
     assert "books.region = " in str(compiled)

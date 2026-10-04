@@ -201,7 +201,7 @@ async def _resolve_author_name(
     name = data.get("contributor", {}).get("name", "").replace("\t", "").strip()
     if name:
         normalized = normalize_author(data, asin, region)
-        persist_author_background(normalized, region)
+        persist_author_background(normalized, region, confirm=True)
         return name
 
     return None

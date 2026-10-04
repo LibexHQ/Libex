@@ -79,7 +79,7 @@ async def get_series(
         normalized = normalize_series(product, region)
 
         # Persist to DB and cache in the background
-        persist_series_background(normalized, region)
+        persist_series_background(normalized, region, confirm=True)
 
         logger.info("Requested Audible Series", extra={
             "series_took": series_took,

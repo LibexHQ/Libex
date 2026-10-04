@@ -240,6 +240,61 @@ async def test_write_book_chunk_logs_the_count_and_region_as_structured_fields(c
 
 
 # ============================================================
+# THE CONFIRMATION STAMP
+# ============================================================
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("confirm", [True, False])
+async def test_the_chunk_write_passes_the_confirm_flag_to_the_writer(confirm):
+    writer = AsyncMock()
+    with patch.object(pq, "write_books", new=writer), \
+         patch.object(pq, "_cache_set_many", new=AsyncMock()):
+        await pq._write_book_chunk(AsyncMock(), _books(2), REGION, confirm)
+
+    assert writer.await_args.kwargs == {"confirm": confirm}
+
+
+@pytest.mark.asyncio
+async def test_the_chunk_write_defaults_to_no_stamp():
+    writer = AsyncMock()
+    with patch.object(pq, "write_books", new=writer), \
+         patch.object(pq, "_cache_set_many", new=AsyncMock()):
+        await pq._write_book_chunk(AsyncMock(), _books(2), REGION)
+
+    assert writer.await_args.kwargs == {"confirm": False}
+
+
+@pytest.mark.asyncio
+async def test_the_per_book_replay_keeps_the_confirm_flag():
+    upsert = AsyncMock()
+    with patch.object(pq, "upsert_book", new=upsert), \
+         patch.object(pq.cache, "set", new=AsyncMock()):
+        await pq._replay_book_chunk(AsyncMock(), _books(2), REGION, True)
+
+    assert [call.kwargs for call in upsert.await_args_list] == [{"confirm": True}] * 2
+
+
+@pytest.mark.asyncio
+async def test_the_retry_loop_hands_the_flag_to_every_attempt():
+    seen = []
+
+    async def _write(session, books, region, confirm=False):
+        seen.append(confirm)
+        raise OperationalError("stmt", {}, Exception("contended"))
+
+    async def _replay(session, books, region, confirm=False):
+        seen.append(confirm)
+
+    with patch.object(pq, "_BackgroundSession", lambda: _FakeSessionCM({"open": 0})), \
+         patch.object(pq, "_write_book_chunk", side_effect=_write), \
+         patch.object(pq, "_replay_book_chunk", side_effect=_replay), \
+         patch.object(pq.asyncio, "sleep", new=AsyncMock()):
+        await pq._persist_book_chunk_background(_books(1), REGION, True)
+
+    assert seen and all(seen)
+
+
+# ============================================================
 # THE RETRY LOOP
 # ============================================================
 
@@ -258,7 +313,7 @@ async def _run_chunk(outcomes, chunk=None):
     open_during_sleep = []
     replayed = []
 
-    async def _write(session, books, region):
+    async def _write(session, books, region, confirm=False):
         outcome = outcomes[len(attempts)]
         attempts.append(region)
         if outcome is not None:
@@ -268,7 +323,7 @@ async def _run_chunk(outcomes, chunk=None):
         sleeps.append(seconds)
         open_during_sleep.append(ledger["open"])
 
-    async def _replay(session, books, region):
+    async def _replay(session, books, region, confirm=False):
         replayed.append(list(books))
 
     with patch.object(pq, "_BackgroundSession", lambda: _FakeSessionCM(ledger)), \

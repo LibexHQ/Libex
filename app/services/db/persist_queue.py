@@ -501,15 +501,19 @@ async def _clear_session(session: AsyncSession, fields: dict) -> None:
 # BOOK CHUNKS
 # ============================================================
 
-async def _write_book_chunk(session: AsyncSession, chunk: list[dict], region: str) -> None:
+async def _write_book_chunk(
+    session: AsyncSession, chunk: list[dict], region: str, confirm: bool = False
+) -> None:
     """One chunk's books and cache entries, committed together. Raises."""
-    await write_books(session, chunk)
+    await write_books(session, chunk, confirm=confirm)
     await _cache_set_many(session, [(book_key(b["asin"], region), b) for b in chunk])
     await session.commit()
     logger.info("DB write", extra={"books": len(chunk), "region": region})
 
 
-async def _replay_book_chunk(session: AsyncSession, chunk: list[dict], region: str) -> None:
+async def _replay_book_chunk(
+    session: AsyncSession, chunk: list[dict], region: str, confirm: bool = False
+) -> None:
     """
     The chunk written a book at a time, each in a transaction of its own.
 
@@ -579,7 +583,7 @@ async def _replay_book_chunk(session: AsyncSession, chunk: list[dict], region: s
         fields = {"asin": book.get("asin"), "region": region}
 
         try:
-            await upsert_book(session, book)
+            await upsert_book(session, book, confirm=confirm)
         except Exception as e:
             write_escaped += 1
             logger.warning(
@@ -607,7 +611,9 @@ async def _replay_book_chunk(session: AsyncSession, chunk: list[dict], region: s
     })
 
 
-async def _attempt_book_chunk(chunk: list[dict], region: str) -> Exception | None:
+async def _attempt_book_chunk(
+    chunk: list[dict], region: str, confirm: bool = False
+) -> Exception | None:
     """
     One attempt at a chunk, in a permit and a session of its own, both released
     before it returns whether it succeeded or not.
@@ -633,14 +639,16 @@ async def _attempt_book_chunk(chunk: list[dict], region: str) -> Exception | Non
     async with _get_bg_write_semaphore():
         async with _BackgroundSession() as session:
             try:
-                await _write_book_chunk(session, chunk, region)
+                await _write_book_chunk(session, chunk, region, confirm)
                 return None
             except Exception as exc:
                 await _clear_session(session, {"region": region, "stage": "chunk_write"})
                 return exc
 
 
-async def _persist_book_chunk_background(chunk: list[dict], region: str) -> None:
+async def _persist_book_chunk_background(
+    chunk: list[dict], region: str, confirm: bool = False
+) -> None:
     """
     Writes one chunk in the background, retrying a contended transaction in a
     fresh session before giving up and replaying the chunk book by book.
@@ -649,7 +657,7 @@ async def _persist_book_chunk_background(chunk: list[dict], region: str) -> None
     backoff holds no permit, no session and no connection.
     """
     for attempt in range(1, _PERSIST_MAX_ATTEMPTS + 1):
-        failure = await _attempt_book_chunk(chunk, region)
+        failure = await _attempt_book_chunk(chunk, region, confirm)
         if failure is None:
             return
 
@@ -662,14 +670,16 @@ async def _persist_book_chunk_background(chunk: list[dict], region: str) -> None
 
     async with _get_bg_write_semaphore():
         async with _BackgroundSession() as session:
-            await _replay_book_chunk(session, chunk, region)
+            await _replay_book_chunk(session, chunk, region, confirm)
 
 
 # ============================================================
 # ENTRY POINTS
 # ============================================================
 
-def persist_books_background(books: list[dict], region: str) -> PersistOutcome:
+def persist_books_background(
+    books: list[dict], region: str, *, confirm: bool = False
+) -> PersistOutcome:
     """
     Fires a single background task to write multiple books to DB and cache.
 
@@ -691,6 +701,11 @@ def persist_books_background(books: list[dict], region: str) -> PersistOutcome:
     either value, in particular that ADMITTED is not a promise the write will
     finish or that it will succeed once it runs.
 
+    confirm stamps the books as confirmed by Audible, and is for a product
+    fetch of those books only; a listing or a search leaves it off. The
+    stamp is written with the books, in the same transaction, on every path
+    the write can take, the per-book replay included.
+
     Existing callers that call this and ignore the return value are
     unaffected: the background write fires identically either way, the same
     as before this had a return value at all.
@@ -703,6 +718,7 @@ def persist_books_background(books: list[dict], region: str) -> PersistOutcome:
                 await _persist_book_chunk_background(
                     persistable[start:start + _PERSIST_CHUNK_SIZE],
                     region,
+                    confirm,
                 )
         except Exception as exc:
             # Every failure a chunk can foresee is already handled inside it,
@@ -718,13 +734,14 @@ def persist_books_background(books: list[dict], region: str) -> PersistOutcome:
     return _spawn(_persist, len(persistable))
 
 
-def persist_author_background(data: dict, region: str) -> None:
-    """Fires a background task to write an author profile to DB and cache."""
+def persist_author_background(data: dict, region: str, *, confirm: bool = False) -> None:
+    """Fires a background task to write an author profile to DB and cache.
+    confirm stamps the author as confirmed, for a profile fetch."""
     async def _persist():
         async with _get_bg_write_semaphore():
             try:
                 async with _BackgroundSession() as session:
-                    await upsert_author_profile(session, data)
+                    await upsert_author_profile(session, data, confirm=confirm)
                     if data.get("asin"):
                         await cache.set(session, author_key(data["asin"], region), data)
             except Exception as e:
@@ -736,13 +753,14 @@ def persist_author_background(data: dict, region: str) -> None:
     _spawn(_persist, 1)
 
 
-def persist_series_background(data: dict, region: str) -> None:
-    """Fires a background task to write a series profile to DB and cache."""
+def persist_series_background(data: dict, region: str, *, confirm: bool = False) -> None:
+    """Fires a background task to write a series profile to DB and cache.
+    confirm stamps the series as confirmed, for a profile fetch."""
     async def _persist():
         async with _get_bg_write_semaphore():
             try:
                 async with _BackgroundSession() as session:
-                    await upsert_series_profile(session, data)
+                    await upsert_series_profile(session, data, confirm=confirm)
                     if data.get("asin"):
                         await cache.set(session, series_key(data["asin"], region), data)
             except Exception as e:
@@ -754,13 +772,19 @@ def persist_series_background(data: dict, region: str) -> None:
     _spawn(_persist, 1)
 
 
-def persist_track_background(asin: str, chapters_data: dict, region: str) -> None:
-    """Fires a background task to write chapter data to DB and cache."""
+def persist_track_background(
+    asin: str, chapters_data: dict, region: str, *, confirm: bool = False
+) -> None:
+    """Fires a background task to write chapter data to DB and cache. confirm
+    also stamps the book's chapters as confirmed, for a listing Audible just
+    answered with."""
     async def _persist():
         async with _get_bg_write_semaphore():
             try:
                 async with _BackgroundSession() as session:
-                    await upsert_track(session, asin, chapters_data, region=region)
+                    await upsert_track(
+                        session, asin, chapters_data, region=region, confirm=confirm
+                    )
                     await cache.set(session, chapters_key(asin, region), chapters_data)
             except Exception as e:
                 logger.warning(

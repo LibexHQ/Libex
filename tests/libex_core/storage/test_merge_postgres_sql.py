@@ -120,3 +120,17 @@ def test_no_sqlite_spelling_reaches_a_postgres_statement():
     assert "libex_" not in text
     assert "json_type" not in text and "json_array_length(" not in text.replace("jsonb_array_length(", "")
     assert " trim(" not in text.replace("btrim(", "")
+
+
+def test_latest_is_greatest_on_postgres_and_a_guarded_max_on_sqlite():
+    from sqlalchemy.dialects import sqlite
+
+    stamp = bindparam("v")
+    expression = merge.latest(stamp, Book.confirmed_at)
+
+    assert str(_compiled(expression, postgresql.dialect())) == "greatest(books.confirmed_at, %(v)s)"
+    on_sqlite = str(_compiled(expression, sqlite.dialect()))
+    # SQLite's max() is NULL when either argument is, so the stored side is
+    # coalesced and an absent incoming value is answered before max runs.
+    assert "max(coalesce(books.confirmed_at, ?), ?)" in on_sqlite
+    assert "? IS NULL" in on_sqlite

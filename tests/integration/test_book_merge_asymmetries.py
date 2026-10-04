@@ -680,11 +680,17 @@ _MERGED_COLUMNS = [
     "extras_withheld",
 ]
 
-# The one column the upsert merges that the sweeps deliberately leave out.
+# updated_at is a column the upsert merges that the sweeps deliberately leave out.
 # It is the column that has to move on a second write, so including it in a
 # "nothing was emptied" comparison would assert the opposite of what
 # test_updated_at_does_move_on_a_later_write holds.
-_MERGED_BUT_NOT_SWEPT = {"updated_at"}
+#
+# confirmed_at is the other. It is a record of when a real answer arrived, not
+# a merged value: the write sets it only when asked to, a thin response is by
+# definition not asked, and the response that omits everything must leave it
+# alone rather than empty it. tests/libex_core/storage/test_confirmed_stamps.py
+# holds the stamp's own rules, from a NULL start, on both backends.
+_MERGED_BUT_NOT_SWEPT = {"updated_at", "confirmed_at"}
 
 
 def _assert_every_merged_column_is_swept():

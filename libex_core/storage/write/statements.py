@@ -68,7 +68,12 @@ def _build_series_upsert(insert):
     the postgresql Insert construct sets inherit_cache = False, so a statement
     carrying literals is recompiled on every execution no matter how many times
     the identical object has been executed before.
+
+    confirmed_at is the one bind a caller may leave out. It is NULL unless the
+    row bound came from Audible's answer for the series itself, and the update
+    only ever moves it forward (see merge.latest).
     """
+    confirmed = merge.stamp_bind()
     stmt = insert(Series).values(
         asin=bindparam("asin"),
         title=bindparam("title"),
@@ -81,6 +86,7 @@ def _build_series_upsert(insert):
         # from a real answer. Same binding the books upsert uses.
         audible_extras=merge.json_bind("audible_extras"),
         extras_withheld=merge.json_bind("extras_withheld"),
+        confirmed_at=confirmed,
         created_at=bindparam("created_at"),
         updated_at=bindparam("updated_at"),
     )
@@ -98,6 +104,7 @@ def _build_series_upsert(insert):
             # as NULL and leaves what a profile fetch stored untouched.
             "audible_extras": merge.extras_union(stmt.excluded.audible_extras, Series.audible_extras),
             "extras_withheld": merge.extras_union(stmt.excluded.extras_withheld, Series.extras_withheld),
+            "confirmed_at": merge.latest(confirmed, Series.confirmed_at),
             "updated_at": stmt.excluded.updated_at,
         },
     )
@@ -139,6 +146,10 @@ def _build_book_upsert(insert):
     guard: keeping returning() off is the part that holds no matter what the
     set_ is later rewritten to say.
 
+    confirmed_at is bound NULL unless the caller says the rows came from
+    Audible's product answer for those books, and the update only moves it
+    forward (merge.latest); a NULL bind leaves the stored stamp as it is.
+
     Four asymmetries in the merge are load-bearing and must survive any edit
     that regenerates this from the column list:
 
@@ -159,6 +170,7 @@ def _build_book_upsert(insert):
       read it through a plain coalesce and rely on the bind never carrying
       '', which nothing in this module was in a position to guarantee.
     """
+    confirmed = merge.stamp_bind()
     stmt = insert(Book).values(
         asin=bindparam("asin"),
         title=merge.coalesce(bindparam("title"), ""),
@@ -215,6 +227,7 @@ def _build_book_upsert(insert):
         # since the column was added.
         audible_extras=merge.json_bind("audible_extras"),
         extras_withheld=merge.json_bind("extras_withheld"),
+        confirmed_at=confirmed,
         created_at=bindparam("created_at"),
         updated_at=bindparam("updated_at"),
     )
@@ -444,6 +457,7 @@ def _build_book_upsert(insert):
             "extras_withheld": merge.extras_union(
                 stmt.excluded.extras_withheld, Book.extras_withheld
             ),
+            "confirmed_at": merge.latest(confirmed, Book.confirmed_at),
             "updated_at": stmt.excluded.updated_at,
         },
     )

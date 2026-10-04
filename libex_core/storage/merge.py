@@ -21,7 +21,7 @@ from sqlalchemy.types import Boolean
 
 # Local
 from libex_core.storage.dialect import JSON_CONTAINS, JSON_MERGE, DialectVariant
-from libex_core.storage.types import JSONDocument
+from libex_core.storage.types import JSONDocument, UTCDateTime
 
 # Every character Unicode gives the White_Space property, for the trim's
 # second argument. A trim with no second argument takes U+0020 and nothing
@@ -264,3 +264,40 @@ def extras_union(new_value, existing_col):
         (contains, existing_col),
         else_=merged,
     )
+
+
+def stamp_bind(name: str = "confirmed_at") -> ColumnElement:
+    """
+    The named bind a confirmation stamp travels in: a UTC timestamp, SQL NULL
+    when the write confirms nothing. It carries a default of None, so a caller
+    that binds its own rows and has never heard of the stamp writes none.
+
+    The value is given when the statement is executed, never held in the
+    bind: the expression it feeds compiles two spellings (see latest), and a
+    value held in a bind that appears in both is lost to the statement cache.
+    """
+    return bindparam(name, None, type_=UTCDateTime())
+
+
+def latest(new_value, existing_col):
+    """
+    Keeps the later of a stored timestamp and an incoming one, and leaves the
+    stored one alone when nothing is incoming: a confirmation stamp never moves
+    backwards, and a write that confirms nothing never touches it.
+
+    Postgres spells it GREATEST, which skips NULLs, so either side being NULL
+    yields the other and both NULL yields NULL. SQLite's two-argument max()
+    returns NULL if either argument is NULL, so it is spelled
+    max(coalesce(stored, incoming), incoming) under a guard for the incoming
+    value being NULL; without the guard a write that confirms nothing would
+    erase the stamp it meant to leave.
+
+    Never a column default: NULL means the row has not been confirmed, and a
+    default would make every row read as confirmed the moment it was written.
+    """
+    on_postgres = func.greatest(existing_col, new_value)
+    on_sqlite = case(
+        (new_value.is_(None), existing_col),
+        else_=func.max(func.coalesce(existing_col, new_value), new_value),
+    )
+    return DialectVariant(on_postgres, on_sqlite)

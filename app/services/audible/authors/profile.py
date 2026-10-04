@@ -126,7 +126,7 @@ async def get_author(
         normalized = normalize_author(data, asin, region)
 
         # Persist to DB and cache in the background
-        persist_author_background(normalized, region)
+        persist_author_background(normalized, region, confirm=True)
 
         logger.info("Requested Audible Author", extra={
             "author_took": author_took,

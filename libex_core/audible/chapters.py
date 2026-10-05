@@ -19,9 +19,12 @@ recorded in the response's extrasWithheld rather than dropped silently.
 # Standard library
 from typing import Any
 
+# Third party
+from pydantic import TypeAdapter, ValidationError
+
 # Core
 from libex_core.audible.client import AudibleGet, validate_region, validated_asin
-from libex_core.audible.extras import MAX_NESTING_DEPTH, bound_extras
+from libex_core.audible.extras import INT_BITS_ALWAYS_RENDERABLE, MAX_NESTING_DEPTH, bound_extras
 
 CHAPTERS_PATH = "/1.0/content/{asin}/metadata"
 
@@ -76,6 +79,81 @@ _CONTENT_METADATA_CONSUMED = frozenset({"chapter_info", "content_reference", "co
 # which is the request's own constant and carries nothing about the book. Any
 # other top-level key rides in audibleExtras.
 _RESPONSE_NOISE = frozenset({"response_groups"})
+
+
+# The model's own lax coercion for the typed fields, so a value ChapterResponse
+# accepted before (a numeric string, a whole-valued float, a bool, a negative,
+# "true" for a bool) publishes exactly the value it always did. Only a value
+# the model refused is a defect to repair.
+_INT = TypeAdapter(int)
+_BOOL = TypeAdapter(bool)
+
+# The widest int json.dumps always renders: CPython refuses to render one
+# past sys.get_int_max_str_digits() digits, 4,300 by default, and that is what
+# failed the JSONB write and the response for a 5,000-digit value. Postgres
+# jsonb itself would store far wider. Shared with bound_extras so the same
+# value is judged the same everywhere.
+_MAX_BITS = INT_BITS_ALWAYS_RENDERABLE
+
+
+class _Unusable(Exception):
+    """A typed scalar the model refuses, or one too wide to render."""
+
+
+def _coerce(adapter: TypeAdapter, value: Any) -> Any:
+    try:
+        coerced = adapter.validate_python(value)
+    except ValidationError as exc:
+        raise _Unusable from exc
+    if isinstance(coerced, int) and coerced.bit_length() > _MAX_BITS:
+        raise _Unusable
+    return coerced
+
+
+def _read_int(source: dict, key: str, rescued: dict[str, Any]) -> int:
+    """
+    Reads one typed scalar off a raw Audible object. An absent key is the
+    field's default, 0, as it always was, and any value the model coerces to
+    an int (see _INT) is that int, unchanged from before. What it refuses
+    -- null, a non-numeric string, a fractional or non-finite float, an object
+    or list -- and an int too wide for json.dumps to render each used to fail
+    the response or the write and take every other chapter with them. They
+    now read as 0, and the raw value is put in `rescued` under Audible's own
+    key, which becomes part of the object's audibleExtras, so nothing Audible
+    sent is lost; a value too wide to render is nulled there and counted in
+    extrasWithheld like any other.
+    """
+    if key not in source:
+        return 0
+    try:
+        return _coerce(_INT, source[key])
+    except _Unusable:
+        rescued[key] = source[key]
+        return 0
+
+
+def _read_bool(source: dict, key: str, rescued: dict[str, Any]) -> bool:
+    """_read_int for a bool field: the model's lax bool, False when it refuses."""
+    if key not in source:
+        return False
+    try:
+        return _coerce(_BOOL, source[key])
+    except _Unusable:
+        rescued[key] = source[key]
+        return False
+
+
+def _read_title(source: dict, rescued: dict[str, Any]) -> str:
+    """
+    A chapter's title: the string Audible sent, "" when it sent none, and ""
+    with the raw value kept in `rescued` when it sent something that is not a
+    string. A NUL in a string title is the caller's to strip.
+    """
+    title = source.get("title", "")
+    if isinstance(title, str):
+        return title
+    rescued["title"] = title
+    return ""
 
 
 class _Withheld:
@@ -134,18 +212,25 @@ def _normalize_chapter(c: dict, depth: int, withheld: _Withheld) -> dict[str, An
     chapter's audibleExtras as Audible sent them, as does a chapters value that
     is not a list of objects, and the cut is counted in extrasWithheld. A NUL
     in the title is stripped, and counted.
+
+    The three typed scalars and the title are read defensively: one the model
+    refuses (see _read_int, _read_title) becomes its default and the raw value
+    rides in audibleExtras under Audible's own key. Anything the model
+    accepted is published as it always was.
     """
-    title = c.get("title", "")
-    if isinstance(title, str) and "\x00" in title:
+    rescued: dict[str, Any] = {}
+    title = _read_title(c, rescued)
+    if "\x00" in title:
         bounded_title, _ = withheld.bound({"title": title})
         title = bounded_title["title"] if bounded_title else title.replace("\x00", "")
     chapter: dict[str, Any] = {
-        "lengthMs": c.get("length_ms", 0),
-        "startOffsetMs": c.get("start_offset_ms", 0),
-        "startOffsetSec": c.get("start_offset_sec", 0),
+        "lengthMs": _read_int(c, "length_ms", rescued),
+        "startOffsetMs": _read_int(c, "start_offset_ms", rescued),
+        "startOffsetSec": _read_int(c, "start_offset_sec", rescued),
         "title": title,
     }
     extras = {k: v for k, v in c.items() if k not in _CHAPTER_CONSUMED}
+    extras.update(rescued)
     children = c.get("chapters")
     if _is_chapter_list(children):
         if children and depth >= MAX_NESTING_DEPTH:
@@ -183,6 +268,12 @@ def normalize_chapters(data: dict, asin: str = "", region: str = "") -> dict[str
     part withheld whole is absent and named in extrasWithheld with its
     reason, which is itself absent when nothing was withheld. asin and region
     are only for the log line a withholding writes.
+
+    A typed scalar or isAccurate the response model refuses, an int too wide
+    for json.dumps, and a non-string title (which the model also refuses) read
+    as the field's default; the raw value is carried in audibleExtras, so the
+    field is wrong-but-valid and nothing Audible sent is gone. Every value
+    the model accepted is published unchanged.
     """
     withheld = _Withheld(asin, region)
 
@@ -214,12 +305,13 @@ def normalize_chapters(data: dict, asin: str = "", region: str = "") -> dict[str
         if raw_chapters is not None:
             chapter_info_leftovers["chapters"] = raw_chapters
 
+    # Same rule as a chapter's own scalars, kept in chapterInfo's extras.
     result: dict[str, Any] = {
-        "brandIntroDurationMs": chapter_info.get("brandIntroDurationMs", 0),
-        "brandOutroDurationMs": chapter_info.get("brandOutroDurationMs", 0),
-        "isAccurate": chapter_info.get("is_accurate", False),
-        "runtimeLengthMs": chapter_info.get("runtime_length_ms", 0),
-        "runtimeLengthSec": chapter_info.get("runtime_length_sec", 0),
+        "brandIntroDurationMs": _read_int(chapter_info, "brandIntroDurationMs", chapter_info_leftovers),
+        "brandOutroDurationMs": _read_int(chapter_info, "brandOutroDurationMs", chapter_info_leftovers),
+        "isAccurate": _read_bool(chapter_info, "is_accurate", chapter_info_leftovers),
+        "runtimeLengthMs": _read_int(chapter_info, "runtime_length_ms", chapter_info_leftovers),
+        "runtimeLengthSec": _read_int(chapter_info, "runtime_length_sec", chapter_info_leftovers),
         "chapters": chapters,
     }
 

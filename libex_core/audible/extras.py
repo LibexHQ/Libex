@@ -71,7 +71,7 @@ MAX_NESTING_DEPTH = _EXTRAS_MAX_DEPTH
 # below 10**4300, so anything at or under this bit length always renders.
 # An operator who lowers the limit below the default is still covered: the
 # dump below is wrapped, and a raise there is recorded rather than thrown.
-_INT_BITS_ALWAYS_RENDERABLE = 14283
+INT_BITS_ALWAYS_RENDERABLE = 14283
 
 # Why a blob, or part of one, did not survive. These are the values that
 # reach the caller in extrasWithheld, so they are part of the response and
@@ -156,7 +156,7 @@ def _strip_podcast_relationships(relationships: list) -> tuple[list, dict[str, i
 def _is_unstorable_int(value: int) -> bool:
     """
     True when an int is too wide to render and store -- see
-    _INT_BITS_ALWAYS_RENDERABLE for the two ceilings and why this is measured
+    INT_BITS_ALWAYS_RENDERABLE for the two ceilings and why this is measured
     in bits.
 
     Conservative by design. A value just past the bound may well have been
@@ -164,7 +164,7 @@ def _is_unstorable_int(value: int) -> bool:
     begins at a 4,300-digit number, and a withholding that gets recorded is
     the better error than a write the database or the encoder refuses.
     """
-    return value.bit_length() > _INT_BITS_ALWAYS_RENDERABLE
+    return value.bit_length() > INT_BITS_ALWAYS_RENDERABLE
 
 
 def _sanitize_for_jsonb(extras: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, int]]:

@@ -630,6 +630,7 @@ The library is built around preventing that from happening by accident:
   reading Audible's answers:
   - closing a stale connection fails (debug): a traceback;
   - request throttled or degraded by Audible: status, region, API path (with the ASIN when one title, series or author is looked up), pool, attempt count, the wait Audible asked for;
+  - Audible answered with something that is not JSON (warning): status, region, API path (with the ASIN when one title, series or author is looked up), the kind of error and the size of the answer in bytes; none of the answer itself;
   - malformed author ASIN: title ASIN, region, the malformed value, the author's name;
   - unreadable subscription plans: title ASIN, a count;
   - extra data cleaned up or held back: title or series ASIN, region, the reason, a count and, if oversized, its size; none of the data itself;

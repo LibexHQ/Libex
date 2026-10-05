@@ -208,27 +208,36 @@ async def fetch_products(get: AudibleGet, asins: list[str], region: str) -> list
 # ============================================================
 
 
-def _entries(value: Any) -> list[dict]:
+def _entries(product: dict, key: str) -> list[dict]:
     """
-    The dict entries of an upstream list, for the parsers below that read a
-    list of objects out of a product.
+    The dict entries of the upstream list at `key`, for the parsers below that
+    read a list of objects out of a product.
 
-    Audible sends these lists as null now and then, and an entry that is not
-    an object (a bare string, a number) has been seen alongside real ones. Any
-    of those used to raise out of the parser and fail the whole book, so a
-    value that is not a list reads as no entries and a non-dict entry is
-    skipped; the entries around it are unaffected. Nothing is lost by it: the
-    parsers' keys are not in _REPRODUCED_KEYS, so the upstream value still
-    reaches audibleExtras exactly as Audible sent it.
+    An entry that is not an object (a bare string, a number) has been seen
+    alongside real ones and used to raise out of the parser and fail the
+    whole book, so it is skipped and the entries around it are unaffected.
+    The upstream list still reaches audibleExtras whole, so nothing is lost.
+
+    The container itself is another matter. A key that is absent, or an
+    empty string or object (which the loops this replaces iterated as
+    nothing), is an empty list. A null or any other non-list raises TypeError
+    and fails the book, as it always did. That raise is the less-data guard
+    doing its job: audibleExtras carries the key as sent, a stored copy is
+    merged by a shallow union, and a book that normalized would write the null
+    over the arrays already stored. Failing here sends the caller to what it
+    already holds.
     """
-    if not isinstance(value, list):
+    value = product.get(key, [])
+    if isinstance(value, list):
+        return [e for e in value if isinstance(e, dict)]
+    if not value and isinstance(value, (str, dict)):
         return []
-    return [e for e in value if isinstance(e, dict)]
+    raise TypeError(f"{key} must be a list, got {type(value).__name__}")
 
 
 def _best_image(product_images: dict | None) -> str | None:
     """Returns the highest resolution image URL with size suffix stripped."""
-    if not product_images or not isinstance(product_images, dict):
+    if not product_images:
         return None
     highest_key = max((int(k) for k in product_images if k.isdigit()), default=None)
     if highest_key is None:
@@ -299,13 +308,13 @@ def _parse_authors(product: dict, region: str) -> list[dict]:
     ceiling keeps an over-long value from failing the insert. It is malformed
     by the same measure, so it is logged too.
 
-    A null authors list, a non-object entry, a null or non-string name and a
-    non-string asin do not fail the book. An entry with no usable name is
+    A non-object entry, a null or non-string name and a non-string asin do
+    not fail the book. An entry with no usable name is
     dropped, as a blank one always was, and a non-string asin reads as no asin.
     The raw list still reaches audibleExtras whole, so the drop loses nothing.
     """
     authors = []
-    for author in _entries(product.get("authors")):
+    for author in _entries(product, "authors"):
         raw_name = author.get("name")
         name = raw_name.replace("\t", "").strip() if isinstance(raw_name, str) else ""
         raw_asin = author.get("asin")
@@ -342,12 +351,12 @@ def _parse_narrators(product: dict) -> list[dict]:
     narrators is not in _REPRODUCED_KEYS and the upstream list therefore still
     reaches audibleExtras whole, nameless entries included.
 
-    A null narrators list, a non-object entry and a name that is not a string
+    A non-object entry and a name that is not a string
     are dropped the same way, and for the same reason, instead of failing the
     book.
     """
     narrators = []
-    for n in _entries(product.get("narrators")):
+    for n in _entries(product, "narrators"):
         raw_name = n.get("name")
         name = raw_name.strip() if isinstance(raw_name, str) else ""
         if name:
@@ -362,7 +371,7 @@ def _parse_genres(product: dict) -> list[dict]:
     A name that is only whitespace is dropped like an empty one instead of
     publishing as a blank genre. The name that is kept is published as sent,
     padding and all: only whether to keep it is decided on the stripped value.
-    A null category_ladders or ladder, a non-object ladder or rung and a name
+    A null inner ladder, a non-object ladder or rung and a name
     that is not a string are dropped rather than failing the book, and a
     dropped rung still counts toward the position of the ones after it, so a
     later rung keeps its Genres or Tags type. category_ladders is not in
@@ -370,7 +379,7 @@ def _parse_genres(product: dict) -> list[dict]:
     """
     genres = []
     seen = set()
-    for ladder in _entries(product.get("category_ladders")):
+    for ladder in _entries(product, "category_ladders"):
         ladder_rungs = ladder.get("ladder")
         if not isinstance(ladder_rungs, list):
             continue
@@ -456,16 +465,16 @@ def _parse_plans(product: dict) -> list[str] | None:
     branch: it returns whatever it could read, same as always, because a
     partial answer is a real answer, not a total parse failure.
 
-    A plans value that is not a list, a non-object entry and a plan_name that
-    is not a string are unreadable by the same measure: they are skipped, and
-    when nothing readable is left the result is None, not a failure of the
-    book.
+    A non-object entry and a plan_name that is not a string are unreadable by
+    the same measure: they are skipped, and when nothing readable is left the
+    result is None, not a failure of the book. A plans value that is not a
+    list still fails it (see _entries).
     """
     raw = product.get("plans")
     if raw is None:
         return None
     names = [
-        p["plan_name"] for p in _entries(raw)
+        p["plan_name"] for p in _entries(product, "plans")
         if p.get("plan_name") and isinstance(p["plan_name"], str)
     ]
     if raw and not names:
@@ -478,12 +487,12 @@ def _parse_series(product: dict, region: str) -> list[dict]:
     """
     Extracts series objects matching AudiMeta's MinimalSeriesDto.
 
-    A null relationships list and a non-object entry are skipped rather than
+    A non-object entry is skipped rather than
     failing the book; relationships is not in _REPRODUCED_KEYS, so the raw
     list still reaches audibleExtras.
     """
     series_list = []
-    for item in _entries(product.get("relationships")):
+    for item in _entries(product, "relationships"):
         if item.get("relationship_type") == "series":
             series_list.append({
                 "asin": item.get("asin"),
@@ -550,10 +559,9 @@ def _reproduce(product: dict, key: str) -> Any:
 # list (authors, narrators, category_ladders, relationships, plans,
 # product_images, rating, and the rating's overall_distribution) is left out
 # on purpose: a null there is Audible failing to answer rather than Audible
-# asserting an empty value. The rating chain still raises on a null, which is
-# the outage the caller sees; authors, narrators, category_ladders and
-# relationships now read as empty and plans and product_images as "said
-# nothing" (see _entries). Reporting any of them as a null would offer the
+# asserting an empty value. normalize_product raises on most of them, which
+# is the outage the caller sees, and the rest (plans, product_images) already
+# normalize to "said nothing"; reporting any of them as a null would offer the
 # caller a clear where there is none.
 _NULLABLE_SCALAR_FIELDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("title", ("title",)),

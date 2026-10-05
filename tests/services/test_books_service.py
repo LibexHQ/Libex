@@ -456,25 +456,41 @@ def test_parse_genres_deduplicates():
 # NULL AND MALFORMED ENTRIES
 # ============================================================
 
-_NULLISH_LISTS = [None, "text", 7, {"name": "x"}]
+_CONTAINERS = ["authors", "narrators", "relationships", "category_ladders", "plans"]
 
 
-@pytest.mark.parametrize("value", _NULLISH_LISTS)
-def test_a_list_audible_sends_as_null_or_not_a_list_reads_as_empty(value):
-    """null (or any non-list) for authors, narrators, relationships or
-    category_ladders used to raise out of the parser and fail the book."""
-    product = {
-        "asin": "B000000001", "authors": value, "narrators": value,
-        "relationships": value, "category_ladders": value,
-    }
-    book = _normalize_product(product, "us")
-    assert book["authors"] == []
-    assert book["narrators"] == []
-    assert book["series"] == []
-    assert book["genres"] == []
-    # The raw value is not lost: none of these keys is reproduced.
-    for key in ("authors", "narrators", "relationships", "category_ladders"):
-        assert book["audibleExtras"][key] == value
+_BAD_CONTAINERS = [
+    (key, value)
+    for key in _CONTAINERS
+    for value in (None, "text", 7, 0, {"name": "x"})
+    if not (key == "plans" and value is None)
+]
+
+
+@pytest.mark.parametrize("key,value", _BAD_CONTAINERS)
+def test_a_container_that_is_not_a_list_still_fails_the_book(key, value):
+    """A null or non-list container raises as it always did. Serving the book
+    would put the null into audibleExtras, which a shallow union then writes
+    over the arrays already stored."""
+    with pytest.raises((TypeError, AttributeError)):
+        _normalize_product({"asin": "B000000001", key: value}, "us")
+
+
+def test_a_null_plans_key_still_reads_as_silence():
+    assert _normalize_product({"asin": "B000000001", "plans": None}, "us")["plans"] is None
+
+
+@pytest.mark.parametrize("key", _CONTAINERS)
+@pytest.mark.parametrize("value", ["", {}, []])
+def test_an_empty_container_reads_as_empty(key, value):
+    book = _normalize_product({"asin": "B000000001", key: value}, "us")
+    assert book["audibleExtras"][key] == value
+
+
+def test_a_missing_container_reads_as_empty():
+    book = _normalize_product({"asin": "B000000001"}, "us")
+    assert book["authors"] == [] and book["narrators"] == []
+    assert book["series"] == [] and book["genres"] == []
 
 
 @pytest.mark.parametrize("name", [None, 5, True, ["a"], {"k": 1}])
@@ -564,18 +580,13 @@ def test_parse_plans_skips_a_plan_name_that_is_not_a_string(name):
     assert _parse_plans({"plans": [{"plan_name": name}, {"plan_name": "Plus"}]}) == ["Plus"]
 
 
-@pytest.mark.parametrize("plans", ["text", 7, {"plan_name": "x"}, [None, 5], [{"plan_name": 5}]])
+@pytest.mark.parametrize("plans", [[None, 5], [{"plan_name": 5}]])
 def test_parse_plans_reads_nothing_readable_as_silence(plans):
     assert _parse_plans({"plans": plans}) is None
 
 
 def test_parse_plans_keeps_an_explicit_empty_list():
     assert _parse_plans({"plans": []}) == []
-
-
-@pytest.mark.parametrize("images", ["text", 7, ["500"], [1]])
-def test_best_image_reads_a_non_object_as_no_image(images):
-    assert _best_image(images) is None
 
 
 # ============================================================

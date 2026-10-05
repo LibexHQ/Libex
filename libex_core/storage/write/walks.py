@@ -69,12 +69,12 @@ def _clean_asins(book_asins: list[str]) -> tuple[list[str], bool]:
 
 
 def _replaceable(at: datetime):
-    """True for a stored row the walk at `at` may replace: an older one, or
+    """True for a stored row the walk at `at` may replace: an older or equal one, or
     one dated beyond the clock's tolerance (a stored future would otherwise
     block every later write)."""
     ceiling = datetime.now(timezone.utc) + _SKEW
     return or_(
-        WalkResult.confirmed_at < bindparam("walk_at", at, type_=WalkResult.confirmed_at.type),
+        WalkResult.confirmed_at <= bindparam("walk_at", at, type_=WalkResult.confirmed_at.type),
         WalkResult.confirmed_at > bindparam("walk_ceiling", ceiling, type_=WalkResult.confirmed_at.type),
     )
 
@@ -93,10 +93,11 @@ async def write_walk_result(
     """Records a walk as the snapshot for (kind, asin, region).
 
     One bound upsert on SQLite and Postgres. An existing row is replaced whole
-    when `at` is strictly newer than its confirmed_at, or when its
-    confirmed_at lies more than SKEW_SECONDS ahead of the local clock; an
-    equal or older `at` leaves it alone. Returns True if the row now holds
-    this walk, False if a newer one was kept.
+    when `at` is newer than or equal to its confirmed_at (a tie goes to the
+    later writer, since two walks can read the same clock instant), or when
+    its confirmed_at lies more than SKEW_SECONDS ahead of the local clock; an
+    older `at` leaves it alone. Returns True if the row now holds this walk,
+    False if a newer one was kept.
 
     ValueError, before any statement runs, for a kind other than the two walk
     kinds, an unknown region, an invalid asin, or a naive `at`. Entries of
@@ -130,8 +131,8 @@ async def delete_walk_result(
     """Removes the snapshot for (kind, asin, region) on the strength of a
     confirmed absence at `at`.
 
-    Guarded like the write: the row goes only if it is strictly older than
-    `at` or future-dated beyond SKEW_SECONDS, so a walk that finished after
+    Guarded like the write: the row goes only if it is older than or equal
+    to `at` or future-dated beyond SKEW_SECONDS, so a walk that finished after
     `at` is not undone by it. Returns True if a row was deleted. Same
     ValueError rules as write_walk_result.
     """

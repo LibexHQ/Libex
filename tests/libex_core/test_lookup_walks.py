@@ -6,7 +6,9 @@ and a stand-in `get`; nothing touches a network.
 """
 
 # Standard library
+from dataclasses import fields
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 # Third party
@@ -15,17 +17,23 @@ import pytest_asyncio
 from sqlalchemy import update
 
 # Local
-from libex_core.exceptions import NotFoundException
-from libex_core.lookup import get_author_books, get_series_books
+from libex_core.exceptions import AudibleAPIException, NotFoundException
+from libex_core.lookup import _store, _walks, get_author_books, get_series_books
 from libex_core.storage.models import WalkResult
 from libex_core.storage.read.walks import get_walk_result
 from libex_core.storage.store import LocalStore
-from libex_core.storage.walk_limits import AUTHOR_BOOKS, SERIES_BOOKS
-from tests.libex_core._lookup_support import AUTHOR, SERIES, asins
+from libex_core.storage.walk_limits import AUTHOR_BOOKS, MAX_WALK_ASINS, SERIES_BOOKS
+from libex_core.storage.write import write_walk_result
+from tests.libex_core._lookup_support import AUTHOR, SERIES, asins, tick_walk_clock
 from tests.libex_core.test_lookup_authors import WALK, _hydrating_get
 from tests.libex_core.test_lookup_series_books import _series_members
 
 DAY = timedelta(days=1)
+
+
+@pytest.fixture(autouse=True)
+def _walk_clock(monkeypatch):
+    tick_walk_clock(monkeypatch)
 
 
 @pytest_asyncio.fixture
@@ -223,8 +231,6 @@ async def test_a_discovery_404_deletes_the_snapshot_and_raises(store):
 
 
 async def test_an_outage_leaves_the_snapshot_alone(store):
-    from libex_core.exceptions import AudibleAPIException
-
     found = asins(2)
     await get_series_books(_series_members(found), SERIES, store=store)
     before = await _row(store, SERIES_BOOKS, SERIES)
@@ -301,8 +307,6 @@ async def test_an_author_discovery_404_deletes_the_snapshot_and_raises(store, mo
 
 
 async def test_an_author_outage_leaves_the_snapshot_alone(store, monkeypatch):
-    from libex_core.exceptions import AudibleAPIException
-
     found = asins(2)
     monkeypatch.setattr(WALK, AsyncMock(return_value=(list(found), True)))
     await get_author_books(_hydrating_get(), AUTHOR, store=store)
@@ -401,8 +405,6 @@ async def test_one_bad_entry_spoils_the_whole_snapshot(store, monkeypatch, entri
 
 @pytest.mark.parametrize("entries", BAD_ENTRIES)
 async def test_a_bad_entry_is_rejected_before_any_store_read_of_it(store, monkeypatch, entries):
-    from libex_core.lookup import _store
-
     found = asins(2)
     await get_series_books(_series_members(found), SERIES, store=store)
     planted = entries(found)
@@ -420,8 +422,6 @@ async def test_a_bad_entry_is_rejected_before_any_store_read_of_it(store, monkey
 
 
 async def test_a_snapshot_over_the_cap_is_a_miss_not_truncated(store, monkeypatch):
-    from libex_core.storage.walk_limits import MAX_WALK_ASINS
-
     found = asins(2)
     many = [*found, *[f"B{n:09d}" for n in range(MAX_WALK_ASINS)]]
     calls, result = await _planted(store, monkeypatch, found, book_asins=many)
@@ -429,16 +429,10 @@ async def test_a_snapshot_over_the_cap_is_a_miss_not_truncated(store, monkeypatc
 
 
 async def test_a_snapshot_exactly_at_the_cap_is_not_over_it(store, monkeypatch):
-    from libex_core.lookup import _walks
-    from libex_core.storage.walk_limits import MAX_WALK_ASINS
-
     assert len(_walks._validated_asins([f"B{n:09d}" for n in range(MAX_WALK_ASINS)])) == MAX_WALK_ASINS
 
 
 async def test_a_list_one_over_the_cap_is_rejected_whole_by_the_validator():
-    from libex_core.lookup import _walks
-    from libex_core.storage.walk_limits import MAX_WALK_ASINS
-
     with pytest.raises(_walks._Miss):
         _walks._validated_asins([f"B{n:09d}" for n in range(MAX_WALK_ASINS + 1)])
 
@@ -454,10 +448,6 @@ async def test_a_list_one_over_the_cap_is_rejected_whole_by_the_validator():
 async def test_a_walk_is_recorded_complete_only_when_the_store_holds_all_of_it(
     monkeypatch, result_kw, from_store
 ):
-    from types import SimpleNamespace
-
-    from libex_core.lookup import _walks
-
     seen = {}
 
     async def persist(store, kind, asin, region, book_asins, **kw):
@@ -474,8 +464,6 @@ async def test_a_walk_is_recorded_complete_only_when_the_store_holds_all_of_it(
 
 
 async def test_a_lowercase_entry_of_valid_shape_is_read_back_uppercased():
-    from libex_core.lookup import _walks
-
     assert _walks._validated_asins(["b0lok00000", "B0LOK00000"]) == ["B0LOK00000"]
 
 
@@ -503,8 +491,6 @@ async def test_any_error_reading_a_row_is_a_miss_and_logs_only_the_type(
 async def test_a_failed_stored_book_read_is_a_miss(store, monkeypatch):
     found = asins(2)
     await get_series_books(_series_members(found), SERIES, store=store)
-    from libex_core.lookup import _store
-
     real, seen = _store.stored_books, []
 
     async def first_fails(*args, **kwargs):
@@ -588,8 +574,6 @@ async def test_a_snapshot_naming_books_stored_only_for_another_region_is_a_miss(
     await get_series_books(_series_members(found), SERIES, store=store, region="us")
     row = await _row(store, SERIES_BOOKS, SERIES)
     async with store.write() as session:
-        from libex_core.storage.write import write_walk_result
-
         await write_walk_result(
             session, kind=SERIES_BOOKS, asin=SERIES, region="uk",
             book_asins=row["book_asins"], complete=True, incomplete_reasons=[],
@@ -610,8 +594,6 @@ _DOCUMENTED_DIFFERENCES = {"snapshot_at", "from_store", "explicit_nulls"}
 
 
 def assert_same_answer(live, stored):
-    from dataclasses import fields
-
     assert [b.model_dump() for b in stored.books] == [b.model_dump() for b in live.books]
     assert live.books, "an empty list would prove nothing"
     names = {f.name for f in fields(live)}

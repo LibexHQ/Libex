@@ -24,7 +24,7 @@ from libex_core.storage.read.walks import get_walk_result
 from libex_core.storage.store import LocalStore
 from libex_core.storage.walk_limits import SERIES_BOOKS
 from libex_core.storage.write import write_walk_result
-from tests.libex_core._lookup_support import AUTHOR, SERIES, asins
+from tests.libex_core._lookup_support import AUTHOR, SERIES, asins, tick_walk_clock
 from tests.libex_core.test_lookup_authors import WALK, _hydrating_get
 from tests.libex_core.test_lookup_series_books import _series_members
 from tests.libex_core.test_lookup_walks import assert_same_answer
@@ -32,6 +32,11 @@ from tests.libex_core.test_lookup_walks import assert_same_answer
 pytestmark = pytest.mark.integration
 
 DAY = timedelta(days=1)
+
+
+@pytest.fixture(autouse=True)
+def _walk_clock(monkeypatch):
+    tick_walk_clock(monkeypatch)
 
 
 @pytest_asyncio.fixture

@@ -82,11 +82,25 @@ async def test_newer_replaces_every_column(session):
     assert row["confirmed_at"] == T0 + timedelta(seconds=1)
 
 
-async def test_older_and_equal_do_not_overwrite(session):
+async def test_older_does_not_overwrite(session):
     await _write(session)
     assert await _write(session, at=T0 - timedelta(seconds=1), book_asins=["B0000000Z9"]) is False
-    assert await _write(session, at=T0, book_asins=["B0000000Z9"]) is False
     assert (await _read(session))["book_asins"] == ASINS
+
+
+async def test_equal_at_replaces_and_reports_true(session):
+    await _write(session)
+    assert await _write(session, at=T0, book_asins=["B0000000Z9"], complete=False,
+                        incomplete_reasons=["tie"]) is True
+    row = await _read(session)
+    assert row["book_asins"] == ["B0000000Z9"] and row["complete"] is False
+
+
+async def test_delete_at_equal_removes(session):
+    await _write(session)
+    assert await delete_walk_result(session, kind="series_books", asin="B0SERIES01",
+                                    region="us", at=T0) is True
+    assert await _read(session) is None
 
 
 async def test_future_dated_row_is_overwritten(session):

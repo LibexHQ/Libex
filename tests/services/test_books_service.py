@@ -319,6 +319,30 @@ def test_parse_narrators_returns_empty_for_none():
     assert _parse_narrators({}) == []
 
 
+@pytest.mark.parametrize("name", ["", "   ", "\t\n ", None])
+def test_parse_narrators_drops_nameless_entry(name):
+    """An empty, whitespace-only or null name is dropped, never published as ''."""
+    assert _parse_narrators({"narrators": [{"name": name}]}) == []
+
+
+def test_parse_narrators_drops_entry_with_missing_name_key():
+    assert _parse_narrators({"narrators": [{"asin": "B000000000"}]}) == []
+
+
+def test_parse_narrators_strips_surrounding_whitespace():
+    result = _parse_narrators({"narrators": [{"name": "  Scott Brick \t"}]})
+    assert result == [{"name": "Scott Brick", "updatedAt": None}]
+
+
+def test_parse_narrators_mixed_list_keeps_named_in_order():
+    product = {"narrators": [
+        {"name": " Kate Reading "}, {"name": "   "}, {"name": None},
+        {"name": ""}, {"name": "Scott Brick"},
+    ]}
+    names = [n["name"] for n in _parse_narrators(product)]
+    assert names == ["Kate Reading", "Scott Brick"]
+
+
 # ============================================================
 # SERIES TESTS
 # ============================================================

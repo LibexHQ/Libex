@@ -833,3 +833,39 @@ async def test_no_column_is_emptied_by_a_response_that_sends_explicit_nulls(db_s
     db_session.expire_all()
     thin = {c: getattr(await _stored(db_session, "B0EVERY0002"), c) for c in _MERGED_COLUMNS}
     assert thin == rich
+
+
+# ============================================================
+# A CONTAINER NULL NEVER REACHES THE WRITER
+# ============================================================
+# A null authors, narrators, category_ladders or relationships rides into
+# audible_extras as sent, and the merge is a shallow union that lets the
+# incoming key win, so a book that normalized would overwrite the stored
+# array with null. normalize_product raises instead, so there is nothing to
+# write and the stored arrays stand.
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", ["authors", "narrators", "category_ladders", "relationships"])
+async def test_a_container_null_raises_before_a_write_and_leaves_stored_arrays(db_session, key):
+    asin = "B0NULLCONT1"
+    full = {
+        "asin": asin,
+        "title": "Full",
+        "authors": [{"asin": "B000AUTHOR1", "name": "An Author"}],
+        "narrators": [{"name": "A Narrator"}],
+        "category_ladders": [{"ladder": [{"id": "g1", "name": "Fiction"}]}],
+        "relationships": [{"relationship_type": "series", "asin": "B0SERIES001", "title": "S"}],
+    }
+    await write_books(db_session, [_normalize_product(full, REGION)])
+    db_session.expire_all()
+    before = (await _stored(db_session, asin)).audible_extras
+
+    with pytest.raises((TypeError, AttributeError)):
+        _normalize_product({**full, key: None}, REGION)
+
+    db_session.expire_all()
+    after = (await _stored(db_session, asin)).audible_extras
+    assert after == before
+    assert after[key] == full[key]

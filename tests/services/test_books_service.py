@@ -20,6 +20,7 @@ from libex_core.audible.books import (
     _parse_narrators,
     _parse_series,
     _parse_genres,
+    _parse_plans,
     _parse_release_date,
     filter_products as _filter_products,
     normalize_product as _normalize_product,
@@ -449,6 +450,143 @@ def test_parse_genres_deduplicates():
     result = _parse_genres(product)
     names = [g["name"] for g in result]
     assert names.count("Fiction") == 1
+
+
+# ============================================================
+# NULL AND MALFORMED ENTRIES
+# ============================================================
+
+_CONTAINERS = ["authors", "narrators", "relationships", "category_ladders", "plans"]
+
+
+_BAD_CONTAINERS = [
+    (key, value)
+    for key in _CONTAINERS
+    for value in (None, "text", 7, 0, {"name": "x"})
+    if not (key == "plans" and value is None)
+]
+
+
+@pytest.mark.parametrize("key,value", _BAD_CONTAINERS)
+def test_a_container_that_is_not_a_list_still_fails_the_book(key, value):
+    """A null or non-list container raises as it always did. Serving the book
+    would put the null into audibleExtras, which a shallow union then writes
+    over the arrays already stored."""
+    with pytest.raises((TypeError, AttributeError)):
+        _normalize_product({"asin": "B000000001", key: value}, "us")
+
+
+def test_a_null_plans_key_still_reads_as_silence():
+    assert _normalize_product({"asin": "B000000001", "plans": None}, "us")["plans"] is None
+
+
+@pytest.mark.parametrize("key", _CONTAINERS)
+@pytest.mark.parametrize("value", ["", {}, []])
+def test_an_empty_container_reads_as_empty(key, value):
+    book = _normalize_product({"asin": "B000000001", key: value}, "us")
+    assert book["audibleExtras"][key] == value
+
+
+def test_a_missing_container_reads_as_empty():
+    book = _normalize_product({"asin": "B000000001"}, "us")
+    assert book["authors"] == [] and book["narrators"] == []
+    assert book["series"] == [] and book["genres"] == []
+
+
+@pytest.mark.parametrize("name", [None, 5, True, ["a"], {"k": 1}])
+def test_parse_authors_drops_an_entry_whose_name_is_not_a_string(name):
+    product = {"authors": [{"name": name, "asin": "B000000001"}, {"name": "Real Author"}]}
+    assert [a["name"] for a in _parse_authors(product, "us")] == ["Real Author"]
+
+
+@pytest.mark.parametrize("entry", [None, "Bare Name", 5, ["a"]])
+def test_parse_authors_skips_an_entry_that_is_not_an_object(entry):
+    product = {"authors": [entry, {"name": "Real Author"}]}
+    assert [a["name"] for a in _parse_authors(product, "us")] == ["Real Author"]
+
+
+@pytest.mark.parametrize("asin", [5, True, ["a"], {"k": 1}])
+def test_parse_authors_reads_a_non_string_asin_as_no_asin(asin):
+    result = _parse_authors({"authors": [{"name": "Real Author", "asin": asin}]}, "us")
+    assert result[0]["asin"] is None
+    assert result[0]["name"] == "Real Author"
+
+
+@pytest.mark.parametrize("entry", [None, "Bare Name", 5, ["a"]])
+def test_parse_narrators_skips_an_entry_that_is_not_an_object(entry):
+    product = {"narrators": [entry, {"name": "Scott Brick"}]}
+    assert [n["name"] for n in _parse_narrators(product)] == ["Scott Brick"]
+
+
+@pytest.mark.parametrize("name", [5, True, ["a"], {"k": 1}])
+def test_parse_narrators_drops_a_name_that_is_not_a_string(name):
+    product = {"narrators": [{"name": name}, {"name": "Scott Brick"}]}
+    assert [n["name"] for n in _parse_narrators(product)] == ["Scott Brick"]
+
+
+def test_a_dropped_narrator_entry_still_reaches_the_extras_as_sent():
+    narrators = [None, {"name": 5}, {"name": "Scott Brick"}]
+    book = _normalize_product({"asin": "B000000001", "narrators": narrators}, "us")
+    assert book["audibleExtras"]["narrators"] == narrators
+
+
+@pytest.mark.parametrize("name", ["  ", "\t\n ", "", None, 5, ["a"]])
+def test_parse_genres_drops_a_name_with_nothing_in_it(name):
+    product = {"category_ladders": [{"ladder": [{"name": name}, {"name": "Fiction"}]}]}
+    result = _parse_genres(product)
+    assert [g["name"] for g in result] == ["Fiction"]
+
+
+def test_parse_genres_publishes_a_padded_name_as_sent():
+    """Only whether to keep a name is decided on the stripped value."""
+    result = _parse_genres({"category_ladders": [{"ladder": [{"name": " Fiction "}]}]})
+    assert result[0]["name"] == " Fiction "
+
+
+def test_parse_genres_a_dropped_rung_still_counts_toward_position():
+    product = {"category_ladders": [{"ladder": [{"name": "  "}, {"name": "Thriller"}]}]}
+    assert _parse_genres(product)[0]["type"] == "Tags"
+
+
+@pytest.mark.parametrize("ladders", [
+    [None, "x", 5, {"ladder": None}, {"ladder": "x"}, {"ladder": [None, "x", 5]}, {}],
+])
+def test_parse_genres_survives_malformed_ladders_and_rungs(ladders):
+    good = {"ladder": [{"name": "Fiction", "id": "g1"}]}
+    result = _parse_genres({"category_ladders": [*ladders, good]})
+    assert [g["name"] for g in result] == ["Fiction"]
+
+
+@pytest.mark.parametrize("entry", [None, "x", 5, ["a"]])
+def test_parse_series_skips_an_entry_that_is_not_an_object(entry):
+    series = {"relationship_type": "series", "asin": "B0SERIES01", "title": "S", "sequence": "1"}
+    assert [s["asin"] for s in _parse_series({"relationships": [entry, series]}, "us")] == ["B0SERIES01"]
+
+
+def test_a_relationship_type_that_is_not_hashable_does_not_fail_the_book():
+    relationships = [{"relationship_type": ["series"]}, {"relationship_type": {"k": 1}}]
+    book = _normalize_product({"asin": "B000000001", "relationships": relationships}, "us")
+    assert book["audibleExtras"]["relationships"] == relationships
+    assert book["series"] == []
+
+
+@pytest.mark.parametrize("entry", [None, "x", 5, ["a"]])
+def test_parse_plans_skips_an_entry_that_is_not_an_object(entry):
+    assert _parse_plans({"plans": [entry, {"plan_name": "Plus"}]}) == ["Plus"]
+
+
+@pytest.mark.parametrize("name", [5, True, ["a"], {"k": 1}])
+def test_parse_plans_skips_a_plan_name_that_is_not_a_string(name):
+    assert _parse_plans({"plans": [{"plan_name": name}, {"plan_name": "Plus"}]}) == ["Plus"]
+
+
+@pytest.mark.parametrize("plans", [[None, 5], [{"plan_name": 5}]])
+def test_parse_plans_reads_nothing_readable_as_silence(plans):
+    assert _parse_plans({"plans": plans}) is None
+
+
+def test_parse_plans_keeps_an_explicit_empty_list():
+    assert _parse_plans({"plans": []}) == []
 
 
 # ============================================================

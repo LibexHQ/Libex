@@ -68,6 +68,23 @@ import scripts.backfill_chapters as backfill_chapters
 # _PERMANENT_UPSTREAM_STATUSES
 # ============================================================
 
+def test_concurrency_ceiling_check_raises_when_ceiling_exceeds_limit():
+    with pytest.raises(RuntimeError, match=r"\(11\).*\(10\)"):
+        backfill_chapters._check_concurrency_ceiling(11, 10)
+
+
+def test_concurrency_ceiling_check_passes_at_or_below_limit():
+    backfill_chapters._check_concurrency_ceiling(10, 10)
+    backfill_chapters._check_concurrency_ceiling(3, 10)
+
+
+def test_concurrency_ceiling_holds_against_the_live_limit():
+    backfill_chapters._check_concurrency_ceiling(
+        backfill_chapters.CONCURRENCY_CEILING,
+        backfill_chapters.audible_client.AUDIBLE_CONCURRENCY_LIMIT,
+    )
+
+
 def test_permanent_upstream_statuses_contains_only_400():
     """Limited to exactly {400} -- the only status actually observed in
     production. Anything wider is a speculative expansion of what gets

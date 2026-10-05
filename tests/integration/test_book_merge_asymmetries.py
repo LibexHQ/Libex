@@ -869,3 +869,75 @@ async def test_a_container_null_raises_before_a_write_and_leaves_stored_arrays(d
     after = (await _stored(db_session, asin)).audible_extras
     assert after == before
     assert after[key] == full[key]
+
+
+# ============================================================
+# A TEXT FIELD OF THE WRONG TYPE NEVER REPLACES STORED TEXT
+# ============================================================
+# content_type, merchandising_summary and publisher_summary are published as
+# no value when Audible sends them as something that is not text, and the raw
+# value rides into audible_extras under its own key. The columns behind them
+# keep the stored text, and since a well-formed response never writes those
+# keys into the blob, no stored blob entry is replaced either.
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", [12, True, ["a"], {"a": 1}])
+async def test_a_text_field_of_the_wrong_type_leaves_the_stored_text_and_adds_the_raw_value(db_session, raw):
+    asin = "B0WRONGTXT1"
+    good = {
+        "asin": asin,
+        "title": "Full",
+        "content_type": "Product",
+        "merchandising_summary": "<p>A long stored description</p>",
+        "publisher_summary": "<p>A long stored summary</p>",
+        "language": "english",
+    }
+    await write_books(db_session, [_normalize_product(good, REGION)])
+    db_session.expire_all()
+    before = await _stored(db_session, asin)
+    stored = (before.content_type, before.description, before.summary, dict(before.audible_extras))
+
+    bad = {**good, "content_type": raw, "merchandising_summary": raw, "publisher_summary": raw}
+    await write_books(db_session, [_normalize_product(bad, REGION)])
+    db_session.expire_all()
+    after = await _stored(db_session, asin)
+
+    assert (after.content_type, after.description, after.summary) == stored[:3]
+    assert after.content_type == "Product"
+    assert after.description == "A long stored description"
+    assert after.summary == "A long stored summary"
+    for key, value in stored[3].items():
+        assert after.audible_extras[key] == value
+    for key in ("content_type", "merchandising_summary", "publisher_summary"):
+        assert after.audible_extras[key] == raw
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize("override", [
+    {"release_date": 20210302},
+    {"product_images": {"500": 12}},
+])
+async def test_a_release_date_or_image_of_the_wrong_type_raises_before_a_write(db_session, override):
+    asin = "B0WRONGTYP1"
+    full = {
+        "asin": asin,
+        "title": "Full",
+        "release_date": "2021-03-02",
+        "product_images": {"500": "http://example.com/a._SX500_.jpg"},
+    }
+    await write_books(db_session, [_normalize_product(full, REGION)])
+    db_session.expire_all()
+    before = await _stored(db_session, asin)
+    extras_before = dict(before.audible_extras)
+
+    with pytest.raises((TypeError, AttributeError)):
+        _normalize_product({**full, **override}, REGION)
+
+    db_session.expire_all()
+    after = await _stored(db_session, asin)
+    assert after.audible_extras == extras_before
+    assert after.audible_extras["release_date"] == "2021-03-02"
+    assert after.release_date == before.release_date

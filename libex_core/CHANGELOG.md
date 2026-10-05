@@ -13,6 +13,11 @@ the first published version. Entries for earlier versions record changes made
 before publication: they are historical record for whoever embeds this package,
 not evidence that anyone consumed a given version at the time it was cut.
 
+## [Unreleased]
+
+### Fixed
+- **A product's `content_type`, `merchandising_summary` or `publisher_summary` that is not text no longer fails the whole book.** A value that is truthy and not a string (a number, a boolean, a list or an object) used to raise out of `normalize_product`, in `.lower()` or in `strip_html`. `contentType`, `description` and `summary` now read as no value, and the raw value is carried in `audibleExtras` under Audible's own key, which a well-formed response never writes there, so a stored blob entry is never replaced; the stored columns keep their text. A falsy value of any type reads as it always did, and a book whose normalization already succeeded is published exactly as before. `normalize_series` does the same for a series' `publisher_summary`. A `release_date` that is not text, an image URL that is not text, and a `product_images` that is not an object still raise, as before: those keys are in `audibleExtras` as sent, and normalizing the book would write the malformed value over the stored copy through the shallow merge. `libex_core.text` gains `is_unreadable_text`.
+
 ## [0.22.0]
 
 ### Added

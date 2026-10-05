@@ -198,3 +198,21 @@ async def test_a_series_first_seen_through_a_book_stores_null_not_an_empty_objec
     await upsert_book(db_session, {**book, "asin": "B0BOOK0003"})
     db_session.expire_all()
     assert (await _row(db_session, "B0SERIES9X")).audible_extras is None
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", [12, True, ["a"], {"a": 1}])
+async def test_a_summary_of_the_wrong_type_leaves_the_stored_description_and_adds_the_raw_value(db_session, raw):
+    await _write(db_session, _product(language="english"))
+    before = await _row(db_session)
+    assert before.description == "Sum"
+    extras_before = dict(before.audible_extras)
+
+    await _write(db_session, _product(publisher_summary=raw, language="english"))
+    after = await _row(db_session)
+
+    assert after.description == "Sum"
+    for key, value in extras_before.items():
+        assert after.audible_extras[key] == value
+    assert after.audible_extras["publisher_summary"] == raw

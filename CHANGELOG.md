@@ -10,6 +10,13 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [2.2.10]
+
+No endpoint, parameter, response field or status code changes, and there is no database migration. A book whose content type or summary is not text is now served instead of failing.
+
+### Fixed
+- **A product's content type, description or summary that is not text no longer fails the whole book.** A value that is truthy and not a string (a number, a boolean, a list or an object) in `content_type`, `merchandising_summary` or `publisher_summary` used to raise and the book came back as an Audible outage. `contentType`, `description` and `summary` now come out empty, and the raw value is carried in `audibleExtras` under Audible's own key, so nothing Audible sent is lost and nothing already stored is replaced. A series whose `publisher_summary` is not text is handled the same way. A book that normalized before is published as before. A release date or image URL that is not text still fails the book, as before, so a stored copy is served rather than overwritten.
+
 ## [2.2.9]
 
 No endpoint, parameter, response field or status code changes, and there is no database migration. A book whose list carries a null or malformed entry is now served instead of failing.

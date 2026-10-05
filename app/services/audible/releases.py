@@ -139,7 +139,9 @@ async def ensure_genres(session: AsyncSession, region: str) -> list[dict[str, st
     — so when Audible restructures (e.g. moves a category to a new parent), the
     old placement doesn't linger as a ghost. A fetch that comes back suspiciously
     small (below that fraction) is treated as partial and only added, never
-    pruned, so a transient glitch can't wipe real branches. On a fetch failure,
+    pruned, so a transient glitch can't wipe real branches. Pruning also needs a
+    non-empty pre-fetch stored set: an empty read can't be told from a failed
+    one, so it is written additively. On a fetch failure,
     nothing is written and a non-empty stored set is served unchanged, so an
     Audible hiccup doesn't empty the response. The result is what the /categories
     discovery endpoint serves.
@@ -150,7 +152,9 @@ async def ensure_genres(session: AsyncSession, region: str) -> list[dict[str, st
     (via as_audible_failure) for the caller to report as an outage. Only the
     Audible fetch is converted that way: a failure writing the taxonomy to the
     store is logged, the stored set is served, and with an empty store the
-    freshly fetched nodes are returned instead.
+    freshly fetched nodes are returned instead. When the re-read after a
+    successful write comes back empty, the fetched nodes are served only if
+    nothing was stored before; otherwise the previously stored set is served.
     """
     stored, oldest_checked = await get_stored_genres(session, region)
     age = _genre_age_seconds(oldest_checked)
@@ -181,15 +185,39 @@ async def ensure_genres(session: AsyncSession, region: str) -> list[dict[str, st
         # Audible answered; a failure from here on is ours, not Audible's, so
         # it is logged and never relabelled as an upstream outage.
         try:
-            if len(nodes) >= _GENRE_RECONCILE_MIN_FRACTION * len(stored):
+            # Pruning needs a known non-empty pre-fetch set to size the fetch
+            # against. An empty read is ambiguous: get_stored_genres returns
+            # the same ([], None) for a region with nothing stored and for a
+            # failed read, and an unknown store must never be read as an empty
+            # one, or any partial fetch would clear the 0.5 floor and prune
+            # real branches. Additive upsert is identical to reconcile when the
+            # store really is empty, so nothing is lost by taking it.
+            if stored and len(nodes) >= _GENRE_RECONCILE_MIN_FRACTION * len(stored):
                 # Plausibly complete — mirror Audible's current tree, pruning
                 # any stale placements (the ghost-root case).
                 await reconcile_genres(session, region, nodes)
             else:
-                # Suspiciously small — add what we got, but don't prune.
+                # Suspiciously small, or the stored size is unknown — add what
+                # we got, but don't prune.
+                if not stored:
+                    logger.warning(
+                        "Genre taxonomy stored set empty or unreadable; writing additively",
+                        extra={"region": region, "fetched_nodes": len(nodes)},
+                    )
                 await upsert_genres(session, region, nodes)
             await session.commit()
-            stored, _ = await get_stored_genres(session, region)
+            reread, _ = await get_stored_genres(session, region)
+            if reread:
+                stored = reread
+            elif not stored:
+                # The write committed but the re-read came back empty or
+                # failed; the fetched nodes are in hand and an empty list
+                # would claim there are no genres.
+                logger.warning(
+                    "Genre taxonomy re-read empty after commit; serving fetched nodes",
+                    extra={"region": region, "fetched_nodes": len(nodes)},
+                )
+                return nodes
         except Exception as e:
             logger.warning(
                 "Genre taxonomy store failed",

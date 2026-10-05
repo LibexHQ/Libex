@@ -451,21 +451,85 @@ async def test_ensure_genres_additive_only_on_tiny_fetch():
 
 
 @pytest.mark.asyncio
-async def test_ensure_genres_reconciles_on_first_populate():
+async def test_ensure_genres_upserts_on_first_populate():
     """
-    With nothing stored yet, a fetch reconciles cleanly (the prune simply has
-    nothing to remove) rather than being held back as 'too small'.
+    With nothing readable stored, a fetch is written additively: the prune has
+    nothing to remove on a truly empty store, and an empty read can't be told
+    from a failed one, so reconcile is never taken.
     """
     fresh = _nodes(50)
     with patch.object(releases, "fetch_catalog_genres", new=AsyncMock(return_value=fresh)) as fetch, \
+         patch.object(releases, "get_stored_genres", new=AsyncMock(side_effect=[([], None), (fresh, None)])), \
+         patch.object(releases, "reconcile_genres", new=AsyncMock()) as recon, \
+         patch.object(releases, "upsert_genres", new=AsyncMock()) as upsert:
+        session = AsyncMock()
+        result = await releases.ensure_genres(session, "us")
+        upsert.assert_awaited_once()
+        recon.assert_not_awaited()
+        assert result == fresh
+    fetch.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fetched", [10, 1000])
+async def test_ensure_genres_store_read_failure_never_prunes(fetched):
+    """
+    get_stored_genres reports a failed read as ([], None). Whether the fetch is
+    partial (10 nodes) or full (1000), that must never be read as "nothing
+    stored, so any fetch is complete": the write is additive, never a prune.
+    """
+    fresh = _nodes(fetched)
+    with patch.object(releases, "fetch_catalog_genres", new=AsyncMock(return_value=fresh)), \
          patch.object(releases, "get_stored_genres", new=AsyncMock(return_value=([], None))), \
          patch.object(releases, "reconcile_genres", new=AsyncMock()) as recon, \
          patch.object(releases, "upsert_genres", new=AsyncMock()) as upsert:
         session = AsyncMock()
-        await releases.ensure_genres(session, "us")
-        recon.assert_awaited_once()
-        upsert.assert_not_awaited()
-    fetch.assert_awaited_once()
+        await releases.ensure_genres(session, "de")
+        recon.assert_not_awaited()
+        upsert.assert_awaited_once()
+        assert upsert.await_args.args[1] == "de"
+        assert upsert.await_args.args[2] == fresh
+
+
+@pytest.mark.asyncio
+async def test_ensure_genres_reread_failure_serves_fetched_nodes(caplog):
+    """
+    The write commits but the re-read fails (reader returns []): the fetched
+    nodes are served instead of an empty list, and the fallback is logged.
+    """
+    fresh = _nodes(20)
+    with patch.object(releases, "fetch_catalog_genres", new=AsyncMock(return_value=fresh)), \
+         patch.object(releases, "get_stored_genres", new=AsyncMock(return_value=([], None))), \
+         patch.object(releases, "reconcile_genres", new=AsyncMock()), \
+         patch.object(releases, "upsert_genres", new=AsyncMock()), \
+         caplog.at_level(logging.WARNING):
+        session = AsyncMock()
+        result = await releases.ensure_genres(session, "us")
+    assert result == fresh
+    assert any("re-read empty" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fetched,expect_reconcile", [(100, True), (10, False)])
+async def test_ensure_genres_reread_failure_with_prior_store_serves_old_set(fetched, expect_reconcile):
+    """
+    With a non-empty stored set before the fetch, a committed write whose
+    re-read comes back empty serves the previously stored set, not the fetched
+    nodes, on both the reconcile and the partial-fetch upsert paths.
+    """
+    old = _nodes(100)
+    # Distinct names, so serving the fetched nodes cannot equal serving old.
+    fresh = [{**n, "name": "new-" + n["name"]} for n in _nodes(fetched)]
+    with patch.object(releases, "fetch_catalog_genres", new=AsyncMock(return_value=fresh)), \
+         patch.object(releases, "get_stored_genres",
+                      new=AsyncMock(side_effect=[(old, _too_old()), ([], None)])), \
+         patch.object(releases, "reconcile_genres", new=AsyncMock()) as recon, \
+         patch.object(releases, "upsert_genres", new=AsyncMock()) as upsert:
+        session = AsyncMock()
+        result = await releases.ensure_genres(session, "us")
+    assert result == old
+    assert recon.await_count == (1 if expect_reconcile else 0)
+    assert upsert.await_count == (0 if expect_reconcile else 1)
 
 
 @pytest.mark.asyncio
@@ -567,11 +631,12 @@ async def test_ensure_genres_fetches_when_nothing_is_stored():
     with patch.object(releases, "fetch_catalog_genres", new=AsyncMock(return_value=fresh)) as fetch, \
          patch.object(releases, "get_stored_genres", new=AsyncMock(return_value=([], None))), \
          patch.object(releases, "reconcile_genres", new=AsyncMock()) as recon, \
-         patch.object(releases, "upsert_genres", new=AsyncMock()):
+         patch.object(releases, "upsert_genres", new=AsyncMock()) as upsert:
         session = AsyncMock()
         await releases.ensure_genres(session, "us")
         fetch.assert_awaited_once_with(releases.audible_get, "us")
-        recon.assert_awaited_once()
+        upsert.assert_awaited_once()
+        recon.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -624,7 +689,7 @@ async def test_ensure_genres_freshness_is_scoped_per_region():
     with patch.object(releases, "fetch_catalog_genres", new=AsyncMock(return_value=_nodes(100))) as fetch, \
          patch.object(releases, "get_stored_genres", new=AsyncMock(side_effect=stored_for)) as reader, \
          patch.object(releases, "reconcile_genres", new=AsyncMock()) as recon, \
-         patch.object(releases, "upsert_genres", new=AsyncMock()):
+         patch.object(releases, "upsert_genres", new=AsyncMock()) as upsert:
         session = AsyncMock()
         await releases.ensure_genres(session, "de")
         await releases.ensure_genres(session, "us")
@@ -634,7 +699,10 @@ async def test_ensure_genres_freshness_is_scoped_per_region():
         assert [c.args[1] for c in fetch.await_args_list] == ["us", "jp"]
         # Every store read named the region it was answering for.
         assert [c.args[1] for c in reader.await_args_list] == ["de", "us", "us", "jp", "jp"]
-        assert [c.args[1] for c in recon.await_args_list] == ["us", "jp"]
+        # us had a stored tree to reconcile against; jp had none readable, so
+        # it is written additively.
+        assert [c.args[1] for c in recon.await_args_list] == ["us"]
+        assert [c.args[1] for c in upsert.await_args_list] == ["jp"]
 
 
 @pytest.mark.asyncio

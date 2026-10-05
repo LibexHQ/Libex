@@ -10,6 +10,14 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [2.2.6]
+
+No endpoint, parameter, response field or status code changes, and there is no database migration. A failed read of the stored genre tree can no longer cause stored genres to be deleted.
+
+### Fixed
+- **A failed read of the stored genre tree no longer lets a partial Audible response prune it.** `GET /categories` refreshes a region's taxonomy from Audible, and prunes stored nodes Audible no longer lists only when the fetch is at least half the size of what is stored. A failed store read looked like an empty store, so any fetch, however truncated, cleared that bar and pruned. Pruning now needs a non-empty stored set that was actually read; otherwise the fetch is written additively, which is identical on a store that really is empty.
+- **`GET /categories` no longer serves an empty list when the re-read after a refresh fails.** When nothing was stored before the refresh, the freshly fetched nodes are served instead; when something was, the previously stored set is served unchanged.
+
 ## [2.2.5]
 
 No endpoint, parameter, response field or status code changes, and there is no database migration. A chapters response is now built for any scalar Audible sends.

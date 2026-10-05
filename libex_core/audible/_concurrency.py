@@ -16,32 +16,30 @@ from contextvars import ContextVar
 # CONCURRENCY BOUND
 # ============================================================
 
-# Every fan-out in this app sets its own per-walk concurrency constant
-# (SCREENS_FANOUT_CONCURRENCY in authors/screens.py), but those only bound
-# one walk at a time -- two simultaneous requests for a
-# large author already double the in-flight count, and nothing upstream of
-# this module caps the total across every walk running at once.
+# A fan-out built on this client can set its own per-walk concurrency
+# constant, but that only bounds one walk at a time -- two simultaneous
+# lookups for a large author already double the in-flight count, and nothing
+# upstream of this module caps the total across every walk running at once.
 # LibexClient.get is the one place every outbound Audible call passes
 # through, so the bound lives here, process-wide, instead of at any
 # individual call site: a per-call-site limit only expresses how eagerly
 # that one walk wants to go, never what one event loop and one exit IP
 # carry across all of them at once.
 #
-# This is the pool every call uses by default. That includes the seeder's
-# continuous, unattended background work -- the workload that once got
-# Libex's exit IP throttled into a VPN rotation, since it runs sustained and
-# unsupervised for as long as the process is up -- and it also includes
-# every bulk route: GET /books takes up to 1000 ASINs (books/router.py),
-# hydrating them as 20 concurrent 50-ASIN chunks, and /author/books?name=,
-# /series/{asin} and /search fan out the same way. Only the author-ASIN
-# path opts out, into the wider pool below.
+# This is the pool every call uses by default. That includes continuous,
+# unattended background crawling -- the workload that once got Libex's exit
+# IP throttled into a VPN rotation, since it runs sustained and unsupervised
+# for as long as the process is up -- and it also includes every bulk
+# lookup: hydrating up to 1000 ASINs means 20 concurrent 50-ASIN chunks, and
+# author-by-name, series and search lookups fan out the same way. Only the
+# author-ASIN path opts out, into the wider pool below.
 #
 # 10 IS A PER-PROCESS FAN-OUT WIDTH, not a share of a deployment-wide
 # budget, and that distinction is why it is a flat literal. The number has
 # two unrelated jobs -- it is a slice of what a shared exit IP tolerates at
 # once, which is divisible, and it is the width one live request's own
 # chunked fan-out passes through, which is not. Sizing it on the first job
-# alone breaks the second: a 1000-ASIN /books call is 20 concurrent calls
+# alone breaks the second: a 1000-ASIN bulk hydration is 20 concurrent calls
 # into this client, two rounds at 10 permits and ten rounds at 2, against
 # a fronting proxy that times out at 30s.
 #
@@ -84,9 +82,9 @@ AUDIBLE_CONCURRENCY_LIMIT = 10
 # self-terminating burst (measured locally: 179 requests for
 # Christie, 651 for Conan Doyle -- several times more than "well under 100"
 # once assumed here, but still capped by the screens plateau and
-# CATALOG_RESULT_CEILING rather than open-ended -- see screens.py and
-# catalog.py) and then stops, driven by real user traffic Libex's own
-# hard-noes already forbid amplifying, not a standing crawl. Reusing
+# CATALOG_RESULT_CEILING rather than open-ended) and then stops, driven by
+# one caller's request rather than a standing crawl, and not something to
+# amplify. Reusing
 # AUDIBLE_CONCURRENCY_LIMIT for it was the actual bug behind a live, measured
 # production outage: 5 concurrent author lookups queued behind a shared
 # 10-wide gate all 504'd at the fronting proxy's 30s timeout, and even a
@@ -129,7 +127,7 @@ AUDIBLE_CONCURRENCY_LIMIT = 10
 # constraint -- a single walk's own fan-out has to fit through it -- and
 # dividing it is exactly the change that produced the 504s described above,
 # so it is not available as a way to make room. The same argument, applied
-# to a 1000-ASIN /books call's own fan-out, is what keeps
+# to a 1000-ASIN bulk hydration's own fan-out, is what keeps
 # AUDIBLE_CONCURRENCY_LIMIT above a flat literal; see its comment. What
 # bounds this pool instead is the measured throttle-free band: 30, 60 and
 # 100 in flight each drew zero throttled responses here, and the ladder
@@ -147,9 +145,9 @@ AUDIBLE_CONCURRENCY_LIMIT = 10
 # an observed edge.
 #
 # What carries the worker count regardless is that 210 is a burst and the
-# incident was not. The VPN rotation came from the seeder's sustained,
-# unattended crawl, and the seeder runs on the default pool alone at its
-# own steady 10 per process; the peak needs a prolific-author walk in every
+# incident was not. The VPN rotation came from a sustained, unattended
+# crawl, and background crawling runs on the default pool alone at its own
+# steady 10 per process; the peak needs a prolific-author walk in every
 # worker at once to appear at all. Since neither pool divides, the worker
 # count is the only dial that moves that peak, which is what makes it the
 # figure to weigh against a shared exit IP -- not either constant on its
@@ -219,21 +217,19 @@ def _get_audible_author_books_semaphore() -> asyncio.Semaphore:
 # parameter to get() itself, to the audible_get delegator every call site
 # actually calls, or to any of the call sites behind that: a
 # threaded-through pool parameter would have to be plumbed through every
-# intermediate fetch function in screens.py, catalog.py, and books.py,
-# several of which are shared with the seeder and must never pick up the
-# wider pool, and several existing tests patch audible_get at each of those
-# consuming modules -- app.services.audible.books.audible_get and its
-# siblings -- with narrow, fixed-arity stand-ins that a new always-passed
-# kwarg would break outright. A ContextVar sidesteps both: it's invisible
+# intermediate fetch function between the caller and the client, several of
+# which are shared with background crawling and must never pick up the
+# wider pool, and tests that patch audible_get at each consuming module
+# use narrow, fixed-arity stand-ins that a new always-passed kwarg would
+# break outright. A ContextVar sidesteps both: it's invisible
 # to every call site (none of them change), asyncio.gather's own tasks
 # inherit whichever value was current when gather() created them
 # (contextvars.copy_context() happens at task creation), and it flows
 # unmodified through every further nested await and nested gather inside
-# that task -- which is exactly why wrapping only the single outer gather
-# in _walk_author_books and the single hydration gather in
-# get_books_by_asins (see author_books_concurrency's call sites) is enough
-# to cover every one of those calls' eventual descent into LibexClient.get,
-# with nothing else in either module touched.
+# that task -- which is exactly why wrapping only the outer gather of an
+# author-books walk and the gather that hydrates its result (the
+# author_books_concurrency call sites) is enough to cover every one of those
+# calls' eventual descent into LibexClient.get, with nothing else touched.
 _audible_concurrency_pool: ContextVar[str] = ContextVar(
     "_audible_concurrency_pool", default="default"
 )
@@ -249,7 +245,8 @@ def author_books_concurrency() -> Iterator[None]:
     live author-books discovery and hydration fan-out (see
     AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT's own docstring for why that
     workload, and only that one, gets the wider pool); every other caller
-    -- single book/author/series lookups, the seeder, chapter backfills --
+    -- single book/author/series lookups, background crawling, chapter
+    backfills --
     never enters this block and stays on the default pool exactly as before.
     """
     token = _audible_concurrency_pool.set("author_books")

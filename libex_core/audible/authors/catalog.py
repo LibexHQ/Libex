@@ -246,7 +246,7 @@ async def _fetch_catalog_page(
     fetch_author_books_by_catalog harvests candidate categories from --
     discovery only needs asin, author-attribution data and, for those
     baseline pages, category placement; never the full response-group set
-    hydration (get_books_by_asins) requests. Fetching that here would be
+    that a book hydration requests. Fetching that here would be
     both wasted work and a shape this function has no use for; hydration
     still owns the DTO.
     """

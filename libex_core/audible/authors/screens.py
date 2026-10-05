@@ -94,7 +94,7 @@ SCREENS_PAGE_SIZE = 20
 # no benefit, so there is no separate, smaller number to justify -- this
 # was previously kept deliberately tighter (8) specifically because it
 # shared its risk exposure, through the single default pool, with the
-# seeder's own sustained background work; splitting that pool off is what
+# sustained background crawling; splitting that pool off is what
 # removes the reason to hold this one back independently.
 SCREENS_FANOUT_CONCURRENCY = AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT
 

@@ -16,6 +16,7 @@ No endpoint, parameter, response field or status code changes, and there is no d
 
 ### Fixed
 - **A chapter listing with an odd scalar no longer fails.** `GET /book/{asin}/chapters` and the chapter store write failed on a non-int duration or offset, or on an int thousands of digits long, and passed a non-string title through. Such a value now reads as the field's default (0, `""`, `false`) and the raw value is kept in `audibleExtras` under Audible's own key; one too wide to render is nulled there and counted in `extrasWithheld`. The other chapters in the listing are unaffected.
+- **A chapter value that used to be coerced now reads as the default.** A duration or offset sent as a numeric string such as `"1500"`, a negative one, and an `isAccurate` sent as `"true"` or `1` were previously converted or passed through. They now read as 0 or `false`, with what Audible sent kept in `audibleExtras`. A whole-valued float such as `1500.0` is still read as the integer.
 
 ## [2.2.4]
 

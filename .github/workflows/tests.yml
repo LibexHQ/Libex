@@ -84,9 +84,9 @@ jobs:
       - name: Build libex-core
         run: |
           "$RUNNER_TEMP/tooling/bin/python" -m build --no-isolation --outdir "$RUNNER_TEMP/libex-core-dist" .
-      # The packaging test skips itself when build or flit_core is missing, and
-      # the job's environment deliberately has neither, so the unit test step
-      # above skips it. Here it runs with exactly those two (plus
+      # The packaging tests skip themselves when build or flit_core is missing,
+      # and the job's environment deliberately has neither, so the unit test
+      # step above skips them. Here they run with exactly those two (plus
       # pyproject_hooks, which build needs) borrowed from the tooling venv by
       # symlink -- installing them into the job's environment would mean a
       # second, unhashed copy, and putting the whole tooling site-packages on
@@ -105,7 +105,7 @@ jobs:
             done
           done
           PYTHONPATH="$tools" python -c 'import build, flit_core'
-          PYTHONPATH="$tools" pytest tests/libex_core/test_packaging.py -v
+          PYTHONPATH="$tools" pytest tests/libex_core/test_packaging.py tests/libex_core/test_installed_cli.py -v
 
   integration:
     runs-on: ubuntu-latest

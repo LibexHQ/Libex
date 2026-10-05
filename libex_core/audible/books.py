@@ -308,12 +308,21 @@ def _parse_authors(product: dict, region: str) -> list[dict]:
 
 
 def _parse_narrators(product: dict) -> list[dict]:
-    """Extracts narrator objects matching AudiMeta's NarratorDto."""
-    return [
-        {"name": n.get("name", "").strip(), "updatedAt": None}
-        for n in product.get("narrators", [])
-        if n.get("name")
-    ]
+    """Extracts narrator objects matching AudiMeta's NarratorDto.
+
+    The name is stripped before it is tested, so a whitespace-only name is
+    dropped like an empty or null one instead of publishing as "". A nameless
+    entry is dropped on purpose: NarratorDto carries only a name, so there is
+    nothing in the entry a caller could use. The drop loses no data, because
+    narrators is not in _REPRODUCED_KEYS and the upstream list therefore still
+    reaches audibleExtras whole, nameless entries included.
+    """
+    narrators = []
+    for n in product.get("narrators", []):
+        name = (n.get("name") or "").strip()
+        if name:
+            narrators.append({"name": name, "updatedAt": None})
+    return narrators
 
 
 def _parse_genres(product: dict) -> list[dict]:

@@ -10,6 +10,13 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [2.2.8]
+
+No endpoint, parameter, response field or status code changes, and there is no database migration. A narrator with a blank name is no longer published.
+
+### Fixed
+- **A narrator whose name is only whitespace is no longer published as an empty name.** The name was tested before it was stripped, so `"   "` passed and came out as `""`. It is now stripped first, and an entry with no name left is dropped from `narrators`. The entry is not lost: the upstream list still reaches `audibleExtras` as Audible sent it.
+
 ## [2.2.7]
 
 No endpoint, parameter, response field or status code changes, and there is no database migration. The chapter backfill script's concurrency check can no longer be skipped.

@@ -18,7 +18,7 @@ they always did.
 """
 
 # Standard library
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 # Third party
 import pytest
@@ -30,11 +30,9 @@ from libex_core.audible.authors.profile import normalize_author
 from libex_core.audible.books import (
     _best_image,
     _parse_release_date,
-    fetch_products,
     normalize_product,
 )
 from libex_core.audible.series import normalize_series
-from app.core.response_headers import REASON_HYDRATION_FAILED, ResponseFacts
 from libex_core.exceptions import AudibleAPIException, NotFoundException
 from libex_core.lookup import get_books
 from tests.libex_core._lookup_support import asins
@@ -183,7 +181,7 @@ def test_a_well_formed_series_summary_still_stays_out_of_the_blob():
 
 
 # ============================================================
-# RELEASE DATE, IMAGE, BIO: STILL RAISING
+# RELEASE DATE AND BIO: STILL RAISING
 # ============================================================
 
 @pytest.mark.parametrize("raw", TRUTHY_NON_TEXT)
@@ -199,6 +197,10 @@ def test_a_falsy_non_text_release_date_is_no_date(raw):
     assert _parse_release_date(raw) is None
     assert normalize_product(_product(release_date=raw), REGION)["releaseDate"] is None
 
+
+# ============================================================
+# IMAGE: UNREADABLE IS WITHHELD, NOT RAISED
+# ============================================================
 
 MALFORMED_IMAGES = [
     12, True, "abc", "500", ["a"], ["x", "y"], ["500"], [1, 2],
@@ -290,98 +292,3 @@ async def test_a_batch_answered_with_null_products_is_an_outage_in_the_hosted_se
             await hosted_books.get_books_by_asins(asins(3), REGION, session)
 
     assert not isinstance(raised.value, NotFoundException)
-
-
-# ============================================================
-# A SINGLE-ASIN 200 WITH product: null IS AN OUTAGE
-# ============================================================
-
-async def _null_product(region, path, params=None, extra_headers=None):
-    return {"product": None}
-
-
-@pytest.mark.asyncio
-async def test_fetch_products_raises_an_outage_for_a_null_single_product():
-    with pytest.raises(AudibleAPIException) as raised:
-        await fetch_products(_null_product, [ASIN], REGION)
-
-    assert not isinstance(raised.value, NotFoundException)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("answer", [{}, {"product": {}}])
-async def test_a_single_product_answer_without_a_product_is_still_empty(answer):
-    async def get(region, path, params=None, extra_headers=None):
-        return answer
-
-    assert await fetch_products(get, [ASIN], REGION) == []
-
-
-@pytest.mark.asyncio
-async def test_a_null_single_product_is_an_outage_in_the_library():
-    with pytest.raises(AudibleAPIException) as raised:
-        await get_books(_null_product, [ASIN], region=REGION)
-
-    assert not isinstance(raised.value, NotFoundException)
-
-
-@pytest.mark.asyncio
-async def test_a_null_single_product_is_an_outage_in_the_hosted_service(monkeypatch):
-    session = AsyncMock()
-    session.rollback = AsyncMock()
-    monkeypatch.setattr(hosted_books, "audible_get", _null_product)
-
-    with patch.object(hosted_books, "get_books_from_db", new=AsyncMock(return_value=[])), \
-         patch("app.services.audible.books.cache.get_many", new=AsyncMock(return_value={})):
-        with pytest.raises(AudibleAPIException) as raised:
-            await hosted_books.get_book_by_asin(ASIN, REGION, session)
-
-    assert not isinstance(raised.value, NotFoundException)
-
-
-@pytest.mark.asyncio
-async def test_a_null_single_product_serves_the_stored_copy_in_the_hosted_service(monkeypatch):
-    session = AsyncMock()
-    session.rollback = AsyncMock()
-    monkeypatch.setattr(hosted_books, "audible_get", _null_product)
-    stored = {"asin": ASIN, "title": "Stored"}
-
-    with patch.object(hosted_books, "get_books_from_db", new=AsyncMock(return_value=[stored])), \
-         patch("app.services.audible.books.cache.get_many", new=AsyncMock(return_value={})):
-        book = await hosted_books.get_book_by_asin(ASIN, REGION, session)
-
-    assert book == stored
-
-
-@pytest.mark.asyncio
-async def test_a_one_asin_remainder_chunk_with_a_null_product_is_not_fetched_not_not_found(monkeypatch):
-    """A bulk request of 51 ASINs ends in a chunk of one, which takes the
-    single-product path: a null product there is an outage for that ASIN, so
-    it is reported as not fetched with the failure reason, and the fifty
-    answered by the batch chunk are still served."""
-    wanted = [f"B0BULK{i:04d}" for i in range(51)]
-
-    async def get(region, path, params=None, extra_headers=None):
-        if params and "asins" in params:
-            return {"products": [
-                {"asin": a, "title": f"Title {a}"} for a in params["asins"].split(",")
-            ]}
-        return {"product": None}
-
-    session = AsyncMock()
-    session.rollback = AsyncMock()
-    monkeypatch.setattr(hosted_books, "audible_get", get)
-    facts = ResponseFacts()
-    not_fetched: list[str] = []
-    persist = MagicMock()
-
-    with patch.object(hosted_books, "get_books_from_db", new=AsyncMock(return_value=[])), \
-         patch.object(hosted_books, "persist_books_background", new=persist), \
-         patch("app.services.audible.books.cache.get_many", new=AsyncMock(return_value={})):
-        books = await hosted_books.get_books_by_asins(
-            wanted, REGION, session, facts=facts, not_fetched_asins=not_fetched,
-        )
-
-    assert {b["asin"] for b in books} == set(wanted[:50])
-    assert not_fetched == [wanted[50]]
-    assert facts.incomplete_reasons == {REASON_HYDRATION_FAILED}

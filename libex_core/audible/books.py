@@ -29,7 +29,6 @@ from typing import Any
 from libex_core.asin import is_valid_asin
 from libex_core.audible.client import AudibleGet, REGION_MAP, validate_region, validated_asin
 from libex_core.audible.extras import _log_extras_incident, build_extras
-from libex_core.exceptions import AudibleAPIException
 from libex_core.log_safety import is_safe_log_value, safe_asin_for_log, window_elapsed
 from libex_core.text import is_unreadable_text, strip_html, strip_image_size_suffix
 
@@ -173,10 +172,8 @@ async def fetch_products(get: AudibleGet, asins: list[str], region: str) -> list
     One ASIN is a single-product request, which Audible answers with a 404
     when it has no such record (NotFoundException out of `get`, terminal);
     several are one batch request, which Audible answers with a 200 whatever
-    it knows. A single-product 200 whose product is an explicit null is not
-    that answer: it is a malformed one, and raises AudibleAPIException, an
-    outage, rather than reading as an absence. Transient failures surface as
-    AudibleAPIException from `get` and are the caller's to retry.
+    it knows. Transient failures surface as AudibleAPIException from `get` and
+    are the caller's to retry.
 
     Raises RegionException for a region that is not one of the eleven, and
     ValueError for more than MAX_ASINS_PER_REQUEST ASINs or for any value that
@@ -195,8 +192,6 @@ async def fetch_products(get: AudibleGet, asins: list[str], region: str) -> list
             "image_sizes": IMAGE_SIZES,
         }
         data = await get(region, f"{CATALOG_PRODUCTS_PATH}/{wanted[0]}", params)
-        if "product" in data and data["product"] is None:
-            raise AudibleAPIException("Audible answered a product request with a null product")
         return [data.get("product", {})] if data.get("product") else []
 
     params = {

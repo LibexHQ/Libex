@@ -10,6 +10,13 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [2.2.7]
+
+No endpoint, parameter, response field or status code changes, and there is no database migration. The chapter backfill script's concurrency check can no longer be skipped.
+
+### Fixed
+- **The chapter backfill's concurrency ceiling check now survives `python -O`.** The guard that keeps the backfill's ramp from widening past the Audible fan-out limit was an `assert`, which optimised mode strips. It is now an explicit check that raises a `RuntimeError` naming both values. Nothing changes unless the configuration is wrong.
+
 ## [2.2.6]
 
 No endpoint, parameter, response field or status code changes, and there is no database migration. A failed read of the stored genre tree can no longer cause stored genres to be deleted.

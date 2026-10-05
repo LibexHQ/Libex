@@ -151,19 +151,28 @@ PAUSE_MAX_HOURS = _env_float("BACKFILL_PAUSE_MAX_HOURS", 11.0)
 # --- concurrency ramp --------------------------------------------------------
 #
 # Plain module constants, not env-tunable. Ceiling fixed at 10, never wider
-# than AUDIBLE_CONCURRENCY_LIMIT (see the assert below).
+# than AUDIBLE_CONCURRENCY_LIMIT (see the check below).
 CONCURRENCY_FLOOR = 1
 CONCURRENCY_START = 3
 CONCURRENCY_STEP = 3
 CONCURRENCY_CEILING = 10
 
-# Never wider than the API's own fan-out width -- asserted, not just
-# commented, so this can't silently regress if either constant moves.
-assert CONCURRENCY_CEILING <= audible_client.AUDIBLE_CONCURRENCY_LIMIT, (
-    f"CONCURRENCY_CEILING ({CONCURRENCY_CEILING}) must not exceed "
-    f"AUDIBLE_CONCURRENCY_LIMIT ({audible_client.AUDIBLE_CONCURRENCY_LIMIT}) -- "
-    "this run's ramp must never widen past the API's own fan-out limit."
-)
+
+def _check_concurrency_ceiling(ceiling: int, limit: int) -> None:
+    """Refuse a ramp wider than the API's own fan-out width.
+
+    An explicit raise rather than an assert, so ``python -O`` cannot strip it.
+    """
+    if ceiling > limit:
+        raise RuntimeError(
+            f"CONCURRENCY_CEILING ({ceiling}) must not exceed "
+            f"AUDIBLE_CONCURRENCY_LIMIT ({limit}) -- "
+            "this run's ramp must never widen past the API's own fan-out limit."
+        )
+
+
+# Checked at import so this can't silently regress if either constant moves.
+_check_concurrency_ceiling(CONCURRENCY_CEILING, audible_client.AUDIBLE_CONCURRENCY_LIMIT)
 
 # Per-rung dwell: BOTH floors must be met before the next step up.
 RAMP_MIN_SECONDS = 60.0

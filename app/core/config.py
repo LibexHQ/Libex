@@ -33,7 +33,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "Libex"
-    app_version: str = "2.2.6"
+    app_version: str = "2.2.7"
     debug: bool = False
     host: str = "0.0.0.0"
     port: int = 3333

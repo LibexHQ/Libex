@@ -17,6 +17,7 @@ recorded in the response's extrasWithheld rather than dropped silently.
 """
 
 # Standard library
+import math
 from typing import Any
 
 # Core
@@ -78,6 +79,66 @@ _CONTENT_METADATA_CONSUMED = frozenset({"chapter_info", "content_reference", "co
 _RESPONSE_NOISE = frozenset({"response_groups"})
 
 
+# The widest value a typed scalar is accepted at: a signed 64-bit integer,
+# which is what a Postgres bigint holds and far past any duration in
+# milliseconds. A wider int is not a duration, and one wider than about 4,300
+# digits cannot even be rendered by json.dumps, which is what would fail the
+# write and the response. Narrower than bound_extras' own ceiling on purpose:
+# these fields are numbers the model types as int, not verbatim passthrough.
+_SCALAR_MAX = 2**63 - 1
+
+
+def _scalar_int(value: Any) -> int | None:
+    """
+    The int a typed chapter scalar carries, or None when what Audible sent is
+    not one: a non-number, a bool (which is an int in Python and not a
+    duration), a negative, a number past _SCALAR_MAX, a fractional float, or a
+    non-finite one. A whole-valued float is the number it spells.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            return None
+        value = int(value)
+    if not isinstance(value, int) or value < 0 or value > _SCALAR_MAX:
+        return None
+    return value
+
+
+def _read_int(source: dict, key: str, rescued: dict[str, Any]) -> int:
+    """
+    Reads one typed scalar off a raw Audible object. An absent key is the
+    field's default, 0, as it always was. A value that is not usable (see
+    _scalar_int) also reads as 0 -- so one odd field cannot fail the response
+    or the write and take the other chapters with it -- and the raw value is
+    put in `rescued` under Audible's own key, which becomes part of the
+    object's audibleExtras. The field no longer speaks for it, but nothing
+    Audible sent is lost; a value too wide to store is nulled there and
+    counted in extrasWithheld like any other.
+    """
+    if key not in source:
+        return 0
+    value = _scalar_int(source[key])
+    if value is None:
+        rescued[key] = source[key]
+        return 0
+    return value
+
+
+def _read_title(source: dict, rescued: dict[str, Any]) -> str:
+    """
+    A chapter's title: the string Audible sent, "" when it sent none, and ""
+    with the raw value kept in `rescued` when it sent something that is not a
+    string. A NUL in a string title is the caller's to strip.
+    """
+    title = source.get("title", "")
+    if isinstance(title, str):
+        return title
+    rescued["title"] = title
+    return ""
+
+
 class _Withheld:
     """
     What bounding the verbatim parts of one chapter response cost, collected
@@ -134,18 +195,24 @@ def _normalize_chapter(c: dict, depth: int, withheld: _Withheld) -> dict[str, An
     chapter's audibleExtras as Audible sent them, as does a chapters value that
     is not a list of objects, and the cut is counted in extrasWithheld. A NUL
     in the title is stripped, and counted.
+
+    The three typed scalars and the title are read defensively: one that is
+    not what the model types (see _read_int, _read_title) becomes its default
+    and the raw value rides in audibleExtras under Audible's own key.
     """
-    title = c.get("title", "")
-    if isinstance(title, str) and "\x00" in title:
+    rescued: dict[str, Any] = {}
+    title = _read_title(c, rescued)
+    if "\x00" in title:
         bounded_title, _ = withheld.bound({"title": title})
         title = bounded_title["title"] if bounded_title else title.replace("\x00", "")
     chapter: dict[str, Any] = {
-        "lengthMs": c.get("length_ms", 0),
-        "startOffsetMs": c.get("start_offset_ms", 0),
-        "startOffsetSec": c.get("start_offset_sec", 0),
+        "lengthMs": _read_int(c, "length_ms", rescued),
+        "startOffsetMs": _read_int(c, "start_offset_ms", rescued),
+        "startOffsetSec": _read_int(c, "start_offset_sec", rescued),
         "title": title,
     }
     extras = {k: v for k, v in c.items() if k not in _CHAPTER_CONSUMED}
+    extras.update(rescued)
     children = c.get("chapters")
     if _is_chapter_list(children):
         if children and depth >= MAX_NESTING_DEPTH:
@@ -183,6 +250,11 @@ def normalize_chapters(data: dict, asin: str = "", region: str = "") -> dict[str
     part withheld whole is absent and named in extrasWithheld with its
     reason, which is itself absent when nothing was withheld. asin and region
     are only for the log line a withholding writes.
+
+    A typed scalar that is not a usable non-negative int no wider than a
+    64-bit one, a non-bool isAccurate, and a non-string title read as the
+    field's default; the raw value is carried in audibleExtras, so the field
+    is wrong-but-valid and nothing Audible sent is gone.
     """
     withheld = _Withheld(asin, region)
 
@@ -214,12 +286,18 @@ def normalize_chapters(data: dict, asin: str = "", region: str = "") -> dict[str
         if raw_chapters is not None:
             chapter_info_leftovers["chapters"] = raw_chapters
 
+    # Same rule as a chapter's own scalars: a value the model cannot type
+    # reads as the default and the raw value is kept in chapterInfo's extras.
+    is_accurate = chapter_info.get("is_accurate", False)
+    if not isinstance(is_accurate, bool):
+        chapter_info_leftovers["is_accurate"] = is_accurate
+        is_accurate = False
     result: dict[str, Any] = {
-        "brandIntroDurationMs": chapter_info.get("brandIntroDurationMs", 0),
-        "brandOutroDurationMs": chapter_info.get("brandOutroDurationMs", 0),
-        "isAccurate": chapter_info.get("is_accurate", False),
-        "runtimeLengthMs": chapter_info.get("runtime_length_ms", 0),
-        "runtimeLengthSec": chapter_info.get("runtime_length_sec", 0),
+        "brandIntroDurationMs": _read_int(chapter_info, "brandIntroDurationMs", chapter_info_leftovers),
+        "brandOutroDurationMs": _read_int(chapter_info, "brandOutroDurationMs", chapter_info_leftovers),
+        "isAccurate": is_accurate,
+        "runtimeLengthMs": _read_int(chapter_info, "runtime_length_ms", chapter_info_leftovers),
+        "runtimeLengthSec": _read_int(chapter_info, "runtime_length_sec", chapter_info_leftovers),
         "chapters": chapters,
     }
 

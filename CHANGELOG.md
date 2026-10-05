@@ -10,6 +10,13 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [2.2.5]
+
+No endpoint, parameter, response field or status code changes, and there is no database migration. A chapters response is now built for any scalar Audible sends.
+
+### Fixed
+- **A chapter listing with an odd scalar no longer fails.** `GET /book/{asin}/chapters` and the chapter store write failed on a non-int duration or offset, or on an int thousands of digits long, and passed a non-string title through. Such a value now reads as the field's default (0, `""`, `false`) and the raw value is kept in `audibleExtras` under Audible's own key; one too wide to render is nulled there and counted in `extrasWithheld`. The other chapters in the listing are unaffected.
+
 ## [2.2.4]
 
 No endpoint, parameter, response shape, field or status code changes, and there is no database migration. Libex now records when Audible last answered for a book, series, author or chapter listing in columns that 2.2.0 added and left empty.

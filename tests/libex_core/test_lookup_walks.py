@@ -273,3 +273,286 @@ async def test_a_raw_row_the_column_would_not_have_coerced_is_a_miss(store, monk
         _series_members(found, calls=calls), SERIES, store=store, max_age=DAY
     )
     assert calls and result.snapshot_at is None
+
+
+# Section: author walks end to end
+
+
+async def test_a_fresh_author_snapshot_answers_with_no_request(store, monkeypatch):
+    found = asins(3)
+    monkeypatch.setattr(WALK, AsyncMock(return_value=(list(found), True)))
+    await get_author_books(_hydrating_get(), AUTHOR, store=store)
+    walk = AsyncMock(side_effect=AssertionError("a stored list must not walk"))
+    monkeypatch.setattr(WALK, walk)
+    result = await get_author_books(_no_requests(), AUTHOR, store=store, max_age=DAY)
+    assert [b.asin for b in result.books] == found
+    assert result.from_store == tuple(found) and result.snapshot_at is not None
+    assert not walk.called
+
+
+async def test_an_author_discovery_404_deletes_the_snapshot_and_raises(store, monkeypatch):
+    found = asins(2)
+    monkeypatch.setattr(WALK, AsyncMock(return_value=(list(found), True)))
+    await get_author_books(_hydrating_get(), AUTHOR, store=store)
+    monkeypatch.setattr(WALK, AsyncMock(side_effect=NotFoundException("gone")))
+    with pytest.raises(NotFoundException):
+        await get_author_books(_hydrating_get(), AUTHOR, store=store)
+    assert await _row(store, AUTHOR_BOOKS, AUTHOR) is None
+
+
+async def test_an_author_outage_leaves_the_snapshot_alone(store, monkeypatch):
+    from libex_core.exceptions import AudibleAPIException
+
+    found = asins(2)
+    monkeypatch.setattr(WALK, AsyncMock(return_value=(list(found), True)))
+    await get_author_books(_hydrating_get(), AUTHOR, store=store)
+    before = await _row(store, AUTHOR_BOOKS, AUTHOR)
+    monkeypatch.setattr(
+        WALK, AsyncMock(side_effect=AudibleAPIException("down", upstream_status=503))
+    )
+    with pytest.raises(AudibleAPIException):
+        await get_author_books(_hydrating_get(), AUTHOR, store=store)
+    assert await _row(store, AUTHOR_BOOKS, AUTHOR) == before
+
+
+async def test_an_incomplete_author_discovery_is_recorded_incomplete(store, monkeypatch):
+    found = asins(2)
+    monkeypatch.setattr(WALK, AsyncMock(return_value=(list(found), False)))
+    await get_author_books(_hydrating_get(), AUTHOR, store=store)
+    assert (await _row(store, AUTHOR_BOOKS, AUTHOR))["complete"] is False
+    calls = []
+    await get_author_books(_hydrating_get(calls=calls), AUTHOR, store=store, max_age=DAY)
+    assert calls, "an incomplete author snapshot is never served"
+
+
+# Section: stored list shape
+
+
+async def test_a_stored_list_keeps_served_order_and_shapes_afterwards(store):
+    found = asins(4)
+    await get_series_books(_series_members(found), SERIES, store=store, sort="title", order="desc")
+    row = await _row(store, SERIES_BOOKS, SERIES)
+    assert row["book_asins"] == found, "recorded before sorting, in served order"
+    plain = await get_series_books(_no_requests(), SERIES, store=store, max_age=DAY)
+    assert [b.asin for b in plain.books] == found
+    desc = await get_series_books(
+        _no_requests(), SERIES, store=store, max_age=DAY, sort="title", order="desc"
+    )
+    assert [b.asin for b in desc.books] == found[::-1]
+
+
+async def test_a_filter_on_a_stored_list_does_not_shrink_from_store(store):
+    found = asins(3)
+    await get_series_books(_series_members(found), SERIES, store=store)
+    result = await get_series_books(
+        _no_requests(), SERIES, store=store, max_age=DAY, filters={"language": "klingon"}
+    )
+    assert result.books == [] and result.from_store == tuple(found)
+    assert result.complete is True
+
+
+async def test_a_duplicate_entry_is_served_once_in_order(store, monkeypatch):
+    found = asins(3)
+    await get_series_books(_series_members(found), SERIES, store=store)
+    row = await _row(store, SERIES_BOOKS, SERIES)
+    row["book_asins"] = [found[1], found[0], found[1], found[2]]
+    monkeypatch.setattr("libex_core.lookup._store.stored_walk", AsyncMock(return_value=row))
+    result = await get_series_books(_no_requests(), SERIES, store=store, max_age=DAY)
+    assert [b.asin for b in result.books] == [found[1], found[0], found[2]]
+
+
+# Section: hostile rows planted raw
+
+
+async def _planted(store, monkeypatch, found, **raw):
+    await get_series_books(_series_members(found), SERIES, store=store)
+    row = {**await _row(store, SERIES_BOOKS, SERIES), **raw}
+    monkeypatch.setattr("libex_core.lookup._store.stored_walk", AsyncMock(return_value=row))
+    calls = []
+    result = await get_series_books(
+        _series_members(found, calls=calls), SERIES, store=store, max_age=DAY
+    )
+    return calls, result
+
+
+BAD_ENTRIES = [
+        lambda f: [f[0], "B0LOK000000"],
+        lambda f: [f[0], "b0lok0000"],
+        lambda f: [f[0], "B0LOK00001\n"],
+        lambda f: [f[0], "ﬃ" * 3],
+        lambda f: [f[0], "B" * 13],
+        lambda f: [f[0], None],
+        lambda f: [f[0], ["B0LOK00001"]],
+        lambda f: [f[0], b"B0LOK00001"],
+        lambda f: [*f, "x"],
+        lambda f: ("B0LOK00000", "B0LOK00001"),
+        lambda f: None,
+        lambda f: 5,
+    ]
+
+
+@pytest.mark.parametrize("entries", BAD_ENTRIES)
+async def test_one_bad_entry_spoils_the_whole_snapshot(store, monkeypatch, entries):
+    found = asins(2)
+    calls, result = await _planted(store, monkeypatch, found, book_asins=entries(found))
+    assert calls and result.snapshot_at is None
+    assert len(result.books) == 2, "the good entries are not served alone"
+
+
+@pytest.mark.parametrize("entries", BAD_ENTRIES)
+async def test_a_bad_entry_is_rejected_before_any_store_read_of_it(store, monkeypatch, entries):
+    from libex_core.lookup import _store
+
+    found = asins(2)
+    await get_series_books(_series_members(found), SERIES, store=store)
+    planted = entries(found)
+    row = {**await _row(store, SERIES_BOOKS, SERIES), "book_asins": planted}
+    monkeypatch.setattr("libex_core.lookup._store.stored_walk", AsyncMock(return_value=row))
+    real, asked = _store.stored_books, []
+
+    async def spy(store_, wanted, *args, **kwargs):
+        asked.append(list(wanted))
+        return await real(store_, wanted, *args, **kwargs)
+
+    monkeypatch.setattr("libex_core.lookup._store.stored_books", spy)
+    await get_series_books(_series_members(found), SERIES, store=store, max_age=DAY)
+    assert all(set(w) <= set(found) for w in asked), "a planted entry reached the reader"
+
+
+async def test_a_snapshot_over_the_cap_is_a_miss_not_truncated(store, monkeypatch):
+    from libex_core.storage.walk_limits import MAX_WALK_ASINS
+
+    found = asins(2)
+    many = [*found, *[f"B{n:09d}" for n in range(MAX_WALK_ASINS)]]
+    calls, result = await _planted(store, monkeypatch, found, book_asins=many)
+    assert calls and result.snapshot_at is None
+
+
+async def test_a_snapshot_exactly_at_the_cap_is_not_over_it(store, monkeypatch):
+    from libex_core.lookup import _walks
+    from libex_core.storage.walk_limits import MAX_WALK_ASINS
+
+    assert len(_walks._validated_asins([f"B{n:09d}" for n in range(MAX_WALK_ASINS)])) == MAX_WALK_ASINS
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [RecursionError("deep"), ValueError("bad json"), TypeError("t"), RuntimeError("drv")],
+)
+async def test_any_error_reading_a_row_is_a_miss_and_logs_only_the_type(
+    store, monkeypatch, exc, caplog
+):
+    found = asins(2)
+    await get_series_books(_series_members(found), SERIES, store=store)
+    monkeypatch.setattr(
+        "libex_core.lookup._store.stored_walk", AsyncMock(side_effect=exc)
+    )
+    calls = []
+    with caplog.at_level("INFO", logger="libex"):
+        result = await get_series_books(
+            _series_members(found, calls=calls), SERIES, store=store, max_age=DAY
+        )
+    assert calls and result.snapshot_at is None
+    assert "deep" not in caplog.text and "bad json" not in caplog.text
+
+
+async def test_a_failed_stored_book_read_is_a_miss(store, monkeypatch):
+    found = asins(2)
+    await get_series_books(_series_members(found), SERIES, store=store)
+    from libex_core.lookup import _store
+
+    real, seen = _store.stored_books, []
+
+    async def first_fails(*args, **kwargs):
+        seen.append(1)
+        if len(seen) == 1:
+            raise RuntimeError("x")
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr("libex_core.lookup._store.stored_books", first_fails)
+    calls = []
+    result = await get_series_books(
+        _series_members(found, calls=calls), SERIES, store=store, max_age=DAY
+    )
+    assert calls and result.snapshot_at is None
+
+
+async def test_a_hit_logs_counts_and_never_row_contents(store, caplog):
+    found = asins(2)
+    await get_series_books(_series_members(found), SERIES, store=store)
+    with caplog.at_level("INFO", logger="libex"):
+        await get_series_books(_no_requests(), SERIES, store=store, max_age=DAY)
+    hit = [r for r in caplog.records if r.getMessage() == "Answered from a stored list"]
+    assert len(hit) == 1 and hit[0].book_num == 2 and hit[0].kind == SERIES_BOOKS
+    assert found[0] not in caplog.text
+
+
+# Section: freshness
+
+
+async def test_a_slightly_future_confirmed_at_is_within_skew(store):
+    found = asins(2)
+    await get_series_books(_series_members(found), SERIES, store=store)
+    await _patch_row(store, confirmed_at=datetime.now(timezone.utc) + timedelta(seconds=60))
+    result = await get_series_books(_no_requests(), SERIES, store=store, max_age=DAY)
+    assert result.snapshot_at is not None
+
+
+async def test_a_confirmed_at_past_the_skew_is_never_served(store):
+    found = asins(2)
+    await get_series_books(_series_members(found), SERIES, store=store)
+    await _patch_row(store, confirmed_at=datetime.now(timezone.utc) + timedelta(minutes=30))
+    calls = []
+    result = await get_series_books(
+        _series_members(found, calls=calls), SERIES, store=store, max_age=timedelta.max
+    )
+    assert calls and result.snapshot_at is None
+
+
+async def test_a_snapshot_just_past_max_age_goes_live(store):
+    found = asins(2)
+    await get_series_books(_series_members(found), SERIES, store=store)
+    await _patch_row(store, confirmed_at=datetime.now(timezone.utc) - timedelta(minutes=10))
+    calls = []
+    result = await get_series_books(
+        _series_members(found, calls=calls), SERIES, store=store, max_age=timedelta(minutes=5)
+    )
+    assert calls and result.snapshot_at is None
+
+
+async def test_a_future_dated_row_is_overwritten_by_the_next_live_walk_and_then_served(store):
+    found = asins(2)
+    await get_series_books(_series_members(found), SERIES, store=store)
+    future = datetime.now(timezone.utc) + timedelta(days=30)
+    await _patch_row(store, confirmed_at=future)
+    calls = []
+    live = await get_series_books(
+        _series_members(found, calls=calls), SERIES, store=store, max_age=DAY
+    )
+    assert calls and live.snapshot_at is None, "future-dated is never served"
+    confirmed = (await _row(store, SERIES_BOOKS, SERIES))["confirmed_at"]
+    assert confirmed < datetime.now(timezone.utc) + timedelta(minutes=1), "overwritten"
+    again = await get_series_books(_no_requests(), SERIES, store=store, max_age=DAY)
+    assert again.snapshot_at is not None
+
+
+# Section: region scoping
+
+
+async def test_a_snapshot_naming_books_stored_only_for_another_region_is_a_miss(store):
+    found = asins(2)
+    await get_series_books(_series_members(found), SERIES, store=store, region="us")
+    row = await _row(store, SERIES_BOOKS, SERIES)
+    async with store.write() as session:
+        from libex_core.storage.write import write_walk_result
+
+        await write_walk_result(
+            session, kind=SERIES_BOOKS, asin=SERIES, region="uk",
+            book_asins=row["book_asins"], complete=True, incomplete_reasons=[],
+            at=datetime.now(timezone.utc),
+        )
+    calls = []
+    result = await get_series_books(
+        _series_members(found, calls=calls), SERIES, store=store, region="uk", max_age=DAY
+    )
+    assert calls and result.snapshot_at is None, "the us books are not the uk's"

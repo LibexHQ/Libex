@@ -28,7 +28,7 @@ from typing import Any
 # Core
 from libex_core.asin import is_valid_asin
 from libex_core.audible.client import AudibleGet, REGION_MAP, validate_region, validated_asin
-from libex_core.audible.extras import build_extras
+from libex_core.audible.extras import _log_extras_incident, build_extras
 from libex_core.exceptions import AudibleAPIException
 from libex_core.log_safety import is_safe_log_value, safe_asin_for_log, window_elapsed
 from libex_core.text import is_unreadable_text, strip_html, strip_image_size_suffix
@@ -256,6 +256,9 @@ _TEXT_READ_KEYS: frozenset[str] = frozenset({
 
 _UNREADABLE_TEXT_LOG_INTERVAL_SECONDS = 60
 
+# The extrasWithheld value recorded for a product_images that cannot be read.
+_WITHHELD_UNREADABLE = "unreadable"
+
 _unreadable_text_counts: dict[str, int] = {}
 _unreadable_text_last_logged: dict[str, float] = {}
 
@@ -285,30 +288,43 @@ def _log_unreadable_text(asin: str, key: str, region: str) -> None:
     _unreadable_text_last_logged[key] = now
 
 
-def _best_image(product_images: dict | None) -> str | None:
-    """
-    Returns the highest resolution image URL with size suffix stripped.
+def _largest_size_key(product_images: dict) -> str | None:
+    """The numeric size key of the largest image in an object of sizes, or
+    None when it has none."""
+    sizes = [k for k in product_images if isinstance(k, str) and k.isdecimal()]
+    return str(max(int(k) for k in sizes)) if sizes else None
 
-    product_images that is truthy and not an object, an object with no
-    numeric size key, or a chosen URL that is truthy and not a string, raises
-    TypeError and fails the book, deliberately. product_images is not in
-    _REPRODUCED_KEYS, so audibleExtras carries it as sent, and a stored copy
-    is merged by a shallow union in which the incoming key wins: a book that
-    normalized with imageUrl left empty would write the malformed value over
-    the sizes already stored. The failure sends the caller to what it already
-    holds. Falsy values of any type are no images, as they always were.
+
+def _images_malformed(product_images: Any) -> bool:
+    """
+    True for a product_images value that cannot be read as sizes: truthy and
+    not an object, an object with no numeric size key, or one whose largest
+    size holds a truthy value that is not a string. Falsy values of any type
+    are no images and are not malformed.
     """
     if not product_images:
-        return None
+        return False
     if not isinstance(product_images, dict):
-        raise TypeError(f"product_images must be an object, got {type(product_images).__name__}")
-    highest_key = max((int(k) for k in product_images if k.isdigit()), default=None)
-    if highest_key is None:
-        raise TypeError("product_images carries no numeric size key")
-    url = product_images.get(str(highest_key))
-    if url and not isinstance(url, str):
-        raise TypeError(f"an image URL must be a string, got {type(url).__name__}")
-    return strip_image_size_suffix(url)
+        return True
+    key = _largest_size_key(product_images)
+    if key is None:
+        return True
+    url = product_images.get(key)
+    return bool(url) and not isinstance(url, str)
+
+
+def _best_image(product_images: dict | None) -> str | None:
+    """
+    Returns the highest resolution image URL with size suffix stripped, or
+    None when there is none to read, which includes a malformed
+    product_images (see _images_malformed). normalize_product withholds a
+    malformed one from audibleExtras and records that in extrasWithheld, so
+    the book is served with no image and neither a stored size map nor a
+    stored image is replaced.
+    """
+    if not product_images or _images_malformed(product_images):
+        return None
+    return strip_image_size_suffix(product_images.get(_largest_size_key(product_images)))
 
 
 def _audible_link(asin: str, region: str) -> str:
@@ -787,11 +803,22 @@ def normalize_product(product: dict, region: str) -> dict[str, Any]:
 
     # Every top-level key no first-class field reproduces rides into the blob
     # as sent, in the order Audible sent it.
+    #
+    # product_images stays out of it when it cannot be read as sizes. It is
+    # carried in the blob as sent and the stored blob is merged by a shallow
+    # union in which the incoming key wins, so a malformed value there would
+    # replace the sizes already stored. Left out, the union finds the key
+    # absent and keeps them, and the omission is recorded in extrasWithheld.
+    images_malformed = _images_malformed(product.get("product_images"))
     passthrough = {
         k: v for k, v in product.items()
-        if k not in _REPRODUCED_KEYS or k in unreadable
+        if (k not in _REPRODUCED_KEYS or k in unreadable)
+        and not (k == "product_images" and images_malformed)
     }
     extras, withheld = build_extras(passthrough, asin, region)
+    if images_malformed:
+        withheld["product_images"] = _WITHHELD_UNREADABLE
+        _log_extras_incident(asin, region, "product_images")
 
     book: dict[str, Any] = {
         "asin": asin,

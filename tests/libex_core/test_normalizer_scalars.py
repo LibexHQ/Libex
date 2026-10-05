@@ -6,27 +6,35 @@ field whose key is withheld from audibleExtras because the first-class field
 carries it (content_type, merchandising_summary, publisher_summary) is
 published as no value and its raw value rides into the blob under its own
 key: no well-formed response writes that key there, so nothing stored can be
-overwritten. A field whose raw value is in the blob regardless (release_date,
-product_images) keeps raising, because a book that normalized would write the
-malformed value over the stored copy through the shallow union.
+overwritten. release_date keeps raising: its raw value is in the blob as
+sent, and a book that normalized would write the malformed value over the
+stored copy through the shallow union. A product_images that cannot be read as
+sizes is served with no image and kept out of the blob, and the omission is
+recorded in extrasWithheld, so the union finds the key absent and keeps the
+stored sizes.
 
 Falsy values of any type are how Audible says nothing and read exactly as
 they always did.
 """
 
+# Standard library
+from unittest.mock import AsyncMock, MagicMock, patch
+
 # Third party
 import pytest
 
 # Local
+import libex_core.audible.books as books_mod
 from app.services.audible import books as hosted_books
 from libex_core.audible.authors.profile import normalize_author
 from libex_core.audible.books import (
     _best_image,
-    fetch_products,
     _parse_release_date,
+    fetch_products,
     normalize_product,
 )
 from libex_core.audible.series import normalize_series
+from app.core.response_headers import REASON_HYDRATION_FAILED, ResponseFacts
 from libex_core.exceptions import AudibleAPIException, NotFoundException
 from libex_core.lookup import get_books
 from tests.libex_core._lookup_support import asins
@@ -116,8 +124,6 @@ def test_a_podcast_still_reads_its_episode_fields():
 
 
 def test_an_unreadable_text_field_is_logged_without_its_value(caplog):
-    import libex_core.audible.books as books_mod
-
     books_mod._unreadable_text_last_logged.clear()
     with caplog.at_level("WARNING", logger="libex"):
         normalize_product(_product(content_type={"secret": "value"}), REGION)
@@ -128,8 +134,6 @@ def test_an_unreadable_text_field_is_logged_without_its_value(caplog):
 
 
 def test_the_unreadable_text_warning_is_windowed_per_key_and_counts_the_suppressed(caplog):
-    import libex_core.audible.books as books_mod
-
     books_mod._unreadable_text_last_logged.clear()
     books_mod._unreadable_text_counts.clear()
     message = "Audible sent a text field that is not text"
@@ -196,34 +200,60 @@ def test_a_falsy_non_text_release_date_is_no_date(raw):
     assert normalize_product(_product(release_date=raw), REGION)["releaseDate"] is None
 
 
-@pytest.mark.parametrize("url", TRUTHY_NON_TEXT)
-def test_an_image_url_that_is_not_text_still_fails_the_book(url):
-    with pytest.raises(TypeError):
-        _best_image({"500": url})
-    with pytest.raises(TypeError):
-        normalize_product(_product(product_images={"500": url}), REGION)
+MALFORMED_IMAGES = [
+    12, True, "abc", "500", ["a"], ["x", "y"], ["500"], [1, 2],
+    {"a": 1}, {"x": "http://example.com/a.jpg"},
+    {"500": 12}, {"500": ["u"]}, {"500": True},
+]
 
 
-@pytest.mark.parametrize("url", FALSY_NON_TEXT)
-def test_a_falsy_non_text_image_url_is_no_image(url):
-    assert _best_image({"500": url}) is None
+@pytest.mark.parametrize("images", MALFORMED_IMAGES)
+def test_product_images_that_cannot_be_read_is_no_image_and_is_withheld_not_carried(images):
+    assert _best_image(images) is None
+    book = normalize_product(_product(product_images=images), REGION)
+
+    assert book["imageUrl"] is None
+    assert "product_images" not in (book["audibleExtras"] or {})
+    assert book["extrasWithheld"] == {"product_images": "unreadable"}
+
+
+def test_a_book_with_malformed_images_is_otherwise_published_as_usual():
+    good = normalize_product(_product(language="english"), REGION)
+    bad = normalize_product(_product(language="english", product_images="abc"), REGION)
+
+    for key in good:
+        if key != "extrasWithheld":
+            assert bad[key] == good[key]
 
 
 @pytest.mark.parametrize("images", [
-    12, True, "abc", "500", ["a"], ["x", "y"], ["500"], [1, 2], {"a": 1}.items(),
-    {"a": 1}, {"x": "http://example.com/a.jpg"},
+    {"500": "http://example.com/a._SX500_.jpg"},
+    {"500": "http://example.com/a._SX500_.jpg", "x": 1},
 ])
-def test_product_images_that_is_not_an_object_of_sizes_fails_the_book(images):
-    with pytest.raises(TypeError):
-        _best_image(images)
-    with pytest.raises(TypeError):
-        normalize_product(_product(product_images=images), REGION)
+def test_readable_product_images_still_ride_in_the_blob_and_set_the_image(images):
+    book = normalize_product(_product(product_images=images), REGION)
+
+    assert book["imageUrl"] == "http://example.com/a.jpg"
+    assert book["audibleExtras"]["product_images"] == images
+    assert "extrasWithheld" not in book
+
+
+@pytest.mark.parametrize("url", FALSY_NON_TEXT)
+def test_a_falsy_non_text_image_url_is_no_image_and_is_not_withheld(url):
+    book = normalize_product(_product(product_images={"500": url}), REGION)
+
+    assert book["imageUrl"] is None
+    assert "extrasWithheld" not in book
+    assert book["audibleExtras"]["product_images"] == {"500": url}
 
 
 @pytest.mark.parametrize("images", [None, 0, False, "", [], {}])
-def test_falsy_product_images_is_no_image(images):
+def test_falsy_product_images_is_no_image_and_is_not_withheld(images):
+    book = normalize_product(_product(product_images=images), REGION)
+
     assert _best_image(images) is None
-    assert normalize_product(_product(product_images=images), REGION)["imageUrl"] is None
+    assert book["imageUrl"] is None
+    assert "extrasWithheld" not in book
 
 
 @pytest.mark.parametrize("raw", TRUTHY_NON_TEXT)
@@ -250,8 +280,6 @@ async def test_a_batch_answered_with_null_products_is_an_outage_in_the_library()
 
 @pytest.mark.asyncio
 async def test_a_batch_answered_with_null_products_is_an_outage_in_the_hosted_service(monkeypatch):
-    from unittest.mock import AsyncMock, patch
-
     session = AsyncMock()
     session.rollback = AsyncMock()
     monkeypatch.setattr(hosted_books, "audible_get", _null_products)
@@ -299,8 +327,6 @@ async def test_a_null_single_product_is_an_outage_in_the_library():
 
 @pytest.mark.asyncio
 async def test_a_null_single_product_is_an_outage_in_the_hosted_service(monkeypatch):
-    from unittest.mock import AsyncMock, patch
-
     session = AsyncMock()
     session.rollback = AsyncMock()
     monkeypatch.setattr(hosted_books, "audible_get", _null_product)
@@ -315,8 +341,6 @@ async def test_a_null_single_product_is_an_outage_in_the_hosted_service(monkeypa
 
 @pytest.mark.asyncio
 async def test_a_null_single_product_serves_the_stored_copy_in_the_hosted_service(monkeypatch):
-    from unittest.mock import AsyncMock, patch
-
     session = AsyncMock()
     session.rollback = AsyncMock()
     monkeypatch.setattr(hosted_books, "audible_get", _null_product)
@@ -327,3 +351,37 @@ async def test_a_null_single_product_serves_the_stored_copy_in_the_hosted_servic
         book = await hosted_books.get_book_by_asin(ASIN, REGION, session)
 
     assert book == stored
+
+
+@pytest.mark.asyncio
+async def test_a_one_asin_remainder_chunk_with_a_null_product_is_not_fetched_not_not_found(monkeypatch):
+    """A bulk request of 51 ASINs ends in a chunk of one, which takes the
+    single-product path: a null product there is an outage for that ASIN, so
+    it is reported as not fetched with the failure reason, and the fifty
+    answered by the batch chunk are still served."""
+    wanted = [f"B0BULK{i:04d}" for i in range(51)]
+
+    async def get(region, path, params=None, extra_headers=None):
+        if params and "asins" in params:
+            return {"products": [
+                {"asin": a, "title": f"Title {a}"} for a in params["asins"].split(",")
+            ]}
+        return {"product": None}
+
+    session = AsyncMock()
+    session.rollback = AsyncMock()
+    monkeypatch.setattr(hosted_books, "audible_get", get)
+    facts = ResponseFacts()
+    not_fetched: list[str] = []
+    persist = MagicMock()
+
+    with patch.object(hosted_books, "get_books_from_db", new=AsyncMock(return_value=[])), \
+         patch.object(hosted_books, "persist_books_background", new=persist), \
+         patch("app.services.audible.books.cache.get_many", new=AsyncMock(return_value={})):
+        books = await hosted_books.get_books_by_asins(
+            wanted, REGION, session, facts=facts, not_fetched_asins=not_fetched,
+        )
+
+    assert {b["asin"] for b in books} == set(wanted[:50])
+    assert not_fetched == [wanted[50]]
+    assert facts.incomplete_reasons == {REASON_HYDRATION_FAILED}

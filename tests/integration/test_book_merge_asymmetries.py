@@ -916,28 +916,40 @@ async def test_a_text_field_of_the_wrong_type_leaves_the_stored_text_and_adds_th
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-@pytest.mark.parametrize("override", [
-    {"release_date": 20210302},
-    {"product_images": {"500": 12}},
-])
-async def test_a_release_date_or_image_of_the_wrong_type_raises_before_a_write(db_session, override):
+async def test_a_release_date_of_the_wrong_type_raises_before_a_write(db_session):
     asin = "B0WRONGTYP1"
-    full = {
-        "asin": asin,
-        "title": "Full",
-        "release_date": "2021-03-02",
-        "product_images": {"500": "http://example.com/a._SX500_.jpg"},
-    }
+    full = {"asin": asin, "title": "Full", "release_date": "2021-03-02"}
     await write_books(db_session, [_normalize_product(full, REGION)])
     db_session.expire_all()
     before = await _stored(db_session, asin)
     extras_before = dict(before.audible_extras)
 
-    with pytest.raises((TypeError, AttributeError)):
-        _normalize_product({**full, **override}, REGION)
+    with pytest.raises(TypeError):
+        _normalize_product({**full, "release_date": 20210302}, REGION)
 
     db_session.expire_all()
     after = await _stored(db_session, asin)
     assert after.audible_extras == extras_before
     assert after.audible_extras["release_date"] == "2021-03-02"
     assert after.release_date == before.release_date
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize("images", ["abc", ["a"], [1, 2], {"x": 1}, {"500": 12}, 12])
+async def test_a_malformed_product_images_leaves_the_stored_sizes_and_image_and_is_recorded(db_session, images):
+    asin = "B0WRONGIMG1"
+    sizes = {"500": "http://example.com/a._SX500_.jpg", "2400": "http://example.com/a._SX2400_.jpg"}
+    full = {"asin": asin, "title": "Full", "product_images": sizes}
+    await write_books(db_session, [_normalize_product(full, REGION)])
+    db_session.expire_all()
+    before = await _stored(db_session, asin)
+    assert before.image == "http://example.com/a.jpg"
+
+    await write_books(db_session, [_normalize_product({**full, "product_images": images}, REGION)])
+    db_session.expire_all()
+    after = await _stored(db_session, asin)
+
+    assert after.image == "http://example.com/a.jpg"
+    assert after.audible_extras["product_images"] == sizes
+    assert after.extras_withheld["product_images"] == "unreadable"

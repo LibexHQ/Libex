@@ -8,6 +8,7 @@ fill a snapshot. Needs Docker, through the container fixture in conftest.
 # Standard library
 import uuid
 from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock
 
 # Third party
 import pytest
@@ -18,13 +19,15 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
 # Local
-from libex_core.lookup import get_series_books
+from libex_core.lookup import get_author_books, get_series_books
 from libex_core.storage.read.walks import get_walk_result
 from libex_core.storage.store import LocalStore
 from libex_core.storage.walk_limits import SERIES_BOOKS
 from libex_core.storage.write import write_walk_result
-from tests.libex_core._lookup_support import SERIES, asins
+from tests.libex_core._lookup_support import AUTHOR, SERIES, asins
+from tests.libex_core.test_lookup_authors import WALK, _hydrating_get
 from tests.libex_core.test_lookup_series_books import _series_members
+from tests.libex_core.test_lookup_walks import assert_same_answer
 
 pytestmark = pytest.mark.integration
 
@@ -110,3 +113,19 @@ async def test_a_snapshot_naming_books_stored_only_for_another_region_is_a_miss(
         _series_members(found, calls=calls), SERIES, store=store, region="uk", max_age=DAY
     )
     assert calls and result.snapshot_at is None
+
+
+async def test_a_stored_series_list_is_the_live_list_field_for_field(store):
+    live = await get_series_books(_series_members(asins(4)), SERIES, store=store)
+    stored = await get_series_books(_no_requests(), SERIES, store=store, max_age=DAY)
+    assert stored.snapshot_at is not None
+    assert_same_answer(live, stored)
+
+
+async def test_a_stored_author_list_is_the_live_list_field_for_field(store, monkeypatch):
+    found = asins(4)
+    monkeypatch.setattr(WALK, AsyncMock(return_value=(list(found), True)))
+    live = await get_author_books(_hydrating_get(), AUTHOR, store=store)
+    stored = await get_author_books(_no_requests(), AUTHOR, store=store, max_age=DAY)
+    assert stored.snapshot_at is not None
+    assert_same_answer(live, stored)

@@ -39,7 +39,7 @@ not evidence that anyone consumed a given version at the time it was cut.
 - **The stamps are no longer unused.** The `confirmed_at` and `chapters_confirmed_at` columns added in 0.21.0 are now written by the lookups and writers above. No output carries them except `Stored.confirmed_at` and `chapters_confirmed_at(...)`.
 - **A store migration adds an index on the series of a book's series links; run `libex-core db upgrade`.** Until the store is upgraded, `open()` refuses it as `StoreOutdated`, as for any older schema. The upgrade is one `CREATE INDEX` on the series-to-book link table, and rerunning it is harmless. Reading the books of a series, and deleting a series together with its links, filtered the whole link table because every existing index on it started with the book; they now use the index. Nothing in the package's public surface, and no stored data, changes. Downgrading drops the index.
 - **`from_store` and `store_write_failed` on a `BookList` mean a little more.** `from_store` also lists every book of a list answered from a record under `max_age`, and `store_write_failed` is also `True` when the record of a live walk could not be written; the live answer is still returned. The earlier meanings are unchanged.
-- **No store migration.** The `walk_results` table was added in 0.21.0 and is now used; a store already upgraded needs nothing.
+- **Recording walks needs no store migration of its own.** The `walk_results` table was added in 0.21.0 and is now used; the only migration in this release is the index above, and a store upgraded for that needs nothing more.
 
 ## [0.21.0]
 

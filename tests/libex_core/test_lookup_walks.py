@@ -435,6 +435,50 @@ async def test_a_snapshot_exactly_at_the_cap_is_not_over_it(store, monkeypatch):
     assert len(_walks._validated_asins([f"B{n:09d}" for n in range(MAX_WALK_ASINS)])) == MAX_WALK_ASINS
 
 
+async def test_a_list_one_over_the_cap_is_rejected_whole_by_the_validator():
+    from libex_core.lookup import _walks
+    from libex_core.storage.walk_limits import MAX_WALK_ASINS
+
+    with pytest.raises(_walks._Miss):
+        _walks._validated_asins([f"B{n:09d}" for n in range(MAX_WALK_ASINS + 1)])
+
+
+@pytest.mark.parametrize(
+    "result_kw, from_store",
+    [
+        ({"complete": True, "store_write_failed": True}, []),
+        ({"complete": True, "store_write_failed": False}, ["B0LOK00000"]),
+        ({"complete": False, "store_write_failed": False}, []),
+    ],
+)
+async def test_a_walk_is_recorded_complete_only_when_the_store_holds_all_of_it(
+    monkeypatch, result_kw, from_store
+):
+    from types import SimpleNamespace
+
+    from libex_core.lookup import _walks
+
+    seen = {}
+
+    async def persist(store, kind, asin, region, book_asins, **kw):
+        seen.update(kw)
+        return True
+
+    monkeypatch.setattr("libex_core.lookup._store.persist_walk", persist)
+    result = SimpleNamespace(incomplete_reasons=(), **result_kw)
+    hydration = SimpleNamespace(books=[{"asin": "B0LOK00000"}], from_store=from_store)
+    await _walks.record_walk(
+        object(), SERIES_BOOKS, SERIES, "us", result, hydration, datetime.now(timezone.utc)
+    )
+    assert seen["complete"] is False
+
+
+async def test_a_lowercase_entry_of_valid_shape_is_read_back_uppercased():
+    from libex_core.lookup import _walks
+
+    assert _walks._validated_asins(["b0lok00000", "B0LOK00000"]) == ["B0LOK00000"]
+
+
 @pytest.mark.parametrize(
     "exc",
     [RecursionError("deep"), ValueError("bad json"), TypeError("t"), RuntimeError("drv")],
@@ -556,3 +600,49 @@ async def test_a_snapshot_naming_books_stored_only_for_another_region_is_a_miss(
         _series_members(found, calls=calls), SERIES, store=store, region="uk", max_age=DAY
     )
     assert calls and result.snapshot_at is None, "the us books are not the uk's"
+
+
+# Section: a stored list is the same answer as the live one
+
+# The fields that legitimately differ between a live list and one answered
+# from a stored walk; every other BookList field must be equal.
+_DOCUMENTED_DIFFERENCES = {"snapshot_at", "from_store", "explicit_nulls"}
+
+
+def assert_same_answer(live, stored):
+    from dataclasses import fields
+
+    assert [b.model_dump() for b in stored.books] == [b.model_dump() for b in live.books]
+    assert live.books, "an empty list would prove nothing"
+    names = {f.name for f in fields(live)}
+    assert _DOCUMENTED_DIFFERENCES <= names
+    for name in names - _DOCUMENTED_DIFFERENCES - {"books"}:
+        assert getattr(stored, name) == getattr(live, name), name
+
+
+async def test_a_stored_series_list_is_the_live_list_field_for_field(store):
+    found = asins(4)
+    live = await get_series_books(_series_members(found), SERIES, store=store)
+    stored = await get_series_books(_no_requests(), SERIES, store=store, max_age=DAY)
+    assert stored.snapshot_at is not None
+    assert_same_answer(live, stored)
+
+
+async def test_a_stored_series_list_is_the_live_list_when_shaped(store):
+    found = asins(4)
+    live = await get_series_books(
+        _series_members(found), SERIES, store=store, sort="title", order="desc"
+    )
+    stored = await get_series_books(
+        _no_requests(), SERIES, store=store, max_age=DAY, sort="title", order="desc"
+    )
+    assert_same_answer(live, stored)
+
+
+async def test_a_stored_author_list_is_the_live_list_field_for_field(store, monkeypatch):
+    found = asins(4)
+    monkeypatch.setattr(WALK, AsyncMock(return_value=(list(found), True)))
+    live = await get_author_books(_hydrating_get(), AUTHOR, store=store)
+    stored = await get_author_books(_no_requests(), AUTHOR, store=store, max_age=DAY)
+    assert stored.snapshot_at is not None
+    assert_same_answer(live, stored)

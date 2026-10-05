@@ -481,7 +481,16 @@ The library is built around preventing that from happening by accident:
   records when Audible last answered for its chapters, even when Audible had
   none to give, so looking up the chapters of a stored book leaves a date
   behind unless Audible couldn't be reached or the chapter list couldn't be
-  written. The database address, and any password in it, is never logged, repeated in an error, or shown in the store's `repr`.
+  written. Looking up a series' books, or an author's books by ASIN, also
+  keeps a record of that list for the region asked: the series or author,
+  which books the list held and in what order, whether it was whole, and
+  when it was fetched. This happens with any store, whether or not the
+  application ever uses the record. The newest fetch replaces the record, so
+  it holds the latest date rather than a history of every lookup, and it is
+  removed when Audible answers that the series or author has no books. An
+  application that asks for it, with `max_age`, can have a recent, whole list
+  answered from that record with no request to Audible; an answer given that
+  way leaves the record and its date as they were. The database address, and any password in it, is never logged, repeated in an error, or shown in the store's `repr`.
   - **A SQLite file** is created only when the application runs the store's
     upgrade step (`libex-core db upgrade` on the command line). On Linux and
     macOS a new file is created readable and writable only by the user
@@ -552,8 +561,10 @@ The library is built around preventing that from happening by accident:
     using the words searched for. The words are used for that query and are
     not written to the store. A PostgreSQL server's own logs are configured
     by whoever runs it, and can record the queries it receives.
-  - **Deleting it.** The library has no delete function, and the command-line
-    tool has no delete command. To remove a SQLite store, delete the file
+  - **Deleting it.** The library has no function that deletes a store or what
+    it holds about books, authors or series. The one delete it offers,
+    `delete_walk_result`, removes a single record of a series' or an author's
+    list. The command-line tool has no delete command. To remove a SQLite store, delete the file
     together with any `-wal` and `-shm` files beside it, with nothing using
     it at the time. To remove a PostgreSQL store, drop its database or its
     tables. Turning storage off stops new writes but leaves what was stored
@@ -637,11 +648,14 @@ The library is built around preventing that from happening by accident:
 
   From a local store, which is used only when an application passes one to a lookup or uses the storage part directly (on the command line, only when `LIBEX_CORE_STORAGE` is set):
   - books, a chapter list, a series or an author written, or a book's chapters recorded as looked up (info): what was written, region, and for books, how many;
+  - the record of a series' or an author's list of books written or removed (info, also logged when a newer record was kept or there was none to remove): which of the two it was, region, and when written, how many books it names;
   - a chapter list not stored because the store doesn't hold its book for that region (info): title ASIN, region;
   - a series profile not stored because it has no ASIN, name or region (info): what was being written, the reason, which is a fixed phrase, and the region;
-  - a write that failed (warning; the answer from Audible is still returned): what was being written, the kind of error, region, and for books, how many were in the batch;
+  - a write that failed (warning; the answer from Audible is still returned): what was being written, the kind of error, region, for books, how many were in the batch, and for the record of a series' or an author's list, which of the two it was and how many books it named;
   - a read that failed, which is treated as nothing stored (warning): what was being read, the kind of error. This includes the check, before a chapter list is stored, that its book is in the store; when that check fails, nothing is written;
-  - an answer given from the store in place of Audible (warning, always "Answered from the store while Audible was unavailable"): what kind of answer it was and the region; for a chapter list, a series or an author, its ASIN; for a series' books, the series ASIN and how many books the store held; for books, how many were asked for and how many the store held; for a quick search split into an author and a title, how many stored books matched and whether Audible's search failed, since the same line is written when Audible's search worked but found nothing;
+  - a series' or an author's books answered from the record of that list under `max_age`, with no request to Audible (info): whether a series or an author, its ASIN, region, how many books, and how old the record was in seconds;
+  - a record of a series' or an author's list that could not be used, so the list was fetched from Audible (info): whether a series or an author, its ASIN, region, and the reason, one of absent, stale, incomplete, malformed or unreadable. When the record could not even be judged, a warning comes first with the same ASIN and region and the kind of error;
+  - an answer given from the store in place of Audible because Audible was unavailable (warning, always "Answered from the store while Audible was unavailable"): what kind of answer it was and the region; for a chapter list, a series or an author, its ASIN; for a series' books, the series ASIN and how many books the store held; for books, how many were asked for and how many the store held; for a quick search split into an author and a title, how many stored books matched and whether Audible's search failed, since the same line is written when Audible's search worked but found nothing;
   - an existing SQLite file that other users have access to, whenever the store checks the file (opening it, upgrading it or asking its status) (warning): the file's name, not its folder;
   - an upgrade that finished (info): the database type, the revision reached and, for SQLite, whether the file was new and its name, not its folder;
   - a SQLite file that stayed locked while being switched to write-ahead logging (warning): the file's name, not its folder, and how long the store waited;
@@ -664,8 +678,9 @@ The library is built around preventing that from happening by accident:
   the records from Audible's answers any ASIN, name or value not shaped like
   an ASIN or a short catalogue entry is logged as `REDACTED`. Most local-store
   records hold only fixed words, counts and the region. Of those that hold an
-  ASIN, the chapter-list record and the record of an answer from the store
-  log one that has already been checked, the author-row record logs its
+  ASIN, the chapter-list record, the record of an answer from the store and
+  the records of a stored series' or author's list log one that has already
+  been checked, the author-row record logs its
   author ASIN and region only once both have matched rows already in the
   store, and the publication-date record takes its title ASIN from the data
   being stored, without the `REDACTED` check. The records that name a SQLite

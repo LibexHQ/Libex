@@ -714,7 +714,11 @@ class LibexClient:
         """
         Makes a GET request to the Audible API through this instance's
         transport. Returns parsed JSON response.
-        Raises AudibleAPIException on non-200 responses.
+        Raises AudibleAPIException on non-200 responses, and on a 200 whose
+        body is not valid JSON (an HTML page, an empty or truncated body).
+        That one carries upstream_status 200, because Audible did answer;
+        it is an outage, never an absence, is not retried, and its message
+        never includes the body.
         Raises RuntimeError, before any request is sent, if this instance
         has been closed -- see aclose()'s own docstring.
 
@@ -812,7 +816,31 @@ class LibexClient:
                 raise NotFoundException()
 
             if response.status_code == 200:
-                return response.json()
+                try:
+                    return response.json()
+                except ValueError as e:
+                    # An HTML interstitial, an empty body or a truncated one
+                    # on a 200: Audible answered, but not with anything this
+                    # client can read, so what the record holds is unknown
+                    # -- an outage, never an absence, and not retried
+                    # because a second read of the same kind of answer is
+                    # no more informative. Only the exception's type, the
+                    # region, path and the body's length are logged: the
+                    # body itself is never copied into a log or a message.
+                    logger.warning(
+                        "Audible API answered 200 with a body that is not JSON",
+                        extra={
+                            "status_code": response.status_code,
+                            "region": region,
+                            "path": path,
+                            "error_type": type(e).__name__,
+                            "body_bytes": len(response.content),
+                        },
+                    )
+                    raise AudibleAPIException(
+                        f"Audible API returned a non-JSON body with 200 for {url}",
+                        upstream_status=response.status_code,
+                    ) from e
 
             if _is_retryable_status(response.status_code):
                 retry_after = _parse_retry_after(response.headers.get("Retry-After"))

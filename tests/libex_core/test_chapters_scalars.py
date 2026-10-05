@@ -6,6 +6,7 @@ Audible's own key, and one bad field never costs the other chapters.
 
 # Standard library
 import json
+import math
 
 # Third party
 import pytest
@@ -15,7 +16,7 @@ from libex_core.audible.chapters import normalize_chapters
 from libex_core.models import ChapterResponse
 
 HUGE = 10**5000
-BAD = ["12", 1.5, float("nan"), True, HUGE, -1, None, {"a": 1}, [1]]
+BAD = ["twelve", "", "1.5", 1.5, float("nan"), float("inf"), HUGE, "9" * 5000, None, {"a": 1}, [1]]
 
 CHAPTER_KEYS = [("length_ms", "lengthMs"), ("start_offset_ms", "startOffsetMs"), ("start_offset_sec", "startOffsetSec")]
 INFO_KEYS = [
@@ -59,7 +60,7 @@ def test_bad_chapter_scalar_defaults_and_is_kept(raw_key, field, bad):
     if bad is HUGE:
         assert kept == {raw_key: None}
         assert out["extrasWithheld"]["sanitized"]["oversizedNumbers"] == 1
-    elif isinstance(bad, float) and bad != bad:
+    elif isinstance(bad, float) and not math.isfinite(bad):
         assert kept == {raw_key: None}
     else:
         assert kept == {raw_key: bad}
@@ -84,20 +85,84 @@ def test_good_scalars_pass_through_unchanged():
     assert "audibleExtras" not in out
 
 
-def test_whole_valued_float_is_the_int():
-    chapter = _good()
-    chapter["length_ms"] = 1500.0
-    out = normalize_chapters(_payload([chapter]))
-    assert out["chapters"][0]["lengthMs"] == 1500
-    assert "audibleExtras" not in out["chapters"][0]
+# Everything the response model coerced before is published unchanged: only a
+# value it refused (or json.dumps could not render) reads as the default.
+INT_MATRIX = [
+    "1500", " 1500 ", "1500.0", "-7", True, False, -5, 0, 1500.0, -3.0, 1e30,
+    2**63, 2**70, 10**4000, "1_000", "٣", "1e3", "0x10", "twelve", "", "1.5",
+    1.5, float("nan"), float("-inf"), None, {}, [], [1], 10**5000,
+]
+BOOL_MATRIX = [
+    "true", "false", "True", "1", "0", "yes", "no", "on", "off", "t", "f", "y", "n",
+    1, 0, True, False, 1.0, 0.0, 2, "2", "maybe", "", None, [], {}, 1.5,
+]
 
 
-def test_just_past_the_int64_bound_is_bad():
-    chapter = _good()
-    chapter["length_ms"] = 2**63
+def _model_int(value):
+    """What the response model published for this value before, or None if it refused."""
+    try:
+        json.dumps(value)
+        return ChapterResponse(chapters=[{"lengthMs": value}]).chapters[0].lengthMs
+    except Exception:
+        return None
+
+
+@pytest.mark.parametrize("value", INT_MATRIX, ids=_id)
+def test_int_differential_against_the_model(value):
+    expected = _model_int(value)
+    chapter = {**_good(), "length_ms": value}
+    out = normalize_chapters(_payload([chapter], runtime_length_ms=value))
+    _roundtrip(out)
+    if expected is None:
+        assert out["chapters"][0]["lengthMs"] == 0
+        assert out["runtimeLengthMs"] == 0
+        assert "length_ms" in out["chapters"][0]["audibleExtras"]
+    else:
+        assert out["chapters"][0]["lengthMs"] == expected
+        assert out["runtimeLengthMs"] == expected
+        assert "audibleExtras" not in out["chapters"][0]
+
+
+def test_int_matrix_covers_both_outcomes():
+    outcomes = {_model_int(v) is None for v in INT_MATRIX}
+    assert outcomes == {True, False}
+
+
+@pytest.mark.parametrize("value", BOOL_MATRIX, ids=_id)
+def test_is_accurate_differential_against_the_model(value):
+    try:
+        expected = ChapterResponse(isAccurate=value).isAccurate
+    except Exception:
+        expected = None
+    out = normalize_chapters(_payload([_good()], is_accurate=value))
+    _roundtrip(out)
+    if expected is None:
+        assert out["isAccurate"] is False
+        assert out["audibleExtras"]["chapterInfo"]["is_accurate"] == value
+    else:
+        assert out["isAccurate"] is expected
+        assert "audibleExtras" not in out
+
+
+def test_title_matrix_matches_the_model():
+    for value in ("t", "", 5, 1.5, True, None, {"t": 1}, ["x"]):
+        try:
+            expected = ChapterResponse(chapters=[{"title": value}]).chapters[0].title
+        except Exception:
+            expected = None
+        out = normalize_chapters(_payload([_good(value)]))
+        _roundtrip(out)
+        if expected is None:
+            assert out["chapters"][0]["title"] == ""
+            assert out["chapters"][0]["audibleExtras"] == {"title": value}
+        else:
+            assert out["chapters"][0]["title"] == expected
+
+
+def test_wide_but_renderable_int_is_published():
+    chapter = {**_good(), "length_ms": 2**63}
     out = normalize_chapters(_payload([chapter]))
-    assert out["chapters"][0]["lengthMs"] == 0
-    assert out["chapters"][0]["audibleExtras"] == {"length_ms": 2**63}
+    assert out["chapters"][0]["lengthMs"] == 2**63
 
 
 @pytest.mark.parametrize("bad", [5, 1.5, True, None, {"t": 1}, ["x"]], ids=_id)
@@ -123,11 +188,3 @@ def test_bad_scalar_on_sub_chapter_keeps_siblings():
     assert [s["title"] for s in subs] == ["s1", "s2"]
     assert subs[1]["lengthMs"] == 0 and subs[0]["lengthMs"] == 10
     assert out["chapters"][1]["title"] == "q"
-
-
-@pytest.mark.parametrize("bad", ["true", 1, None, {}], ids=_id)
-def test_non_bool_is_accurate_defaults_and_is_kept(bad):
-    out = normalize_chapters(_payload([_good()], is_accurate=bad))
-    _roundtrip(out)
-    assert out["isAccurate"] is False
-    assert out["audibleExtras"]["chapterInfo"]["is_accurate"] == bad

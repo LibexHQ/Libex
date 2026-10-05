@@ -76,7 +76,7 @@ AUDIBLE_CONCURRENCY_LIMIT = 10
 
 # A second, wider pool reserved for exactly one caller: a live author-books
 # request's own discovery-and-hydration fan-out (screens + catalog walk in
-# authors/, then get_books_by_asins hydrating the result), entered via
+# authors/, then the hydration of the walk's result), entered via
 # author_books_concurrency() below. That workload is a fundamentally different
 # shape from the sustained one above -- one user request fires a bounded,
 # self-terminating burst (measured locally: 179 requests for
@@ -84,12 +84,11 @@ AUDIBLE_CONCURRENCY_LIMIT = 10
 # once assumed here, but still capped by the screens plateau and
 # CATALOG_RESULT_CEILING rather than open-ended) and then stops, driven by
 # one caller's request rather than a standing crawl, and not something to
-# amplify. Reusing
-# AUDIBLE_CONCURRENCY_LIMIT for it was the actual bug behind a live, measured
-# production outage: 5 concurrent author lookups queued behind a shared
-# 10-wide gate all 504'd at the fronting proxy's 30s timeout, and even a
-# single uncontended prolific-author request (Christie) measured at 28.22s
-# wall clock -- inside 2s of that same timeout.
+# amplify. Reusing AUDIBLE_CONCURRENCY_LIMIT for it was the actual bug behind
+# a live, measured production outage: 5 concurrent author lookups queued
+# behind a shared 10-wide gate all 504'd at the fronting proxy's 30s timeout,
+# and even a single uncontended prolific-author request (Christie) measured
+# at 28.22s wall clock -- inside 2s of that same timeout.
 #
 # Measured directly against Audible (bypassing the production proxy, so
 # these are relative, not absolute, numbers) across Conan Doyle and

@@ -6,7 +6,7 @@ redaction that keep caller text and malformed upstream values off log lines.
 # Third party
 import pytest
 
-# Core
+# Local
 from libex_core.log_safety import (
     _MAX_VALUE_LENGTH,
     is_safe_log_value,
@@ -25,14 +25,14 @@ from libex_core.log_safety import (
     "Science Fiction",
     "Science Fiction & Fantasy",           # "&" (Po)
     "SF・ファンタジー",                      # jp middle dot (Po)
-    "Littérature d’aventure",         # U+2019 (Pf)
-    "पुस्तक",  # Devanagari with combining marks (Mn/Mc)
+    "Littérature d\u2019aventure",         # U+2019 (Pf)
+    "\u092a\u0941\u0938\u094d\u0924\u0915\u093e",  # Devanagari: Mn marks plus Mc U+093E
     "Фантастика",
     "科幻小说",
     "ファンタジー",
     "رواية",
     "นิยาย",      # Thai with marks
-    "Kids　Books",                     # ideographic space (Zs)
+    "Kids\u3000Books",                     # ideographic space (Zs)
     "C++ $ + ~ ©",                         # symbols
     "Self-Help (2nd ed.)",
     "",                                    # vacuously safe
@@ -66,12 +66,12 @@ def test_length_counts_characters_not_bytes():
 @pytest.mark.parametrize("ch", [
     "\x00", "\n", "\r", "\t", "\x1b", "\x7f",   # C0 and DEL (Cc)
     "\x85", "\x9f",                             # C1 (Cc)
-    " ", " ",                         # line/paragraph separators (Zl/Zp)
-    "‮", "‪", "⁦",               # bidi overrides/isolates (Cf)
-    "​", "﻿",                         # zero-width space, BOM (Cf)
-    "",                                   # private use (Co)
+    "\u2028", "\u2029",                         # line/paragraph separators (Zl/Zp)
+    "\u202e", "\u202a", "\u2066",               # bidi overrides/isolates (Cf)
+    "\u200b", "\ufeff",                         # zero-width space, BOM (Cf)
+    "\ue000",                                   # private use (Co)
     "\ud800",                                   # lone surrogate (Cs)
-    "͸",                                   # unassigned (Cn)
+    "\u0378",                                   # unassigned (Cn)
     ";", "=",                                   # query-smuggling characters
 ])
 @pytest.mark.parametrize("template", ["{}", "ab{}", "{}ab", "a{}b"])

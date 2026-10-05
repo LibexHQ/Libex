@@ -13,6 +13,7 @@ absence. Nothing here reads the environment.
 # Standard library
 import logging
 import time
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 # Core
@@ -24,12 +25,13 @@ from libex_core.audible.client import (
 )
 from libex_core.audible.series import fetch_series, fetch_series_book_asins, normalize_series
 from libex_core.exceptions import AudibleAPIException, NotFoundException
-from libex_core.lookup import _store
+from libex_core.lookup import _store, _walks
 from libex_core.lookup._common import OUTAGE_MESSAGE
 from libex_core.lookup._shaping import check_shaping
-from libex_core.lookup.author_books import BookList, _assemble
+from libex_core.lookup.author_books import BookList, _assemble, _assemble_snapshot
 from libex_core.lookup.books import Hydration, _canonical_asin, hydrate_books
 from libex_core.models import SeriesResponse
+from libex_core.storage.walk_limits import SERIES_BOOKS
 
 if TYPE_CHECKING:
     from libex_core.storage.store import LocalStore
@@ -103,6 +105,7 @@ async def get_series_books(
     sort: str | None = None,
     order: str = "asc",
     store: "LocalStore | None" = None,
+    max_age: timedelta | None = None,
 ) -> BookList:
     """
     Fetches the full books in a series.
@@ -130,7 +133,20 @@ async def get_series_books(
     member list Audible could not give and the store answered: the stored
     members may not be the whole series, so discovery-incomplete is reported.
     Judged before filtering. store_write_failed is True when a store was given and
-    some fetched book could not be written to it.
+    some fetched book, or the record of the walk, could not be written to it.
+
+    With a store every live walk also records which books it returned and
+    whether it was whole, as the series' stored walk, replacing the last.
+    max_age (a timedelta, default None) lets that stored walk answer in place
+    of a new one: when it was complete, is no older than max_age, and names
+    only books stored for this region, the list is answered from the store with
+    no request to Audible, complete, with snapshot_at set and every book in
+    from_store. Anything else, including an unreadable or malformed stored
+    walk, makes the walk live. filters, sort and order are applied to a stored
+    list afterwards. ValueError, before anything is sent, when it is not a
+    timedelta, is not above zero, or is given without a store. None never
+    reads a stored walk. A confirmed absence is never answered from the store:
+    the stored walk is removed.
 
     filters, sort and order are applied as on the hosted route: the books keep
     series order unless a sort is given, which overrides it. See
@@ -145,8 +161,14 @@ async def get_series_books(
     canonical = _canonical_asin(asin)
     region = validate_region(region)
     check_shaping(filters, sort, order)
+    _walks.check_max_age(max_age, store)
     if store is not None:
         await _store.check(store)
+        if max_age is not None:
+            snapshot = await _walks.stored_list(store, SERIES_BOOKS, canonical, region, max_age)
+            if snapshot is not None:
+                return _assemble_snapshot(*snapshot, filters, sort, order)
+        walk_at = datetime.now(timezone.utc)
     try:
         start = time.monotonic()
         asins = await fetch_series_book_asins(get, canonical, region)
@@ -158,6 +180,8 @@ async def get_series_books(
             "region": region,
         })
     except NotFoundException:
+        if store is not None:
+            await _walks.forget_walk(store, SERIES_BOOKS, canonical, region, walk_at)
         raise
     except Exception as e:
         logger.warning("Audible unavailable for series books", extra={
@@ -185,9 +209,14 @@ async def get_series_books(
         raise as_audible_failure(e, OUTAGE_MESSAGE) from e
 
     if not asins:
+        if store is not None:
+            await _walks.forget_walk(store, SERIES_BOOKS, canonical, region, walk_at)
         raise NotFoundException("No books found for series")
     hydration = await hydrate_books(get, asins, region, store=store)
-    return _assemble(True, hydration, filters, sort, order)
+    result = _assemble(True, hydration, filters, sort, order)
+    if store is None:
+        return result
+    return await _walks.record_walk(store, SERIES_BOOKS, canonical, region, result, hydration, walk_at)
 
 
 async def search_series(

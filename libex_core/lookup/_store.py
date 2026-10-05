@@ -24,6 +24,7 @@ quietly run without storage.
 # Standard library
 import logging
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 # Core
@@ -236,6 +237,57 @@ async def persist_chapters_confirmed_absent(
     )
 
 
+async def persist_walk(
+    store: "LocalStore",
+    kind: str,
+    asin: str,
+    region: str,
+    book_asins: list[str],
+    *,
+    complete: bool,
+    incomplete_reasons: tuple[str, ...],
+    at: datetime,
+) -> bool:
+    """Records a finished walk as the snapshot for (kind, asin, region). False
+    when the write failed. A newer snapshot already held is kept by the writer
+    and is not a failure. Logged with counts only, never the ASINs."""
+    from libex_core.storage import write
+
+    return await _persist_one(
+        store,
+        "walk",
+        lambda s: write.write_walk_result(
+            s,
+            kind=kind,
+            asin=asin,
+            region=region,
+            book_asins=book_asins,
+            complete=complete,
+            incomplete_reasons=list(incomplete_reasons),
+            at=at,
+        ),
+        kind=kind,
+        region=region,
+        book_num=len(book_asins),
+    )
+
+
+async def forget_walk(
+    store: "LocalStore", kind: str, asin: str, region: str, *, at: datetime
+) -> bool:
+    """Removes the snapshot for (kind, asin, region) after Audible confirmed
+    the walk's subject has no books. False when the delete failed."""
+    from libex_core.storage import write
+
+    return await _persist_one(
+        store,
+        "walk removal",
+        lambda s: write.delete_walk_result(s, kind=kind, asin=asin, region=region, at=at),
+        kind=kind,
+        region=region,
+    )
+
+
 # ============================================================
 # READING
 # ============================================================
@@ -299,6 +351,20 @@ async def stored_books(
     )
     by_asin = {row["asin"]: row for row in rows}
     return settle_flags_list([by_asin[a] for a in asins if a in by_asin])
+
+
+async def stored_walk(
+    store: "LocalStore", kind: str, asin: str, region: str
+) -> dict[str, Any] | None | object:
+    """The raw stored snapshot row for (kind, asin, region), None when there is
+    none, and _READ_FAILED when the read failed, which is not the same as
+    there being none. The values are unchecked; libex_core.lookup._walks judges
+    them."""
+    from libex_core.storage.read import walks
+
+    return await _read(
+        store, "walk", lambda s: walks.get_walk_result(s, kind, asin, region), _READ_FAILED
+    )
 
 
 async def serve_merged(

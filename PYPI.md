@@ -227,6 +227,20 @@ store has `explicit_nulls` of `None` (`BookLookup`) or no entry in the mapping
 (`BooksLookup`), meaning unknown, where `()` means Audible answered and sent
 none.
 
+With a store, `get_series_books` and `get_author_books` (by ASIN) also record
+which books each live walk returned and whether it reached its end. Pass
+`max_age=timedelta(...)` and a recorded walk that was complete, is no older
+than that, and names only books stored for the region asked answers the call
+with no request to Audible: the result is complete, `snapshot_at` says when
+Audible last gave the list, and every book is listed in `from_store`. Filters
+and sort apply afterwards. Anything else (no record, an older or incomplete
+one, a book missing from the store, a record that cannot be read) is a live
+walk, which then replaces the record. Without `max_age` nothing is ever served
+from a record. `max_age` without a store is a `ValueError`. A list Audible
+confirms has no books is never answered from the store, and its record is
+removed. The record is part of the plaintext store, so it also notes which
+series and authors you looked up, and when.
+
 ### Supplying your own connection
 
 `LocalStore(url)` makes the database connection itself. If you need one it

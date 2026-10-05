@@ -17,6 +17,7 @@ from typing import Any
 
 _EXPORTS = {
     "confirm_chapters": "libex_core.storage.write.entities",
+    "delete_walk_result": "libex_core.storage.write.walks",
     "exclusive_write": "libex_core.storage.write.serialize",
     "resolve_author_ids": "libex_core.storage.write.books",
     "write_books": "libex_core.storage.write.books",
@@ -27,6 +28,7 @@ _EXPORTS = {
     "write_author_profile": "libex_core.storage.write.entities",
     "write_series_profile": "libex_core.storage.write.entities",
     "write_track": "libex_core.storage.write.entities",
+    "write_walk_result": "libex_core.storage.write.walks",
 }
 
 __all__ = sorted(_EXPORTS)

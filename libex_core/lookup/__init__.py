@@ -13,6 +13,11 @@ answers an outage from the stored copy where the hosted service does. Nothing
 about the storage is imported unless a store is passed, so this package works
 without the storage extra. The stored_* functions are the exception to the
 shape: they read a store alone, never ask Audible, and take the store first.
+
+With a store, get_series_books and get_author_books (by ASIN) also record each
+live walk as a stored list, and given max_age (a timedelta) answer from that
+record, with no request to Audible, while it is complete, fresh and names only
+books stored for the region asked. Any other state of the record is a live walk.
 """
 
 # Local

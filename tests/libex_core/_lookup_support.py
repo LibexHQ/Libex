@@ -5,11 +5,13 @@ helpers that build products and batch answers. Nothing here touches a network.
 """
 
 # Standard library
+import itertools
 from datetime import datetime, timedelta, timezone
 
 # Local
 from libex_core.audible.releases import flatten_genre_nodes
 from libex_core.exceptions import AudibleAPIException, NotFoundException
+from libex_core.lookup import author_books, series
 
 AUTHOR = "B000AUTHOR"
 AUTHOR_NAME = "Jane Test"
@@ -143,3 +145,19 @@ async def empty_get(region, path, params=None, extra_headers=None):
 
 def asins(count, prefix="B0LOK"):
     return [f"{prefix}{i:05d}" for i in range(count)]
+
+
+def tick_walk_clock(monkeypatch):
+    """Makes the time a walk is stamped with strictly later on every call, so a
+    second walk is always newer than the first and no test depends on the wall
+    clock having moved between two back-to-back walks."""
+    start = datetime.now(timezone.utc)
+    ticks = itertools.count(1)
+
+    class _Ticking(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return start + timedelta(seconds=next(ticks))
+
+    for module in (series, author_books):
+        monkeypatch.setattr(module, "datetime", _Ticking)

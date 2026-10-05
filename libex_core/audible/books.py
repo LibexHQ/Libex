@@ -29,6 +29,7 @@ from typing import Any
 from libex_core.asin import is_valid_asin
 from libex_core.audible.client import AudibleGet, REGION_MAP, validate_region, validated_asin
 from libex_core.audible.extras import build_extras
+from libex_core.exceptions import AudibleAPIException
 from libex_core.log_safety import is_safe_log_value, safe_asin_for_log, window_elapsed
 from libex_core.text import is_unreadable_text, strip_html, strip_image_size_suffix
 
@@ -172,8 +173,10 @@ async def fetch_products(get: AudibleGet, asins: list[str], region: str) -> list
     One ASIN is a single-product request, which Audible answers with a 404
     when it has no such record (NotFoundException out of `get`, terminal);
     several are one batch request, which Audible answers with a 200 whatever
-    it knows. Transient failures surface as AudibleAPIException from `get` and
-    are the caller's to retry.
+    it knows. A single-product 200 whose product is an explicit null is not
+    that answer: it is a malformed one, and raises AudibleAPIException, an
+    outage, rather than reading as an absence. Transient failures surface as
+    AudibleAPIException from `get` and are the caller's to retry.
 
     Raises RegionException for a region that is not one of the eleven, and
     ValueError for more than MAX_ASINS_PER_REQUEST ASINs or for any value that
@@ -192,6 +195,8 @@ async def fetch_products(get: AudibleGet, asins: list[str], region: str) -> list
             "image_sizes": IMAGE_SIZES,
         }
         data = await get(region, f"{CATALOG_PRODUCTS_PATH}/{wanted[0]}", params)
+        if "product" in data and data["product"] is None:
+            raise AudibleAPIException("Audible answered a product request with a null product")
         return [data.get("product", {})] if data.get("product") else []
 
     params = {
@@ -284,19 +289,22 @@ def _best_image(product_images: dict | None) -> str | None:
     """
     Returns the highest resolution image URL with size suffix stripped.
 
-    product_images that is not an object of sizes, or a chosen URL that is
-    truthy and not a string, raises and fails the book, deliberately.
-    product_images is not in _REPRODUCED_KEYS, so audibleExtras
-    carries it as sent, and a stored copy is merged by a shallow union in
-    which the incoming key wins: a book that normalized with imageUrl left
-    empty would write the malformed value over the sizes already stored. The
-    failure sends the caller to what it already holds.
+    product_images that is truthy and not an object, an object with no
+    numeric size key, or a chosen URL that is truthy and not a string, raises
+    TypeError and fails the book, deliberately. product_images is not in
+    _REPRODUCED_KEYS, so audibleExtras carries it as sent, and a stored copy
+    is merged by a shallow union in which the incoming key wins: a book that
+    normalized with imageUrl left empty would write the malformed value over
+    the sizes already stored. The failure sends the caller to what it already
+    holds. Falsy values of any type are no images, as they always were.
     """
     if not product_images:
         return None
+    if not isinstance(product_images, dict):
+        raise TypeError(f"product_images must be an object, got {type(product_images).__name__}")
     highest_key = max((int(k) for k in product_images if k.isdigit()), default=None)
     if highest_key is None:
-        return None
+        raise TypeError("product_images carries no numeric size key")
     url = product_images.get(str(highest_key))
     if url and not isinstance(url, str):
         raise TypeError(f"an image URL must be a string, got {type(url).__name__}")
@@ -1035,10 +1043,10 @@ async def normalize_products(products: list[dict], region: str) -> list[dict[str
     (strip_html, strip_image_size_suffix, datetime parsing, and the sanitizing
     walk in extras.py) -- no DB session, no cache, and no read of any
     ContextVar, so running it on another thread carries no correctness risk.
-    Two pieces of shared mutable state are in reach and neither changes that.
+    Three pieces of shared mutable state are in reach and none changes that.
     The counters behind the windowed warnings (_log_unreadable_plans,
-    _log_extras_incident) decide only how often a warning prints, never what
-    any product normalizes to, so a lost increment across concurrent batches
+    _log_unreadable_text, _log_extras_incident) decide only how often a
+    warning prints, never what any product normalizes to, so a lost increment across concurrent batches
     costs an off-by-a-few occurrence count and nothing else. The
     _reproduced_keys_read recorder every _reproduce call checks is written
     only by _verify_reproduced_keys_read, at import, long before any batch

@@ -12,10 +12,11 @@ capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
 ## [2.2.10]
 
-No endpoint, parameter, response field or status code changes, and there is no database migration. A book whose content type or summary is not text is now served instead of failing.
+No endpoint, parameter or response field changes, and there is no database migration. One status code changes, for one input: a single-book request that Audible answers with a null product is now a 503 instead of a 404. A book whose content type or summary is not text is now served instead of failing.
 
 ### Fixed
-- **A product's content type, description or summary that is not text no longer fails the whole book.** A value that is truthy and not a string (a number, a boolean, a list or an object) in `content_type`, `merchandising_summary` or `publisher_summary` used to raise and the book came back as an Audible outage. `contentType`, `description` and `summary` now come out empty, and the raw value is carried in `audibleExtras` under Audible's own key, so nothing Audible sent is lost and nothing already stored is replaced. A series whose `publisher_summary` is not text is handled the same way. A book that normalized before is published as before. A release date or image URL that is not text still fails the book, as before, so a stored copy is served rather than overwritten.
+- **A product's content type, description or summary that is not text no longer fails the whole book.** A value that is truthy and not a string (a number, a boolean, a list or an object) in `content_type`, `merchandising_summary` or `publisher_summary` used to raise and the book came back as an Audible outage. `contentType`, `description` and `summary` now come out empty, and the raw value is carried in `audibleExtras` under Audible's own key, so nothing Audible sent is lost and nothing already stored is replaced. A series whose `publisher_summary` is not text is handled the same way. A book that normalized before is published as before. A release date or image URL that is not text still fails the book, as before, and so does a `product_images` that is a string, a list or an object with no numeric size key (it used to be served with an empty `imageUrl`), so a stored copy is served rather than overwritten.
+- **A single-book request that Audible answers with `"product": null` is now an outage, not a 404.** This is a status change for that input only. It used to read as the book not existing and answer 404; it now serves the stored copy when there is one and otherwise answers 503 with `Retry-After`, like any other Audible failure. A response with no product at all is unchanged. A batch answered with `"products": null` was already an outage and is unchanged.
 
 ## [2.2.9]
 

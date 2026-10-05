@@ -45,7 +45,10 @@ def normalize_series(product: dict, region: str) -> dict[str, Any]:
     carried in audibleExtras, built the way a book's is (build_extras), with
     extrasWithheld recording anything that had to be left out of it. Both
     appear only when there is something to say, so a product that carries
-    only the three consumed keys normalizes exactly as it did before.
+    only the three consumed keys normalizes exactly as it did before. A
+    publisher_summary that is truthy and not text is the one consumed key
+    that is carried in audibleExtras as well: the description is then None
+    and the raw value is kept, as sent, under its own key.
     """
     # A summary that is not text is published as no description and rides
     # into the blob under its own key, as sent. publisher_summary is withheld

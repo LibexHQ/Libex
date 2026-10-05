@@ -65,7 +65,7 @@ import scripts.backfill_chapters as backfill_chapters
 
 
 # ============================================================
-# _PERMANENT_UPSTREAM_STATUSES
+# _check_concurrency_ceiling
 # ============================================================
 
 def test_concurrency_ceiling_check_raises_when_ceiling_exceeds_limit():
@@ -84,6 +84,10 @@ def test_concurrency_ceiling_holds_against_the_live_limit():
         backfill_chapters.audible_client.AUDIBLE_CONCURRENCY_LIMIT,
     )
 
+
+# ============================================================
+# _PERMANENT_UPSTREAM_STATUSES
+# ============================================================
 
 def test_permanent_upstream_statuses_contains_only_400():
     """Limited to exactly {400} -- the only status actually observed in

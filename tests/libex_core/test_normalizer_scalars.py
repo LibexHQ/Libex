@@ -265,7 +265,7 @@ def test_an_author_bio_that_is_not_text_still_fails_the_response(raw):
 
 
 # ============================================================
-# products: null IS AN OUTAGE, NEVER AN ABSENCE
+# A BATCH ANSWERED WITH products: null IS AN OUTAGE
 # ============================================================
 
 async def _null_products(region, path, params=None, extra_headers=None):

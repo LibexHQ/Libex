@@ -4,6 +4,8 @@ on:
     branches: ['**']
   pull_request:
     branches: [main, develop]
+permissions:
+  contents: read
 jobs:
   backend:
     runs-on: ubuntu-latest

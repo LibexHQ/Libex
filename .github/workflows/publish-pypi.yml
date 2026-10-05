@@ -25,7 +25,7 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: '3.12'
-      # The packaging test runs under the repo's conftest, which imports the
+      # The packaging tests run under the repo's conftest, which imports the
       # application, so the job needs the dev lock as well as the tooling one.
       - name: Install dependencies
         run: |
@@ -65,7 +65,7 @@ jobs:
             done
           done
           PYTHONPATH="$tools" python -c 'import build, flit_core'
-          PYTHONPATH="$tools" pytest tests/libex_core/test_packaging.py -v
+          PYTHONPATH="$tools" pytest tests/libex_core/test_packaging.py tests/libex_core/test_installed_cli.py -v
       - name: Upload distributions
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:

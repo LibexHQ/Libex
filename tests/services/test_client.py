@@ -535,5 +535,3 @@ def test_is_retryable_status_600_out_of_range_not_retryable():
     from libex_core.audible.client import _is_retryable_status
 
     assert _is_retryable_status(600) is False
-
-

@@ -28,9 +28,9 @@ from typing import Any
 # Core
 from libex_core.asin import is_valid_asin
 from libex_core.audible.client import AudibleGet, REGION_MAP, validate_region, validated_asin
-from libex_core.audible.extras import build_extras
+from libex_core.audible.extras import _log_extras_incident, build_extras
 from libex_core.log_safety import is_safe_log_value, safe_asin_for_log, window_elapsed
-from libex_core.text import strip_html, strip_image_size_suffix
+from libex_core.text import is_unreadable_text, strip_html, strip_image_size_suffix
 
 logger = logging.getLogger("libex")
 
@@ -235,15 +235,91 @@ def _entries(product: dict, key: str) -> list[dict]:
     raise TypeError(f"{key} must be a list, got {type(value).__name__}")
 
 
-def _best_image(product_images: dict | None) -> str | None:
-    """Returns the highest resolution image URL with size suffix stripped."""
+# The reproduced keys whose value is read as text, and so can arrive as
+# something that is not. Each is withheld from audibleExtras by
+# _REPRODUCED_KEYS because the first-class field carries it, which is exactly
+# what makes defaulting the field safe: when the value is unreadable it goes
+# into the blob under its own key instead (see is_unreadable_text), and since a
+# well-formed response never writes that key there, no stored blob entry is
+# overwritten. The columns behind the fields are merged by `answered` and
+# `longer_wins`, which leave the stored value for an empty one.
+_TEXT_READ_KEYS: frozenset[str] = frozenset({
+    "merchandising_summary",
+    "publisher_summary",
+    "content_type",
+})
+
+_UNREADABLE_TEXT_LOG_INTERVAL_SECONDS = 60
+
+# The extrasWithheld value recorded for a product_images that cannot be read.
+_WITHHELD_UNREADABLE = "unreadable"
+
+_unreadable_text_counts: dict[str, int] = {}
+_unreadable_text_last_logged: dict[str, float] = {}
+
+
+def _log_unreadable_text(asin: str, key: str, region: str) -> None:
+    """
+    Reports that Audible sent a text field as something else, at most once
+    per _UNREADABLE_TEXT_LOG_INTERVAL_SECONDS per key, through the shared
+    window_elapsed gate: a changed upstream shape would otherwise log on
+    every product in a page. The key is one of _TEXT_READ_KEYS, Libex's own
+    vocabulary; nothing from the value is logged.
+    """
+    count = _unreadable_text_counts.get(key, 0) + 1
+    _unreadable_text_counts[key] = count
+    now = time.monotonic()
+    if not window_elapsed(
+        _unreadable_text_last_logged.get(key), now, _UNREADABLE_TEXT_LOG_INTERVAL_SECONDS
+    ):
+        return
+    logger.warning("Audible sent a text field that is not text", extra={
+        "asin": safe_asin_for_log(asin),
+        "region": region,
+        "text_field": key,
+        "occurrences": count,
+    })
+    _unreadable_text_counts[key] = 0
+    _unreadable_text_last_logged[key] = now
+
+
+def _largest_size_key(product_images: dict) -> str | None:
+    """The numeric size key of the largest image in an object of sizes, or
+    None when it has none."""
+    sizes = [k for k in product_images if isinstance(k, str) and k.isdecimal()]
+    return str(max(int(k) for k in sizes)) if sizes else None
+
+
+def _images_malformed(product_images: Any) -> bool:
+    """
+    True for a product_images value that cannot be read as sizes: truthy and
+    not an object, an object with no numeric size key, or one whose largest
+    size holds a truthy value that is not a string. Falsy values of any type
+    are no images and are not malformed.
+    """
     if not product_images:
+        return False
+    if not isinstance(product_images, dict):
+        return True
+    key = _largest_size_key(product_images)
+    if key is None:
+        return True
+    url = product_images.get(key)
+    return bool(url) and not isinstance(url, str)
+
+
+def _best_image(product_images: dict | None) -> str | None:
+    """
+    Returns the highest resolution image URL with size suffix stripped, or
+    None when there is none to read, which includes a malformed
+    product_images (see _images_malformed). normalize_product withholds a
+    malformed one from audibleExtras and records that in extrasWithheld, so
+    the book is served with no image and neither a stored size map nor a
+    stored image is replaced.
+    """
+    if not product_images or _images_malformed(product_images):
         return None
-    highest_key = max((int(k) for k in product_images if k.isdigit()), default=None)
-    if highest_key is None:
-        return None
-    url = product_images.get(str(highest_key))
-    return strip_image_size_suffix(url)
+    return strip_image_size_suffix(product_images.get(_largest_size_key(product_images)))
 
 
 def _audible_link(asin: str, region: str) -> str:
@@ -255,9 +331,19 @@ def _parse_release_date(raw: str | None) -> str | None:
     """
     Converts a raw Audible release date string to ISO 8601 format.
     Audimeta stores dates as DateTime and outputs .toISO(), e.g. "2021-03-02T00:00:00.000+00:00".
+
+    A truthy value that is not a string raises TypeError and fails the book,
+    deliberately. release_date is not in _REPRODUCED_KEYS, so audibleExtras
+    carries it as sent, and a stored copy is merged by a shallow union in
+    which the incoming key wins: defaulting the field would let a book that
+    normalized write the malformed value over the date already stored there.
+    The failure sends the caller to what it already holds. A falsy value of
+    any type is no date, as it always was.
     """
     if not raw:
         return None
+    if not isinstance(raw, str):
+        raise TypeError(f"release_date must be a string, got {type(raw).__name__}")
     try:
         dt = datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=timezone.utc)
         return dt.isoformat()
@@ -693,20 +779,48 @@ def normalize_product(product: dict, region: str) -> dict[str, Any]:
     asin = _reproduce(product, "asin") or ""
     series_list = _parse_series(product, region)
 
-    content_type = _reproduce(product, "content_type")
+    # A text field that is not text is published as no value and rides into
+    # the blob under its own key, as sent, so the field is defaulted and
+    # nothing Audible sent is lost. See _TEXT_READ_KEYS for why that cannot
+    # overwrite anything stored.
+    unreadable = {
+        k for k in _TEXT_READ_KEYS if is_unreadable_text(product.get(k))
+    }
+    for k in sorted(unreadable):
+        _log_unreadable_text(product.get("asin") or "", k, region)
+
+    def _text(key: str) -> Any:
+        value = _reproduce(product, key)
+        return None if key in unreadable else value
+
+    content_type = _text("content_type")
     is_podcast = content_type and content_type.lower() == "podcast"
 
     # Every top-level key no first-class field reproduces rides into the blob
     # as sent, in the order Audible sent it.
-    passthrough = {k: v for k, v in product.items() if k not in _REPRODUCED_KEYS}
+    #
+    # product_images stays out of it when it cannot be read as sizes. It is
+    # carried in the blob as sent and the stored blob is merged by a shallow
+    # union in which the incoming key wins, so a malformed value there would
+    # replace the sizes already stored. Left out, the union finds the key
+    # absent and keeps them, and the omission is recorded in extrasWithheld.
+    images_malformed = _images_malformed(product.get("product_images"))
+    passthrough = {
+        k: v for k, v in product.items()
+        if (k not in _REPRODUCED_KEYS or k in unreadable)
+        and not (k == "product_images" and images_malformed)
+    }
     extras, withheld = build_extras(passthrough, asin, region)
+    if images_malformed:
+        withheld["product_images"] = _WITHHELD_UNREADABLE
+        _log_extras_incident(asin, region, "product_images")
 
     book: dict[str, Any] = {
         "asin": asin,
         "title": _reproduce(product, "title"),
         "subtitle": _reproduce(product, "subtitle"),
-        "description": strip_html(_reproduce(product, "merchandising_summary")),
-        "summary": strip_html(_reproduce(product, "publisher_summary")),
+        "description": strip_html(_text("merchandising_summary")),
+        "summary": strip_html(_text("publisher_summary")),
         "region": region,
         "regions": [region],
         "publisher": _reproduce(product, "publisher_name"),
@@ -951,10 +1065,10 @@ async def normalize_products(products: list[dict], region: str) -> list[dict[str
     (strip_html, strip_image_size_suffix, datetime parsing, and the sanitizing
     walk in extras.py) -- no DB session, no cache, and no read of any
     ContextVar, so running it on another thread carries no correctness risk.
-    Two pieces of shared mutable state are in reach and neither changes that.
+    Three pieces of shared mutable state are in reach and none changes that.
     The counters behind the windowed warnings (_log_unreadable_plans,
-    _log_extras_incident) decide only how often a warning prints, never what
-    any product normalizes to, so a lost increment across concurrent batches
+    _log_unreadable_text, _log_extras_incident) decide only how often a
+    warning prints, never what any product normalizes to, so a lost increment across concurrent batches
     costs an off-by-a-few occurrence count and nothing else. The
     _reproduced_keys_read recorder every _reproduce call checks is written
     only by _verify_reproduced_keys_read, at import, long before any batch

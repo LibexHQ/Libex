@@ -10,13 +10,17 @@ serves, derived from AudiMeta's SeriesDto.
 """
 
 # Standard library
+import logging
 from typing import Any
 
 # Core
 from libex_core.audible.client import AudibleGet, validate_region, validated_asin
 from libex_core.audible.extras import build_extras
 from libex_core.exceptions import NotFoundException
-from libex_core.text import strip_html
+from libex_core.log_safety import safe_asin_for_log
+from libex_core.text import is_unreadable_text, strip_html
+
+logger = logging.getLogger("libex")
 
 SERIES_PATH = "/1.0/catalog/products/{asin}"
 
@@ -41,18 +45,38 @@ def normalize_series(product: dict, region: str) -> dict[str, Any]:
     carried in audibleExtras, built the way a book's is (build_extras), with
     extrasWithheld recording anything that had to be left out of it. Both
     appear only when there is something to say, so a product that carries
-    only the three consumed keys normalizes exactly as it did before.
+    only the three consumed keys normalizes exactly as it did before. A
+    publisher_summary that is truthy and not text is the one consumed key
+    that is carried in audibleExtras as well: the description is then None
+    and the raw value is kept, as sent, under its own key.
     """
+    # A summary that is not text is published as no description and rides
+    # into the blob under its own key, as sent. publisher_summary is withheld
+    # from the blob only because the description carries it, so a well-formed
+    # response never writes that key there and no stored entry can be
+    # overwritten; the description column is merged by longer_wins, which
+    # leaves the stored text for an empty one.
+    summary = product.get("publisher_summary")
+    unreadable = is_unreadable_text(summary)
+    if unreadable:
+        logger.warning("Audible sent a text field that is not text", extra={
+            "asin": safe_asin_for_log(product.get("asin") or ""),
+            "region": region,
+            "text_field": "publisher_summary",
+        })
     series = {
         "asin": product.get("asin"),
         "name": product.get("title"),
-        "description": strip_html(product.get("publisher_summary")),
+        "description": None if unreadable else strip_html(summary),
         "region": region,
         "position": None,
         "updatedAt": None,
     }
 
-    passthrough = {k: v for k, v in product.items() if k not in _SERIES_CONSUMED}
+    passthrough = {
+        k: v for k, v in product.items()
+        if k not in _SERIES_CONSUMED or (k == "publisher_summary" and unreadable)
+    }
     if passthrough:
         extras, withheld = build_extras(passthrough, product.get("asin") or "", region)
         series["audibleExtras"] = extras

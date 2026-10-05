@@ -9,6 +9,16 @@ output reflects the content rather than the delivery format it arrived in.
 
 # Standard library
 import re
+from typing import Any
+
+
+def is_unreadable_text(value: Any) -> bool:
+    """
+    True for a value read as text that is not text: truthy and not a string.
+    A falsy value of any type is how Audible says nothing, and strip_html
+    reads it as that.
+    """
+    return bool(value) and not isinstance(value, str)
 
 
 def strip_html(text: str | None) -> str | None:

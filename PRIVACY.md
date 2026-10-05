@@ -633,13 +633,16 @@ The library is built around preventing that from happening by accident:
   - Audible answered with something that is not JSON (warning): status, region, API path (with the ASIN when one title, series or author is looked up), the kind of error and the size of the answer in bytes; none of the answer itself;
   - malformed author ASIN: title ASIN, region, the malformed value, the author's name;
   - unreadable subscription plans: title ASIN, a count;
+  - a title's content type, description or summary, or a series' summary, that is not text (warning): title or series ASIN, region, which of those fields it was and, for a title, a count; none of the value;
   - extra data cleaned up or held back: title or series ASIN, region, the reason, a count and, if oversized, its size; none of the data itself;
   - an author's book list from Audible's author page ended without a confirmed end: author ASIN, region, why it stopped, pages fetched, books found, Audible's own count, how much was cut off, and the error message if a page failed;
   - a search for an author's books by name lost its first page: region, the error message. Never the name;
   - a search for an author's books by name lost a later page: region, the page number, books found so far, the error message. Never the name.
 
-  The subscription-plan and extra-data records log at most once a minute
-  (extras, once a minute per reason), naming only the latest title.
+  The subscription-plan, extra-data and title text-field records log at most
+  once a minute (extras, once a minute per reason; text fields, once a minute
+  per field), naming only the latest title. The series text-field record is
+  written each time.
 
   From the lookup functions:
   - a completed lookup (info): region, how long Audible took and, except for a single chapters, series or author lookup or an author search, counts of what was asked for and what came back, including, for books, how many were answered from the store; for a search, the names of the fields searched; for a quick search, the length of the text and, when a compound query was split, how many parts it made; for an author's books by ASIN, the author ASIN, how each of the two ways of finding them went, and whether the list is whole; for new releases and coming soon, the number of days and the category ID, if one was given;

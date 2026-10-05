@@ -13,6 +13,12 @@ the first published version. Entries for earlier versions record changes made
 before publication: they are historical record for whoever embeds this package,
 not evidence that anyone consumed a given version at the time it was cut.
 
+## [Unreleased]
+
+### Fixed
+- **A product's `content_type`, `merchandising_summary` or `publisher_summary` that is not text no longer fails the whole book.** A value that is truthy and not a string (a number, a boolean, a list or an object) used to raise out of `normalize_product`, in `.lower()` or in `strip_html`. `contentType`, `description` and `summary` now read as no value, and the raw value is carried in `audibleExtras` under Audible's own key, which a well-formed response never writes there, so a stored blob entry is never replaced; the stored columns keep their text. A falsy value of any type reads as it always did, and a book whose normalization already succeeded is published exactly as before. `normalize_series` does the same for a series' `publisher_summary`. A `release_date` that is not text still raises: its raw value is in `audibleExtras` as sent, and normalizing the book would write the malformed value over the stored copy through the shallow merge.
+- **A `product_images` that cannot be read as sizes no longer fails the book or rides into `audibleExtras`.** A value that is truthy and not an object, an object with no numeric size key, or one whose largest size is truthy and not a string is now published as `imageUrl` empty, left out of `audibleExtras`, and recorded in `extrasWithheld` as `"product_images": "unreadable"`. A string, a list or an object with no numeric size key used to normalize with `imageUrl` empty and the raw value in `audibleExtras`; the rest used to raise. Left out of the blob, it cannot replace a stored size map through the shallow merge. A readable `product_images` is unchanged.
+
 ## [0.22.0]
 
 ### Added

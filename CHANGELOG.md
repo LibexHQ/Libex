@@ -10,6 +10,13 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [2.2.11]
+
+No endpoint, parameter or response field changes, and there is no database migration. One input changes status: a request for a single ASIN that Audible answers with a null product is now a 503 instead of a 404 (see the entry below for where else that shows).
+
+### Fixed
+- **A request for a single ASIN that Audible answers with `"product": null` is now an outage, not a 404.** Audible answers a missing ASIN with a placeholder product, never a null one (probed live across a known book, a title absent from another region, a made-up ASIN and an all-zero ASIN, on both the single and the batch path: a full product or a placeholder every time, no 404 and no null), so a null product is a malformed answer and is treated as an outage. This is a status change for that input. It used to read as the book not existing and answer 404; it now serves the stored copy when there is one and otherwise answers 503 with `Retry-After`, like any other Audible failure. It is not limited to `GET` of one book. Any route that hydrates books by ASIN sends Audible a single-product request for a chunk that holds one ASIN: a bulk request for one ASIN, or the last chunk of a bulk, author, series or search list when the count is one more than a multiple of 50. For such an ASIN the response now lists it under `notFetched` instead of `notFound`, and the incomplete reason is `hydration-failed` instead of `hydration-not-found`. A bulk request for that one ASIN with nothing stored answers 503 instead of 404. A response with no product at all, or an empty one, is unchanged, and a batch answered with `"products": null` was already an outage and is unchanged.
+
 ## [2.2.10]
 
 No endpoint, parameter, shape or status code changes, and there is no database migration. A book whose content type, summary or image data is not what Audible normally sends is now served instead of failing.

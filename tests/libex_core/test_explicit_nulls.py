@@ -145,13 +145,14 @@ async def test_a_book_list_reports_only_the_books_that_survive_the_filter():
     assert result.explicit_nulls == {long_: ("subtitle",)}
 
 
-# Section: a container null is an outage, not a clear
+# Section: a container null is served empty, and is not reported as a clear
 
 @pytest.mark.parametrize("key", ["authors", "narrators", "category_ladders", "relationships"])
-async def test_a_container_null_stays_an_outage(key):
+async def test_a_container_null_serves_the_book_and_is_not_reported(key):
     get = batch_get(**{ASIN: product(ASIN, **{key: None})})
-    with pytest.raises(AudibleAPIException):
-        await get_book_with_nulls(get, ASIN)
+    lookup = await get_book_with_nulls(get, ASIN)
+    assert lookup.book.asin == ASIN
+    assert lookup.explicit_nulls == ()
 
 
 async def test_a_null_rating_object_stays_an_outage():

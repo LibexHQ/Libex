@@ -924,8 +924,9 @@ async def _process_one(
     except Exception as e:
         elapsed = time.monotonic() - started
         # Never became an AudibleAPIException, so there is no upstream_status
-        # to classify (audible_get returned 200 and the body failed to parse,
-        # a bug, etc.) -- always retried, but never a signal for either the
+        # to classify (a bug in the fetch or the parse, a database error, etc.;
+        # a 200 whose body is not JSON is not here, it arrives above as an
+        # AudibleAPIException with upstream_status 200) -- always retried, but never a signal for either the
         # back-off window or the ratchet, since pausing fixes nothing about it.
         logger.warning(f"Backfill: fetch error for {asin} ({region}): {type(e).__name__}: {e}")
         return _Outcome.ERROR, False, False, elapsed

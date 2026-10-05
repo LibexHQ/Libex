@@ -141,12 +141,15 @@ def _strip_podcast_relationships(relationships: list) -> tuple[list, dict[str, i
     extrasWithheld, so the caller is told an episode list existed and how
     long it was. Without that the strip would be exactly the silent drop this
     blob was built to end, hidden inside the mechanism meant to prevent it.
+
+    An entry whose relationship_type is not a string (a list or an object is
+    unhashable) is kept as sent rather than failing the book.
     """
     kept = []
     stripped: dict[str, int] = {}
     for entry in relationships:
         relationship_type = entry.get("relationship_type") if isinstance(entry, dict) else None
-        if relationship_type in _STRIPPED_RELATIONSHIP_TYPES:
+        if isinstance(relationship_type, str) and relationship_type in _STRIPPED_RELATIONSHIP_TYPES:
             stripped[relationship_type] = stripped.get(relationship_type, 0) + 1
         else:
             kept.append(entry)

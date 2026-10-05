@@ -10,6 +10,14 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [2.2.9]
+
+No endpoint, parameter, response field or status code changes, and there is no database migration. A book whose product carries a null or malformed entry is now served instead of failing.
+
+### Fixed
+- **A null or malformed entry in a product no longer fails the whole book.** `authors`, `narrators`, `relationships`, `category_ladders` and `plans` sent as null, or as something that is not a list, read as empty (`plans` as unreadable, so `null`), and an entry that is not an object, or a name that is not a string, is skipped. These used to raise and the book came back as an Audible outage. The raw value still reaches `audibleExtras` as Audible sent it, and a book that normalized before is published exactly as before.
+- **A genre whose name is only whitespace, or not a string, is no longer published.** A blank genre such as `"  "` is dropped; a name that is kept is published as sent. A plan name that is not a string is skipped the same way.
+
 ## [2.2.8]
 
 No endpoint, parameter, response field or status code changes, and there is no database migration. A narrator with a blank name is no longer published.

@@ -40,7 +40,8 @@ Nothing here reads the environment.
 import asyncio
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 # Core
@@ -60,11 +61,12 @@ from libex_core.audible.client import (
     validate_region,
 )
 from libex_core.exceptions import AudibleAPIException, NotFoundException
-from libex_core.lookup import _store
+from libex_core.lookup import _store, _walks
 from libex_core.lookup._common import OUTAGE_MESSAGE
 from libex_core.lookup._shaping import check_shaping, shape_books
 from libex_core.lookup.books import Hydration, _canonical_asin, hydrate_books
 from libex_core.models import BookResponse
+from libex_core.storage.walk_limits import AUTHOR_BOOKS
 
 if TYPE_CHECKING:
     from libex_core.storage.store import LocalStore
@@ -103,11 +105,15 @@ class BookList:
     since a filter legitimately shortens the list and says nothing about the
     fetch. incomplete_reasons names why, in INCOMPLETE_REASONS order, and is
     empty exactly when complete is True. store_write_failed is True when a
-    store was given and some fetched book could not be written to it.
-    from_store holds the ASINs of the books answered from the store because
-    Audible could not answer for them (before filtering, so a filtered-out
-    ASIN can appear here); those books are stored copies, not what Audible
-    said this time. explicit_nulls maps the ASIN of each book in books to the
+    store was given and some fetched book, or the record of the walk itself,
+    could not be written to it. from_store holds the ASINs of the books
+    answered from the store rather than by Audible this time (before
+    filtering, so a filtered-out ASIN can appear here): because Audible could
+    not answer for them, or because the whole list was answered from a stored
+    walk (max_age), in which case it is every book served. Those books are
+    stored copies, not what Audible said this time. snapshot_at is set only
+    for a list answered from a stored walk, and is when that walk was made
+    (when Audible last gave the list); it is None for a live list. explicit_nulls maps the ASIN of each book in books to the
     published fields Audible sent as an explicit null rather than omitting
     (see libex_core.audible.books.explicit_null_fields); it reports and changes
     no value. A book with no entry is unknown, as every stored copy is, and
@@ -120,6 +126,7 @@ class BookList:
     store_write_failed: bool = False
     from_store: tuple[str, ...] = ()
     explicit_nulls: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    snapshot_at: datetime | None = None
 
 
 def _reasons(discovery_complete: bool, hydration: Hydration) -> tuple[str, ...]:
@@ -160,6 +167,22 @@ def _assemble(
             for asin, nulls in hydration.explicit_nulls.items()
             if asin in kept
         },
+    )
+
+
+def _assemble_snapshot(
+    books: list[dict[str, Any]],
+    at: datetime,
+    filters: dict[str, Any] | None,
+    sort: str | None,
+    order: str,
+) -> BookList:
+    """The list a stored walk answers with: complete, every book from the
+    store, shaped as asked after the fact."""
+    asins = [book["asin"] for book in books]
+    return replace(
+        _assemble(True, Hydration(books=books, from_store=asins), filters, sort, order),
+        snapshot_at=at,
     )
 
 
@@ -365,13 +388,27 @@ async def get_author_books(
     sort: str | None = None,
     order: str = "asc",
     store: "LocalStore | None" = None,
+    max_age: timedelta | None = None,
 ) -> BookList:
     """
     Fetches the full books an author is credited with, by author ASIN.
 
     With a store, discovery also draws on the books the store holds for the
     author, and the books are written through and served as the store holds
-    them; see the module docstring.
+    them; see the module docstring. Every live walk then also records which
+    books it returned and whether it was whole, as the author's stored walk,
+    replacing the last.
+
+    max_age (a timedelta, default None) lets a stored walk answer in place of
+    a new one: when the store holds a walk for this author and region that was
+    complete, is no older than max_age, and names only books stored for this
+    region, the list is answered from the store with no request to Audible,
+    complete, with snapshot_at set and every book in from_store. Anything else,
+    including an unreadable or malformed stored walk, makes the walk live.
+    filters, sort and order are applied to a stored list afterwards. ValueError,
+    before anything is sent, when it is not a timedelta, is not above zero, or
+    is given without a store. None never reads a stored walk. A confirmed
+    absence is never answered from the store: the stored walk is removed.
 
     Author ASINs are global, but the catalogue is each marketplace's own, so
     the same ASIN lists different books per region. The books come back in the
@@ -389,8 +426,14 @@ async def get_author_books(
     canonical = _canonical_asin(asin)
     region = validate_region(region)
     check_shaping(filters, sort, order)
+    _walks.check_max_age(max_age, store)
     if store is not None:
         await _store.check(store)
+        if max_age is not None:
+            snapshot = await _walks.stored_list(store, AUTHOR_BOOKS, canonical, region, max_age)
+            if snapshot is not None:
+                return _assemble_snapshot(*snapshot, filters, sort, order)
+        walk_at = datetime.now(timezone.utc)
 
     # One deadline for discovery and hydration together, so the two cannot add
     # up past it.
@@ -398,13 +441,21 @@ async def get_author_books(
     # The store is passed only when there is one, so a walk without storage is
     # called exactly as it always was.
     walk_extra = {"store": store} if store is not None else {}
-    asins, discovery_complete = await _walk_author_books(
-        get, canonical, region, deadline, **walk_extra
-    )
+    try:
+        asins, discovery_complete = await _walk_author_books(
+            get, canonical, region, deadline, **walk_extra
+        )
+    except NotFoundException:
+        if store is not None:
+            await _walks.forget_walk(store, AUTHOR_BOOKS, canonical, region, walk_at)
+        raise
     hydration = await hydrate_books(
         get, asins, region, deadline=deadline, high_concurrency=True, store=store
     )
-    return _assemble(discovery_complete, hydration, filters, sort, order)
+    result = _assemble(discovery_complete, hydration, filters, sort, order)
+    if store is None:
+        return result
+    return await _walks.record_walk(store, AUTHOR_BOOKS, canonical, region, result, hydration, walk_at)
 
 
 # ============================================================

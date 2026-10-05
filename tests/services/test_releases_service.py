@@ -510,6 +510,29 @@ async def test_ensure_genres_reread_failure_serves_fetched_nodes(caplog):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("fetched,expect_reconcile", [(100, True), (10, False)])
+async def test_ensure_genres_reread_failure_with_prior_store_serves_old_set(fetched, expect_reconcile):
+    """
+    With a non-empty stored set before the fetch, a committed write whose
+    re-read comes back empty serves the previously stored set, not the fetched
+    nodes, on both the reconcile and the partial-fetch upsert paths.
+    """
+    old = _nodes(100)
+    # Distinct names, so serving the fetched nodes cannot equal serving old.
+    fresh = [{**n, "name": "new-" + n["name"]} for n in _nodes(fetched)]
+    with patch.object(releases, "fetch_catalog_genres", new=AsyncMock(return_value=fresh)), \
+         patch.object(releases, "get_stored_genres",
+                      new=AsyncMock(side_effect=[(old, _too_old()), ([], None)])), \
+         patch.object(releases, "reconcile_genres", new=AsyncMock()) as recon, \
+         patch.object(releases, "upsert_genres", new=AsyncMock()) as upsert:
+        session = AsyncMock()
+        result = await releases.ensure_genres(session, "us")
+    assert result == old
+    assert recon.await_count == (1 if expect_reconcile else 0)
+    assert upsert.await_count == (0 if expect_reconcile else 1)
+
+
+@pytest.mark.asyncio
 async def test_ensure_genres_serves_stored_on_fetch_failure():
     """
     When the taxonomy fetch raises, nothing is written and the stored set is

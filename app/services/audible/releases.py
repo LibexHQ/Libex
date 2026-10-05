@@ -152,8 +152,9 @@ async def ensure_genres(session: AsyncSession, region: str) -> list[dict[str, st
     (via as_audible_failure) for the caller to report as an outage. Only the
     Audible fetch is converted that way: a failure writing the taxonomy to the
     store is logged, the stored set is served, and with an empty store the
-    freshly fetched nodes are returned instead — likewise when the re-read
-    after a successful write comes back empty.
+    freshly fetched nodes are returned instead. When the re-read after a
+    successful write comes back empty, the fetched nodes are served only if
+    nothing was stored before; otherwise the previously stored set is served.
     """
     stored, oldest_checked = await get_stored_genres(session, region)
     age = _genre_age_seconds(oldest_checked)

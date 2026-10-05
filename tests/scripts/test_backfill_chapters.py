@@ -41,7 +41,6 @@ import pytest
 # Local
 from tests.scripts.conftest import set_hosted_transport
 from libex_core.exceptions import AudibleAPIException, NotFoundException
-from app.services.db import writer
 from scripts.backfill_chapters import (
     _BackoffWindow,
     _Gate,
@@ -132,7 +131,41 @@ async def test_process_one_404_is_not_found_and_marked_checked_no_signals():
     assert outcome == _Outcome.NOT_FOUND
     assert is_backoff is False
     assert is_ratchet is False
-    mark_checked.assert_awaited_once_with(session, "B00TEST0404", "us")
+    # A 404 is a real answer for the chapters, so it confirms them as well.
+    mark_checked.assert_awaited_once_with(session, "B00TEST0404", "us", confirmed=True)
+
+
+@pytest.mark.asyncio
+async def test_process_one_no_listing_is_none_and_confirms_the_empty_answer():
+    """A 200 with no chapter_info is Audible answering that there is nothing
+    to list: NONE, marked checked and confirmed, nothing stored."""
+    session = AsyncMock()
+    data = {"content_metadata": {}}
+    with patch(
+        "scripts.backfill_chapters.audible_get", new=AsyncMock(return_value=data)
+    ), patch("scripts.backfill_chapters._store_chapters", new=AsyncMock()) as store, \
+         patch("scripts.backfill_chapters._mark_checked", new=AsyncMock()) as mark_checked:
+        outcome, *_ = await _process_one(session, "B00TESTNOLS", "de")
+
+    assert outcome == _Outcome.NONE
+    store.assert_not_awaited()
+    mark_checked.assert_awaited_once_with(session, "B00TESTNOLS", "de", confirmed=True)
+
+
+@pytest.mark.asyncio
+async def test_process_one_store_failure_leaves_the_book_unmarked_and_unconfirmed():
+    """A failed listing write stamps nothing, checked or confirmed, so the
+    book is fetched again."""
+    session = AsyncMock()
+    data = {"content_metadata": {"chapter_info": {"chapters": []}}}
+    with patch("scripts.backfill_chapters.audible_get", new=AsyncMock(return_value=data)), \
+         patch("scripts.backfill_chapters.normalize_chapters", return_value={"chapters": []}), \
+         patch("scripts.backfill_chapters._store_chapters", new=AsyncMock(side_effect=RuntimeError("db"))), \
+         patch("scripts.backfill_chapters._mark_checked", new=AsyncMock()) as mark_checked:
+        outcome, *_ = await _process_one(session, "B00TESTFAIL", "us")
+
+    assert outcome == _Outcome.ERROR
+    mark_checked.assert_not_awaited()
 
 
 @pytest.mark.parametrize("upstream_status", [401, 403])
@@ -843,34 +876,80 @@ def test_select_work_over_a_mixed_page():
 
 def test_store_chapters_borrows_the_writers_own_guard_rather_than_restating_it():
     """Identity, not equivalence. One rule written out twice is a drift
-    surface, and this is the second of the two sites that write this column --
-    the first version of this slice left this one unguarded entirely. A local
-    re-implementation could pass every behavioural test on the day it was
-    written and diverge silently afterwards; sharing the object cannot."""
-    assert backfill_chapters._chaptered_wins is writer._chaptered_wins
-    assert backfill_chapters._chapter_count is writer._chapter_count
+    surface; calling the storage layer's own writer shares the object, where
+    a local re-implementation could pass every behavioural test on the day it
+    was written and diverge silently afterwards. The guard's behaviour is
+    proved on this site and the service's in
+    tests/integration/test_track_chapters_shrinkage.py."""
+    from libex_core.storage.write import write_track
+
+    assert backfill_chapters.write_track is write_track
+    assert not hasattr(backfill_chapters, "_chaptered_wins")
 
 
 @pytest.mark.asyncio
-async def test_store_chapters_puts_the_guard_in_the_conflict_clause():
-    """Wired into the statement, not merely imported. The merge is decided by
-    postgresql inside the one write, against the row it has locked, rather
-    than by reading the row first -- several paths refresh the same ASIN at
-    once, and a read-compare-write would let two of them agree the stored row
-    was empty before either had written."""
-    result = MagicMock()
-    result.scalar = MagicMock(return_value=0)
+async def test_store_chapters_confirms_the_listing_through_the_public_writer():
     session = AsyncMock()
-    session.execute = AsyncMock(return_value=result)
+    with patch(
+        "scripts.backfill_chapters.write_track", new=AsyncMock(return_value=3)
+    ) as write:
+        await backfill_chapters._store_chapters(
+            session, "B00STORECNF", {"chapters": [{}]}, region="us"
+        )
 
-    await backfill_chapters._store_chapters(
-        session, "B00STORESQL", {"chapters": []}, region="us"
+    write.assert_awaited_once_with(
+        session, "B00STORECNF", {"chapters": [{}]}, region="us", confirm=True
     )
+    session.commit.assert_awaited_once()
 
-    sql = str(session.execute.call_args_list[0].args[0].compile())
-    assert "ON CONFLICT (asin, region) DO UPDATE SET chapters = CASE WHEN" in sql
-    assert "jsonb_array_length(CASE WHEN (jsonb_typeof(excluded.chapters[" in sql
-    assert "jsonb_array_length(CASE WHEN (jsonb_typeof(tracks.chapters[" in sql
+
+@pytest.mark.asyncio
+async def test_store_chapters_logs_a_suppressed_overwrite(caplog):
+    session = AsyncMock()
+    with patch("scripts.backfill_chapters.write_track", new=AsyncMock(return_value=5)), \
+         caplog.at_level(logging.WARNING):
+        await backfill_chapters._store_chapters(
+            session, "B00STORESUP", {"chapters": []}, region="us"
+        )
+
+    assert "Kept stored chapters over an empty response" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_store_chapters_for_a_book_not_stored_for_the_region_is_not_an_error():
+    session = AsyncMock()
+    with patch("scripts.backfill_chapters.write_track", new=AsyncMock(return_value=None)):
+        await backfill_chapters._store_chapters(
+            session, "B00STORENON", {"chapters": [{}]}, region="us"
+        )
+
+
+@pytest.mark.asyncio
+async def test_store_chapters_lets_a_write_failure_reach_the_caller():
+    session = AsyncMock()
+    with patch(
+        "scripts.backfill_chapters.write_track", new=AsyncMock(side_effect=RuntimeError("db"))
+    ):
+        with pytest.raises(RuntimeError):
+            await backfill_chapters._store_chapters(
+                session, "B00STOREERR", {"chapters": [{}]}, region="us"
+            )
+    session.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mark_checked_confirms_only_when_told_to():
+    session = AsyncMock()
+    with patch("scripts.backfill_chapters.confirm_chapters", new=AsyncMock()) as confirm:
+        await backfill_chapters._mark_checked(session, "B00MARKNO", "us")
+        confirm.assert_not_awaited()
+
+        await backfill_chapters._mark_checked(session, "B00MARKYES", "de", confirmed=True)
+        confirm.assert_awaited_once()
+        assert confirm.await_args.args == (session, "B00MARKYES")
+        assert confirm.await_args.kwargs["region"] == "de"
+        # one transaction: the confirmation is staged before the single commit
+        assert session.commit.await_count == 2
 
 
 # ============================================================
@@ -1503,18 +1582,15 @@ async def test_mark_checked_stamps_only_the_asked_regions_row():
 
 @pytest.mark.asyncio
 async def test_store_chapters_files_the_listing_under_the_books_region():
-    result = MagicMock()
-    result.scalar = MagicMock(return_value=0)
     session = AsyncMock()
-    session.execute = AsyncMock(return_value=result)
+    with patch(
+        "scripts.backfill_chapters.write_track", new=AsyncMock(return_value=0)
+    ) as write:
+        await backfill_chapters._store_chapters(
+            session, "B00STOREREG", {"chapters": []}, region="jp"
+        )
 
-    await backfill_chapters._store_chapters(
-        session, "B00STOREREG", {"chapters": []}, region="jp"
-    )
-
-    stmt = session.execute.call_args_list[0].args[0]
-    assert stmt.compile().params["region"] == "jp"
-    assert "ON CONFLICT (asin, region)" in _compiled(stmt)
+    assert write.await_args.kwargs["region"] == "jp"
 
 
 def test_store_chapters_has_no_default_region():

@@ -1464,7 +1464,7 @@ def test_every_text_column_on_the_table_is_accounted_for():
 # database, including the replay after a lost transaction, is proved in
 # tests/integration/test_persist_book_chunk.py.
 
-async def _captured_chunks(books, region="us"):
+async def _captured_chunks(books, region="us", **kwargs):
     """
     Drives persist_books_background to completion and returns the chunks it
     handed to _persist_book_chunk, in order.
@@ -1480,10 +1480,12 @@ async def _captured_chunks(books, region="us"):
 
     captured_chunks = []
     captured_regions = []
+    captured_confirms = []
 
-    async def _record(chunk, chunk_region):
+    async def _record(chunk, chunk_region, confirm=False):
         captured_chunks.append(list(chunk))
         captured_regions.append(chunk_region)
+        captured_confirms.append(confirm)
 
     captured = {}
 
@@ -1493,9 +1495,10 @@ async def _captured_chunks(books, region="us"):
 
     with patch("app.services.db.persist_queue.asyncio.create_task", side_effect=_fake_create_task), \
          patch("app.services.db.persist_queue._persist_book_chunk_background", side_effect=_record):
-        persist_books_background(books, region)
+        persist_books_background(books, region, **kwargs)
         await captured["coro"]
 
+    _captured_chunks.confirms = captured_confirms
     return captured_chunks, captured_regions
 
 
@@ -1588,6 +1591,16 @@ async def test_persist_books_background_passes_the_region_to_every_chunk():
     assert regions == ["de", "de"]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kwargs, expected", [({"confirm": True}, True), ({}, False)])
+async def test_persist_books_background_hands_the_confirm_flag_to_every_chunk(kwargs, expected):
+    """A product fetch asks for the stamp and a listing does not; the flag
+    reaches every chunk, never only the first, and defaults to no stamp."""
+    await _captured_chunks(_books(_PERSIST_CHUNK_SIZE + 1), **kwargs)
+
+    assert _captured_chunks.confirms == [expected, expected]
+
+
 def test_persist_chunk_size_matches_the_audible_fetch_chunk():
     """The chunk size is 50 because that is the largest ASIN list a single
     Audible request takes. The two are coupled by intent rather than by a
@@ -1670,3 +1683,51 @@ def test_a_series_profile_with_a_region_returns_its_asin_and_logs_the_write(capl
         result = asyncio.run(upsert_series_profile(session, profile))
     assert result == "B0SERIES01"
     assert any("DB write: series" in r.getMessage() for r in caplog.records)
+
+
+# ============================================================
+# THE CONFIRMATION STAMP, THREADED THROUGH THE HOSTED ENTRY POINTS
+# ============================================================
+
+@pytest.mark.parametrize("confirm", [True, False])
+def test_the_hosted_writers_hand_confirm_to_the_shared_writers(confirm):
+    from app.services.db import writer
+
+    session = AsyncMock()
+    book = {"asin": "B0STAMP001", "region": "us", "title": "T"}
+    profile = {"asin": "B0SERIES01", "name": "S", "region": "us"}
+    author = {"asin": "B0AUTHOR01", "name": "A", "region": "us"}
+    with patch.object(writer._books, "write_books", new=AsyncMock()) as books, \
+         patch.object(writer._entities, "write_series_profile", new=AsyncMock(return_value="x")) as series, \
+         patch.object(writer._entities, "write_author_profile", new=AsyncMock()) as authors, \
+         patch.object(writer._entities, "write_track", new=AsyncMock(return_value=1)) as track:
+        asyncio.run(writer.upsert_book(session, book, confirm=confirm))
+        asyncio.run(writer.upsert_series_profile(session, profile, confirm=confirm))
+        asyncio.run(writer.upsert_author_profile(session, author, confirm=confirm))
+        asyncio.run(writer.upsert_track(session, "B0STAMP001", {"chapters": []}, region="us", confirm=confirm))
+
+    assert books.await_args.kwargs["confirm"] is confirm
+    assert series.await_args.kwargs["confirm"] is confirm
+    assert authors.await_args.kwargs["confirm"] is confirm
+    assert track.await_args.kwargs["confirm"] is confirm
+
+
+def test_the_hosted_writers_stamp_nothing_unless_asked():
+    from app.services.db import writer
+
+    session = AsyncMock()
+    with patch.object(writer._books, "write_books", new=AsyncMock()) as books, \
+         patch.object(writer._entities, "write_series_profile", new=AsyncMock(return_value="x")) as series, \
+         patch.object(writer._entities, "write_author_profile", new=AsyncMock()) as authors, \
+         patch.object(writer._entities, "write_track", new=AsyncMock(return_value=1)) as track:
+        asyncio.run(writer.upsert_book(session, {"asin": "B0STAMP001"}))
+        asyncio.run(writer.upsert_series_profile(
+            session, {"asin": "B0SERIES01", "name": "S", "region": "us"}
+        ))
+        asyncio.run(writer.upsert_author_profile(
+            session, {"asin": "B0AUTHOR01", "name": "A", "region": "us"}
+        ))
+        asyncio.run(writer.upsert_track(session, "B0STAMP001", {"chapters": []}, region="us"))
+
+    for mock in (books, series, authors, track):
+        assert mock.await_args.kwargs["confirm"] is False

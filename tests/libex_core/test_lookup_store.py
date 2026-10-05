@@ -533,6 +533,16 @@ def test_without_a_store_the_lookups_load_and_run_without_the_storage_libraries(
     assert done.returncode == 0, done.stderr
 
 
+STORE_ONLY_READS = {
+    "chapters_confirmed_at",
+    "stored_author",
+    "stored_book",
+    "stored_books",
+    "stored_chapters",
+    "stored_series",
+}
+
+
 def test_every_lookup_takes_a_keyword_only_store_that_defaults_to_none():
     import inspect
 
@@ -540,7 +550,7 @@ def test_every_lookup_takes_a_keyword_only_store_that_defaults_to_none():
 
     for name in lookup.__all__:
         fn = getattr(lookup, name)
-        if not inspect.iscoroutinefunction(fn):
+        if not inspect.iscoroutinefunction(fn) or name in STORE_ONLY_READS:
             continue
         param = inspect.signature(fn).parameters.get("store")
         assert param is not None, name

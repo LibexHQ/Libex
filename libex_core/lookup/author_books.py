@@ -178,7 +178,9 @@ async def _resolve_author_name(
         return None
     name = (data.get("contributor", {}).get("name") or "").replace("\t", "").strip()
     if name and store is not None:
-        await _store.persist_author(store, normalize_author(data, asin, region), region)
+        await _store.persist_author(
+            store, normalize_author(data, asin, region), region, confirm=True
+        )
     return name or None
 
 

@@ -16,6 +16,7 @@ import importlib
 from typing import Any
 
 _EXPORTS = {
+    "confirm_chapters": "libex_core.storage.write.entities",
     "exclusive_write": "libex_core.storage.write.serialize",
     "resolve_author_ids": "libex_core.storage.write.books",
     "write_books": "libex_core.storage.write.books",

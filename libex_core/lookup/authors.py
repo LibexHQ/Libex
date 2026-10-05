@@ -97,7 +97,9 @@ async def get_author(
                 _store.log_served_from_store("author", region, author_asin=canonical)
                 return AuthorResponse(**stored)
         raise as_audible_failure(e, OUTAGE_MESSAGE) from e
-    if store is not None and await _store.persist_author(store, normalized, region):
+    if store is not None and await _store.persist_author(
+        store, normalized, region, confirm=True
+    ):
         normalized = await _store.stored_author(store, canonical, region) or normalized
     return AuthorResponse(**normalized)
 

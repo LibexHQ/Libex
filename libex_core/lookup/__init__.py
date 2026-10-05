@@ -11,7 +11,8 @@ libex_core.storage.LocalStore: with it the lookup writes what Audible answered
 through under the hosted merge rules, serves the row the store then holds, and
 answers an outage from the stored copy where the hosted service does. Nothing
 about the storage is imported unless a store is passed, so this package works
-without the storage extra.
+without the storage extra. The stored_* functions are the exception to the
+shape: they read a store alone, never ask Audible, and take the store first.
 """
 
 # Local
@@ -32,14 +33,25 @@ from libex_core.lookup.search import (
     search,
 )
 from libex_core.lookup.series import get_series, get_series_books, search_series
+from libex_core.lookup.stored import (
+    Stored,
+    chapters_confirmed_at,
+    stored_author,
+    stored_book,
+    stored_books,
+    stored_chapters,
+    stored_series,
+)
 
 __all__ = [
     "INCOMPLETE_REASONS",
     "RELEASE_WINDOWS",
     "BookList",
+    "Stored",
     "abs_quick_search",
     "abs_search",
     "categories",
+    "chapters_confirmed_at",
     "coming_soon",
     "get_author",
     "get_author_books",
@@ -55,4 +67,9 @@ __all__ = [
     "search",
     "search_authors",
     "search_series",
+    "stored_author",
+    "stored_book",
+    "stored_books",
+    "stored_chapters",
+    "stored_series",
 ]

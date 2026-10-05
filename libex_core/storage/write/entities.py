@@ -13,6 +13,9 @@ Every function takes the dialect of its session from the session unless the
 caller already knows it and passes `dialect`, which saves the lookup.
 """
 
+# Standard library
+from datetime import datetime
+
 # Third party
 from sqlalchemy import exists, literal, select, update
 from sqlalchemy.exc import IntegrityError
@@ -109,7 +112,11 @@ async def upsert_series(
 
 
 async def write_series_profile(
-    session: AsyncSession, data: dict, *, dialect: str | None = None
+    session: AsyncSession,
+    data: dict,
+    *,
+    dialect: str | None = None,
+    confirm: bool = False,
 ) -> str | None:
     """
     Writes a full series profile fetched from the series endpoint, returning
@@ -121,13 +128,16 @@ async def write_series_profile(
     adds is a stricter guard: a profile fetch that answered without a name has
     failed, where a book's series relationship may legitimately carry the title
     under either key.
+
+    confirm records that Audible answered for this series itself just now, and
+    is for the series profile fetch alone; the stamp only moves forward.
     """
     asin = data.get("asin")
     name = data.get("name")
     if not asin or not name:
         return None
 
-    params = series_params(data, utc_now())
+    params = series_params(data, utc_now(), confirm=confirm)
     if params is None:
         return None
     dialect = dialect or dialect_of(session)
@@ -333,7 +343,11 @@ async def upsert_author(
 
 
 async def write_author_profile(
-    session: AsyncSession, data: dict, *, dialect: str | None = None
+    session: AsyncSession,
+    data: dict,
+    *,
+    dialect: str | None = None,
+    confirm: bool = False,
 ) -> int | None:
     """
     Writes a full author profile fetched from the contributors endpoint and
@@ -342,6 +356,10 @@ async def write_author_profile(
     Updates description and image which aren't available from book data alone.
     Also writes author genres to author_genre pivot. Author genres are
     additive -- never delete. A profile without an asin writes nothing.
+
+    confirm records that Audible answered for this author itself just now, and
+    is for the author profile fetch alone; an author named by a book is never
+    stamped (upsert_author takes no such flag). The stamp only moves forward.
     """
     asin = data.get("asin")
     name = data.get("name", "").strip()
@@ -353,6 +371,8 @@ async def write_author_profile(
     dialect = dialect or dialect_of(session)
     insert = insert_for(dialect)
 
+    now = utc_now()
+    confirmed = merge.stamp_bind()
     stmt = insert(Author).values(
         asin=asin,
         name=name,
@@ -360,6 +380,7 @@ async def write_author_profile(
         description=data.get("description"),
         image=data.get("image"),
         fetched_description=True,
+        confirmed_at=confirmed,
         created_at=utc_now(),
         updated_at=utc_now(),
     ).on_conflict_do_update(
@@ -374,10 +395,11 @@ async def write_author_profile(
             # ordinary profile refresh.
             "image": merge.answered(data.get("image"), Author.image),
             "fetched_description": True,
+            "confirmed_at": merge.latest(confirmed, Author.confirmed_at),
             "updated_at": utc_now(),
         },
     ).returning(Author.id)
-    result = await session.execute(stmt)
+    result = await session.execute(stmt, {"confirmed_at": now if confirm else None})
     row = result.fetchone()
     author_id = row[0] if row else None
 
@@ -405,6 +427,7 @@ async def write_track(
     *,
     region: str,
     dialect: str | None = None,
+    confirm: bool = False,
 ) -> int | None:
     """
     Writes chapter data for a book, keeping the richer of the two payloads, and
@@ -431,6 +454,9 @@ async def write_track(
     applies to an executemany, and this is a single row with literal values.
     The count comes back so a caller can tell a suppressed overwrite -- fewer
     chapters offered than are held -- from an ordinary one.
+
+    confirm also stamps the book's chapters_confirmed_at, for a chapters answer
+    that came from Audible just now (see confirm_chapters).
     """
     insert = insert_for(dialect or dialect_of(session))
     columns = Track.__table__.c
@@ -462,4 +488,39 @@ async def write_track(
     row = result.first()
     if row is None:
         return None
+    if confirm:
+        await confirm_chapters(session, asin, region=region, at=now)
     return row[0] or 0
+
+
+async def confirm_chapters(
+    session: AsyncSession,
+    asin: str,
+    *,
+    region: str,
+    at: datetime | None = None,
+) -> bool:
+    """
+    Records that Audible answered for this book's chapters just now, and
+    returns whether the store holds the book for the region to record it on.
+
+    For a real answer of either kind: a listing (write_track passes confirm
+    for it) or a legitimately empty one, a chapters 404 or a response with no
+    listing, which is an answer too -- it is how a book with no chapters is
+    told apart from one nobody has asked about. Never for an outage, a
+    store-served answer or a placeholder.
+
+    The stamp only moves forward and a book never asked about keeps NULL. It is
+    a statement of its own because an empty answer writes no listing for
+    write_track to ride on.
+    """
+    column = Book.chapters_confirmed_at
+    stamp = merge.stamp_bind("stamp")
+    result = await session.execute(
+        update(Book)
+        .where(Book.asin == asin, Book.region == region)
+        .values(chapters_confirmed_at=merge.latest(stamp, column))
+        .execution_options(synchronize_session=False),
+        {"stamp": at or utc_now()},
+    )
+    return result.rowcount > 0

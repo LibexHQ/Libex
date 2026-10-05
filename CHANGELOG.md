@@ -10,6 +10,15 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [2.2.4]
+
+No endpoint, parameter, response shape, field or status code changes, and there is no database migration. Libex now records when Audible last answered for a book, series, author or chapter listing in columns that 2.2.0 added and left empty.
+
+### Changed
+- **The `confirmed_at` columns start filling.** A book's `confirmed_at` is stamped when its product is fetched from Audible, a series' when its profile is fetched, and an author's when its profile is fetched (including when an author's name is looked up for their books). A series or author that a book only names is not stamped. A book's `chapters_confirmed_at` is stamped when Audible answers for its chapters with a listing, and when the seeder or the chapters backfill asks and Audible answers with a 404 or with no chapter listing. A permanent refusal such as a 400 is not stamped. The stamp never moves backwards. Nothing reads these columns yet and no response carries them.
+- **Rows stored before this release stay unstamped** until Audible is asked about them again; nothing is backfilled.
+- **A `GET /book/{asin}/chapters` that Audible answers with a 404 does not stamp the book.** Only a chapters listing does. The no-chapters answers recorded are the ones the seeder and the backfill get.
+
 ## [2.2.3]
 
 No endpoint, parameter, response shape, field or status code moved, and the application behaves exactly as before. This release corrects the operator script's runbook and nothing else; there is no database migration.

@@ -350,10 +350,10 @@ def _upsert_escaping_on(*asins):
     rollback in that handler failing too -- which is what a connection that
     died under the statement does.
     """
-    async def _upsert(session, data):
+    async def _upsert(session, data, **options):
         if data.get("asin") in asins:
             raise _a_dead_connection()
-        return await upsert_book(session, data)
+        return await upsert_book(session, data, **options)
 
     return _upsert
 
@@ -370,13 +370,13 @@ def _upsert_escaping_on_an_aborted_session(asin):
     aborted transaction. Whether the replay clears the session on that path is
     only observable from here: with a raise alone there is nothing to clear.
     """
-    async def _upsert(session, data):
+    async def _upsert(session, data, **options):
         if data.get("asin") == asin:
             try:
                 await session.execute(text("SELECT 1 / 0"))
             except Exception as aborted:
                 raise _a_dead_connection() from aborted
-        return await upsert_book(session, data)
+        return await upsert_book(session, data, **options)
 
     return _upsert
 

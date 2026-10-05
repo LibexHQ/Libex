@@ -82,6 +82,7 @@ async def write_books(
     *,
     dialect: str | None = None,
     conflict_errors: tuple[type[BaseException], ...] = (),
+    confirm: bool = False,
 ) -> None:
     """
     Issues every statement for a list of books -- their rows plus their genre,
@@ -94,6 +95,10 @@ async def write_books(
     before. The saving is compile time on the event loop, not round trips --
     see the book upsert for why holding the statement object is not enough on
     its own.
+
+    confirm stamps the books' own rows as confirmed by Audible, and is for the
+    books of a real product answer only. The series and authors those books
+    name are mentions and are never stamped, whatever confirm says.
 
     Owns no transaction: it neither commits nor rolls back, so the caller
     decides whether one book or fifty share a transaction. Every statement is
@@ -123,7 +128,7 @@ async def write_books(
     now = utc_now()
 
     await lock_asins(session, "book", [book["asin"] for book in books], dialect=dialect)
-    await session.execute(statements.book_upsert, [book_params(book, now) for book in books])
+    await session.execute(statements.book_upsert, [book_params(book, now, confirm=confirm) for book in books])
 
     genres: dict[str, dict] = {}
     book_genres: dict[tuple, dict] = {}

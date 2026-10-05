@@ -70,6 +70,7 @@ from libex_core.audible.client import (
     upstream_status_of,
 )
 from libex_core.exceptions import ErrorCode, NotFoundException
+from libex_core.storage import merge
 from app.core.logging import get_logger
 from app.core.response_headers import (
     REASON_HYDRATION_DEADLINE,
@@ -640,7 +641,7 @@ async def _get_books_by_asins_unsettled(
 
         if all_products:
             # Persist to DB and cache in the background
-            outcome = persist_books_background(normalized, region)
+            outcome = persist_books_background(normalized, region, confirm=True)
             if persist_outcome is not None:
                 persist_outcome.append(outcome)
 
@@ -784,7 +785,7 @@ async def get_chapters(
         result = normalize_chapters(data, asin, region)
 
         # Persist to DB and cache in the background
-        persist_track_background(asin, result, region)
+        persist_track_background(asin, result, region, confirm=True)
 
         logger.info("Requested chapters from Audible", extra={
             "chapters_took": chapters_took,
@@ -894,7 +895,7 @@ async def fetch_and_store_chapters(
     try:
         data = await fetch_chapter_metadata(audible_get, asin, region)
     except NotFoundException:
-        await _mark_chapters_checked(session, asin, region)
+        await _mark_chapters_checked(session, asin, region, confirmed=True)
         return "not_found"
     except Exception as e:
         logger.warning(
@@ -909,12 +910,12 @@ async def fetch_and_store_chapters(
         return "error"
 
     if not has_chapter_info(data):
-        await _mark_chapters_checked(session, asin, region)
+        await _mark_chapters_checked(session, asin, region, confirmed=True)
         return "none"
 
     try:
         chapters = normalize_chapters(data, asin, region)
-        await upsert_track(session, asin, chapters, region=region)
+        await upsert_track(session, asin, chapters, region=region, confirm=True)
         await _mark_chapters_checked(session, asin, region)
         return "stored"
     except Exception as e:
@@ -927,7 +928,7 @@ async def fetch_and_store_chapters(
 
 
 async def _mark_chapters_checked(
-    session: AsyncSession, asin: str, region: str
+    session: AsyncSession, asin: str, region: str, *, confirmed: bool = False
 ) -> None:
     """
     Stamps chapters_checked_at on a book, recording that its chapters have
@@ -942,10 +943,25 @@ async def _mark_chapters_checked(
     condition here, because the stamp itself is the record of when the
     question was asked. See _gather_chapters in the seeder and _select_work in
     scripts/backfill_chapters.py.
+
+    confirmed also stamps chapters_confirmed_at, which only ever moves
+    forward, for a legitimately empty answer from Audible (a 404, or a
+    response with no listing): that is an answer, and it is how a book with no
+    chapters is told apart from one nobody has asked about. It is False by
+    default, and stays False for a value never sent to Audible and for a
+    listing, which is confirmed by the track write itself so that the stamp
+    follows whether the write succeeded.
     """
+    now = datetime.now(timezone.utc)
+    values = {"chapters_checked_at": now}
+    params: dict = {}
+    if confirmed:
+        values["chapters_confirmed_at"] = merge.latest(
+            merge.stamp_bind("stamp"), Book.chapters_confirmed_at
+        )
+        params["stamp"] = now
     await session.execute(
-        update(Book)
-        .where(Book.asin == asin, Book.region == region)
-        .values(chapters_checked_at=datetime.now(timezone.utc))
+        update(Book).where(Book.asin == asin, Book.region == region).values(**values),
+        params,
     )
     await session.commit()

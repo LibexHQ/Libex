@@ -154,6 +154,35 @@ can carry database credentials, so it is read from the environment, never
 accepted as an option, and never printed. To delete a SQLite store, remove
 the file and its `-wal` and `-shm` companions beside it.
 
+### Reading the store directly
+
+`libex_core.lookup` also reads a store without asking Audible:
+`stored_book`, `stored_books`, `stored_chapters`, `stored_series`,
+`stored_author` and `chapters_confirmed_at`. Each takes the `LocalStore` first and returns the same model
+the live lookup returns, wrapped in `Stored`.
+
+```python
+from libex_core.lookup import stored_book
+
+found = await stored_book(store, asin, region="us")
+if found is not None:
+    print(found.value.title, found.confirmed_at)
+```
+
+- `region` is required, with no default; a record stored for another
+  marketplace is never returned.
+- `Stored.confirmed_at` is when Audible last confirmed the record. `None`
+  means it has not been confirmed since 0.22.0 (for instance, it was stored
+  earlier or only mentioned by another record), not that it is stale.
+- A record that is not stored returns `None`; `stored_books` leaves it out.
+- A closed store raises `StoreClosed`.
+- `stored_chapters` returns `None` when the stored chapters answer is empty.
+  To tell that from a book never asked about, call
+  `chapters_confirmed_at(store, asin, region=...)`: it returns when Audible
+  last answered for the book's chapters, empty answers included, or `None`
+  if it never has. A date with no `stored_chapters` result means Audible
+  confirmed the book has none.
+
 ## Use it as a library
 
 ```python

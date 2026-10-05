@@ -80,7 +80,7 @@ def _log_write_failure(what: str, exc: Exception, **fields: Any) -> None:
 # ============================================================
 
 async def persist_books(
-    store: "LocalStore", books: list[dict[str, Any]], region: str
+    store: "LocalStore", books: list[dict[str, Any]], region: str, *, confirm: bool = False
 ) -> tuple[set[str], bool]:
     """
     Writes normalized books, unsettled (the writer needs the tri-state flags as
@@ -91,6 +91,10 @@ async def persist_books(
     for two regions is two rows and neither write touches the other. Every
     book in the list is written for region; the writer links its series,
     authors, narrators and genres to that region's record.
+
+    confirm stamps the books as confirmed by Audible, and is for a product
+    fetch of those books only, never a listing or a search; the series and
+    authors they name are never stamped.
     """
     from libex_core.storage import write
 
@@ -101,7 +105,7 @@ async def persist_books(
         chunk = persistable[start:start + WRITE_CHUNK_SIZE]
         try:
             async with store.write() as session:
-                await write.write_books(session, chunk)
+                await write.write_books(session, chunk, confirm=confirm)
         except Exception as exc:
             failed = True
             _log_write_failure("books", exc, books=len(chunk), region=region)
@@ -139,36 +143,51 @@ async def _persist_one(
     return True
 
 
-async def persist_series(store: "LocalStore", data: dict[str, Any], region: str) -> bool:
+async def persist_series(
+    store: "LocalStore", data: dict[str, Any], region: str, *, confirm: bool = False
+) -> bool:
     """Writes a series profile, which carries its own region. False when the
-    write failed or the profile names no region and so could not be keyed."""
+    write failed or the profile names no region and so could not be keyed.
+    confirm stamps the series as confirmed, for a series profile fetch."""
     from libex_core.storage import write
 
     return await _persist_one(
         store,
         "series",
-        lambda s: write.write_series_profile(s, data),
+        lambda s: write.write_series_profile(s, data, confirm=confirm),
         refusal="the series has no asin, name or region",
         region=region,
     )
 
 
-async def persist_author(store: "LocalStore", data: dict[str, Any], region: str) -> bool:
-    """Writes an author profile. False when the write failed."""
+async def persist_author(
+    store: "LocalStore", data: dict[str, Any], region: str, *, confirm: bool = False
+) -> bool:
+    """Writes an author profile. False when the write failed. confirm stamps
+    the author as confirmed, for an author profile fetch."""
     from libex_core.storage import write
 
     return await _persist_one(
-        store, "author", lambda s: write.write_author_profile(s, data), region=region
+        store,
+        "author",
+        lambda s: write.write_author_profile(s, data, confirm=confirm),
+        region=region,
     )
 
 
 async def persist_track(
-    store: "LocalStore", asin: str, chapters: dict[str, Any], region: str
+    store: "LocalStore",
+    asin: str,
+    chapters: dict[str, Any],
+    region: str,
+    *,
+    confirm: bool = False,
 ) -> bool:
     """Writes a book's chapters under the book's record for region, keeping the
     richer of the stored and offered listing. False when that record is not in
     the store, the read that looked for it failed, or the write failed; each is
-    logged as its own case."""
+    logged as its own case. confirm also stamps the book's chapters as
+    confirmed, for a listing Audible just answered with."""
     from libex_core.storage import write
 
     # A chapter listing hangs off its book's row, so one for a book the store
@@ -191,8 +210,28 @@ async def persist_track(
     return await _persist_one(
         store,
         "chapters",
-        lambda s: write.write_track(s, asin, chapters, region=region),
+        lambda s: write.write_track(s, asin, chapters, region=region, confirm=confirm),
         refusal="the book is not stored for the region",
+        region=region,
+    )
+
+
+async def persist_chapters_confirmed_absent(
+    store: "LocalStore", asin: str, region: str
+) -> bool:
+    """
+    Records that Audible answered for a book's chapters with nothing to list (a
+    404, or a response with no listing). That is an answer, and it is what
+    tells a book without chapters from one nobody has asked about. Nothing else
+    about the store changes, and a book the store does not hold for the region
+    has nothing to record it on. False when the write failed.
+    """
+    from libex_core.storage import write
+
+    return await _persist_one(
+        store,
+        "chapters confirmation",
+        lambda s: write.confirm_chapters(s, asin, region=region),
         region=region,
     )
 

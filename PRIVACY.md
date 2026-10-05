@@ -468,8 +468,20 @@ The library is built around preventing that from happening by accident:
   the titles stored are the titles looked up, and every stored book, author,
   series, narrator, genre and chapter list records when it was first written
   and last updated, so a local store is part of that person's reading
-  history, with dates. The database address, and any password in it, is
-  never logged, repeated in an error, or shown in the store's `repr`.
+  history, with dates. A stored book, series or author also records when
+  Audible last answered for it directly. For a book, that is when it was
+  fetched in full: looking up a book or a list of books, a series' or an
+  author's books, or a quick search answered from Audible's suggestions. For
+  a series or an author, it is when its own profile was looked up, which
+  looking up an author's books by ASIN also does when the store doesn't
+  already hold the author's name. A book that only came back in a search
+  (including a quick search split into an author and a title), a narrator's
+  books, or a new releases or coming soon scan doesn't get that date, and
+  nor does anything only named by another record. A stored book also
+  records when Audible last answered for its chapters, even when Audible had
+  none to give, so looking up the chapters of a stored book leaves a date
+  behind unless Audible couldn't be reached or the chapter list couldn't be
+  written. The database address, and any password in it, is never logged, repeated in an error, or shown in the store's `repr`.
   - **A SQLite file** is created only when the application runs the store's
     upgrade step (`libex-core db upgrade` on the command line). On Linux and
     macOS a new file is created readable and writable only by the user
@@ -624,7 +636,7 @@ The library is built around preventing that from happening by accident:
   - Audible unavailable (warning, or error for a book or narrator search, a quick search, or a new releases or coming soon scan): region; except for a book lookup, the kind of error; except for a book lookup, a book or narrator search, a quick search or an author's books by ASIN, Audible's status where there was one; for a chapters, series, series' books, author or author's books lookup, the ASIN asked for, and for an author's books by ASIN, the error messages from the parts that failed and whether reading the store failed; for a search for a series or an author, or for an author's books by name, the length of the name; for new releases and coming soon, the category ID.
 
   From a local store, which is used only when an application passes one to a lookup or uses the storage part directly (on the command line, only when `LIBEX_CORE_STORAGE` is set):
-  - books, a chapter list, a series or an author written (info): what was written, region, and for books, how many;
+  - books, a chapter list, a series or an author written, or a book's chapters recorded as looked up (info): what was written, region, and for books, how many;
   - a chapter list not stored because the store doesn't hold its book for that region (info): title ASIN, region;
   - a series profile not stored because it has no ASIN, name or region (info): what was being written, the reason, which is a fixed phrase, and the region;
   - a write that failed (warning; the answer from Audible is still returned): what was being written, the kind of error, region, and for books, how many were in the batch;

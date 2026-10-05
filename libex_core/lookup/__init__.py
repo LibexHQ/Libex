@@ -23,7 +23,15 @@ from libex_core.lookup.author_books import (
     get_author_books_by_name,
 )
 from libex_core.lookup.authors import get_author, search_authors
-from libex_core.lookup.books import get_book, get_books, get_chapters
+from libex_core.lookup.books import (
+    BookLookup,
+    BooksLookup,
+    get_book,
+    get_book_with_nulls,
+    get_books,
+    get_books_with_nulls,
+    get_chapters,
+)
 from libex_core.lookup.releases import RELEASE_WINDOWS, categories, coming_soon, new_releases
 from libex_core.lookup.search import (
     abs_quick_search,
@@ -47,6 +55,8 @@ __all__ = [
     "INCOMPLETE_REASONS",
     "RELEASE_WINDOWS",
     "BookList",
+    "BookLookup",
+    "BooksLookup",
     "Stored",
     "abs_quick_search",
     "abs_search",
@@ -57,7 +67,9 @@ __all__ = [
     "get_author_books",
     "get_author_books_by_name",
     "get_book",
+    "get_book_with_nulls",
     "get_books",
+    "get_books_with_nulls",
     "get_chapters",
     "get_series",
     "get_series_books",

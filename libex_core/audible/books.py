@@ -472,6 +472,112 @@ def _reproduce(product: dict, key: str) -> Any:
 
 
 # ============================================================
+# EXPLICIT NULLS
+# ============================================================
+
+# The scalar upstream keys whose explicit null explicit_null_fields reports,
+# each with the published fields it feeds, in the order normalize_product
+# builds them. Scalars only. A key Audible normally sends as an object or a
+# list (authors, narrators, category_ladders, relationships, plans,
+# product_images, rating, and the rating's overall_distribution) is left out
+# on purpose: a null there is Audible failing to answer rather than Audible
+# asserting an empty value. normalize_product raises on most of them, which
+# is the outage the caller sees, and the rest (plans, product_images) already
+# normalize to "said nothing"; reporting any of them as a null would offer the
+# caller a clear where there is none.
+_NULLABLE_SCALAR_FIELDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("title", ("title",)),
+    ("subtitle", ("subtitle",)),
+    ("merchandising_summary", ("description",)),
+    ("publisher_summary", ("summary",)),
+    ("publisher_name", ("publisher",)),
+    ("copyright", ("copyright",)),
+    ("isbn", ("isbn",)),
+    ("language", ("language",)),
+    ("format_type", ("bookFormat",)),
+    ("release_date", ("releaseDate",)),
+    ("is_adult_product", ("explicit",)),
+    ("is_pdf_url_available", ("hasPdf",)),
+    ("read_along_support", ("whisperSync",)),
+    ("runtime_length_min", ("lengthMinutes",)),
+    ("content_type", ("contentType",)),
+    ("content_delivery_type", ("contentDeliveryType",)),
+    ("sku", ("sku",)),
+    ("sku_lite", ("skuGroup",)),
+    ("is_listenable", ("isListenable",)),
+    ("is_buyable", ("isAvailable", "isBuyable")),
+    ("is_vvab", ("isVvab",)),
+    ("publication_name", ("publicationName",)),
+    ("publication_datetime", ("publicationDatetime",)),
+    ("extended_product_description", ("extendedProductDescription",)),
+    ("product_state", ("productState",)),
+)
+
+# The two podcast-only fields: normalize_product reads these upstream keys only
+# for a podcast and publishes None for anything else whatever Audible sent, so
+# a null on a non-podcast is not what the published value reflects.
+_PODCAST_ONLY_FIELDS: tuple[tuple[str, str], ...] = (
+    ("episode_number", "episodeNumber"),
+    ("episode_type", "episodeType"),
+)
+
+
+def explicit_null_fields(product: dict) -> tuple[str, ...]:
+    """
+    The published fields whose Audible source key was present in `product`
+    with the value None, as opposed to omitted.
+
+    The two read differently to a consumer. An omitted key is Audible saying
+    nothing and a stored value should stand; an explicit null is Audible
+    saying the value is empty, which a consumer that wants to tell the two
+    apart can now do. Only the signal is produced here: normalize_product
+    still publishes None for both, the scalar coalescing that keeps stored data
+    from being cleared is unchanged, and nothing about what is stored or
+    served depends on this.
+
+    Presence is the whole test, so a key from a response group that was not
+    requested, or a key Audible left out, is never reported. Container nulls
+    are never reported either (see _NULLABLE_SCALAR_FIELDS); the rating's three
+    scalars are, when the rating object itself is present. Each name appears
+    once. A product with no asin has nothing to key a report on and the asin
+    itself is never reported, since a product without one is not served.
+    """
+    found: list[str] = []
+    for key, fields in _NULLABLE_SCALAR_FIELDS:
+        if key in product and product[key] is None:
+            found.extend(fields)
+
+    rating = product.get("rating")
+    if isinstance(rating, dict):
+        distribution = rating.get("overall_distribution")
+        if isinstance(distribution, dict):
+            if "average_rating" in distribution and distribution["average_rating"] is None:
+                found.append("rating")
+            if "num_ratings" in distribution and distribution["num_ratings"] is None:
+                found.append("numRatings")
+        if "num_reviews" in rating and rating["num_reviews"] is None:
+            found.append("numReviews")
+
+    content_type = product.get("content_type")
+    if isinstance(content_type, str) and content_type.lower() == "podcast":
+        for key, name in _PODCAST_ONLY_FIELDS:
+            if key in product and product[key] is None:
+                found.append(name)
+
+    return tuple(dict.fromkeys(found))
+
+
+def explicit_nulls_by_asin(products: list[dict]) -> dict[str, tuple[str, ...]]:
+    """
+    explicit_null_fields for each raw product, keyed by the product's asin. A
+    product with no nulls maps to (), which says "looked and found none";
+    a product that was never looked at has no entry at all, which is how a
+    caller tells that apart.
+    """
+    return {p["asin"]: explicit_null_fields(p) for p in products if p.get("asin")}
+
+
+# ============================================================
 # NORMALIZATION
 # ============================================================
 

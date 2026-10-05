@@ -107,7 +107,11 @@ class BookList:
     from_store holds the ASINs of the books answered from the store because
     Audible could not answer for them (before filtering, so a filtered-out
     ASIN can appear here); those books are stored copies, not what Audible
-    said this time.
+    said this time. explicit_nulls maps the ASIN of each book in books to the
+    published fields Audible sent as an explicit null rather than omitting
+    (see libex_core.audible.books.explicit_null_fields); it reports and changes
+    no value. A book with no entry is unknown, as every stored copy is, and
+    that is not the same as () -- Audible answered and sent none.
     """
 
     books: list[BookResponse] = field(default_factory=list)
@@ -115,6 +119,7 @@ class BookList:
     incomplete_reasons: tuple[str, ...] = ()
     store_write_failed: bool = False
     from_store: tuple[str, ...] = ()
+    explicit_nulls: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 def _reasons(discovery_complete: bool, hydration: Hydration) -> tuple[str, ...]:
@@ -143,12 +148,18 @@ def _assemble(
 ) -> BookList:
     reasons = _reasons(discovery_complete, hydration)
     books = shape_books(hydration.books, filters, sort, order)
+    kept = {book["asin"] for book in books}
     return BookList(
         books=[BookResponse(**book) for book in books],
         complete=not reasons,
         incomplete_reasons=reasons,
         store_write_failed=hydration.store_write_failed,
         from_store=tuple(hydration.from_store),
+        explicit_nulls={
+            asin: nulls
+            for asin, nulls in hydration.explicit_nulls.items()
+            if asin in kept
+        },
     )
 
 

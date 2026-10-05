@@ -218,6 +218,15 @@ store as above; without it nothing is persisted. Importing `libex_core`
 itself imports nothing else, and the storage libraries load only when
 `libex_core.storage` is used.
 
+`get_book_with_nulls` and `get_books_with_nulls` return the same book or books
+together with `explicit_nulls`: the published fields Audible sent as an
+explicit null rather than leaving out. A value already in the store is never
+cleared by one. A null in place of a whole container, such as the product
+itself, is still reported as an outage, not as a book. A book served from the
+store has `explicit_nulls` of `None` (`BookLookup`) or no entry in the mapping
+(`BooksLookup`), meaning unknown, where `()` means Audible answered and sent
+none.
+
 ### Supplying your own connection
 
 `LocalStore(url)` makes the database connection itself. If you need one it

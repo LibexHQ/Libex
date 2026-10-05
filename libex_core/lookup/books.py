@@ -40,6 +40,7 @@ from libex_core.audible.books import (
     fetch_products,
     filter_products,
     is_placeholder_record,
+    explicit_nulls_by_asin,
     normalize_products,
     settle_flags_list,
 )
@@ -94,6 +95,12 @@ class Hydration:
     answer for them; it is a subset of books, and those books are the stored
     copies, not anything Audible said this time. store_write_failed is True
     when a store was given and some fetched book could not be written to it.
+    explicit_nulls maps an ASIN to the published fields Audible sent as an
+    explicit null in this response, as opposed to omitting them (see
+    libex_core.audible.books.explicit_null_fields); () means Audible's answer
+    was read and carried none. It reports what Audible said and changes no
+    value in books. An ASIN with no entry is unknown: every ASIN in from_store
+    has none, because a stored copy is not an answer from Audible this time.
     """
 
     books: list[dict[str, Any]] = field(default_factory=list)
@@ -103,6 +110,7 @@ class Hydration:
     deadline_abandoned: list[str] = field(default_factory=list)
     from_store: list[str] = field(default_factory=list)
     store_write_failed: bool = False
+    explicit_nulls: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 class _HydrationDeadlineExceeded(Exception):
@@ -288,6 +296,9 @@ async def hydrate_books(
             raise errors[0]
 
         normalized = await normalize_products(all_products, region)
+        # Read after normalizing, so a product whose container null raises
+        # there is an outage and never reaches a report of nulls.
+        explicit_nulls = explicit_nulls_by_asin(all_products)
 
         # The books are written as normalized, tri-state flags and all, and
         # served as the store then holds them.
@@ -338,6 +349,7 @@ async def hydrate_books(
             deadline_abandoned=abandoned,
             from_store=[b["asin"] for b in from_store],
             store_write_failed=write_failed,
+            explicit_nulls=explicit_nulls,
         )
 
     except NotFoundException:
@@ -396,6 +408,50 @@ def _canonical_asin(asin: str) -> str:
     return normalise_asin(asin)
 
 
+@dataclass(frozen=True)
+class BookLookup:
+    """
+    One book with what Audible said about its nulls.
+
+    book is exactly what get_book returns. explicit_nulls names the published
+    fields Audible sent as an explicit null rather than omitting, or is None
+    when unknown because the book was answered from the store and not by
+    Audible this time. () means Audible answered and sent none.
+    """
+
+    book: BookResponse
+    explicit_nulls: tuple[str, ...] | None = None
+
+
+async def get_book_with_nulls(
+    get: AudibleGet,
+    asin: str,
+    *,
+    region: str = "us",
+    store: "LocalStore | None" = None,
+) -> BookLookup:
+    """
+    get_book, returning the book together with its explicit nulls.
+
+    Same arguments, same errors and same book as get_book; see it. The only
+    addition is BookLookup.explicit_nulls, which reports and changes nothing.
+    """
+    canonical = _canonical_asin(asin)
+    hydration = await hydrate_books(get, [canonical], region, store=store)
+    if not hydration.books:
+        if canonical in hydration.placeholders:
+            raise NotFoundException(
+                "Audible returned only a placeholder record for this ASIN",
+                code=ErrorCode.WITHHELD,
+            )
+        raise NotFoundException("Book not found")
+    book = hydration.books[0]
+    return BookLookup(
+        book=BookResponse(**book),
+        explicit_nulls=hydration.explicit_nulls.get(book["asin"]),
+    )
+
+
 async def get_book(
     get: AudibleGet,
     asin: str,
@@ -415,20 +471,29 @@ async def get_book(
     book; RegionException for an unknown region. With a store the book is
     written through and served as the store holds it, and an outage is
     answered from the stored copy.
+
+    get_book_with_nulls is the same lookup that also reports which fields
+    Audible sent as an explicit null.
     """
-    canonical = _canonical_asin(asin)
-    hydration = await hydrate_books(get, [canonical], region, store=store)
-    if not hydration.books:
-        if canonical in hydration.placeholders:
-            raise NotFoundException(
-                "Audible returned only a placeholder record for this ASIN",
-                code=ErrorCode.WITHHELD,
-            )
-        raise NotFoundException("Book not found")
-    return BookResponse(**hydration.books[0])
+    return (await get_book_with_nulls(get, asin, region=region, store=store)).book
 
 
-async def get_books(
+@dataclass(frozen=True)
+class BooksLookup:
+    """
+    A bulk lookup with what Audible said about each book's nulls.
+
+    response is exactly what get_books returns. explicit_nulls maps the ASIN
+    of each book in it to the published fields Audible sent as an explicit
+    null; a book with no entry is unknown (answered from the store), and ()
+    means Audible answered and sent none.
+    """
+
+    response: BulkBookResponse
+    explicit_nulls: dict[str, tuple[str, ...]] = field(default_factory=dict)
+
+
+async def get_books_with_nulls(
     get: AudibleGet,
     asins: list[str],
     *,
@@ -437,8 +502,16 @@ async def get_books(
     sort: str | None = None,
     order: str = "asc",
     store: "LocalStore | None" = None,
-) -> BulkBookResponse:
+) -> BooksLookup:
     """
+    get_books, returning the response together with each book's explicit nulls.
+
+    Same arguments, errors and response as get_books, all documented below.
+    BooksLookup.explicit_nulls maps the ASIN of each book in the response to
+    the published fields Audible sent as an explicit null rather than
+    omitting; a book answered from the store has no entry, which means unknown
+    and is not the same as ().
+
     Fetches up to 1000 books by ASIN.
 
     Each entry may itself be comma-separated, as the hosted route's query
@@ -499,7 +572,8 @@ async def get_books(
 
     shaped = shape_books(hydration.books, filters, sort, order)
 
-    return BulkBookResponse(
+    shaped_asins = {book["asin"] for book in shaped}
+    response = BulkBookResponse(
         books=[BookResponse(**book) for book in shaped],
         notFound=[
             a for a in asin_list
@@ -510,6 +584,34 @@ async def get_books(
         placeholderRecords=[a for a in asin_list if normalise_asin(a) in placeholder_set],
         notFetched=[a for a in asin_list if normalise_asin(a) in not_fetched_set],
     )
+    return BooksLookup(
+        response=response,
+        explicit_nulls={
+            asin: nulls
+            for asin, nulls in hydration.explicit_nulls.items()
+            if asin in shaped_asins
+        },
+    )
+
+
+async def get_books(
+    get: AudibleGet,
+    asins: list[str],
+    *,
+    region: str = "us",
+    filters: dict[str, Any] | None = None,
+    sort: str | None = None,
+    order: str = "asc",
+    store: "LocalStore | None" = None,
+) -> BulkBookResponse:
+    """
+    Fetches up to 1000 books by ASIN. See get_books_with_nulls, which this
+    returns the response of, for the arguments, the ordering, filtering and
+    store behaviour, and the errors.
+    """
+    return (await get_books_with_nulls(
+        get, asins, region=region, filters=filters, sort=sort, order=order, store=store
+    )).response
 
 
 async def get_chapters(

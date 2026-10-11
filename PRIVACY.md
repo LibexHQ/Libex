@@ -353,17 +353,19 @@ What the software does as shipped:
   keeps them forever, not zero days. The compose files limit Docker's own log
   to five 10 MB files per container.
 - **No Cloudflare**, unless you put it in front yourself.
-- **How your instance reaches Audible depends on how you deploy it.** The
-  published compose files will not start without a proxy for Audible traffic,
-  and each includes an example VPN client container to provide one. Deployed
-  that way, Audible sees your VPN's exit address, and your VPN provider sees
-  which Audible host you connect to and when, but not the content. The example
-  container logs and makes outbound connections as described under
+- **How your instance reaches Audible depends on how you deploy it.** The API
+  does not require a proxy, and neither does its published compose file. Leave
+  `AUDIBLE_PROXY_URL` blank and the API connects to Audible directly from your
+  server's address, so Audible sees that address. The compose files for the
+  seeder, the chapter backfill and the corpus refresh will not start without a
+  proxy. All four of these compose files, the API's included, ship an example
+  VPN client container to provide one. Deployed through a VPN, Audible sees your VPN's
+  exit address, and your VPN provider sees which Audible host you connect to
+  and when, but not the content. The example container logs and makes
+  outbound connections as described under
   [Who receives data](#who-receives-data). It is only an example: any HTTP or
   HTTPS proxy will do, and choosing a VPN provider, and what that provider
-  logs, is up to you. Libex itself does not require a proxy. Run it some other
-  way with `AUDIBLE_PROXY_URL` blank and it connects to Audible directly from
-  your server's address. The startup log line shows which mode is in use.
+  logs, is up to you. The startup log line shows which mode is in use.
   Either way, search terms go to Audible and nothing about your users does.
 - **Documentation pages** are served from your own copy of the assets, which
   `scripts/fetch_docs_assets.sh` downloads and verifies during the Docker

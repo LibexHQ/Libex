@@ -10,6 +10,14 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [2.2.12]
+
+No endpoint, parameter, response field or status code changes, and there is no database migration. Only the published API stack's deployment and one startup log line change.
+
+### Changed
+- **`docker-compose.yml` deploys again with `AUDIBLE_PROXY_URL` blank.** Since 1.24.0 the API stack refused to deploy without it. It is now optional: blank sends the API's Audible requests directly from the host. Setting it, ideally to a VPN exit such as the bundled `libex-vpn` sidecar, is still recommended so Audible never sees the address the API answers on, and a value that isn't an `http://` or `https://` proxy URL still stops the app from starting. Running with no proxy? Remove the `libex-vpn` service too, or with its keys blank it restarts in a loop. The seeder, backfill and refresh stacks still refuse to deploy without their own proxy.
+- **Running without a proxy now logs a warning at startup.** The `Audible transport` line each worker writes at launch is a WARNING when requests go direct, reading "requests go to Audible directly from this host, no proxy", instead of INFO. A proxied deployment still logs it at INFO, unchanged. Anything that filters or alerts on log level will see the direct case at the higher level, once per worker.
+
 ## [2.2.11]
 
 No endpoint, parameter or response field changes, and there is no database migration. One Audible answer changes how it is read: a single-ASIN product request answered with a null product is now an outage, so some requests move from 404 or from an empty 200 to 503. The routes and transitions are listed in the entry below.

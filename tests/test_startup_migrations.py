@@ -153,6 +153,7 @@ def test_lifespan_logs_audible_transport_mode_and_host_for_a_proxy(monkeypatch, 
     record = records[0]
     assert record.audible_transport_mode == "proxy"
     assert record.audible_transport_host == "libex-vpn"
+    assert record.levelno == logging.INFO
     assert "hunter2" not in caplog.text
     assert "libexuser" not in caplog.text
     assert "8888" not in caplog.text
@@ -174,6 +175,8 @@ def test_lifespan_logs_audible_transport_mode_and_host_for_direct_egress(monkeyp
     record = records[0]
     assert record.audible_transport_mode == "direct"
     assert record.audible_transport_host is None
+    assert record.levelno == logging.WARNING
+    assert "directly from this host" in record.getMessage()
 
 
 def test_lifespan_runs_once_per_worker_process_so_the_line_logs_once_here(monkeypatch, caplog):

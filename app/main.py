@@ -110,10 +110,17 @@ async def lifespan(app: FastAPI):
     # each log this line once; that duplication is expected, not a bug, since
     # nothing here tries to elect a single worker to speak for the rest.
     transport = audible_service._hosted_client.transport_summary()
-    logger.info(
-        f"Audible transport: {transport.mode}",
-        extra={"audible_transport_mode": transport.mode, "audible_transport_host": transport.host},
-    )
+    transport_extra = {
+        "audible_transport_mode": transport.mode,
+        "audible_transport_host": transport.host,
+    }
+    if transport.mode == "direct":
+        logger.warning(
+            "Audible transport: direct -- requests go to Audible directly from this host, no proxy",
+            extra=transport_extra,
+        )
+    else:
+        logger.info(f"Audible transport: {transport.mode}", extra=transport_extra)
 
     # The seeder is deliberately not started here. run_seeder and
     # run_new_releases_seeder used to be launched from this lifespan, which

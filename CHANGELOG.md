@@ -10,6 +10,13 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [2.2.14]
+
+No endpoint, parameter, response field or status code changes, and there is no database migration. Only the chapter backfill script changes.
+
+### Fixed
+- **The chapter backfill starts again in the published image.** `python -m scripts.backfill_chapters` died at import with `StorageUnavailable: local storage needs the 'storage' extra (missing: aiosqlite)`. Since 2.2.4 the script imported its storage writers through the package, which checks for the SQLite driver, and the image only carries the Postgres one. It now imports them from the module that defines them, the way the rest of the app does. The 2.2.4 to 2.2.13 images cannot start the chapter backfill; the API, the seeder and the refresh job were not affected. A new test imports every script and the app with the SQLite driver hidden, which is what the image looks like.
+
 ## [2.2.13]
 
 No endpoint, parameter or response field changes, and there is no database migration. One Audible answer changes how it is read: a series request answered with a null product is now an outage, so some requests move from 404 to 503. The transitions are listed in the entry below.

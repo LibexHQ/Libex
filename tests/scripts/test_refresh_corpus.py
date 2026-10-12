@@ -704,3 +704,66 @@ def test_chunks_keep_the_same_asin_in_every_region_it_is_stored_under():
     """Dedupe is per region: the same asin in two regions is two fetches."""
     chunks = _chunks_for_page([("B0SAME001", "us"), ("B0SAME001", "uk")], size=50)
     assert sorted(chunks) == [("uk", ["B0SAME001"]), ("us", ["B0SAME001"])]
+
+
+# ============================================================
+# Failed chunks: named in the log, and they stop the run counting as clean
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_a_failed_chunk_warning_names_its_first_and_last_asin(caplog):
+    run = _Run(None)
+    ramp = MagicMock()
+    ramp.record = AsyncMock()
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("db down")
+
+    session_cm = MagicMock()
+    session_cm.__aenter__ = AsyncMock(return_value=MagicMock())
+    session_cm.__aexit__ = AsyncMock(return_value=False)
+    with patch.object(refresh_corpus, "AsyncSessionFactory", return_value=session_cm), \
+         patch.object(refresh_corpus.books_service, "get_books_by_asins", _boom), \
+         caplog.at_level(logging.WARNING, logger="libex"):
+        await refresh_corpus._refresh_chunk("us", ["B000000001", "B000000002", "B000000003"], run, ramp)
+
+    record = next(r for r in caplog.records if r.getMessage() == "Refresh: chunk failed")
+    assert record.first_asin == "B000000001"
+    assert record.last_asin == "B000000003"
+    assert run.chunks_failed == 1
+
+
+@pytest.mark.asyncio
+async def test_a_run_with_a_failed_chunk_exits_2_and_is_not_clean(caplog):
+    async def _failing_chunk(region, asins, run, ramp):
+        run.chunks_done += 1
+        run.chunks_failed += 1
+
+    pages = iter([[("B000000001", "us")], []])
+
+    async def _read(session, cursor, size):
+        return next(pages)
+
+    session_cm = MagicMock()
+    session_cm.__aenter__ = AsyncMock(return_value=MagicMock())
+    session_cm.__aexit__ = AsyncMock(return_value=False)
+    with patch.object(refresh_corpus, "_verify_dedicated_proxy"), \
+         patch.object(refresh_corpus, "_verify_backlog_headroom"), \
+         patch.object(refresh_corpus, "_raise_process_limits"), \
+         patch.object(refresh_corpus, "_install_audible_observer"), \
+         patch.object(refresh_corpus, "_install_persist_shed_observer"), \
+         patch.object(refresh_corpus.signal, "signal"), \
+         patch.object(refresh_corpus, "AsyncSessionFactory", return_value=session_cm), \
+         patch.object(refresh_corpus, "_remaining_books", AsyncMock(return_value=1)), \
+         patch.object(refresh_corpus, "_read_page", _read), \
+         patch.object(refresh_corpus, "_refresh_chunk", _failing_chunk), \
+         patch.object(refresh_corpus, "_wait_for_backlog", AsyncMock()), \
+         patch.object(refresh_corpus, "_drain_persist_queue", AsyncMock(return_value=True)), \
+         patch.object(refresh_corpus, "engine", MagicMock(dispose=AsyncMock())), \
+         caplog.at_level(logging.INFO, logger="libex"):
+        code = await refresh_corpus._run(None)
+
+    stopped = next(r for r in caplog.records if r.getMessage() == "Refresh: stopped")
+    assert code == 2
+    assert stopped.clean_exit is False
+    assert stopped.chunks_failed == 1

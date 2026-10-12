@@ -82,8 +82,8 @@ ENVIRONMENT.
     REFRESH_PROGRESS_EVERY             100     chunks between progress lines.
 
 Exit codes: 0 clean, 1 aborted (429, sustained 5xx, or chunk-failure rate), 2
-finished without aborting but a shed batch or a drain timeout means not
-everything landed.
+finished without aborting but a failed chunk, a shed batch or a drain timeout
+means not everything landed. Each failed chunk logs its first and last ASIN.
 """
 
 # Standard library
@@ -110,6 +110,7 @@ from app.db.session import AsyncSessionFactory, engine
 from libex_core.audible import _concurrency as audible_concurrency
 from libex_core.audible import client as audible_client
 from libex_core.exceptions import NotFoundException
+from libex_core.log_safety import safe_asin_for_log
 from app.core.logging import get_logger, setup_logging
 
 # Services
@@ -634,6 +635,13 @@ async def _refresh_chunk(region: str, asins: list[str], run: _Run, ramp: _Ramp) 
         # two apart, so the count only moves when the fetch actually happened.
         if observation.get("failed"):
             failed = True
+            logger.warning("Refresh: chunk failed", extra={
+                "region": region,
+                "asins": len(asins),
+                "first_asin": safe_asin_for_log(asins[0]),
+                "last_asin": safe_asin_for_log(asins[-1]),
+                "error_type": observation.get("error_type"),
+            })
         else:
             run.books_refreshed += len(books)
             run.books_not_found += max(0, len(asins) - len(books))
@@ -656,6 +664,8 @@ async def _refresh_chunk(region: str, asins: list[str], run: _Run, ramp: _Ramp) 
         logger.warning("Refresh: chunk failed", extra={
             "region": region,
             "asins": len(asins),
+            "first_asin": safe_asin_for_log(asins[0]),
+            "last_asin": safe_asin_for_log(asins[-1]),
             "error_type": type(exc).__name__,
             "sqlstate": getattr(getattr(exc, "orig", None), "sqlstate", None),
         })
@@ -1053,13 +1063,18 @@ async def _run(cursor: Cursor | None) -> int:
             "throttled_responses": sentinel.throttled,
             "final_concurrency": gate.limit,
             "elapsed_minutes": round(run.elapsed / 60, 1),
-            "clean_exit": drained and run.abort_reason is None and run.books_shed == 0,
+            "clean_exit": (
+                drained
+                and run.abort_reason is None
+                and run.books_shed == 0
+                and run.chunks_failed == 0
+            ),
         })
         logger.info(f"RESUME CURSOR: {format_cursor(run.cursor)}")
 
     if run.abort_reason:
         return 1
-    if run.books_shed or not drained:
+    if run.books_shed or run.chunks_failed or not drained:
         return 2
     return 0
 

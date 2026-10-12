@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 # Core
 from libex_core.audible.books import settle_flags_list
+from libex_core.log_safety import safe_asin_for_log
 
 if TYPE_CHECKING:
     from libex_core.storage.store import LocalStore
@@ -86,7 +87,8 @@ async def persist_books(
     """
     Writes normalized books, unsettled (the writer needs the tri-state flags as
     normalization produced them), and returns the ASINs that were committed and
-    whether any chunk failed to be.
+    whether any book failed to be. A chunk that fails is replayed a book at a
+    time, so one bad book costs only itself.
 
     A book is keyed by its ASIN and its marketplace, so the same ASIN written
     for two regions is two rows and neither write touches the other. Every
@@ -108,8 +110,21 @@ async def persist_books(
             async with store.write() as session:
                 await write.write_books(session, chunk, confirm=confirm)
         except Exception as exc:
-            failed = True
             _log_write_failure("books", exc, books=len(chunk), region=region)
+            # One bad book must not keep the rest of its chunk out of the
+            # store: replay the chunk a book at a time, as the hosted writer
+            # does, and fail only for the books that still do not write.
+            for book in chunk:
+                try:
+                    async with store.write() as session:
+                        await write.write_books(session, [book], confirm=confirm)
+                except Exception as single:
+                    failed = True
+                    _log_write_failure(
+                        "book", single, asin=safe_asin_for_log(book["asin"]), region=region
+                    )
+                else:
+                    written.add(book["asin"])
             continue
         written.update(b["asin"] for b in chunk)
     if written:

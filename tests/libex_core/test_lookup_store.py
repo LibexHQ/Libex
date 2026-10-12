@@ -250,7 +250,7 @@ async def test_a_failed_write_is_logged_returned_live_and_reported(store, monkey
     assert await stored_asins(store) == []
     failure = [r for r in caplog.records if r.getMessage().startswith("Store write failed")]
     assert failure and failure[0].error_type == "RuntimeError"
-    assert "secret detail" not in caplog.text and ASIN not in caplog.text
+    assert "secret detail" not in caplog.text
 
 
 async def test_a_closed_store_is_the_callers_error(store):
@@ -567,3 +567,47 @@ async def test_concurrent_lookups_write_without_losing_a_book(store):
     async with store.session() as session:
         assert len(await read_books.get_books(session, asins)) == len(asins)
     assert BookResponse
+
+
+# Section: one bad book in a chunk
+
+BAD = "B0BAD00000"
+
+
+def _books(*asins):
+    return [{"asin": a, "title": f"Title {a}", "region": "us"} for a in asins]
+
+
+async def test_one_bad_book_costs_only_itself(store, monkeypatch, caplog):
+    from libex_core.lookup import _store
+    from libex_core.storage import write
+
+    real = write.write_books
+
+    async def picky(session, books, **kwargs):
+        if any(b["asin"] == BAD for b in books):
+            raise RuntimeError("over-width value")
+        return await real(session, books, **kwargs)
+
+    monkeypatch.setattr(write, "write_books", picky)
+    caplog.set_level(logging.WARNING, logger="libex")
+    asins = [ASIN, BAD, OTHER]
+
+    written, failed = await _store.persist_books(store, _books(*asins), "us")
+
+    assert failed is True
+    assert written == {ASIN, OTHER}
+    async with store.session() as session:
+        rows = await read_books.get_books(session, asins, region="us")
+    assert sorted(r["asin"] for r in rows) == [ASIN, OTHER]
+    single = [r for r in caplog.records if getattr(r, "what", "") == "book"]
+    assert [r.asin for r in single] == [BAD]
+
+
+async def test_all_good_books_in_one_chunk_report_no_failure(store):
+    from libex_core.lookup import _store
+
+    written, failed = await _store.persist_books(store, _books(ASIN, OTHER), "us")
+
+    assert failed is False
+    assert written == {ASIN, OTHER}

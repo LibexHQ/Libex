@@ -105,7 +105,7 @@ from app.db.models import Book
 from libex_core.audible import client as audible_client
 from libex_core.audible.chapters import normalize_chapters
 from libex_core.exceptions import AudibleAPIException, NotFoundException
-from libex_core.storage.write import confirm_chapters, write_track
+from libex_core.storage.write.entities import confirm_chapters, write_track
 from app.core.logging import get_logger, setup_logging
 
 # Services

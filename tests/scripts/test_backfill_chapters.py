@@ -902,7 +902,7 @@ def test_store_chapters_borrows_the_writers_own_guard_rather_than_restating_it()
     was written and diverge silently afterwards. The guard's behaviour is
     proved on this site and the service's in
     tests/integration/test_track_chapters_shrinkage.py."""
-    from libex_core.storage.write import write_track
+    from libex_core.storage.write.entities import write_track
 
     assert backfill_chapters.write_track is write_track
     assert not hasattr(backfill_chapters, "_chaptered_wins")

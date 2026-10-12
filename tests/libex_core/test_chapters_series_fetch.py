@@ -165,6 +165,9 @@ async def test_fetch_series_returns_the_product_raw():
     {"response_groups": ["only_one"], "product": {"asin": "B0SERIES01"}},
     {"response_groups": ["a", "b"]},
     {"response_groups": ["a", "b"], "product": {}},
+    {"response_groups": [], "product": None},
+    {"response_groups": ["only_one"], "product": None},
+    {"product": None},
 ])
 async def test_fetch_series_not_found_when_audible_answers_for_no_series(data):
     get = AsyncMock(return_value=data)

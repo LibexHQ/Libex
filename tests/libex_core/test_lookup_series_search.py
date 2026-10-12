@@ -93,6 +93,27 @@ async def test_search_series_every_candidate_failing_is_an_outage_not_an_absence
         await search_series(get, "q")
 
 
+async def test_search_series_every_candidate_null_product_is_an_outage_not_an_absence():
+    async def get(region, path, params=None, extra_headers=None):
+        if "title" in params:
+            return await fake_get(region, path, params, extra_headers)
+        return {"response_groups": ["a", "b"], "product": None}
+
+    with pytest.raises(AudibleAPIException) as raised:
+        await search_series(get, "q")
+    assert not isinstance(raised.value, NotFoundException)
+
+
+async def test_search_series_leaves_out_a_null_product_series_and_keeps_the_rest():
+    async def get(region, path, params=None, extra_headers=None):
+        if path.endswith("B0SERIES02"):
+            return {"response_groups": ["a", "b"], "product": None}
+        return await fake_get(region, path, params, extra_headers)
+
+    result = await search_series(get, "q")
+    assert [s.asin for s in result] == [SERIES]
+
+
 async def test_search_series_every_candidate_unknown_is_not_found_not_an_outage():
     async def get(region, path, params=None, extra_headers=None):
         if "title" in params:

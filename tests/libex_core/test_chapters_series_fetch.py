@@ -165,13 +165,22 @@ async def test_fetch_series_returns_the_product_raw():
     {"response_groups": ["only_one"], "product": {"asin": "B0SERIES01"}},
     {"response_groups": ["a", "b"]},
     {"response_groups": ["a", "b"], "product": {}},
-    {"response_groups": ["a", "b"], "product": None},
+    {"response_groups": [], "product": None},
+    {"response_groups": ["only_one"], "product": None},
+    {"product": None},
 ])
 async def test_fetch_series_not_found_when_audible_answers_for_no_series(data):
     get = AsyncMock(return_value=data)
     with pytest.raises(NotFoundException) as exc:
         await fetch_series(get, "B0SERIES01", "us")
     assert "B0SERIES01" in exc.value.message
+
+
+async def test_fetch_series_raises_an_outage_for_a_null_product():
+    get = AsyncMock(return_value={"response_groups": ["a", "b"], "product": None})
+    with pytest.raises(AudibleAPIException) as exc:
+        await fetch_series(get, "B0SERIES01", "us")
+    assert not isinstance(exc.value, NotFoundException)
 
 
 async def test_fetch_series_lets_a_failure_from_get_through():

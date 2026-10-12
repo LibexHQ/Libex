@@ -5,13 +5,14 @@ Audible API calls are mocked — we test our code not Audible's.
 """
 
 # Standard library
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # Third party
 import pytest
 from httpx import AsyncClient, ASGITransport
 
 # Local
+from app.db.session import get_session
 from app.main import app
 from libex_core.exceptions import AudibleAPIException, NotFoundException
 from tests.fixtures.outage import assert_outage_503
@@ -787,3 +788,43 @@ async def test_get_series_books_with_a_malformed_relationship_asin_is_200_with_t
     assert [b["asin"] for b in response.json()] == [found_asin]
     assert response.headers["x-libex-complete"] == "false"
     assert response.headers["x-libex-incomplete-reason"] == "hydration-not-found"
+
+
+# ============================================================
+# A NULL PRODUCT ON A SERIES REQUEST IS AN OUTAGE
+# ============================================================
+
+async def _null_series_product(region, path, params=None, extra_headers=None):
+    return {"response_groups": ["product_attrs", "product_desc"], "product": None}
+
+
+@pytest.fixture
+async def null_product_client():
+    app.dependency_overrides[get_session] = lambda: MagicMock()
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            yield c
+    finally:
+        app.dependency_overrides.pop(get_session, None)
+
+
+@pytest.mark.asyncio
+async def test_a_null_series_product_with_nothing_stored_returns_503_with_retry_after(null_product_client):
+    with patch("app.services.audible.series.audible_get", new=_null_series_product), \
+         patch("app.services.audible.series.get_series_from_db", new=AsyncMock(return_value=None)), \
+         patch("app.services.audible.series.cache.get", new=AsyncMock(return_value=None)):
+        response = await null_product_client.get("/series/B00SERIES1?cache=false")
+
+    assert_outage_503(response, "Audible unavailable and no cached series data found")
+
+
+@pytest.mark.asyncio
+async def test_a_null_series_product_serves_the_stored_copy(null_product_client):
+    stored = {**MOCK_SERIES, "updatedAt": "2024-01-01T00:00:00+00:00"}
+    with patch("app.services.audible.series.audible_get", new=_null_series_product), \
+         patch("app.services.audible.series.get_series_from_db", new=AsyncMock(return_value=stored)), \
+         patch("app.services.audible.series.cache.get", new=AsyncMock(return_value=None)):
+        response = await null_product_client.get("/series/B00SERIES1?cache=false")
+
+    assert response.status_code == 200
+    assert response.json()["name"] == "Dune Chronicles"

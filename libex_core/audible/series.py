@@ -16,7 +16,7 @@ from typing import Any
 # Core
 from libex_core.audible.client import AudibleGet, validate_region, validated_asin
 from libex_core.audible.extras import build_extras
-from libex_core.exceptions import NotFoundException
+from libex_core.exceptions import AudibleAPIException, NotFoundException
 from libex_core.log_safety import safe_asin_for_log
 from libex_core.text import is_unreadable_text, strip_html
 
@@ -91,9 +91,14 @@ async def fetch_series(get: AudibleGet, asin: str, region: str) -> dict[str, Any
     as Audible sent it.
 
     Raises NotFoundException when Audible answers with no series behind the
-    ASIN: a response that names no response groups, or only one, or carries no
-    product, is Audible answering for something that is not a series record,
-    and that answer is terminal. Transient failures surface as
+    ASIN: a response that names no response groups, or only one, or has no
+    product key or an empty one, is Audible answering for something that is
+    not a series record, and that answer is terminal.
+
+    Raises AudibleAPIException when the response names its response groups and
+    carries `"product": null`. Audible answers a missing ASIN with a
+    placeholder product, never a null one, so a null product is a malformed
+    answer and an outage, not an absence. Transient failures surface as
     AudibleAPIException from `get` and are the caller's to retry.
 
     Raises RegionException for a region that is not one of the eleven, and
@@ -113,6 +118,9 @@ async def fetch_series(get: AudibleGet, asin: str, region: str) -> dict[str, Any
         or len(data.get("response_groups", [])) == 1
     ):
         raise NotFoundException(f"Series not found: {asin}")
+
+    if "product" in data and data["product"] is None:
+        raise AudibleAPIException("Audible answered a series request with a null product")
 
     product = data.get("product")
     if not product:

@@ -481,11 +481,84 @@ async def _expand_series(region: str, delay: float) -> dict[str, int]:
 # PHASE 3: NARRATOR EXPANSION
 # ============================================================
 
-async def _expand_narrators(region: str, delay: float) -> dict[str, int]:
+async def _expand_narrator_in_region(
+    narrator_name: str, region: str, delay: float, stats: dict[str, int]
+) -> bool:
+    """Searches one region's catalog for a narrator and fetches the missing books.
+
+    Returns True when the narrator is fully handled for this region (nothing
+    missing, or every new book reached storage), False when the persist queue
+    shed a chunk or the region failed, so the caller leaves the narrator stale.
+    """
+    from app.services.audible import audible_get
+
+    try:
+        path = "/1.0/catalog/products"
+        params = {
+            "narrator": narrator_name,
+            "num_results": 50,
+            "response_groups": "product_desc,contributors,series,product_attrs,media",
+        }
+        data = await audible_get(region, path, params)
+        await asyncio.sleep(delay)
+        await asyncio.sleep(0)
+
+        products = data.get("products", [])
+        book_asins = []
+        if products:
+            book_asins = [
+                p["asin"] for p in products
+                if p.get("asin") and any(
+                    n.get("name", "").lower() == narrator_name.lower()
+                    for n in p.get("narrators", [])
+                )
+            ]
+
+        persisted = True
+        if book_asins:
+            async with SessionFactory() as session:
+                missing = await _get_missing_asins(session, book_asins, region)
+            if missing:
+                persisted = await _fetch_and_persist(missing, region, delay)
+                stats["books_discovered"] += len(missing)
+                logger.info(
+                    "Seeder: narrator yielded new books",
+                    extra={
+                        "narrator_name": narrator_name,
+                        "new_books": len(missing),
+                        "region": region,
+                    },
+                )
+
+        if not persisted:
+            # See _expand_authors' identical guard: a shed chunk means these
+            # books never reached storage, so the narrator is left stale
+            # for the next cycle to retry rather than stamped over the gap.
+            logger.warning(
+                "Seeder: not stamping narrator — persist queue shed a "
+                "chunk of its new books, will retry next cycle",
+                extra={"narrator_name": narrator_name, "region": region},
+            )
+        return persisted
+
+    except Exception as e:
+        stats["errors"] += 1
+        logger.warning(
+            "Seeder: failed to expand narrator",
+            extra={"narrator_name": narrator_name, "region": region, "error": str(e)},
+        )
+        return False
+
+
+async def _expand_narrators(regions: list[str], delay: float) -> dict[str, int]:
+    """Expands stale narrators across every configured region.
+
+    Narrator has no region column, so one stamp covers all regions. A narrator
+    is therefore stamped only after every region has been expanded for it;
+    stamping after the first region would hide it from the rest for a week.
+    """
     stats = {"narrators_processed": 0, "books_discovered": 0, "errors": 0}
     cutoff = _stale_cutoff()
-
-    from app.services.audible import audible_get
 
     async with SessionFactory() as session:
         result = await session.execute(
@@ -500,77 +573,39 @@ async def _expand_narrators(region: str, delay: float) -> dict[str, int]:
 
     total = len(narrator_names)
     if total == 0:
-        logger.info("Seeder: no stale narrators, skipping", extra={"region": region})
+        logger.info("Seeder: no stale narrators, skipping", extra={"regions": regions})
         return stats
 
     logger.info(
         "Seeder: expanding stale narrators",
-        extra={"total": total, "region": region},
+        extra={"total": total, "regions": regions},
     )
 
     for narrator_name in narrator_names:
-        try:
-            path = "/1.0/catalog/products"
-            params = {
-                "narrator": narrator_name,
-                "num_results": 50,
-                "response_groups": "product_desc,contributors,series,product_attrs,media",
-            }
-            data = await audible_get(region, path, params)
-            await asyncio.sleep(delay)
-            await asyncio.sleep(0)
+        all_persisted = True
+        for region in regions:
+            if not await _expand_narrator_in_region(narrator_name, region, delay, stats):
+                all_persisted = False
 
-            products = data.get("products", [])
-            book_asins = []
-            if products:
-                book_asins = [
-                    p["asin"] for p in products
-                    if p.get("asin") and any(
-                        n.get("name", "").lower() == narrator_name.lower()
-                        for n in p.get("narrators", [])
-                    )
-                ]
-
-            persisted = True
-            if book_asins:
-                async with SessionFactory() as session:
-                    missing = await _get_missing_asins(session, book_asins, region)
-                if missing:
-                    persisted = await _fetch_and_persist(missing, region, delay)
-                    stats["books_discovered"] += len(missing)
-                    logger.info(
-                        "Seeder: narrator yielded new books",
-                        extra={"narrator_name": narrator_name, "new_books": len(missing)},
-                    )
-
-            if persisted:
+        if all_persisted:
+            try:
                 await _stamp_narrator(narrator_name)
                 stats["narrators_processed"] += 1
-            else:
-                # See _expand_authors' identical guard: a shed chunk means these
-                # books never reached storage, so the narrator is left stale
-                # for the next cycle to retry rather than stamped over the gap.
+            except Exception as e:
+                stats["errors"] += 1
                 logger.warning(
-                    "Seeder: not stamping narrator — persist queue shed a "
-                    "chunk of its new books, will retry next cycle",
-                    extra={"narrator_name": narrator_name},
+                    "Seeder: failed to stamp narrator",
+                    extra={"narrator_name": narrator_name, "error": str(e)},
                 )
 
-            if stats["narrators_processed"] % 100 == 0:
-                logger.info(
-                    "Seeder: narrator progress",
-                    extra={
-                        "narrators_processed": stats["narrators_processed"],
-                        "total": total,
-                        "books_discovered": stats["books_discovered"],
-                    },
-                )
-
-        except Exception as e:
-            stats["errors"] += 1
-            logger.warning(
-                "Seeder: failed to expand narrator",
-                extra={"narrator_name": narrator_name, "error": str(e)},
+        if stats["narrators_processed"] % 100 == 0:
+            logger.info(
+                "Seeder: narrator progress",
+                extra={
+                    "narrators_processed": stats["narrators_processed"],
+                    "total": total,
+                    "books_discovered": stats["books_discovered"],
+                },
             )
 
         await asyncio.sleep(delay)
@@ -932,10 +967,11 @@ async def run_seeder(once: bool = False) -> None:
                 cycle_stats["books_discovered"] += series_stats["books_discovered"]
                 cycle_stats["errors"] += series_stats["errors"]
 
-                narrator_stats = await _expand_narrators(region, delay)
-                cycle_stats["narrators_processed"] += narrator_stats["narrators_processed"]
-                cycle_stats["books_discovered"] += narrator_stats["books_discovered"]
-                cycle_stats["errors"] += narrator_stats["errors"]
+
+            narrator_stats = await _expand_narrators(regions, delay)
+            cycle_stats["narrators_processed"] += narrator_stats["narrators_processed"]
+            cycle_stats["books_discovered"] += narrator_stats["books_discovered"]
+            cycle_stats["errors"] += narrator_stats["errors"]
 
             logger.info("Seeder: cycle complete", extra=cycle_stats)
 

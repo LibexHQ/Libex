@@ -10,6 +10,18 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [2.2.13]
+
+No endpoint, parameter or response field changes, and there is no database migration. One Audible answer changes how it is read: a series request answered with a null product is now an outage, so some requests move from 404 to 503. The transitions are listed in the entry below.
+
+### Fixed
+- **A request for a series that Audible answers with `"product": null` is now an outage, not a 404.** This is the same change 2.2.11 made for books. Audible answers a missing ASIN with a placeholder product, never a null one (probed live on 2026-10-05, no 404 and no null), so a null product is a malformed answer, not a series that does not exist. It used to read as the series being absent and answer 404; it now serves the stored copy when there is one, from the database and then from the cache, and otherwise answers 503 with `Retry-After`, like any other Audible failure. It applies only when the answer names its response groups; an answer that names none, or only one, is still read as a placeholder and is still a 404. The routes and transitions:
+  - `GET /series/{asin}` with a stored or cached copy: 404 to 200, serving that copy. With `cache` left at its default a cached copy is served before Audible is asked at all, so only a request that gets past the cache sees the change.
+  - `GET /series/{asin}` with nothing stored or cached: 404 to 503 with `Retry-After`.
+  - `GET /series/search?name=` and the legacy `GET /series?name=` look each related series up the same way, so a related series whose answer is null now counts as unreachable and is skipped rather than skipped as absent, or is served from its stored copy when there is one. The status of the search does not change: the hosted search has always answered 404 `No series found` when no related series could be resolved and the database has no match either, and it still does.
+  - `GET /series/books/{asin}` and the legacy `/series/{asin}/books` read the series' book list, not the series record, and are unchanged. The seeder's series expansion and the refresh jobs read the series' relationships directly and do not use this lookup, so they are unchanged.
+  A response with no `product` key, or an empty product, is unchanged and is still a 404.
+
 ## [2.2.12]
 
 No endpoint, parameter, response field or status code changes, and there is no database migration. Only the published API stack's deployment and one startup log line change.

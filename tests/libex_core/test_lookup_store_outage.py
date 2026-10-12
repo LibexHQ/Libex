@@ -14,7 +14,7 @@ import pytest_asyncio
 from sqlalchemy import text
 
 # Local
-from libex_core.exceptions import AudibleAPIException
+from libex_core.exceptions import AudibleAPIException, NotFoundException
 from libex_core.lookup import (
     get_author,
     get_author_books,
@@ -100,6 +100,25 @@ async def test_a_series_answered_from_the_store_is_logged(store, caplog):
     await get_series(outage_get, SERIES, store=store)
 
     assert one_served(caplog) == {"what": "series", "region": "us", "series_asin": SERIES}
+
+
+async def null_series_product(region, path, params=None, extra_headers=None):
+    return {"response_groups": ["product_attrs", "product_desc"], "product": None}
+
+
+async def test_a_null_series_product_is_an_outage_with_nothing_stored(store):
+    with pytest.raises(AudibleAPIException) as raised:
+        await get_series(null_series_product, "B0SERIES09", store=store)
+
+    assert not isinstance(raised.value, NotFoundException)
+
+
+async def test_a_null_series_product_serves_the_stored_series(store):
+    live = await get_series(fake_get, SERIES, store=store)
+
+    served = await get_series(null_series_product, SERIES, store=store)
+
+    assert served.name == live.name
 
 
 async def test_series_books_answered_from_the_stored_members_are_logged(store, caplog):

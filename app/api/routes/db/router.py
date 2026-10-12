@@ -396,7 +396,7 @@ async def get_db_author_books(
         session,
         asin,
         region,
-        book_region=book_region,
+        book_region=validate_region(book_region) if book_region is not None else None,
         **filters.as_kwargs(),
         sort=sort.value if sort is not None else None,
         order=order.value,

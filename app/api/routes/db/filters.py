@@ -20,6 +20,9 @@ from typing import Annotated
 # Third party
 from fastapi import Query
 
+# First party
+from libex_core.audible.client import validate_region
+
 
 class AudiobooksProduced(str, Enum):
     one_to_ten = "1 to 10"
@@ -92,6 +95,8 @@ def book_filters(exclude: set[str] | None = None) -> type:
     def __init__(self, **kwargs) -> None:
         for name in fields:
             setattr(self, name, kwargs.get(name))
+        if getattr(self, "region", None) is not None:
+            self.region = validate_region(self.region)
 
     # Build an explicit signature so FastAPI sees each field as a Query param.
     params = [

@@ -41,14 +41,14 @@ process models; only its outward shape differs.
 allow_direct_egress=True is passed unconditionally, not only when
 audible_proxy_url is blank. LibexClient's constructor ignores it whenever a
 proxy URL is actually supplied (see its own docstring), so this changes
-nothing about the proxied case; it exists to cover the blank one. Every
-published compose stack now requires a proxy URL -- each Libex-image
-service's compose file gates its own proxy variable behind Compose's `:?`,
-so a deployment that runs one of those files as shipped can never leave
-the value blank. A deployment that departs from the published files and
-still leaves it blank goes direct, and libex_core lets it: that stays a
-runtime choice this code does not enforce, because whoever diverges from
-the published files owns that choice, not libex_core. libex_core cannot
+nothing about the proxied case; it exists to cover the blank one. The
+API stack's compose file leaves the proxy variable optional, so a
+deployment can run it as shipped with the value blank and go direct; the
+seeder, refresh and backfill stacks still gate theirs behind Compose's `:?`
+and can never leave it blank. Whichever way a blank value arises, it
+goes direct, and libex_core lets it: that stays a runtime choice this
+code does not enforce, because whoever runs without a proxy owns that
+choice, not libex_core. libex_core cannot
 make that call itself in the general case either: an embedder distributed
 across many separately operated machines has no single operator to make
 it on their behalf, and a blank proxy setting there is exactly as likely

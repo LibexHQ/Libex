@@ -12,8 +12,8 @@ services:
       - CACHE_ENABLED=${CACHE_ENABLED:-true}
       - CACHE_TTL=${CACHE_TTL:-86400}
       - DEFAULT_REGION=${DEFAULT_REGION:-us}
-      # required: this stack's own VPN exit.
-      - AUDIBLE_PROXY_URL=${AUDIBLE_PROXY_URL:?set AUDIBLE_PROXY_URL to this stack's VPN proxy, e.g. http://libex-vpn:8888}
+      # optional: blank goes direct, and startup logs which.
+      - AUDIBLE_PROXY_URL=${AUDIBLE_PROXY_URL:-}
       # a literal, not a knob: per-process budgets are sized to it.
       - WEB_CONCURRENCY=6
       - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}

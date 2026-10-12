@@ -23,8 +23,9 @@ The five files:
 - `docker-compose.refresh.yml` -- `libex-refresh-corpus` and its sidecar
   `libex-refresh-vpn`, a one-shot job.
 
-Four services reach Audible and therefore require their own VPN exit: libex,
-libex-seeder, chapter-backfill and libex-refresh-corpus. Each is paired with
+Four services reach Audible: libex, libex-seeder, chapter-backfill and
+libex-refresh-corpus. The three job services require their own VPN exit; the
+API's proxy is optional, and blank sends it direct. Each is paired with
 its own example gluetun sidecar and its own egress network, and none of the
 four shares an egress network with another -- a shared exit would let one
 stack's traffic pattern implicate another's. libex-backup is the one
@@ -33,9 +34,10 @@ it carries no proxy variable, no sidecar, and no egress network membership.
 
 These are the properties checked, each a direction below:
 
-1. Every Audible-facing service's own proxy variable is required (`:?`), not
+1. Every job service's own proxy variable is required (`:?`), not
    defaulted -- a blank proxy must refuse to start that container, never
-   silently go direct.
+   silently go direct. The API's is optional (`:-` with an empty default):
+   blank goes direct, and its startup log line says so.
 2. No `*_WG_*` placeholder is required -- an operator using a proxy that is
    not the bundled gluetun sidecar must never be forced to fill in
    WireGuard keys a sidecar they removed will never read.
@@ -100,8 +102,7 @@ ALL_COMPOSE_PATHS = (
     REFRESH_COMPOSE_PATH,
 )
 
-# Every service that reaches Audible and therefore requires its own VPN
-# exit, mapped to the interpolation variable its AUDIBLE_PROXY_URL entry is
+# Every service that reaches Audible, mapped to the interpolation variable its AUDIBLE_PROXY_URL entry is
 # built from and the lowercase token its `:?` message must name (None for
 # libex itself, which carries no such token -- only the job stacks need one,
 # to stop an operator pointing a job stack at the API's own proxy by habit).
@@ -164,14 +165,18 @@ def _service_networks(compose: dict, service: str) -> list[str]:
 
 def test_audible_facing_proxy_urls_are_required():
     """
-    Direction 1: every Audible-facing service's AUDIBLE_PROXY_URL entry is
-    built from an interpolation using `:?`, never `:-` -- a blank value must
-    stop that specific container from starting, not fall back to a default
-    that sends Audible traffic out unproxied. This is the compose-side half
-    of the same invariant enforced in code: Libex refuses to run with a
-    blank proxy unless direct egress was explicitly chosen, and a `:-`
-    default here would let a stack silently choose that for an operator who
-    never meant to.
+    Direction 1: every job service's AUDIBLE_PROXY_URL entry is built from
+    an interpolation using `:?`, never `:-` -- a blank value must stop that
+    specific container from starting, not fall back to a default that sends
+    Audible traffic out unproxied. Each job script also refuses direct
+    egress itself (its _verify_dedicated_proxy), so the `:?` only moves that
+    refusal to deploy time.
+
+    The API is the exception: its entry is exactly `${AUDIBLE_PROXY_URL:-}`.
+    Blank means direct egress, which the hosted client allows and the API
+    logs at startup. Pinned exactly so it can never pick up a non-empty
+    default, which would route every deployment through an exit its
+    operator never chose.
 
     Also proves BACKFILL_PROXY_URL and REFRESH_PROXY_URL are the interpolation
     variables actually wired into their stacks' AUDIBLE_PROXY_URL entries --
@@ -183,6 +188,13 @@ def test_audible_facing_proxy_urls_are_required():
         compose = _load_yaml(path)
         values = _service_environment_values(compose, service)
         proxy_value = values.get("AUDIBLE_PROXY_URL", "")
+        if path == COMPOSE_PATH:
+            assert proxy_value == f"${{{var}:-}}", (
+                f"{path.name}'s {service} service's AUDIBLE_PROXY_URL entry is "
+                f"{proxy_value!r}, not the optional, empty-default "
+                f"${{{var}:-}} the API stack ships with."
+            )
+            continue
         assert f"${{{var}:?" in proxy_value, (
             f"{path.name}'s {service} service's AUDIBLE_PROXY_URL entry is "
             f"{proxy_value!r}, which does not require {var} via `:?`. A "

@@ -5,6 +5,7 @@ Audible API calls are mocked — we test our code not Audible's.
 """
 
 # Standard library
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Third party
@@ -12,6 +13,7 @@ import pytest
 from httpx import AsyncClient, ASGITransport
 
 # Local
+from app.api.routes.large_response import LARGE_RESPONSE_THREAD_THRESHOLD, _build_and_serialize
 from app.db.session import get_session
 from app.main import app
 from libex_core.exceptions import AudibleAPIException, NotFoundException
@@ -217,10 +219,6 @@ async def test_get_series_books_default_region_is_us(async_client):
 async def test_a_large_series_is_serialized_off_the_loop_with_its_headers(async_client, path):
     """A series list past the threshold is built on a worker thread, and the
     pre-built response still carries every book and the headers the route set."""
-    import asyncio
-
-    from app.api.routes.large_response import LARGE_RESPONSE_THREAD_THRESHOLD, _build_and_serialize
-
     async def fetch(count):
         books = [{**MOCK_BOOK, "asin": f"B{i:09d}"} for i in range(count)]
         with patch("app.api.routes.series.router.get_series_books", new_callable=AsyncMock) as mock_series, \

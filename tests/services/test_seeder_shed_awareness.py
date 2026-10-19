@@ -46,6 +46,7 @@ raise-path bool-return tests, mocking get_books_by_asins directly.
 """
 
 # Standard library
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Third party
@@ -64,6 +65,7 @@ from libex_core.exceptions import AudibleAPIException, NotFoundException
 # Services
 from app.core.response_headers import REASON_DISCOVERY_INCOMPLETE, record_incomplete
 from app.services import seeder
+from app.services.db import persist_queue
 from app.services.db.persist_queue import PersistOutcome
 
 _AUDIBLE_CLIENT_GET = "app.services.audible.audible_get"
@@ -512,10 +514,6 @@ async def test_fetch_and_persist_returns_true_when_every_chunk_is_admitted():
 async def test_fetch_and_persist_gathers_chapters_only_after_the_background_write_lands():
     """_gather_chapters reads the chunk's books back from the database, so it
     has to run after the background write commits, not alongside it."""
-    import asyncio
-
-    from app.services.db import persist_queue
-
     events = []
 
     async def _write():

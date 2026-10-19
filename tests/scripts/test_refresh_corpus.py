@@ -734,6 +734,34 @@ async def test_a_failed_chunk_warning_names_its_first_and_last_asin(caplog):
 
 
 @pytest.mark.asyncio
+async def test_a_chunk_the_fetch_reports_as_failed_names_its_asins_and_error_type(caplog):
+    """get_books_by_asins falls back to stored rows and returns normally, so the
+    failure only shows in the observation it fills in."""
+    run = _Run(None)
+    ramp = MagicMock()
+    ramp.record = AsyncMock()
+
+    async def _fell_back(asins, region, session, use_cache=True):
+        refresh_corpus._chunk_observation.get().update(failed=True, error_type="AudibleAPIException")
+        return [MagicMock()]
+
+    session_cm = MagicMock()
+    session_cm.__aenter__ = AsyncMock(return_value=MagicMock())
+    session_cm.__aexit__ = AsyncMock(return_value=False)
+    with patch.object(refresh_corpus, "AsyncSessionFactory", return_value=session_cm), \
+         patch.object(refresh_corpus.books_service, "get_books_by_asins", _fell_back), \
+         caplog.at_level(logging.WARNING, logger="libex"):
+        await refresh_corpus._refresh_chunk("us", ["B000000001", "B000000002", "B000000003"], run, ramp)
+
+    record = next(r for r in caplog.records if r.getMessage() == "Refresh: chunk failed")
+    assert record.first_asin == "B000000001"
+    assert record.last_asin == "B000000003"
+    assert record.error_type == "AudibleAPIException"
+    assert run.chunks_failed == 1
+    assert run.books_refreshed == 0
+
+
+@pytest.mark.asyncio
 async def test_a_run_with_a_failed_chunk_exits_2_and_is_not_clean(caplog):
     async def _failing_chunk(region, asins, run, ramp):
         run.chunks_done += 1

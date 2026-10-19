@@ -338,7 +338,7 @@ async def _served_authors(factory) -> list[str]:
         return [a.name for a in book.authors]
 
 
-async def test_authors_are_served_in_the_order_audible_credited_them(factory):
+async def test_authors_come_back_in_written_order_on_a_small_table(factory):
     async with factory() as session:
         await write_books(session, [CREDITED])
         await session.commit()

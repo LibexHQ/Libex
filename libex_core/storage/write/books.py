@@ -71,10 +71,11 @@ async def resolve_author_ids(
             author.get("image"),
         )
 
-    # Written in the order the books credit them: authors are served in id
-    # order, so the first credited has to get the lowest id. The advisory locks,
-    # taken in key order, are what keep two writers that meet the same authors
-    # in opposite orders from deadlocking. Both an author's asin and their
+    # Written in the order the books credit them, so the first credited gets the
+    # lowest id. Served order is not guaranteed: the relationship has no
+    # order_by, so it follows the query plan. The advisory locks, taken in key
+    # order, are what keep two writers that meet the same authors in opposite
+    # orders from deadlocking. Both an author's asin and their
     # region-scoped name are locked, because a null-asin row is upgraded in
     # place and the same row is reached by either.
     distinct = {memo_key(author): author for data in books for author in data.get("authors", [])}
@@ -239,10 +240,11 @@ async def write_books(
                 "position": entry.get("position"),
             }
 
-    # Written in the order the books credit them, because the relationships are
-    # served in insertion order. The advisory locks, taken in key order, are
-    # what keep two writers that meet the same genres or narrators in opposite
-    # orders from deadlocking.
+    # Written in the order the books credit them. Served order for genres and
+    # narrators follows the query plan and is not guaranteed (the links carry no
+    # position column). The advisory locks, taken in key order, are what keep
+    # two writers that meet the same genres or narrators in opposite orders
+    # from deadlocking.
     if genres:
         await lock_asins(session, "genre", list(genres), dialect=dialect)
         await session.execute(statements.genre_insert, list(genres.values()))

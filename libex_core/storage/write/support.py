@@ -57,7 +57,8 @@ async def lock_asins(
     author's, which may be an ASIN or a region-scoped name ("us:Name"), and a
     narrator's, which is the name. Taking them in sorted order is also what
     lets a caller write its rows in the order Audible credited them without two
-    writers deadlocking.
+    writers deadlocking. That is write order only; it does not fix the order
+    the rows are later served in.
 
     A no-op on SQLite, where a write transaction already excludes every other.
     """

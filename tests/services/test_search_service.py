@@ -130,3 +130,35 @@ async def test_quick_search_compound_fallback_returns_empty_list_when_db_also_ha
         result = await quick_search("Frank Herbert - Dune", "us", MagicMock())
 
     assert result == []
+
+
+# ============================================================
+# SEARCH() — ONE RESULT THAT WILL NOT NORMALIZE
+# ============================================================
+
+def _result(asin, **extra):
+    return {
+        "asin": asin, "title": f"Book {asin}", "authors": [], "narrators": [],
+        "relationships": [], "product_images": {}, "category_ladders": [],
+        "rating": {}, "publication_datetime": "2021-01-01T00:00:00Z", **extra,
+    }
+
+
+@pytest.mark.asyncio
+async def test_search_serves_the_rest_when_one_result_will_not_normalize():
+    page = {"products": [_result("B0GOODONE1"), _result("B0BADONE01", authors=None)]}
+    with patch("app.services.audible.search.audible_get", new=AsyncMock(return_value=page)), \
+         patch("app.services.audible.search.persist_books_background") as persist:
+        result = await search(region="us", session=MagicMock(), title="Dune")
+
+    assert [b["asin"] for b in result] == ["B0GOODONE1"]
+    assert [b["asin"] for b in persist.call_args.args[0]] == ["B0GOODONE1"]
+
+
+@pytest.mark.asyncio
+async def test_search_is_an_outage_when_every_result_will_not_normalize():
+    page = {"products": [_result("B0BADONE01", authors=None)]}
+    with patch("app.services.audible.search.audible_get", new=AsyncMock(return_value=page)), \
+         patch("app.services.audible.search.persist_books_background"):
+        with pytest.raises(AudibleAPIException):
+            await search(region="us", session=MagicMock(), title="Dune")

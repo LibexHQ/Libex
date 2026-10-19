@@ -41,7 +41,7 @@ from libex_core.audible.books import (
     filter_products,
     is_placeholder_record,
     explicit_nulls_by_asin,
-    normalize_products,
+    normalize_products_each,
     settle_flags_list,
 )
 from libex_core.audible.chapters import (
@@ -283,6 +283,28 @@ async def hydrate_books(
             placeholders.extend(chunk_placeholders)
             all_products.extend(kept)
 
+        # Each product on its own: one that raises (it does so on purpose, so
+        # a bad answer never overwrites stored data) is an outage for its own
+        # ASIN, answered like a failed chunk, and costs no other book.
+        outcomes = await normalize_products_each(all_products, region)
+        requested = set(shaped)
+        good_products: list[dict[str, Any]] = []
+        normalized: list[dict[str, Any]] = []
+        for product, outcome in zip(all_products, outcomes):
+            if isinstance(outcome, Exception):
+                errors.append(outcome)
+                bad_asin = product.get("asin")
+                if bad_asin in requested and bad_asin not in failed:
+                    failed.append(bad_asin)
+                logger.warning("Product could not be normalized", extra={
+                    "region": region,
+                    "error_type": type(outcome).__name__,
+                })
+            else:
+                good_products.append(product)
+                normalized.append(outcome)
+        all_products = good_products
+
         if not_found or placeholders or failed:
             logger.warning("Partial hydration shortfall", extra={
                 "requested_num": len(shaped),
@@ -295,9 +317,8 @@ async def hydrate_books(
         if failed and not all_products:
             raise errors[0]
 
-        normalized = await normalize_products(all_products, region)
-        # Read after normalizing, so a product whose container null raises
-        # there is an outage and never reaches a report of nulls.
+        # Read over the products that normalized, so one whose container null
+        # raises is an outage and never reaches a report of nulls.
         explicit_nulls = explicit_nulls_by_asin(all_products)
 
         # The books are written as normalized, tri-state flags and all, and

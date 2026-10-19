@@ -56,7 +56,7 @@ from libex_core.audible.books import (
     fetch_products,
     filter_products,
     is_placeholder_record,
-    normalize_products,
+    normalize_products_each,
     settle_flags_list,
 )
 from libex_core.audible.chapters import (
@@ -580,6 +580,29 @@ async def _get_books_by_asins_unsettled(
                 record_incomplete(facts, REASON_HYDRATION_NOT_FOUND)
             all_products.extend(kept)
 
+        # Each product on its own: one that raises (it does so on purpose, so
+        # a bad answer never overwrites stored data) is a transient failure
+        # for its own ASIN, answered by the backstop below like a failed
+        # chunk, and costs no other book its 200.
+        outcomes = await normalize_products_each(all_products, region)
+        requested = set(shaped_asins)
+        good_products: list[dict[str, Any]] = []
+        normalized: list[dict[str, Any]] = []
+        for product, item in zip(all_products, outcomes):
+            if isinstance(item, Exception):
+                transient_errors.append(item)
+                bad_asin = product.get("asin")
+                if bad_asin in requested and bad_asin not in transient_failed_asins:
+                    transient_failed_asins.append(bad_asin)
+                logger.warning("Product could not be normalized", extra={
+                    "region": region,
+                    "error_type": type(item).__name__,
+                })
+            else:
+                good_products.append(product)
+                normalized.append(item)
+        all_products = good_products
+
         if placeholder_asins is not None:
             placeholder_asins.extend(placeholders)
 
@@ -637,9 +660,7 @@ async def _get_books_by_asins_unsettled(
                     _unfetched(transient_failed_asins, backstop_asins)
                 )
 
-        normalized = await normalize_products(all_products, region)
-
-        if all_products:
+        if normalized:
             # Persist to DB and cache in the background
             outcome = persist_books_background(normalized, region, confirm=True)
             if persist_outcome is not None:

@@ -1109,6 +1109,35 @@ async def normalize_products(products: list[dict], region: str) -> list[dict[str
     return await asyncio.to_thread(lambda: [normalize_product(p, region) for p in products])
 
 
+def _normalize_each(products: list[dict], region: str) -> list[dict[str, Any] | Exception]:
+    out: list[dict[str, Any] | Exception] = []
+    for p in products:
+        try:
+            out.append(normalize_product(p, region))
+        except Exception as e:
+            out.append(e)
+    return out
+
+
+async def normalize_products_each(
+    products: list[dict], region: str
+) -> list[dict[str, Any] | Exception]:
+    """
+    Normalizes each raw product on its own, so one product that raises costs
+    only itself. The result lines up with `products` by index: the normalized
+    dict where it normalized, the exception normalize_product raised where it
+    did not. A product raises deliberately when serving it would let a bad
+    answer overwrite stored data, so the caller owes that product's ASIN the
+    answer for a failed fetch (served from the store if held, otherwise
+    reported not fetched), never an absence.
+
+    Threading is as in normalize_products: one hop for the whole batch.
+    """
+    if len(products) < NORMALIZE_THREAD_THRESHOLD:
+        return _normalize_each(products, region)
+    return await asyncio.to_thread(_normalize_each, products, region)
+
+
 def is_placeholder_record(p: dict) -> bool:
     """True for a titled record carrying the UNRELEASED_PLACEHOLDER date.
 

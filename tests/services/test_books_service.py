@@ -3105,3 +3105,76 @@ async def test_fetch_and_store_chapters_writes_and_stamps_for_the_requests_regio
     compiled = stamp.compile(dialect=postgresql.dialect())
     assert "books.region = " in str(compiled)
     assert "uk" in compiled.params.values()
+
+
+# ============================================================
+# ONE PRODUCT THAT WILL NOT NORMALIZE
+# ============================================================
+
+def _unnormalizable_product(asin):
+    """A product whose authors container is null: normalize_product raises on
+    it on purpose, so a bad answer never overwrites a stored book."""
+    return {**_hydration_product(asin), "authors": None}
+
+
+@pytest.mark.asyncio
+async def test_one_unnormalizable_product_costs_only_its_own_book():
+    good, bad = "B0GOODONE1", "B0BADONE01"
+    facts = ResponseFacts()
+    not_fetched: list[str] = []
+
+    async def _get(region, path, params):
+        return {"products": [_hydration_product(good), _unnormalizable_product(bad)]}
+
+    with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.books.persist_books_background") as mock_persist, \
+         patch("app.services.audible.books.get_books_from_db", new=AsyncMock(return_value=[])), \
+         patch("app.services.audible.books.cache.get", return_value=None):
+        result = await get_books_by_asins(
+            [good, bad], "us", AsyncMock(), facts=facts,
+            not_fetched_asins=not_fetched,
+        )
+
+    assert [b["asin"] for b in result] == [good]
+    assert not_fetched == [bad]
+    assert not facts.is_complete
+    assert [b["asin"] for b in mock_persist.call_args.args[0]] == [good]
+
+
+@pytest.mark.asyncio
+async def test_an_unnormalizable_product_is_served_from_the_database_when_stored():
+    good, bad = "B0GOODONE1", "B0BADONE01"
+    facts = ResponseFacts()
+    not_fetched: list[str] = []
+    stored = {"asin": bad, "title": "Stored copy"}
+
+    async def _get(region, path, params):
+        return {"products": [_hydration_product(good), _unnormalizable_product(bad)]}
+
+    with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.books.persist_books_background"), \
+         patch("app.services.audible.books.get_books_from_db", new=AsyncMock(return_value=[stored])), \
+         patch("app.services.audible.books.cache.get", return_value=None):
+        result = await get_books_by_asins(
+            [good, bad], "us", AsyncMock(), facts=facts, not_fetched_asins=not_fetched,
+        )
+
+    assert {b["asin"] for b in result} == {good, bad}
+    assert not_fetched == []
+    assert facts.is_complete
+
+
+@pytest.mark.asyncio
+async def test_every_product_unnormalizable_with_nothing_stored_is_an_outage():
+    bad, other = "B0BADONE01", "B0BADONE02"
+
+    async def _get(region, path, params):
+        return {"products": [_unnormalizable_product(bad), _unnormalizable_product(other)]}
+
+    with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.books.persist_books_background"), \
+         patch("app.services.audible.books.get_books_from_db", new=AsyncMock(return_value=[])), \
+         patch("app.services.audible.books.cache.get_many", new=AsyncMock(return_value={})), \
+         patch("app.services.audible.books.cache.get", return_value=None):
+        with pytest.raises(AudibleAPIException):
+            await get_books_by_asins([bad, other], "us", AsyncMock())

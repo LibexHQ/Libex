@@ -242,6 +242,22 @@ confirms has no books is never answered from the store, and its record is
 removed. The record is part of the plaintext store, so it also notes which
 series and authors you looked up, and when.
 
+`get_book` and `get_books` (and their `_with_nulls` forms) take `max_age` the
+same way. A book stored for exactly the region asked, which Audible last
+confirmed no longer ago than `max_age`, is served with no request to Audible;
+`get_books` asks Audible, in one hydration, for only the other ASINs, and
+returns the books in the order requested. A book that was never confirmed
+(for instance one ingested from a hosted server), one confirmed longer ago, one
+stamped ahead of the local clock, one stored only for another region, and one
+the store cannot be read for are all asked for live. Books served from the
+store carry no `explicit_nulls` entry (`None` for `get_book_with_nulls`), since
+Audible said nothing this time, and they are never in `notFound`,
+`placeholderRecords` or `notFetched`. If Audible is down for the rest, the
+fresh books are still returned and the others are `notFetched`. A book Audible
+confirms it has no record of is never answered from the store. `max_age` that
+is not a `timedelta`, is zero or negative, or is given without a `store` is a
+`ValueError`, raised before anything is sent.
+
 ### Supplying your own connection
 
 `LocalStore(url)` makes the database connection itself. If you need one it

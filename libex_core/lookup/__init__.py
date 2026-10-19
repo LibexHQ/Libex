@@ -18,6 +18,10 @@ With a store, get_series_books and get_author_books (by ASIN) also record each
 live walk as a stored list, and given max_age (a timedelta) answer from that
 record, with no request to Audible, while it is complete, fresh and names only
 books stored for the region asked. Any other state of the record is a live walk.
+
+get_book and get_books likewise take max_age, and serve from the store a book
+stored for the region asked that Audible confirmed within it, asking Audible for
+only the rest.
 """
 
 # Local

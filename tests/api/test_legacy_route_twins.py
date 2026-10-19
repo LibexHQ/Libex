@@ -5,6 +5,7 @@ here means one of the two has grown its own copy of the handler again.
 """
 
 # Standard library
+from contextlib import ExitStack
 from unittest.mock import AsyncMock, patch
 
 # Third party
@@ -107,8 +108,6 @@ _CASES = {
 
 
 async def _get(async_client, path, patches):
-    from contextlib import ExitStack
-
     with ExitStack() as stack:
         for target, kwargs in patches.items():
             stack.enter_context(patch(target, new_callable=AsyncMock, **kwargs))

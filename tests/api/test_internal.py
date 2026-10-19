@@ -4,15 +4,24 @@ Tests auth, validation, and narrator matching.
 """
 
 # Standard library
+import base64
+import hashlib
+import logging
 import secrets
 from contextlib import asynccontextmanager
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # Third party
 import pytest
 
 # Local
-from app.api.routes.internal.router import MAX_BODY_BYTES, hash_secret, verify_secret
+from app.api.routes.internal.router import (
+    MAX_BODY_BYTES,
+    _read_capped_body,
+    _seed_authorized,
+    hash_secret,
+    verify_secret,
+)
 
 MOD = "app.api.routes.internal.router"
 SEED_TOKEN = secrets.token_urlsafe(32)
@@ -96,9 +105,6 @@ async def test_returns_401_when_secret_not_set(async_client):
 @pytest.mark.asyncio
 async def test_old_pbkdf2_secret_is_refused(async_client):
     """A PBKDF2-format SEED_SECRET leaves the endpoint disabled, even for its own token."""
-    import base64
-    import hashlib
-
     salt = secrets.token_bytes(32)
     key = hashlib.pbkdf2_hmac("sha256", SEED_TOKEN.encode(), salt, 1000)
     old = base64.b64encode(salt + key).decode()
@@ -253,3 +259,38 @@ def test_seed_endpoint_not_in_openapi(async_client):
     schema = app.openapi()
     paths = schema.get("paths", {})
     assert "/internal/seed/narrators" not in paths
+
+
+# ============================================================
+# SECRET HANDLING
+# ============================================================
+
+def test_unusable_secret_is_logged_once_on_use(caplog):
+    """The warning goes out through the libex logger, once, when the secret is first used."""
+    with patch(f"{MOD}.settings") as mock_settings, \
+         patch(f"{MOD}._warned_unusable", False), \
+         caplog.at_level(logging.WARNING, logger="libex"):
+        mock_settings.seed_secret = "not-a-digest"
+        assert _seed_authorized(f"Bearer {SEED_TOKEN}") is False
+        assert _seed_authorized(f"Bearer {SEED_TOKEN}") is False
+    assert [r.name for r in caplog.records if "SEED_SECRET" in r.getMessage()] == ["libex"]
+
+
+def test_uppercase_hex_secret_still_works():
+    """A digest pasted in uppercase, or with stray whitespace, is the same digest."""
+    with patch(f"{MOD}.settings") as mock_settings:
+        mock_settings.seed_secret = f" {SEED_HASH.upper()}\n"
+        assert _seed_authorized(f"Bearer {SEED_TOKEN}") is True
+
+
+@pytest.mark.asyncio
+async def test_unicode_digit_content_length_is_not_a_500():
+    """A superscript digit passes str.isdigit but not int(); it must be ignored, not raise."""
+    request = MagicMock()
+    request.headers = {"content-length": "²"}
+
+    async def _stream():
+        yield b"[]"
+
+    request.stream = _stream
+    assert await _read_capped_body(request) == b"[]"

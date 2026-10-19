@@ -658,7 +658,9 @@ async def _replay_book_chunk(
 
         try:
             stored = await _read_back(session, lambda: _stored_books(session, [book["asin"]], region), fields)
-            if stored is not None:
+            if stored is None:
+                cache_failed += 1
+            else:
                 await cache.set(session, book_key(book["asin"], region), stored[0] if stored else book)
         except Exception as e:
             cache_failed += 1

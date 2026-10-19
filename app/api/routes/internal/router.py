@@ -51,6 +51,7 @@ MAX_BODY_BYTES = 32 * 1024 * 1024
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{43}")
 _SECRET_RE = re.compile(r"[0-9a-f]{64}")
+_warned_unusable = False
 
 
 # ============================================================
@@ -81,12 +82,25 @@ def _extract_token(authorization: str | None) -> str | None:
     return token
 
 
+def _warn_unusable_secret_once() -> None:
+    """Logged on first use rather than at import, which runs before logging is set up."""
+    global _warned_unusable
+    if not _warned_unusable:
+        _warned_unusable = True
+        logger.warning(
+            "SEED_SECRET is not a SHA-256 hex digest (an old PBKDF2 value?); "
+            "the seed endpoint is disabled until it is regenerated with "
+            "python -m app.api.routes.internal.router"
+        )
+
+
 def _seed_authorized(authorization: str | None) -> bool:
     """Shape check first, hash only for a well-formed token."""
-    stored = settings.seed_secret
+    stored = (settings.seed_secret or "").strip().lower()
     if not stored:
         return False
     if not _secret_is_usable(stored):
+        _warn_unusable_secret_once()
         return False
     token = _extract_token(authorization)
     if token is None:
@@ -94,18 +108,10 @@ def _seed_authorized(authorization: str | None) -> bool:
     return verify_secret(token, stored)
 
 
-if settings.seed_secret and not _secret_is_usable(settings.seed_secret):
-    logger.warning(
-        "SEED_SECRET is not a SHA-256 hex digest (an old PBKDF2 value?); "
-        "the seed endpoint is disabled until it is regenerated with "
-        "python -m app.api.routes.internal.router"
-    )
-
-
 async def _read_capped_body(request: Request) -> bytes | None:
     """Reads the body, returning None once it passes MAX_BODY_BYTES."""
     declared = request.headers.get("content-length")
-    if declared and declared.isdigit() and int(declared) > MAX_BODY_BYTES:
+    if declared and declared.isascii() and declared.isdigit() and int(declared) > MAX_BODY_BYTES:
         return None
     chunks: list[bytes] = []
     total = 0

@@ -790,8 +790,7 @@ async def test_get_series_books_with_a_malformed_relationship_asin_is_200_with_t
     assert response.headers["x-libex-incomplete-reason"] == "hydration-not-found"
 
 
-# =====================================================
-
+# ============================================================
 # A NULL PRODUCT ON A SERIES REQUEST IS AN OUTAGE
 # ============================================================
 

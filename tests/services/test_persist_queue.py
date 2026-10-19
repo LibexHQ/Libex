@@ -716,3 +716,15 @@ async def test_books_without_an_asin_are_not_counted_against_the_backlog():
         pq.persist_books_background(_books(3) + [{"title": "No ASIN"}], REGION)
 
     assert captured["books"] == 3
+
+
+@pytest.mark.asyncio
+async def test_the_replay_counts_a_failed_read_back_as_a_cache_failure():
+    with patch.object(pq, "upsert_book", new=AsyncMock()), \
+         patch.object(pq, "_read_back", new=AsyncMock(return_value=None)), \
+         patch.object(pq.cache, "set", new=AsyncMock()) as cache_set, \
+         patch.object(pq, "logger") as log:
+        await pq._replay_book_chunk(AsyncMock(), _books(2), REGION)
+
+    cache_set.assert_not_awaited()
+    assert log.info.call_args.kwargs["extra"]["cache_failed"] == 2

@@ -76,6 +76,7 @@ async def get_book(
     return BookResponse(**data)
 
 
+@router.get("/chapters/{asin}", response_model=ChapterResponse, include_in_schema=False)
 @router.get("/{asin}/chapters", response_model=ChapterResponse, responses={**ERROR_RESPONSES, 200: {"headers": FACTS_RESPONSE_HEADERS}})
 async def get_book_chapters(
     asin: Annotated[str, Depends(valid_asin("Audible ASIN"))],
@@ -84,25 +85,6 @@ async def get_book_chapters(
     session: AsyncSession = Depends(get_session),
 ) -> ChapterResponse:
     """Get chapter information for a book by ASIN."""
-    facts = ResponseFacts()
-    data = await outage_as_unavailable(get_chapters(asin, region, session, facts=facts))
-    stamp_facts_headers(response, facts, has_entities=True)
-    return ChapterResponse(**data)
-
-
-@router.get(
-    "/chapters/{asin}",
-    response_model=ChapterResponse,
-    include_in_schema=False,
-    responses={200: {"headers": FACTS_RESPONSE_HEADERS}},
-)
-async def get_book_chapters_legacy(
-    asin: Annotated[str, Depends(valid_asin("Audible ASIN"))],
-    response: Response,
-    region: str = Depends(valid_region),
-    session: AsyncSession = Depends(get_session),
-) -> ChapterResponse:
-    """Legacy endpoint. Use /book/{asin}/chapters instead."""
     facts = ResponseFacts()
     data = await outage_as_unavailable(get_chapters(asin, region, session, facts=facts))
     stamp_facts_headers(response, facts, has_entities=True)

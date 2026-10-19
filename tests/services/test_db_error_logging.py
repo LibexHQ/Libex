@@ -110,6 +110,7 @@ def _statement_error(column, *, hide_parameters):
 def _session_raising(error):
     session = MagicMock()
     session.execute = AsyncMock(side_effect=error)
+    session.rollback = AsyncMock()
     return session
 
 

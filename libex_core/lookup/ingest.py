@@ -42,14 +42,20 @@ direct lookups can.
 
 Fields the response carries and the store derives or does not keep are not
 written: a record's updatedAt and regions, an author's id, a series' position.
-Chapter payloads are written with their null parts left out, so an
-explicit null contentReference or contentUrl is stored as absent. An empty
-chapter listing is not written: it says nothing about the book, and the
-absence of chapters is Audible's to confirm.
+Chapter payloads are written with their null parts and the fields the model
+was built without left out, so an explicit null contentReference or
+contentUrl is stored as absent and a default is never stored as an answer. A
+chapter listing is written only when the store holds none for the book: a
+response confirms nothing, so it never replaces what is stored, and an empty
+listing says nothing about the book, the absence of chapters being Audible's
+to confirm.
+
+An author or narrator the response names without a usable name is left
+out of the book, since the writer cannot key it; the book itself is still
+written.
 """
 
 # Standard library
-import logging
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -68,8 +74,6 @@ __all__ = [
     "ingest_chapters",
     "ingest_series",
 ]
-
-logger = logging.getLogger("libex")
 
 # The flags whose settled default is the given value; see the module docstring.
 _SETTLES_TO_TRUE = ("isListenable", "isBuyable")
@@ -101,6 +105,12 @@ def _unsettled(book: BookResponse, region: str) -> dict[str, Any]:
             data[key] = None
     if "plans" not in book.model_fields_set or not data["plans"]:
         data["plans"] = None
+    # A reference with no usable name cannot be keyed, and one of them would
+    # fail the whole book's write.
+    for key in ("authors", "narrators"):
+        data[key] = [
+            e for e in data[key] if isinstance(e.get("name"), str) and e["name"].strip()
+        ]
     for author in data["authors"]:
         author["region"] = author.get("region") or region
     return data
@@ -112,9 +122,9 @@ async def ingest_books(
     """
     Writes the books, with their authors, narrators, genres and series, and
     returns the ASINs that were committed. A book whose ASIN is not ASIN-shaped
-    cannot be stored and is left out. Writes are made in chunks, so a chunk that
-    fails is logged and its books are missing from the result while the others
-    stand.
+    cannot be stored and is left out. Writes are made in chunks; a chunk that
+    fails is logged and replayed book by book, so only the books that still
+    fail are missing from the result.
     """
     region = _check_region(books, region)
     await _store.check(store)
@@ -136,18 +146,25 @@ async def ingest_chapters(
 ) -> bool:
     """
     Writes a book's chapter listing under the book's record for the region,
-    keeping the richer of the stored and the offered. False when nothing was
-    written: the listing is empty, the book is not stored for the region (ingest
-    the book first), or the write failed.
+    when the store holds no listing for it yet. A stored listing is never
+    replaced: the response confirms nothing, and its zeros, False and missing
+    parts could otherwise stand in for what Audible said. False when nothing was
+    written: the listing is empty, one is already stored, the book is not
+    stored for the region (ingest the book first), or the write failed.
     """
     region = validate_region(region)
     await _store.check(store)
     if not chapters.chapters or not isinstance(asin, str) or not is_valid_asin(asin):
         return False
+    asin = normalise_asin(asin)
+    held = await _store.stored_track(store, asin, region)
+    if held and held.get("chapters"):
+        return False
+    # Fields the model was built without are unknown, not the default it fills in.
     return await _store.persist_track(
         store,
-        normalise_asin(asin),
-        chapters.model_dump(exclude_none=True),
+        asin,
+        chapters.model_dump(exclude_none=True, exclude_unset=True),
         region,
     )
 

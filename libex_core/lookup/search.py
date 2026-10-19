@@ -41,6 +41,7 @@ from libex_core.exceptions import (
     NotFoundException,
     RegionException,
 )
+from libex_core.log_safety import safe_asin_for_log
 from libex_core.lookup import _store
 from libex_core.lookup.books import hydrate_books
 from libex_core.models import AbsSearchResponse, BookResponse, to_abs_book
@@ -141,6 +142,11 @@ async def _search_books(
             logger.warning("Search results could not be normalized", extra={
                 "region": region,
                 "skipped": len(errors),
+                "skipped_asins": ",".join(
+                    safe_asin_for_log(p.get("asin"))
+                    for p, o in zip(products, outcomes)
+                    if isinstance(o, Exception)
+                ),
                 "results": len(outcomes),
                 "error_type": type(errors[0]).__name__,
             })

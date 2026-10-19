@@ -70,6 +70,7 @@ from libex_core.audible.client import (
     upstream_status_of,
 )
 from libex_core.exceptions import ErrorCode, NotFoundException
+from libex_core.log_safety import safe_asin_for_log
 from libex_core.storage import merge
 from libex_core.storage.write.entities import write_track
 from app.core.logging import get_logger
@@ -595,6 +596,7 @@ async def _get_books_by_asins_unsettled(
                 if bad_asin in requested and bad_asin not in transient_failed_asins:
                     transient_failed_asins.append(bad_asin)
                 logger.warning("Product could not be normalized", extra={
+                    "asin": safe_asin_for_log(bad_asin),
                     "region": region,
                     "error_type": type(item).__name__,
                 })

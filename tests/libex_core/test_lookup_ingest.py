@@ -85,3 +85,19 @@ async def test_an_unknown_region_and_a_foreign_asin(store):
     odd = BookResponse(asin="not an asin", region="us", title="T")
     assert await ingest_books(store, [odd], region="us") == set()
     assert await ingest_books(store, [], region="us") == set()
+
+
+async def test_ingest_never_replaces_a_stored_chapter_listing(store):
+    await cases.case_ingest_never_replaces_a_stored_chapter_listing(store)
+
+
+async def test_ingest_stores_only_what_the_listing_carries(store):
+    await cases.case_ingest_stores_only_what_the_listing_carries(store)
+
+
+async def test_a_nameless_author_or_narrator_does_not_lose_the_book(store):
+    await cases.case_a_nameless_author_or_narrator_does_not_lose_the_book(store)
+
+
+async def test_an_author_without_a_region_takes_the_ingest_region(store):
+    await cases.case_an_author_without_a_region_takes_the_ingest_region(store)

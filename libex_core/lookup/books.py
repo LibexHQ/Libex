@@ -6,7 +6,10 @@ These are the library's counterparts of the hosted routes -- fetch, normalize,
 settle the tri-state flags, split what Audible answered from what it did not --
 without the cache. With no store, nothing is persisted and an outage is simply
 an outage: an ASIN whose request failed is reported in notFetched, and a
-request in which nothing could be served raises AudibleAPIException. Audible
+request in which nothing could be served raises AudibleAPIException. A
+product that Audible answered but that could not be normalized counts as a
+failed request for its own ASIN: it is in notFetched, and when no book can be
+served it is the failure that raises. Audible
 confirming it has no record is a different fact and stays NotFoundException (a
 bulk lookup reports it in notFound), never retried and never mixed with an
 outage.
@@ -59,6 +62,7 @@ from libex_core.audible.client import (
     validate_region,
 )
 from libex_core.exceptions import AudibleAPIException, ErrorCode, NotFoundException
+from libex_core.log_safety import safe_asin_for_log
 from libex_core.lookup import _store, _walks
 from libex_core.lookup._common import OUTAGE_MESSAGE
 from libex_core.lookup._shaping import check_shaping, shape_books
@@ -92,10 +96,11 @@ class Hydration:
     not_fetched holds ASINs whose request failed, so nothing is known about
     them. deadline_abandoned is the part of not_fetched whose request was cut
     off because the caller's deadline arrived rather than because it failed.
-    from_store holds the ASINs
-    of the books that were answered from the store because Audible could not
-    answer for them; it is a subset of books, and those books are the stored
-    copies, not anything Audible said this time. store_write_failed is True
+    from_store holds the ASINs of the books that were answered from the store,
+    either because Audible could not answer for them or, with max_age, because
+    they were fresh enough that Audible was never asked; it is a subset of
+    books, and those books are the stored copies, not anything Audible said
+    this time. store_write_failed is True
     when a store was given and some fetched book could not be written to it.
     explicit_nulls maps an ASIN to the published fields Audible sent as an
     explicit null in this response, as opposed to omitting them (see
@@ -144,9 +149,10 @@ async def hydrate_books(
     would read as an outage.
 
     A chunk that fails with NotFoundException puts its ASINs in not_found. A
-    chunk that fails any other way puts its ASINs in not_fetched, and the
-    chunks that answered are still returned. When any chunk failed and no chunk
-    produced a servable book, nothing can be told apart from an outage, so the
+    chunk that fails any other way puts its ASINs in not_fetched, as does a
+    product in an answered chunk that cannot be normalized (that ASIN alone),
+    and the rest that answered are still returned. When any chunk or product
+    failed and nothing servable came back, nothing can be told apart from an outage, so the
     call raises AudibleAPIException carrying the first failure's upstream
     status, even if another chunk confirmed some ASINs absent.
 
@@ -299,6 +305,7 @@ async def hydrate_books(
                 if bad_asin in requested and bad_asin not in failed:
                     failed.append(bad_asin)
                 logger.warning("Product could not be normalized", extra={
+                    "asin": safe_asin_for_log(bad_asin),
                     "region": region,
                     "error_type": type(outcome).__name__,
                 })

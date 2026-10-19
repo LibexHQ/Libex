@@ -22,6 +22,7 @@ from libex_core.audible.search import (
     fetch_suggestion_asins,
 )
 from libex_core.exceptions import AudibleAPIException, NotFoundException
+from libex_core.log_safety import safe_asin_for_log
 from app.core.logging import get_logger
 
 # Services
@@ -101,6 +102,11 @@ async def search(
             logger.warning("Search results could not be normalized", extra={
                 "region": region,
                 "skipped": len(errors),
+                "skipped_asins": ",".join(
+                    safe_asin_for_log(p.get("asin"))
+                    for p, o in zip(products, outcomes)
+                    if isinstance(o, Exception)
+                ),
                 "results": len(outcomes),
                 "error_type": type(errors[0]).__name__,
             })

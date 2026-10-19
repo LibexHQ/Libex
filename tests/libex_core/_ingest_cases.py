@@ -19,7 +19,14 @@ from libex_core.lookup.stored import (
     stored_chapters,
     stored_series,
 )
-from libex_core.models import AuthorResponse, BookResponse, ChapterResponse, SeriesResponse
+from libex_core.models import (
+    AuthorRefResponse,
+    AuthorResponse,
+    BookResponse,
+    ChapterResponse,
+    NarratorResponse,
+    SeriesResponse,
+)
 from libex_core.storage.models import Book
 from sqlalchemy import select
 from tests.libex_core._lookup_support import AUTHOR, AUTHOR_NAME, SERIES, product
@@ -220,3 +227,48 @@ async def case_series_and_author(store):
     got = await stored_author(store, AUTHOR, region="us")
     assert got.value.description == "Bio" and got.value.image == "http://i"
     assert got.confirmed_at is None
+
+
+async def case_ingest_never_replaces_a_stored_chapter_listing(store):
+    await ingest_books(store, [await response_of(rich())], region="us")
+    confirmed = ChapterResponse(
+        runtimeLengthMs=3000, runtimeLengthSec=3, isAccurate=True,
+        contentReference={"acr": "x"},
+        chapters=[
+            {"lengthMs": 1000, "startOffsetMs": 0, "startOffsetSec": 0, "title": "One",
+             "audibleExtras": {"k": "v"}},
+            {"lengthMs": 2000, "startOffsetMs": 1000, "startOffsetSec": 1, "title": "Two"},
+        ],
+    )
+    await _store.persist_track(store, ASIN, confirmed.model_dump(exclude_none=True), "us", confirm=True)
+
+    hollow = ChapterResponse(chapters=[{}], contentReference=None, audibleExtras=None)
+    assert await ingest_chapters(store, ASIN, hollow, region="us") is False
+    assert (await stored_chapters(store, ASIN, region="us")).value == confirmed
+
+
+async def case_ingest_stores_only_what_the_listing_carries(store):
+    await ingest_books(store, [await response_of(rich())], region="us")
+    listing = ChapterResponse(chapters=[{"title": "One"}], contentReference=None)
+    assert await ingest_chapters(store, ASIN, listing, region="us") is True
+    assert await _store.stored_track(store, ASIN, "us") == {"chapters": [{"title": "One"}]}
+
+
+async def case_a_nameless_author_or_narrator_does_not_lose_the_book(store):
+    book = await response_of(rich())
+    book.authors.append(AuthorRefResponse(asin="B0NONAME01"))
+    book.authors.append(AuthorRefResponse(asin="B0NONAME02", name="   "))
+    book.narrators.append(NarratorResponse.model_construct(name=None))
+    assert await ingest_books(store, [book], region="us") == {ASIN}
+    got = (await stored_book(store, ASIN, region="us")).value
+    assert [a.asin for a in got.authors] == [AUTHOR]
+    assert [n.name for n in got.narrators] == ["Nora Narrator"]
+
+
+async def case_an_author_without_a_region_takes_the_ingest_region(store):
+    book = await response_of(rich(), "uk")
+    for author in book.authors:
+        author.region = None
+    await ingest_books(store, [book], region="uk")
+    got = (await stored_book(store, ASIN, region="uk")).value
+    assert [a.region for a in got.authors] == ["uk"]

@@ -23,6 +23,7 @@ from libex_core.lookup import (
     get_books_with_nulls,
 )
 from libex_core.lookup import _store
+from libex_core.lookup.books import _hydrate
 from libex_core.storage.models import Book
 from libex_core.storage.store import LocalStore
 from tests.libex_core._lookup_support import not_found_get, outage_get, product
@@ -137,6 +138,27 @@ async def test_a_mixed_bulk_asks_once_for_only_the_stale_and_missing(store):
     assert [b.asin for b in got.response.books] == [C, B, A]
     assert got.response.notFound == got.response.notFetched == []
     assert set(got.explicit_nulls) == {B, C}
+
+
+async def test_a_fresh_book_sits_between_two_stale_ones_in_request_order(store):
+    await seed(store, A, B, C)
+    for stale in (A, C):
+        await stamp(store, stale, datetime.now(timezone.utc) - 3 * DAY)
+    get = counting(**{A: 1, B: 1, C: 1})
+    got = await get_books(get, [A, B, C], store=store, max_age=DAY)
+    assert requested(get) == [A, C]
+    assert [b.asin for b in got.books] == [A, B, C]
+
+
+async def test_the_fresh_books_are_listed_as_from_store_on_every_path(store):
+    await seed(store, A, B)
+    await stamp(store, B, datetime.now(timezone.utc) - 3 * DAY)
+    single = await _hydrate(counting(**{A: 1}), [A], "us", store, DAY)
+    assert single.from_store == [A]
+    bulk = await _hydrate(counting(**{A: 1, B: 1}), [B, A], "us", store, DAY)
+    assert bulk.from_store == [A] and [b["asin"] for b in bulk.books] == [B, A]
+    outage = await _hydrate(outage_get, [A, B, C], "us", store, DAY)
+    assert A in outage.from_store and outage.not_fetched == [C]
 
 
 async def test_a_fully_fresh_bulk_makes_no_request_and_has_no_nulls(store):

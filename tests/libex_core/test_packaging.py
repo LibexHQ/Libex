@@ -107,14 +107,21 @@ _EXPECTED_REQUIRES_DIST = {
 # Optional extras, spelled out here rather than read from pyproject.toml so a
 # dependency added there without being declared here fails the build check.
 _EXPECTED_EXTRAS = {
-    "storage": {
+    "sqlite": {
         "sqlalchemy>=2.0.46,<2.1",
         "alembic>=1.18.4,<1.19",
         "aiosqlite>=0.22.1,<0.23",
     },
     "postgres": {
-        "libex-core[storage]",
+        "sqlalchemy>=2.0.46,<2.1",
+        "alembic>=1.18.4,<1.19",
         "asyncpg>=0.31,<0.32",
+    },
+    # The older name for sqlite; installs the same set.
+    "storage": {
+        "sqlalchemy>=2.0.46,<2.1",
+        "alembic>=1.18.4,<1.19",
+        "aiosqlite>=0.22.1,<0.23",
     },
     "socks": {
         "httpx[socks]>=0.28.1,<0.29",

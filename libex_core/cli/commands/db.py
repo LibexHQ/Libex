@@ -49,7 +49,7 @@ def register(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") 
         "set up the local store and read what it holds",
         "Work with the local store, a database of what earlier lookups "
         "returned. It is off unless LIBEX_CORE_STORAGE is set, and needs the "
-        "storage extra. These commands answer from the store alone and make "
+        "sqlite or postgres extra. These commands answer from the store alone and make "
         "no request to Audible. Run db upgrade once to create it. Each read "
         "command matches the hosted service's /db route of the same name and "
         "prints the same shape; one that finds nothing exits 3. A command "

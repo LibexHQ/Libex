@@ -655,6 +655,44 @@ def test_postgres_without_asyncpg_names_the_extra(monkeypatch):
     _assert_no_secret(caught.value)
 
 
+def _hide_libraries(monkeypatch, *names):
+    import importlib.util
+
+    real = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util, "find_spec", lambda name, *a: None if name in names else real(name, *a)
+    )
+
+
+def test_postgres_opens_without_aiosqlite(monkeypatch):
+    _hide_libraries(monkeypatch, "aiosqlite")
+    store = LocalStore(f"postgresql://u:{SECRET}@h/d")
+    assert store._postgres
+
+
+def test_sqlite_opens_without_asyncpg(monkeypatch, db):
+    _hide_libraries(monkeypatch, "asyncpg")
+    store = LocalStore(f"sqlite+aiosqlite:///{db}")
+    assert not store._postgres
+
+
+def test_sqlite_without_aiosqlite_names_the_extra(monkeypatch, db):
+    _hide_libraries(monkeypatch, "aiosqlite")
+    with pytest.raises(StorageUnavailable) as caught:
+        LocalStore(f"sqlite+aiosqlite:///{db}")
+    assert "libex-core[sqlite]" in str(caught.value)
+
+
+@pytest.mark.parametrize("url", ["sqlite+aiosqlite:///x.db", f"postgresql://u:{SECRET}@h/d"])
+def test_without_sqlalchemy_every_store_names_the_extra(monkeypatch, url):
+    _hide_libraries(monkeypatch, "sqlalchemy")
+    with pytest.raises(StorageUnavailable) as caught:
+        LocalStore(url)
+    assert "libex-core[sqlite]" in str(caught.value)
+    assert "libex-core[postgres]" in str(caught.value)
+    _assert_no_secret(caught.value)
+
+
 # ------------------------------------------------------------
 # The secret stays put
 # ------------------------------------------------------------

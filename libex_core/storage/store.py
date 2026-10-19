@@ -530,6 +530,11 @@ class LocalStore:
                 "Postgres needs the 'postgres' extra (missing: asyncpg); "
                 "install it with: pip install 'libex-core[postgres]'"
             )
+        if not self._postgres and importlib.util.find_spec("aiosqlite") is None:
+            raise StorageUnavailable(
+                "SQLite needs the 'sqlite' extra (missing: aiosqlite); "
+                "install it with: pip install 'libex-core[sqlite]'"
+            )
         options: dict = {}
         self._handoff = _Handoff()
         if connect is None:

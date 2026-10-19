@@ -4,8 +4,11 @@ Local storage for Libex: the relational schema, on SQLite or Postgres.
 This is the one part of `libex_core` that needs a database library, so it is
 an opt-in extra rather than a dependency of the package:
 
-    pip install "libex-core[storage]"    # SQLite
-    pip install "libex-core[postgres]"   # SQLite and Postgres
+    pip install "libex-core[sqlite]"     # SQLite
+    pip install "libex-core[postgres]"   # Postgres
+
+`libex-core[storage]` is the older name for `[sqlite]` and still installs the
+same thing.
 
 Nothing here is imported when `libex_core` is, and importing this package does
 not import SQLAlchemy either. The names below load on first use, and
@@ -18,7 +21,9 @@ import importlib
 import importlib.util
 from typing import Any
 
-_REQUIRED = ("sqlalchemy", "aiosqlite")
+# What every backend needs. The driver is checked where the backend is known,
+# when a store resolves its URL.
+_REQUIRED = ("sqlalchemy", "alembic")
 
 _EXPORTS = {
     "Base": "libex_core.storage.base",
@@ -45,18 +50,19 @@ __all__ = ["StorageUnavailable", "require_storage", *_EXPORTS]
 
 
 class StorageUnavailable(ImportError):
-    """The storage extra is not installed."""
+    """The libraries local storage needs are not installed."""
 
 
 def require_storage() -> None:
-    """Raise StorageUnavailable, naming the extra, unless the storage
-    libraries can be imported. Looks the libraries up without importing them."""
+    """Raise StorageUnavailable, naming the extras, unless the libraries every
+    backend shares can be imported. Looks them up without importing them. The
+    SQLite or Postgres driver is checked by the store that uses it."""
     missing = [name for name in _REQUIRED if importlib.util.find_spec(name) is None]
     if missing:
         raise StorageUnavailable(
-            "local storage needs the 'storage' extra "
+            "local storage needs the 'sqlite' or 'postgres' extra "
             f"(missing: {', '.join(missing)}); install it with: "
-            "pip install 'libex-core[storage]'"
+            "pip install 'libex-core[sqlite]' or pip install 'libex-core[postgres]'"
         )
 
 

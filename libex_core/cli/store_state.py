@@ -1,7 +1,7 @@
 """
 What the command line says when the local store cannot be used, and the
 errors that carry it. Light on purpose: the exit-status mapping imports this,
-and it must work when the storage extra is not installed.
+and it must work when the sqlite and postgres extras are not installed.
 
 Every message is fixed text. None repeats the value of LIBEX_CORE_STORAGE or
 any part of it.
@@ -12,7 +12,7 @@ from libex_core.cli.environment import STORAGE_VARIABLE
 STORAGE_OFF = (
     f"local storage is off: set {STORAGE_VARIABLE} to sqlite, an absolute path "
     "to a SQLite file, or a postgresql URL to use it (needs "
-    "pip install 'libex-core[storage]')"
+    "pip install 'libex-core[sqlite]', or 'libex-core[postgres]' for postgresql)"
 )
 
 # Schema state -> (name shown by `db status`, message when it blocks a command).

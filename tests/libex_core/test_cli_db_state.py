@@ -214,7 +214,7 @@ def test_every_db_command_with_storage_off_says_so_and_exits_5(run_cli, command,
 
 def test_the_storage_off_text_names_the_variable_and_the_extra():
     assert STORAGE_VARIABLE in store_state.STORAGE_OFF
-    assert "libex-core[storage]" in store_state.STORAGE_OFF
+    assert "libex-core[sqlite]" in store_state.STORAGE_OFF
 
 
 # ============================================================
@@ -238,7 +238,7 @@ def test_every_db_command_without_the_extra_names_it_and_exits_5(run_cli, no_sto
     result = run_cli(list(command), env={STORAGE_VARIABLE: str(tmp_path / "x.db")})
     assert result.code == 5
     assert result.out == ""
-    assert "libex-core[storage]" in result.err
+    assert "libex-core[sqlite]" in result.err
     assert result.err.endswith("(code: config_error)\n")
     assert str(tmp_path) not in result.err
 
@@ -250,7 +250,7 @@ def test_a_lookup_without_the_extra_stops_before_asking_audible(run_cli, no_stor
     result = run_cli(list(case.argv), env={**EGRESS, STORAGE_VARIABLE: str(tmp_path / "x.db")})
     assert result.code == 5
     assert result.out == ""
-    assert "libex-core[storage]" in result.err
+    assert "libex-core[sqlite]" in result.err
     get.assert_not_called()
 
 

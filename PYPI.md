@@ -16,8 +16,8 @@ Libex also runs as a hosted API, and a free public instance is at
 
 ```
 pip install libex-core
-pip install "libex-core[storage]"    # adds the optional local store (SQLite)
-pip install "libex-core[postgres]"   # the store, with Postgres as well
+pip install "libex-core[sqlite]"     # adds the optional local store, on SQLite
+pip install "libex-core[postgres]"   # the local store, on Postgres
 pip install "libex-core[socks]"      # lets the proxy be a SOCKS5 proxy
 ```
 
@@ -121,14 +121,15 @@ By default nothing is kept. Setting `LIBEX_CORE_STORAGE` turns on a local
 database that lookups write what Audible answered into, under the same merge
 rules as the hosted service, and that serves the stored copy when Audible is
 unreachable. It needs the
-`storage` extra.
+`sqlite` extra, or the `postgres` extra for Postgres. (`storage` is the older
+name for `sqlite` and still works.)
 
 | `LIBEX_CORE_STORAGE` | Store |
 |---|---|
 | unset, empty or `off` | none (default) |
 | `sqlite` | `libex.db` in your user data directory: `~/.local/share/libex-core/` on Linux (or under `$XDG_DATA_HOME`), `~/Library/Application Support/libex-core/` on macOS, `%LOCALAPPDATA%\libex-core\` on Windows |
 | an absolute path | that SQLite file |
-| a `sqlite:///` or `postgresql://` URL | that database (`postgres` extra for Postgres) |
+| a `sqlite:///` or `postgresql://` URL | that database (`postgres` extra) |
 
 ```
 export LIBEX_CORE_STORAGE=sqlite

@@ -39,7 +39,7 @@ VARIABLES: tuple[tuple[str, str], ...] = (
         "absolute path uses that SQLite file, and a sqlite:/// or "
         "postgresql:// URL uses that database. It may carry credentials, so "
         "it is read from the environment, never accepted as an option, and "
-        "never printed. Needs the storage extra, and the postgres extra for "
+        "never printed. Needs the sqlite extra, or the postgres extra for "
         "postgresql.",
     ),
 )

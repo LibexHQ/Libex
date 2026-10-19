@@ -9,6 +9,7 @@ before they moved, so the move is proven byte-identical rather than assumed.
 """
 
 # Standard library
+import importlib.util
 import json
 import subprocess
 import sys
@@ -121,7 +122,8 @@ def test_require_storage_names_the_extra_when_a_library_is_missing():
         with pytest.raises(storage.StorageUnavailable) as raised:
             storage.require_storage()
 
-    assert "libex-core[storage]" in str(raised.value)
+    assert "libex-core[sqlite]" in str(raised.value)
+    assert "libex-core[postgres]" in str(raised.value)
     assert "sqlalchemy" in str(raised.value)
 
 
@@ -131,18 +133,18 @@ def test_storage_unavailable_is_an_import_error():
 
 def test_require_storage_names_only_what_is_missing():
     def spec(name):
-        return None if name == "aiosqlite" else object()
+        return None if name == "alembic" else object()
 
     with patch("libex_core.storage.importlib.util.find_spec", side_effect=spec):
         with pytest.raises(storage.StorageUnavailable) as raised:
             storage.require_storage()
 
-    assert "missing: aiosqlite" in str(raised.value)
+    assert "missing: alembic" in str(raised.value)
 
 
 def test_lazy_attribute_access_raises_the_same_error_when_missing():
     with patch("libex_core.storage.importlib.util.find_spec", return_value=None):
-        with pytest.raises(storage.StorageUnavailable, match=r"libex-core\[storage\]"):
+        with pytest.raises(storage.StorageUnavailable, match=r"libex-core\[sqlite\]"):
             storage.Book
 
 
@@ -350,3 +352,26 @@ def test_the_golden_holds_the_partial_index_predicate():
     golden = _golden()
 
     assert "WHERE asin IS NULL" in golden["authors"]
+
+
+def _hide(*names):
+    real = importlib.util.find_spec
+    return patch(
+        "libex_core.storage.importlib.util.find_spec",
+        side_effect=lambda name, *a: None if name in names else real(name, *a),
+    )
+
+
+def test_require_storage_does_not_need_a_driver():
+    with _hide("aiosqlite", "asyncpg"):
+        storage.require_storage()
+
+
+def test_lazy_exports_load_without_aiosqlite():
+    with _hide("aiosqlite"):
+        assert storage.LocalStore is _EXPORTS["LocalStore"]
+
+
+def test_lazy_exports_load_without_asyncpg():
+    with _hide("asyncpg"):
+        assert storage.LocalStore is _EXPORTS["LocalStore"]

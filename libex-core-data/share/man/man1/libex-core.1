@@ -1537,7 +1537,7 @@ URL of the http, https, socks5 or socks5h proxy that every request goes through.
 Set to 1, true, yes or on to let requests leave on this machine's own address when no proxy is set. 0, false, no, off or empty keeps that refused. A proxy, when set, is always used.
 .TP
 \fBLIBEX_CORE_STORAGE\fR
-Where the local store lives. off or empty, the default, keeps nothing. sqlite uses libex.db in this user's data directory, an absolute path uses that SQLite file, and a sqlite:/// or postgresql:// URL uses that database. It may carry credentials, so it is read from the environment, never accepted as an option, and never printed. Needs the storage extra, and the postgres extra for postgresql.
+Where the local store lives. off or empty, the default, keeps nothing. sqlite uses libex.db in this user's data directory, an absolute path uses that SQLite file, and a sqlite:/// or postgresql:// URL uses that database. It may carry credentials, so it is read from the environment, never accepted as an option, and never printed. Needs the sqlite extra, or the postgres extra for postgresql.
 .SH EXIT STATUS
 .TP
 \fB0\fR

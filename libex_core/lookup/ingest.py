@@ -149,15 +149,20 @@ async def ingest_chapters(
     when the store holds no listing for it yet. A stored listing is never
     replaced: the response confirms nothing, and its zeros, False and missing
     parts could otherwise stand in for what Audible said. False when nothing was
-    written: the listing is empty, one is already stored, the book is not
-    stored for the region (ingest the book first), or the write failed.
+    written: the listing is empty, one is already stored or could not be read,
+    the book is not stored for the region (ingest the book first), or the write
+    failed.
     """
     region = validate_region(region)
     await _store.check(store)
     if not chapters.chapters or not isinstance(asin, str) or not is_valid_asin(asin):
         return False
     asin = normalise_asin(asin)
-    held = await _store.stored_track(store, asin, region)
+    held = await _store.stored_track(store, asin, region, default=_store._READ_FAILED)
+    # A failed read is not an empty one: writing over a listing that could not
+    # be read could replace a confirmed one.
+    if held is _store._READ_FAILED:
+        return False
     if held and held.get("chapters"):
         return False
     # Fields the model was built without are unknown, not the default it fills in.

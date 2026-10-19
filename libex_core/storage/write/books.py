@@ -65,7 +65,7 @@ async def resolve_author_ids(
     def memo_key(author: dict) -> tuple:
         return (
             author.get("asin"),
-            author.get("name", "").strip(),
+            (author.get("name") or "").strip(),
             author.get("region"),
             author.get("description"),
             author.get("image"),
@@ -84,7 +84,7 @@ async def resolve_author_ids(
         [
             key
             for author in distinct.values()
-            for key in (author.get("asin"), f"{author.get('region')}:{author.get('name', '').strip()}")
+            for key in (author.get("asin"), f"{author.get('region')}:{(author.get('name') or '').strip()}")
             if key
         ],
         dialect=dialect,
@@ -200,7 +200,7 @@ async def write_books(
             })
 
         for narrator in data.get("narrators", []):
-            name = narrator.get("name", "").strip()
+            name = (narrator.get("name") or "").strip()
             if not name:
                 continue
             narrators.setdefault(name, {"name": name, "created_at": now, "updated_at": now})
@@ -239,13 +239,19 @@ async def write_books(
                 "position": entry.get("position"),
             }
 
+    # Written in the order the books credit them, because the relationships are
+    # served in insertion order. The advisory locks, taken in key order, are
+    # what keep two writers that meet the same genres or narrators in opposite
+    # orders from deadlocking.
     if genres:
-        await session.execute(statements.genre_insert, _in_key_order(genres))
-        await session.execute(statements.book_genre_insert, _in_key_order(book_genres))
+        await lock_asins(session, "genre", list(genres), dialect=dialect)
+        await session.execute(statements.genre_insert, list(genres.values()))
+        await session.execute(statements.book_genre_insert, list(book_genres.values()))
 
     if narrators:
-        await session.execute(statements.narrator_insert, _in_key_order(narrators))
-        await session.execute(statements.book_narrator_insert, _in_key_order(book_narrators))
+        await lock_asins(session, "narrator", list(narrators), dialect=dialect)
+        await session.execute(statements.narrator_insert, list(narrators.values()))
+        await session.execute(statements.book_narrator_insert, list(book_narrators.values()))
 
     if series:
         # Not key-ordered like the rest: the first series row stored for an

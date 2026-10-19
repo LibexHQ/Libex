@@ -631,7 +631,8 @@ async def _replay_book_chunk(
     A failed cache write leaves the row written. upsert_book has already
     committed by then, the row is the durable copy and the cache entry is
     derivable from it, so the loop reports the book and moves on rather than
-    unwinding a store that succeeded.
+    unwinding a store that succeeded. A failed read-back of the stored row
+    counts toward cache_failed the same way.
 
     One residue the guards cannot remove: the rollback is itself work against
     the connection, so it can fail when the connection is gone rather than

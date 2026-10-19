@@ -96,6 +96,7 @@ def _warn_unusable_secret_once() -> None:
 
 def _seed_authorized(authorization: str | None) -> bool:
     """Shape check first, hash only for a well-formed token."""
+    # Lowered and stripped so a digest pasted in uppercase or with stray whitespace still matches.
     stored = (settings.seed_secret or "").strip().lower()
     if not stored:
         return False

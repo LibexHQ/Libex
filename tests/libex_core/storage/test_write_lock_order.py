@@ -14,6 +14,7 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy.pool import NullPool
 
 from libex_core.storage.models import Author, Book, Genre, Narrator, author_book, book_genre, book_narrator
+from libex_core.storage.read.books import get_books
 from libex_core.storage.write.books import write_books
 from tests.libex_core.storage import _write_cases as cases
 
@@ -133,3 +134,23 @@ async def test_authors_are_served_in_the_order_audible_credited_them(factory):
         await write_books(session, [CREDITED])
         await session.commit()
     assert await _served_authors(factory) == ["author Z", "author M", "author A"]
+
+
+CREDITED_PEOPLE = {
+    "asin": "B0CREDIT02",
+    "region": "us",
+    "title": "credited",
+    "narrators": [{"name": f"narr {n}"} for n in ("Z", "M", "A")],
+    "genres": [{"asin": f"G{n}", "name": f"G{n}", "type": "Genres"} for n in ("Z", "M", "A")],
+}
+
+
+@pytest.mark.parametrize(("field", "expected"), [("narrators", ["narr Z", "narr M", "narr A"]), ("genres", ["GZ", "GM", "GA"])])
+async def test_narrators_and_genres_are_served_in_the_order_audible_credited_them(factory, field, expected):
+    async with factory() as session:
+        await write_books(session, [CREDITED_PEOPLE])
+        await session.commit()
+    async with factory() as session:
+        await session.execute(text("ANALYZE"))
+        (book,) = await get_books(session, [CREDITED_PEOPLE["asin"]], region="us")
+        assert [x["name"] for x in book[field]] == expected

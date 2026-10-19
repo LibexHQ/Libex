@@ -80,7 +80,7 @@ async def upsert_narrator(
     session: AsyncSession, narrator: dict, *, dialect: str | None = None
 ) -> str | None:
     """Upserts a single narrator. Returns name if successful."""
-    name = narrator.get("name", "").strip()
+    name = (narrator.get("name") or "").strip()
     if not name:
         return None
 
@@ -174,7 +174,7 @@ async def upsert_author(
     conflict_errors.
     """
     a_asin = author.get("asin")
-    a_name = author.get("name", "").strip()
+    a_name = (author.get("name") or "").strip()
     a_region = author.get("region")
 
     if not a_name or not a_region:
@@ -362,7 +362,7 @@ async def write_author_profile(
     stamped (upsert_author takes no such flag). The stamp only moves forward.
     """
     asin = data.get("asin")
-    name = data.get("name", "").strip()
+    name = (data.get("name") or "").strip()
     region = data.get("region")
 
     if not name or not region or not asin:

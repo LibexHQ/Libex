@@ -4,6 +4,9 @@ written under the merge rules, with the settled values read back as unknown and
 nothing confirmed. The cases are shared with the Postgres run.
 """
 
+# Standard library
+from unittest.mock import patch
+
 # Third party
 import pytest
 import pytest_asyncio
@@ -11,6 +14,7 @@ import pytest_asyncio
 # Local
 from libex_core.lookup.ingest import ingest_books, ingest_chapters
 from libex_core.models import BookResponse, ChapterResponse
+from libex_core.storage.read import books as read_books
 from libex_core.storage.store import LocalStore, StoreClosed
 from tests.libex_core import _ingest_cases as cases
 
@@ -101,3 +105,14 @@ async def test_a_nameless_author_or_narrator_does_not_lose_the_book(store):
 
 async def test_an_author_without_a_region_takes_the_ingest_region(store):
     await cases.case_an_author_without_a_region_takes_the_ingest_region(store)
+
+
+async def test_a_failed_read_of_the_stored_listing_writes_nothing(store):
+    await ingest_books(store, [await cases.response_of(cases.rich())], region="us")
+    assert await ingest_chapters(store, cases.ASIN, cases.CHAPTERS, region="us") is True
+    stored = (await cases.stored_chapters(store, cases.ASIN, region="us")).value
+
+    other_listing = ChapterResponse(chapters=[{"title": "Replacement"}])
+    with patch.object(read_books, "get_track", side_effect=RuntimeError("read failed")):
+        assert await ingest_chapters(store, cases.ASIN, other_listing, region="us") is False
+    assert (await cases.stored_chapters(store, cases.ASIN, region="us")).value == stored

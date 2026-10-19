@@ -508,14 +508,16 @@ async def stored_author_book_asins(
 
 
 async def stored_track(
-    store: "LocalStore", asin: str, region: str | None = None
-) -> dict[str, Any] | None:
+    store: "LocalStore", asin: str, region: str | None = None, *, default: Any = None
+) -> dict[str, Any] | None | object:
     """The stored chapters. A listing belongs to one marketplace's record of the
-    book: with a region, that listing; without, the first-stored one."""
+    book: with a region, that listing; without, the first-stored one. A failed
+    read answers `default`; a caller that must tell it from nothing stored
+    passes _READ_FAILED."""
     from libex_core.storage.read import books as read_books
 
     return await _read(
-        store, "chapters", lambda s: read_books.get_track(s, asin, region=region), None
+        store, "chapters", lambda s: read_books.get_track(s, asin, region=region), default
     )
 
 

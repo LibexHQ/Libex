@@ -339,6 +339,7 @@ async def _served_authors(factory) -> list[str]:
 
 
 async def test_authors_come_back_in_written_order_on_a_small_table(factory):
+    """Small-table behaviour only; at scale the query plan decides the order."""
     async with factory() as session:
         await write_books(session, [CREDITED])
         await session.commit()

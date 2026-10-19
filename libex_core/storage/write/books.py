@@ -13,6 +13,29 @@ from libex_core.storage.write.statements import statements_for
 from libex_core.storage.write.support import dialect_of, lock_asins, utc_now
 
 
+def _key_order(keys) -> list:
+    """
+    The keys in one fixed order, whatever order they arrived in. A key's absent
+    parts sort first.
+
+    Each unique-keyed insert takes a row lock on the key it writes and holds it
+    until the transaction ends, so two writers that meet the same keys in
+    opposite orders each wait on the other and Postgres kills one. A fixed order
+    for everyone makes the wait a queue.
+    """
+
+    def sortable(key) -> tuple:
+        parts = key if isinstance(key, tuple) else (key,)
+        return tuple("" if part is None else part for part in parts)
+
+    return sorted(keys, key=sortable)
+
+
+def _in_key_order(rows: dict) -> list[dict]:
+    """The rows of a keyed collection, in the order of their keys."""
+    return [rows[key] for key in _key_order(rows)]
+
+
 async def resolve_author_ids(
     session: AsyncSession,
     books: list[dict],
@@ -39,26 +62,32 @@ async def resolve_author_ids(
     descriptions or images are still both written. Only a genuinely identical
     repeat is skipped.
     """
+    def memo_key(author: dict) -> tuple:
+        return (
+            author.get("asin"),
+            author.get("name", "").strip(),
+            author.get("region"),
+            author.get("description"),
+            author.get("image"),
+        )
+
+    # Written in key order, not in the order the books name them: the author
+    # rows are unique-keyed inserts and a prolific author shared between two
+    # chunks is exactly where crossed orders meet. Which author a later book
+    # maps to is looked up in the memo afterwards, so the result is the same.
+    distinct = {memo_key(author): author for data in books for author in data.get("authors", [])}
     memo: dict[tuple, int | None] = {}
+    for key in _key_order(distinct):
+        memo[key] = await upsert_author(
+            session, distinct[key], dialect=dialect, conflict_errors=conflict_errors
+        )
+
     ids_by_book: dict[tuple[str, str | None], list[int]] = {}
 
     for data in books:
         ids: list[int] = []
         for author in data.get("authors", []):
-            key = (
-                author.get("asin"),
-                author.get("name", "").strip(),
-                author.get("region"),
-                author.get("description"),
-                author.get("image"),
-            )
-            if key in memo:
-                author_id = memo[key]
-            else:
-                author_id = await upsert_author(
-                    session, author, dialect=dialect, conflict_errors=conflict_errors
-                )
-                memo[key] = author_id
+            author_id = memo[memo_key(author)]
             if author_id and author_id not in ids:
                 ids.append(author_id)
         # Accumulated, not assigned. A chunk can legitimately carry the same
@@ -198,18 +227,21 @@ async def write_books(
             }
 
     if genres:
-        await session.execute(statements.genre_insert, list(genres.values()))
-        await session.execute(statements.book_genre_insert, list(book_genres.values()))
+        await session.execute(statements.genre_insert, _in_key_order(genres))
+        await session.execute(statements.book_genre_insert, _in_key_order(book_genres))
 
     if narrators:
-        await session.execute(statements.narrator_insert, list(narrators.values()))
-        await session.execute(statements.book_narrator_insert, list(book_narrators.values()))
+        await session.execute(statements.narrator_insert, _in_key_order(narrators))
+        await session.execute(statements.book_narrator_insert, _in_key_order(book_narrators))
 
     if series:
+        # Not key-ordered like the rest: the first series row stored for an
+        # asin is the one marked primary, so the batch's own order is data.
+        # The advisory locks, taken in asin order, are what keep writers apart.
         await lock_asins(session, "series", [asin for asin, _ in series], dialect=dialect)
         await session.execute(statements.series_upsert, list(series.values()))
     if book_series_links:
-        await session.execute(statements.book_series_upsert, list(book_series_links.values()))
+        await session.execute(statements.book_series_upsert, _in_key_order(book_series_links))
 
     ids_by_book = await resolve_author_ids(
         session, books, dialect=dialect, conflict_errors=conflict_errors
@@ -237,6 +269,6 @@ async def write_books(
                 })
 
     if author_books:
-        await session.execute(statements.author_book_insert, list(author_books.values()))
+        await session.execute(statements.author_book_insert, _in_key_order(author_books))
     if series_authors:
-        await session.execute(statements.series_author_insert, list(series_authors.values()))
+        await session.execute(statements.series_author_insert, _in_key_order(series_authors))

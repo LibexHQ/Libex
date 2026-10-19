@@ -509,6 +509,35 @@ async def test_fetch_and_persist_returns_true_when_every_chunk_is_admitted():
 
 
 @pytest.mark.asyncio
+async def test_fetch_and_persist_gathers_chapters_only_after_the_background_write_lands():
+    """_gather_chapters reads the chunk's books back from the database, so it
+    has to run after the background write commits, not alongside it."""
+    import asyncio
+
+    from app.services.db import persist_queue
+
+    events = []
+
+    async def _write():
+        await asyncio.sleep(0.01)
+        events.append("written")
+
+    async def _get_books(asins, region, session, persist_outcome=None):
+        persist_queue._spawn(_write, len(asins))
+        return []
+
+    async def _gather(asins, region, delay):
+        events.append("gathered")
+
+    with patch.object(seeder, "SessionFactory", return_value=_FakeSessionCM(_passthrough_session())), \
+         patch.object(seeder, "get_books_by_asins", new=AsyncMock(side_effect=_get_books)), \
+         patch.object(seeder, "_gather_chapters", new=AsyncMock(side_effect=_gather)):
+        await seeder._fetch_and_persist(["B0ONE00001"], "us", delay=0)
+
+    assert events == ["written", "gathered"]
+
+
+@pytest.mark.asyncio
 async def test_fetch_and_persist_returns_false_if_any_of_several_chunks_sheds():
     """101 ASINs is three 50-wide chunks. Only the middle one sheds -- the
     call must still report False for the whole batch, since one shed chunk

@@ -72,11 +72,6 @@ def book_key(asin: str, region: str) -> str:
     return f"book:{region}:{asin}"
 
 
-def books_bulk_key(asins: list[str], region: str) -> str:
-    joined = "+".join(sorted(asins))
-    return f"books:{region}:{joined}"
-
-
 def author_key(asin: str, region: str) -> str:
     return f"author:{region}:{asin}"
 

@@ -264,6 +264,21 @@ def queued_books() -> int:
     return _queued_books
 
 
+async def wait_for_inflight() -> None:
+    """
+    Waits for every background write already in flight to finish, for a
+    caller about to read back rows it just handed to this queue. Writes
+    started while it waits are not waited for. asyncio.wait rather than
+    gather, so a caller cancelled mid-wait leaves the writes running. Only
+    tasks on the running loop are waited for: one left on a loop that has
+    since closed will never finish.
+    """
+    loop = asyncio.get_running_loop()
+    pending = {task for task in _inflight if task.get_loop() is loop}
+    if pending:
+        await asyncio.wait(pending)
+
+
 def set_bg_write_concurrency_limit(limit: int) -> None:
     """
     Raises or lowers _BG_WRITE_CONCURRENCY_LIMIT for this process, before the

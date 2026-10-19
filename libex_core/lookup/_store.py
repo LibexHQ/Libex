@@ -164,14 +164,16 @@ async def persist_series(
 async def persist_author(
     store: "LocalStore", data: dict[str, Any], region: str, *, confirm: bool = False
 ) -> bool:
-    """Writes an author profile. False when the write failed. confirm stamps
-    the author as confirmed, for an author profile fetch."""
+    """Writes an author profile. False when the write failed or the profile
+    lacks the asin, name or region it is keyed by. confirm stamps the author
+    as confirmed, for an author profile fetch."""
     from libex_core.storage import write
 
     return await _persist_one(
         store,
         "author",
         lambda s: write.write_author_profile(s, data, confirm=confirm),
+        refusal="the author has no asin, name or region",
         region=region,
     )
 

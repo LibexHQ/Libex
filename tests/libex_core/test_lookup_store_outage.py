@@ -431,6 +431,23 @@ async def test_a_chapter_write_the_store_declined_reports_false(store, caplog):
     assert any(r.getMessage() == "Not written to the store" for r in caplog.records)
 
 
+async def test_an_author_profile_the_store_cannot_key_is_reported_as_not_written(
+    store, caplog
+):
+    """A profile without a name writes nothing, so it is a refusal and not a
+    stored author."""
+    caplog.set_level(logging.INFO, logger="libex")
+
+    stored = await store_module.persist_author(
+        store, {"asin": AUTHOR, "name": "", "region": "us"}, "us"
+    )
+
+    assert stored is False
+    messages = [r.getMessage() for r in caplog.records]
+    assert "Not written to the store" in messages
+    assert "Wrote to the store" not in messages
+
+
 async def test_a_chapter_write_that_stored_an_empty_listing_reports_true(store):
     """write_track answers 0 for a written row holding no chapters; only None
     is a refusal."""

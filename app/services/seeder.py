@@ -52,6 +52,7 @@ from libex_core.audible.releases import fetch_catalog_genres
 # Services
 from app.services.audible.authors import fetch_author_books_by_name
 from app.services.audible.books import fetch_and_store_chapters, get_books_by_asins
+from app.services.db import persist_queue
 from app.services.db.persist_queue import PersistOutcome
 
 logger = get_logger()
@@ -256,6 +257,9 @@ async def _fetch_and_persist(missing: list[str], region: str, delay: float) -> b
         await asyncio.sleep(0)
 
         # Gather chapters for the newly-persisted books (paced, best-effort).
+        # The books are written in the background, and _gather_chapters only
+        # considers books it can read back, so the write has to land first.
+        await persist_queue.wait_for_inflight()
         await _gather_chapters(chunk, region, delay)
 
     return all_admitted

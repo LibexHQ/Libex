@@ -212,6 +212,41 @@ async def test_get_series_books_default_region_is_us(async_client):
         assert mock_series.call_args[0][1] == "us"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/series/books/B00SERIES1", "/series/B00SERIES1/books"])
+async def test_a_large_series_is_serialized_off_the_loop_with_its_headers(async_client, path):
+    """A series list past the threshold is built on a worker thread, and the
+    pre-built response still carries every book and the headers the route set."""
+    import asyncio
+
+    from app.api.routes.large_response import LARGE_RESPONSE_THREAD_THRESHOLD, _build_and_serialize
+
+    async def fetch(count):
+        books = [{**MOCK_BOOK, "asin": f"B{i:09d}"} for i in range(count)]
+        with patch("app.api.routes.series.router.get_series_books", new_callable=AsyncMock) as mock_series, \
+             patch("app.api.routes.series.router.get_books_by_asins", new_callable=AsyncMock) as mock_books:
+            mock_series.return_value = [b["asin"] for b in books]
+            mock_books.return_value = books
+            return await async_client.get(path)
+
+    small = await fetch(1)
+    real_to_thread = asyncio.to_thread
+    offloaded = []
+
+    async def spy(fn, *args, **kwargs):
+        offloaded.append(fn)
+        return await real_to_thread(fn, *args, **kwargs)
+
+    with patch("app.api.routes.large_response.asyncio.to_thread", side_effect=spy):
+        large = await fetch(LARGE_RESPONSE_THREAD_THRESHOLD)
+
+    assert _build_and_serialize in offloaded
+    assert large.status_code == 200
+    assert len(large.json()) == LARGE_RESPONSE_THREAD_THRESHOLD
+    for header in ("cache-control", "x-libex-complete"):
+        assert large.headers.get(header) == small.headers.get(header)
+
+
 # ============================================================
 # SERIES SEARCH
 # ============================================================

@@ -18,6 +18,7 @@ from app.api.routes.errors import ERROR_RESPONSES
 from app.api.routes.audible_outage import outage_as_unavailable
 from app.api.routes.cache_param import CacheStandardParam, apply_cache_control
 from app.api.routes.facts_headers import FACTS_RESPONSE_HEADERS, stamp_facts_headers
+from app.api.routes.large_response import build_large_list_response
 from app.api.routes.sort_params import BookSortField, SortOrder
 from app.api.routes.filter_params import LiveBookFilters
 
@@ -82,7 +83,12 @@ async def get_books_by_series(
     books = sort_dicts(books, sort.value if sort is not None else None, order.value, BOOK_SORT_FIELDS)
     apply_cache_control(response, cache)
     stamp_facts_headers(response, facts, entities=books)
-    return [BookResponse(**b) for b in books]
+    return await build_large_list_response(
+        list[BookResponse],
+        len(books),
+        lambda: [BookResponse(**b) for b in books],
+        injected_response=response,
+    )
 
 
 @router.get("/{asin}", response_model=SeriesResponse, responses={**ERROR_RESPONSES, 200: {"headers": FACTS_RESPONSE_HEADERS}})

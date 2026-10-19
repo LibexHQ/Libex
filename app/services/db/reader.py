@@ -132,10 +132,6 @@ def _guarded(message, fallback, log=(), failure=_failure_fields):
     return decorate
 
 
-def _author_failure(e: BaseException) -> dict:
-    return {"error_type": type(e).__name__, "error": str(e)}
-
-
 def _error_type_only(e: BaseException) -> dict:
     return {"error_type": type(e).__name__}
 
@@ -182,7 +178,7 @@ get_track_from_db = _guarded(
 # ============================================================
 
 get_author_from_db = _guarded(
-    "DB read failed for author", lambda: None, ("asin", "region"), _author_failure
+    "DB read failed for author", lambda: None, ("asin", "region")
 )(_people.get_author)
 # None, not [], on failure: a caller feeding this into an authoritative write
 # must be able to tell a failed read from an author with no stored books.

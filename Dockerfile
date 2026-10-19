@@ -31,15 +31,13 @@ FROM python:3.12-slim@sha256:a39549e211a16149edf74e5fdc9ef03a6767e46cd987c5048b6
 
 WORKDIR /app
 
+# No compiler and no libpq-dev: every package in requirements.lock installs
+# from a cp312 manylinux wheel, so nothing is built from source here.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
-    libpq-dev \
     # what the pg_dump and pg_restore copied in below link against
-    # (libpq.so.5). It is already here as a dependency of libpq-dev, and is
-    # named anyway because dpkg has no idea the copied binaries exist, let
-    # alone what they need: a later cleanup that drops libpq-dev, or
-    # multi-stages the compiler out, autoremoves libpq5 with nothing failing
-    # at build time and pg_dump failing at the first backup instead.
+    # (libpq.so.5). Nothing else installed here pulls it in, and dpkg has no
+    # idea the copied binaries exist, let alone what they need: leave it out
+    # and the build still passes, with pg_dump failing at the first backup.
     libpq5 \
     curl \
     && rm -rf /var/lib/apt/lists/*

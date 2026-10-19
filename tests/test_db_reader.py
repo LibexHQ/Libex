@@ -2355,6 +2355,24 @@ async def test_get_distinct_genres_from_db_logs_structured_fields_on_dbapi_error
 
 
 @pytest.mark.asyncio
+async def test_get_author_from_db_failure_logs_structured_fields_not_the_message(caplog):
+    """Postgres puts row content in its error text, so the author read logs the
+    same structured fields as every other read and never the message itself."""
+    session = _session_raising(Exception("Failing row contains (B000APF21M, secret)"))
+
+    with caplog.at_level(logging.WARNING):
+        result = await get_author_from_db(session, "B000APF21M", "us")
+
+    assert result is None
+    matches = [r for r in caplog.records if "DB read failed for author" == r.getMessage()]
+    assert len(matches) == 1
+    record = matches[0]
+    assert record.error_type == "Exception"
+    assert not hasattr(record, "error")
+    assert "Failing row" not in str(vars(record))
+
+
+@pytest.mark.asyncio
 async def test_get_books_by_plan_from_db_returns_empty_list_on_exception():
     session = _session_raising(Exception("DB error"))
     result = await get_books_by_plan_from_db(session, "Plus Catalog")

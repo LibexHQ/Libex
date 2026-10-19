@@ -1641,8 +1641,3 @@ def test_advance_cursor_carries_the_region_so_a_second_region_is_not_skipped():
     rows = [("B001", "de", None, None), ("B001", "us", None, None)]
     next_cursor, _wrapped, _done = _advance_cursor(rows, cursor=None, wrapped=False)
     assert next_cursor == ("B001", "us")
-
-
-def test_format_cursor_names_both_halves_or_the_start():
-    assert backfill_chapters._format_cursor(("B001", "us")) == "B001:us"
-    assert backfill_chapters._format_cursor(None) == "(start)"

@@ -37,5 +37,5 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index('ix_cache_expires_at', table_name='cache')
+    op.drop_index('ix_cache_expires_at', table_name='cache', if_exists=True)
     op.drop_table('cache')

@@ -471,6 +471,45 @@ async def test_a_finished_task_is_dropped_from_the_registry():
     assert pq._inflight == set()
 
 
+@pytest.mark.asyncio
+async def test_wait_for_inflight_returns_once_the_write_in_flight_has_finished():
+    finished = []
+    release = asyncio.Event()
+
+    async def _work():
+        await release.wait()
+        finished.append(True)
+
+    pq._spawn(_work, 1)
+    waiter = asyncio.create_task(pq.wait_for_inflight())
+    await asyncio.sleep(0)
+    assert not waiter.done()
+
+    release.set()
+    await asyncio.wait_for(waiter, 1)
+
+    assert finished == [True]
+
+
+@pytest.mark.asyncio
+async def test_cancelling_wait_for_inflight_leaves_the_write_running():
+    release = asyncio.Event()
+
+    async def _work():
+        await release.wait()
+
+    pq._spawn(_work, 1)
+    (task,) = pq._inflight
+    waiter = asyncio.create_task(pq.wait_for_inflight())
+    await asyncio.sleep(0)
+    waiter.cancel()
+    await asyncio.sleep(0)
+
+    assert not task.cancelled()
+    release.set()
+    await asyncio.wait_for(task, 1)
+
+
 # ============================================================
 # THE BOUNDED BACKLOG
 # ============================================================

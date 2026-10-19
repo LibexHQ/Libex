@@ -461,6 +461,17 @@ async def stored_series_books(
     return settle_flags_list(rows)
 
 
+def _literal(text: str) -> str:
+    """The text with LIKE's wildcards and its escape character made literal.
+
+    The readers behind these two searches read % and _ as wildcards, which is
+    right for the hosted /db search that shares them. A fallback after Audible
+    found nothing is a substring search for what the caller typed, so a stray
+    % or _ must not match unrelated rows. Backslash is the escape character on
+    both Postgres (by default) and the SQLite variant, which states it."""
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 async def search_stored_series(
     store: "LocalStore", name: str, region: str | None = None
 ) -> list[dict[str, Any]]:
@@ -471,7 +482,7 @@ async def search_stored_series(
     return await _read(
         store,
         "series search",
-        lambda s: read_series.search_series(s, name, region=region),
+        lambda s: read_series.search_series(s, _literal(name), region=region),
         [],
     )
 
@@ -519,7 +530,7 @@ async def search_stored_books(
         store,
         "book search",
         lambda s: read_books.search_books(
-            s, title=title, author_name=author, region=region, limit=10
+            s, title=_literal(title), author_name=_literal(author), region=region, limit=10
         ),
         [],
     )

@@ -19,7 +19,7 @@ from fastapi import FastAPI, Response
 from httpx import ASGITransport, AsyncClient
 
 # Local
-from app.main import _FAVICON, app as libex_app
+from app.main import _FAVICON, app as libex_app, generic_exception_handler
 
 # Core
 from app.core import middleware
@@ -476,6 +476,61 @@ async def _request(caplog, path, headers=None, client=("1.2.3.4", 1234)):
         async with AsyncClient(transport=transport, base_url="http://t") as ac:
             await ac.get(path, headers=headers or {})
     return [r for r in caplog.records if r.getMessage() == "Request completed"]
+
+
+def _app_with_failing_routes():
+    """The real unhandled-exception handler behind LoggingMiddleware, with a
+    route that raises and a /health that does too."""
+    app = FastAPI()
+    app.add_middleware(LoggingMiddleware)
+    app.add_exception_handler(Exception, generic_exception_handler)
+
+    @app.get("/boom")
+    async def boom():
+        raise RuntimeError("secret detail")
+
+    @app.get("/health")
+    async def health():
+        raise RuntimeError("health down")
+
+    return app
+
+
+async def _failing_request(caplog, path):
+    transport = ASGITransport(
+        app=_app_with_failing_routes(),
+        client=("1.2.3.4", 1234),
+        raise_app_exceptions=False,
+    )
+    with caplog.at_level(logging.INFO):
+        async with AsyncClient(transport=transport, base_url="http://t") as ac:
+            response = await ac.get(path)
+    return response, [r for r in caplog.records if r.getMessage() == "Request completed"]
+
+
+@pytest.mark.asyncio
+async def test_an_unhandled_exception_still_logs_request_completed_as_a_500(caplog):
+    response, records = await _failing_request(caplog, "/boom?region=us&title=Salt")
+
+    assert response.status_code == 500
+    assert response.json() == {"error": "Internal server error", "status_code": 500}
+    assert len(records) == 1
+    record = records[0]
+    assert record.status == 500
+    assert record.url == "/boom"
+    assert record.method == "GET"
+    assert record.request_id == response.headers["X-Request-Id"]
+    assert record.query == "region=us&title=REDACTED"
+    assert (record.complete, record.incompleteReason, record.source) == ("", "", "")
+    assert record.took >= 0
+
+
+@pytest.mark.asyncio
+async def test_a_failing_health_check_stays_unlogged_as_a_request(caplog):
+    response, records = await _failing_request(caplog, "/health")
+
+    assert response.status_code == 500
+    assert records == []
 
 
 def _app_with_facts_headers():

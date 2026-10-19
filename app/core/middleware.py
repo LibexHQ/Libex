@@ -5,7 +5,7 @@ Response compression, CORS and request validation.
 
 # Standard library
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 import gzip
 import time
 import urllib.parse
@@ -216,6 +216,70 @@ def _logged_value(key: str, value: str) -> str:
 _SLOW_HEALTH_MS = 1000.0
 
 
+def _log_completed(
+    request: Request,
+    request_id: str,
+    status: int,
+    took: float,
+    response_headers: Mapping[str, str],
+) -> None:
+    """
+    Writes the one "Request completed" line, for a response and for the 500 an
+    unhandled exception becomes. Both go through here so the two can never
+    log different field sets, or apply different rules to the query string.
+    """
+    # No client address is read here, from any header or from the
+    # connection. Libex does not record who called it -- not in full, not
+    # truncated, not hashed. Every field below describes the request, not
+    # the requester, which is what keeps per-endpoint failure rates and
+    # latency visible while leaving nothing that identifies a caller.
+    #
+    # The user agent stays because it names client SOFTWARE, not a person
+    # -- it is how a spike gets traced to a particular consumer version.
+    # With no address logged alongside it, it cannot be tied back to an
+    # individual, so removing it on privacy grounds would blind the
+    # monitoring for nothing.
+    user_agent = request.headers.get("user-agent", "")
+    # The only signal, once both libex.lostcartographer.xyz and libexdb.com serve
+    # the same container, that tells old-host traffic apart from new-host traffic.
+    host = request.headers.get("host", "")
+    logger.info(
+        "Request completed",
+        extra={
+            "request_id": request_id,
+            "method": request.method,
+            "url": request.url.path,
+            # Path alone cannot answer which parameters consumers actually
+            # use. Values are allowlisted -- see _redact_query -- so this
+            # answers that without keeping what a caller typed. No secret
+            # travels this way either: the internal routes authenticate on
+            # an Authorization header, not a query param.
+            "query": _redact_query(request.url.query),
+            "status": status,
+            "userAgent": user_agent,
+            "took": took,
+            "host": host,
+            # The three fields below read whatever a route already
+            # stamped on the response object this middleware is holding
+            # -- nothing new is computed or looked up here, and none of
+            # it describes the requester. Keys are always present, empty
+            # string when the header was never stamped, because a field
+            # that only sometimes exists is painful to filter on in
+            # Axiom; a sparse "sometimes absent" field would be worse
+            # than one that is merely often empty.
+            #
+            # X-Libex-Source matters even -- especially -- when it comes
+            # back empty: the cache layer's own log lines carry no
+            # request_id, so they cannot be tied back to this request or
+            # to the headers it received. This line is the only place a
+            # request_id and a response's provenance appear together.
+            "complete": response_headers.get(HEADER_COMPLETE, ""),
+            "incompleteReason": response_headers.get(HEADER_INCOMPLETE_REASON, ""),
+            "source": response_headers.get(HEADER_SOURCE, ""),
+        },
+    )
+
+
 class LoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         # Minted here and nowhere else. Never taken from a caller-supplied
@@ -237,7 +301,26 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         # makes it reachable from there at all.
         request.state.request_id = request_id
         start = time.monotonic()
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception:
+            # An exception no route handled comes back out of call_next rather
+            # than as a response, so without this the one request that most
+            # needs a completion line -- a real 500 -- is the one that never
+            # gets it, and per-endpoint error rates built on these lines read
+            # zero. The status is 500 because that is what app.main's handler
+            # builds from this same exception; the re-raise leaves it to do
+            # so. /health stays silent for the reason given below, and the
+            # response-derived fields are empty: there is no response to read.
+            if request.url.path != "/health":
+                _log_completed(
+                    request,
+                    request_id,
+                    500,
+                    round((time.monotonic() - start) * 1000, 2),
+                    {},
+                )
+            raise
         took = round((time.monotonic() - start) * 1000, 2)
 
         # Stamped before the /health branch below returns, so /health
@@ -280,55 +363,8 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                 )
             return response
 
-        # No client address is read here, from any header or from the
-        # connection. Libex does not record who called it -- not in full, not
-        # truncated, not hashed. Every field below describes the request, not
-        # the requester, which is what keeps per-endpoint failure rates and
-        # latency visible while leaving nothing that identifies a caller.
-        #
-        # The user agent stays because it names client SOFTWARE, not a person
-        # -- it is how a spike gets traced to a particular consumer version.
-        # With no address logged alongside it, it cannot be tied back to an
-        # individual, so removing it on privacy grounds would blind the
-        # monitoring for nothing.
-        user_agent = request.headers.get("user-agent", "")
-        # The only signal, once both libex.lostcartographer.xyz and libexdb.com serve
-        # the same container, that tells old-host traffic apart from new-host traffic.
-        host = request.headers.get("host", "")
-        logger.info(
-            "Request completed",
-            extra={
-                "request_id": request_id,
-                "method": request.method,
-                "url": request.url.path,
-                # Path alone cannot answer which parameters consumers actually
-                # use. Values are allowlisted -- see _redact_query -- so this
-                # answers that without keeping what a caller typed. No secret
-                # travels this way either: the internal routes authenticate on
-                # an Authorization header, not a query param.
-                "query": _redact_query(request.url.query),
-                "status": response.status_code,
-                "userAgent": user_agent,
-                "took": took,
-                "host": host,
-                # The three fields below read whatever a route already
-                # stamped on the response object this middleware is holding
-                # -- nothing new is computed or looked up here, and none of
-                # it describes the requester. Keys are always present, empty
-                # string when the header was never stamped, because a field
-                # that only sometimes exists is painful to filter on in
-                # Axiom; a sparse "sometimes absent" field would be worse
-                # than one that is merely often empty.
-                #
-                # X-Libex-Source matters even -- especially -- when it comes
-                # back empty: the cache layer's own log lines carry no
-                # request_id, so they cannot be tied back to this request or
-                # to the headers it received. This line is the only place a
-                # request_id and a response's provenance appear together.
-                "complete": response.headers.get(HEADER_COMPLETE, ""),
-                "incompleteReason": response.headers.get(HEADER_INCOMPLETE_REASON, ""),
-                "source": response.headers.get(HEADER_SOURCE, ""),
-            },
+        _log_completed(
+            request, request_id, response.status_code, took, response.headers
         )
         return response
 

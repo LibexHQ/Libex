@@ -141,6 +141,34 @@ async def test_oversized_declared_body_rejected_after_auth(async_client):
     parser.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_oversized_streamed_body_rejected_after_auth(async_client):
+    """A chunked body declares no length, so the cap has to hold while it streams."""
+    async def body():
+        yield b"["
+        yield b" " * (MAX_BODY_BYTES + 1)
+        yield b"]"
+
+    with patch(f"{MOD}.settings") as mock_settings, \
+         patch(f"{MOD}.json.loads") as parser:
+        mock_settings.seed_secret = SEED_HASH
+        response = await async_client.post(URL, content=body(), headers=_bearer())
+    assert response.status_code == 413
+    parser.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scheme", ["bearer", "BEARER", "Bearer"])
+async def test_scheme_is_case_insensitive(async_client, scheme):
+    with patch(f"{MOD}.settings") as mock_settings, \
+         patch(f"{MOD}.AsyncSessionFactory", _factory()):
+        mock_settings.seed_secret = SEED_HASH
+        response = await async_client.post(
+            URL, json=[], headers={"Authorization": f"{scheme} {SEED_TOKEN}"}
+        )
+    assert response.status_code == 200
+
+
 # ============================================================
 # VALIDATION TESTS
 # ============================================================

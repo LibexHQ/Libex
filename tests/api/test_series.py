@@ -790,7 +790,8 @@ async def test_get_series_books_with_a_malformed_relationship_asin_is_200_with_t
     assert response.headers["x-libex-incomplete-reason"] == "hydration-not-found"
 
 
-# ============================================================
+# =====================================================
+
 # A NULL PRODUCT ON A SERIES REQUEST IS AN OUTAGE
 # ============================================================
 
@@ -828,3 +829,48 @@ async def test_a_null_series_product_serves_the_stored_copy(null_product_client)
 
     assert response.status_code == 200
     assert response.json()["name"] == "Dune Chronicles"
+
+
+class _AbortedTransactionSession:
+    """
+    Postgres semantics for one failed statement: every later statement raises
+    until rollback() runs. The first execute is the up-front cache miss, the
+    second is the stored-series read timing out, and the cache lookup after it
+    answers a miss only if the reader rolled back.
+    """
+
+    def __init__(self):
+        self._calls = 0
+        self._aborted = False
+
+    async def execute(self, *args, **kwargs):
+        self._calls += 1
+        if self._calls == 2:
+            self._aborted = True
+            raise TimeoutError("statement timeout")
+        if self._aborted:
+            raise RuntimeError("current transaction is aborted, commands ignored")
+        miss = MagicMock()
+        miss.scalar_one_or_none.return_value = None
+        return miss
+
+    async def rollback(self):
+        self._aborted = False
+
+
+@pytest.mark.asyncio
+async def test_get_series_outage_with_failed_db_read_is_503_not_500(async_client):
+    """A timed-out stored read during an Audible outage must not poison the
+    session for the cache lookup that follows it."""
+    app.dependency_overrides[get_session] = lambda: _AbortedTransactionSession()
+    try:
+        with patch(
+            "app.services.audible.series.fetch_series",
+            new_callable=AsyncMock,
+            side_effect=AudibleAPIException("Audible down"),
+        ):
+            response = await async_client.get("/series/B00SERIES1")
+    finally:
+        app.dependency_overrides.pop(get_session, None)
+
+    assert_outage_503(response, "Audible unavailable and no cached series data found")

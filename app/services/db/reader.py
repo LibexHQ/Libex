@@ -83,6 +83,19 @@ __all__ = [
 # SWALLOW-AND-LOG
 # ============================================================
 
+async def _rollback_after_failed_read(session) -> None:
+    """
+    Ends the transaction a failed read left behind. Postgres aborts it, so
+    without this the caller's next statement on the same session (the cache
+    fallback after a database miss, say) raises InFailedSQLTransaction. A
+    rollback that itself fails is logged and never replaces the read's error.
+    """
+    try:
+        await session.rollback()
+    except Exception as e:
+        logger.warning("Rollback after failed DB read failed", extra=_failure_fields(e))
+
+
 def _guarded(message, fallback, log=(), failure=_failure_fields):
     """
     Wraps a core read so a failure is logged and answered with `fallback()`.
@@ -105,6 +118,7 @@ def _guarded(message, fallback, log=(), failure=_failure_fields):
                 bound = signature.bind(session, *args, **kwargs).arguments
                 extra = {name: bound[name] for name in log if name in bound}
                 logger.warning(message, extra={**extra, **failure(e)})
+                await _rollback_after_failed_read(session)
                 return fallback()
 
         wrapper.__doc__ = (
@@ -411,4 +425,5 @@ async def get_stored_genres(
             "DB read failed for catalog_genres",
             extra={"region": region, **_failure_fields(e)},
         )
+        await _rollback_after_failed_read(session)
         return [], None

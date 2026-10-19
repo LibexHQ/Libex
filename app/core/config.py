@@ -212,7 +212,7 @@ class Settings(BaseSettings):
     # compose's own interpolation before Settings ever sees it (see
     # tests/test_compose_env_parity.py). axiom_token is passed straight into
     # axiom_py's Client(token=...) constructor (app/core/logging.py), and
-    # seed_secret is compared directly against a caller's Authorization header
+    # seed_secret is a SHA-256 digest compared with the hash of a caller's token
     # in app/api/routes/internal/router.py. Wrapping either means touching
     # that call site to unwrap it first, and neither has been done -- being
     # unwrapped is a fact about today's code, not an endorsement.

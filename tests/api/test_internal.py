@@ -4,17 +4,34 @@ Tests auth, validation, and narrator matching.
 """
 
 # Standard library
+import secrets
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, patch
 
 # Third party
 import pytest
 
 # Local
-from app.api.routes.internal.router import hash_secret
+from app.api.routes.internal.router import MAX_BODY_BYTES, hash_secret, verify_secret
 
-
-SEED_TOKEN = "test-secret-token-12345"
+MOD = "app.api.routes.internal.router"
+SEED_TOKEN = secrets.token_urlsafe(32)
 SEED_HASH = hash_secret(SEED_TOKEN)
+URL = "/internal/seed/narrators"
+
+
+def _factory(session=None):
+    session = session or AsyncMock()
+
+    @asynccontextmanager
+    async def factory():
+        yield session
+
+    return factory
+
+
+def _bearer(token=SEED_TOKEN):
+    return {"Authorization": f"Bearer {token}"}
 
 
 # ============================================================
@@ -23,51 +40,105 @@ SEED_HASH = hash_secret(SEED_TOKEN)
 
 
 @pytest.mark.asyncio
-async def test_seed_narrators_returns_401_without_token(async_client):
-    """Returns 401 when no authorization header is provided."""
-    with patch("app.api.routes.internal.router.settings") as mock_settings:
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},
+        {"Authorization": SEED_TOKEN},
+        {"Authorization": f"Basic {SEED_TOKEN}"},
+        {"Authorization": "Bearer wrong-token"},
+        {"Authorization": "Bearer " + SEED_TOKEN[:-1]},
+        {"Authorization": "Bearer " + SEED_TOKEN + "A"},
+        {"Authorization": "Bearer " + "A" * 5000},
+        {"Authorization": "Bearer " + SEED_TOKEN[:-1] + "!"},
+        {"Authorization": "Bearer " + secrets.token_urlsafe(32)},
+    ],
+    ids=["missing", "no-scheme", "basic", "short", "one-short", "one-long", "huge", "bad-charset", "wrong-valid-shape"],
+)
+async def test_bad_credentials_return_401(async_client, headers):
+    """Every bad or wrong credential is the same 401."""
+    with patch(f"{MOD}.settings") as mock_settings:
         mock_settings.seed_secret = SEED_HASH
-        response = await async_client.post("/internal/seed/narrators", json=[])
-        assert response.status_code == 401
+        response = await async_client.post(URL, json=[], headers=headers)
+    assert response.status_code == 401
+    assert response.json() == {"error": "Unauthorized"}
 
 
 @pytest.mark.asyncio
-async def test_seed_narrators_returns_401_with_wrong_token(async_client):
-    """Returns 401 when token doesn't match."""
-    with patch("app.api.routes.internal.router.settings") as mock_settings:
+async def test_malformed_headers_never_hash(async_client):
+    """Missing, long, short and wrong-charset tokens are rejected before hashing."""
+    bad = [
+        {},
+        {"Authorization": "Bearer short"},
+        {"Authorization": "Bearer " + "A" * 5000},
+        {"Authorization": "Bearer " + "!" * 43},
+    ]
+    with patch(f"{MOD}.settings") as mock_settings, \
+         patch(f"{MOD}.hash_secret") as hasher, \
+         patch(f"{MOD}.verify_secret") as verifier:
         mock_settings.seed_secret = SEED_HASH
-        response = await async_client.post(
-            "/internal/seed/narrators",
-            json=[],
-            headers={"Authorization": "Bearer wrong-token"},
-        )
-        assert response.status_code == 401
+        for headers in bad:
+            response = await async_client.post(URL, json=[], headers=headers)
+            assert response.status_code == 401
+    hasher.assert_not_called()
+    verifier.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_seed_narrators_returns_401_when_secret_not_set(async_client):
+async def test_returns_401_when_secret_not_set(async_client):
     """Returns 401 when SEED_SECRET env var is empty."""
-    with patch("app.api.routes.internal.router.settings") as mock_settings:
+    with patch(f"{MOD}.settings") as mock_settings:
         mock_settings.seed_secret = ""
-        response = await async_client.post(
-            "/internal/seed/narrators",
-            json=[],
-            headers={"Authorization": "Bearer some-token"},
-        )
-        assert response.status_code == 401
+        response = await async_client.post(URL, json=[], headers=_bearer())
+    assert response.status_code == 401
 
 
 @pytest.mark.asyncio
-async def test_seed_narrators_returns_401_with_malformed_header(async_client):
-    """Returns 401 when Authorization header is malformed."""
-    with patch("app.api.routes.internal.router.settings") as mock_settings:
+async def test_old_pbkdf2_secret_is_refused(async_client):
+    """A PBKDF2-format SEED_SECRET leaves the endpoint disabled, even for its own token."""
+    import base64
+    import hashlib
+
+    salt = secrets.token_bytes(32)
+    key = hashlib.pbkdf2_hmac("sha256", SEED_TOKEN.encode(), salt, 1000)
+    old = base64.b64encode(salt + key).decode()
+    with patch(f"{MOD}.settings") as mock_settings, \
+         patch(f"{MOD}.verify_secret", return_value=True) as verifier, \
+         patch(f"{MOD}.AsyncSessionFactory", _factory()):
+        mock_settings.seed_secret = old
+        response = await async_client.post(URL, json=[], headers=_bearer())
+    assert response.status_code == 401
+    verifier.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_body_not_read_before_auth(async_client):
+    """An unauthorized request never has its body read or parsed."""
+    with patch(f"{MOD}.settings") as mock_settings, \
+         patch(f"{MOD}._read_capped_body", new_callable=AsyncMock) as reader, \
+         patch(f"{MOD}.json.loads") as parser, \
+         patch(f"{MOD}.AsyncSessionFactory") as factory:
+        mock_settings.seed_secret = SEED_HASH
+        response = await async_client.post(URL, content=b"not json", headers={"Authorization": "Bearer bad"})
+    assert response.status_code == 401
+    reader.assert_not_called()
+    parser.assert_not_called()
+    factory.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_oversized_declared_body_rejected_after_auth(async_client):
+    """An authorized body past the cap is a 413 and is never parsed."""
+    with patch(f"{MOD}.settings") as mock_settings, \
+         patch(f"{MOD}.json.loads") as parser:
         mock_settings.seed_secret = SEED_HASH
         response = await async_client.post(
-            "/internal/seed/narrators",
-            json=[],
-            headers={"Authorization": SEED_TOKEN},
+            URL,
+            content=b"[" + b" " * (MAX_BODY_BYTES + 1) + b"]",
+            headers=_bearer(),
         )
-        assert response.status_code == 401
+    assert response.status_code == 413
+    parser.assert_not_called()
 
 
 # ============================================================
@@ -76,52 +147,47 @@ async def test_seed_narrators_returns_401_with_malformed_header(async_client):
 
 
 @pytest.mark.asyncio
-async def test_seed_narrators_returns_400_for_non_array(async_client):
+async def test_returns_400_for_non_array(async_client):
     """Returns 400 when body is not a JSON array."""
-    with patch("app.api.routes.internal.router.settings") as mock_settings:
+    with patch(f"{MOD}.settings") as mock_settings:
         mock_settings.seed_secret = SEED_HASH
-        response = await async_client.post(
-            "/internal/seed/narrators",
-            json={"name": "Jim Dale"},
-            headers={"Authorization": f"Bearer {SEED_TOKEN}"},
-        )
-        assert response.status_code == 400
-        assert "Expected JSON array" in response.json()["error"]
+        response = await async_client.post(URL, json={"name": "Jim Dale"}, headers=_bearer())
+    assert response.status_code == 400
+    assert "Expected JSON array" in response.json()["error"]
 
 
 @pytest.mark.asyncio
-async def test_seed_narrators_returns_200_with_empty_array(async_client):
+async def test_returns_400_for_invalid_json(async_client):
+    """Returns 400 when the body is not JSON."""
+    with patch(f"{MOD}.settings") as mock_settings:
+        mock_settings.seed_secret = SEED_HASH
+        response = await async_client.post(URL, content=b"{nope", headers=_bearer())
+    assert response.status_code == 400
+    assert response.json()["error"] == "Invalid JSON"
+
+
+@pytest.mark.asyncio
+async def test_returns_200_with_empty_array(async_client):
     """Returns 200 with zero counts for empty input."""
-    mock_session = AsyncMock()
-    with patch("app.api.routes.internal.router.settings") as mock_settings, \
-         patch("app.api.routes.internal.router.get_session", return_value=mock_session):
+    with patch(f"{MOD}.settings") as mock_settings, \
+         patch(f"{MOD}.AsyncSessionFactory", _factory()):
         mock_settings.seed_secret = SEED_HASH
-        response = await async_client.post(
-            "/internal/seed/narrators",
-            json=[],
-            headers={"Authorization": f"Bearer {SEED_TOKEN}"},
-        )
-        assert response.status_code == 200
-        data = response.json()
-        assert data["matched"] == 0
-        assert data["skipped"] == 0
+        response = await async_client.post(URL, json=[], headers=_bearer())
+    assert response.status_code == 200
+    data = response.json()
+    assert data["matched"] == 0
+    assert data["skipped"] == 0
 
 
 @pytest.mark.asyncio
-async def test_seed_narrators_skips_entries_without_name(async_client):
+async def test_skips_entries_without_name(async_client):
     """Entries without a name field are skipped."""
-    mock_session = AsyncMock()
-    mock_session.commit = AsyncMock()
-    with patch("app.api.routes.internal.router.settings") as mock_settings, \
-         patch("app.api.routes.internal.router.get_session", return_value=mock_session):
+    with patch(f"{MOD}.settings") as mock_settings, \
+         patch(f"{MOD}.AsyncSessionFactory", _factory()):
         mock_settings.seed_secret = SEED_HASH
-        response = await async_client.post(
-            "/internal/seed/narrators",
-            json=[{"description": "No name here"}],
-            headers={"Authorization": f"Bearer {SEED_TOKEN}"},
-        )
-        assert response.status_code == 200
-        assert response.json()["skipped"] == 1
+        response = await async_client.post(URL, json=[{"description": "No name here"}], headers=_bearer())
+    assert response.status_code == 200
+    assert response.json()["skipped"] == 1
 
 
 # ============================================================
@@ -129,36 +195,22 @@ async def test_seed_narrators_skips_entries_without_name(async_client):
 # ============================================================
 
 
-def test_hash_secret_produces_different_hashes():
-    """Same plaintext produces different hashes (random salt)."""
-    h1 = hash_secret("test")
-    h2 = hash_secret("test")
-    assert h1 != h2
+def test_hash_secret_is_sha256_hex():
+    """The stored form is a deterministic 64-character hex digest."""
+    assert hash_secret("test") == hash_secret("test")
+    assert len(hash_secret("test")) == 64
 
 
 def test_verify_secret_validates_correct_token():
-    """Correct plaintext verifies against its hash."""
-    from app.api.routes.internal.router import verify_secret
-    hashed = hash_secret("my-secret")
-    assert verify_secret("my-secret", hashed) is True
+    assert verify_secret("my-secret", hash_secret("my-secret")) is True
 
 
 def test_verify_secret_rejects_wrong_token():
-    """Wrong plaintext fails verification."""
-    from app.api.routes.internal.router import verify_secret
-    hashed = hash_secret("my-secret")
-    assert verify_secret("wrong-secret", hashed) is False
+    assert verify_secret("wrong-secret", hash_secret("my-secret")) is False
 
 
-def test_verify_secret_rejects_garbage_hash():
-    """Garbage hash string fails gracefully."""
-    from app.api.routes.internal.router import verify_secret
+def test_verify_secret_rejects_garbage_and_empty_digest():
     assert verify_secret("anything", "not-a-valid-hash") is False
-
-
-def test_verify_secret_rejects_empty_hash():
-    """Empty hash fails gracefully."""
-    from app.api.routes.internal.router import verify_secret
     assert verify_secret("anything", "") is False
 
 

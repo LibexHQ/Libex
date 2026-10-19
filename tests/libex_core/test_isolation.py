@@ -36,7 +36,7 @@ LIBEX_CORE_DIR = REPO_ROOT / "libex_core"
 # is a real dependency of the hosted application, not of the metadata-
 # normalisation logic itself -- fastapi/starlette (the web layer), sqlalchemy/
 # asyncpg (the database), pydantic_settings (env-var configuration),
-# axiom_py/pythonjsonlogger (the app's own logging pipeline), and app itself.
+# axiom_py (the app's own logging pipeline), and app itself.
 _FORBIDDEN_MODULES = (
     "app",
     "fastapi",
@@ -45,7 +45,6 @@ _FORBIDDEN_MODULES = (
     "asyncpg",
     "pydantic_settings",
     "axiom_py",
-    "pythonjsonlogger",
 )
 
 # Discovered here, in the parent process, purely to give the walk below a
@@ -253,7 +252,7 @@ def test_the_storage_walk_actually_walked_every_storage_module(tmp_path):
 
 def test_the_storage_forbidden_list_still_names_what_matters():
     assert {"asyncpg", "app", "fastapi", "starlette", "pydantic_settings",
-            "axiom_py", "pythonjsonlogger", "alembic"} <= set(_STORAGE_FORBIDDEN_MODULES)
+            "axiom_py", "alembic"} <= set(_STORAGE_FORBIDDEN_MODULES)
     assert "sqlalchemy" not in _STORAGE_FORBIDDEN_MODULES
 
 

@@ -18,6 +18,9 @@ pytest-timeout==2.4.0
 
 testcontainers[postgres]==4.14.2
 
+# Synchronous Postgres driver, used only by tests/integration/_scratch.py; the hosted service talks to Postgres through asyncpg.
+psycopg2-binary==2.9.12
+
 # Async SQLite driver for the packaged library's local storage; dev-only because the hosted service runs on Postgres.
 aiosqlite==0.22.1
 

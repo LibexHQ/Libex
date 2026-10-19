@@ -78,7 +78,7 @@ async def test_not_in_libex_from_db_book_miss(async_client):
 
 @pytest.mark.asyncio
 async def test_not_in_libex_from_book_sku_miss(async_client):
-    with patch("app.api.routes.books.router.get_books_by_sku", new_callable=AsyncMock) as mock:
+    with patch("app.api.routes.books.router.get_books_by_sku_from_db", new_callable=AsyncMock) as mock:
         mock.return_value = []
         response = await async_client.get("/book/sku/BK_FAKE_000000")
 

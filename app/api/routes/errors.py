@@ -47,7 +47,8 @@ ERROR_RESPONSES: dict[int | str, dict] = {
         "model": ErrorResponse,
         "description": (
             "Audible could not be reached and Libex had no stored or cached copy "
-            "to answer from (code `upstream_unavailable`); retry after the "
+            "to answer from, or the local database could not be read on a route "
+            "that answers from it alone (code `upstream_unavailable`); retry after the "
             "Retry-After header's number of seconds"
         ),
         "headers": {

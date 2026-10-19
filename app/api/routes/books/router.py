@@ -25,7 +25,7 @@ from app.api.routes.filter_params import LiveBookFilters
 
 # Services
 from app.services.audible.books import get_book_by_asin, get_books_by_asins, get_chapters
-from app.services.db.reader import get_books_by_sku_from_db
+from app.services.db.stored import get_books_by_sku_from_db
 from app.services.sorting import sort_dicts, BOOK_SORT_FIELDS
 from app.services.filtering import filter_dicts
 

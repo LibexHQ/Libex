@@ -519,11 +519,13 @@ async def redoc() -> HTMLResponse:
 
 @app.exception_handler(LibexException)
 async def libex_exception_handler(request: Request, exc: LibexException) -> JSONResponse:
-    if isinstance(exc, AudibleAPIException):
+    if isinstance(exc, AudibleAPIException) or exc.status_code == 503:
         # An outage is a temporary inability to answer, not an absence, so it
         # is 503 with a retry hint, never a 404. The package keeps 502 on the
-        # exception itself; the mapping to 503 lives here, in the app. Only
-        # this branch carries retryAfter or the two headers.
+        # exception itself; the mapping to 503 lives here, in the app. A stored
+        # read that failed on the database arrives already marked 503 and
+        # answers the same way. Only this branch carries retryAfter or the two
+        # headers.
         return JSONResponse(
             status_code=503,
             headers={

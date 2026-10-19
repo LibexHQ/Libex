@@ -226,7 +226,7 @@ async def test_the_seeder_confirms_an_empty_answer_and_nothing_else():
 
         with patch("app.services.audible.books._mark_chapters_checked", new=mark), \
              patch("app.services.audible.books.audible_get", **get_side), \
-             patch("app.services.audible.books.upsert_track", new=AsyncMock()):
+             patch("app.services.audible.books.write_track", new=AsyncMock(return_value=1)):
             result = await fetch_and_store_chapters(valid, "us", session_with_book())
         return result, marks
 

@@ -214,13 +214,20 @@ async def _run(once: bool) -> int:
     # against an empty task list -- requested=True gets set, but there is
     # nothing yet to cancel, and the tasks created afterward are never told.
     # Registering last closes that window instead of guarding against it.
+    #
+    # loop.add_signal_handler, not signal.signal: the workers sleep about a
+    # day between cycles, and a plain signal.signal handler runs without
+    # waking an idle event loop, so the cancel would sit unnoticed until the
+    # sleep ended and `docker stop` would run out its grace period into a
+    # SIGKILL. The loop's own handler wakes it immediately.
     stopper = _Stopper()
     seeder_task = asyncio.create_task(run_seeder(once=once), name="seeder")
     releases_task = asyncio.create_task(run_new_releases_seeder(once=once), name="seeder-new-releases")
     stopper.track(seeder_task)
     stopper.track(releases_task)
-    signal.signal(signal.SIGTERM, stopper.request)
-    signal.signal(signal.SIGINT, stopper.request)
+    loop = asyncio.get_running_loop()
+    loop.add_signal_handler(signal.SIGTERM, stopper.request)
+    loop.add_signal_handler(signal.SIGINT, stopper.request)
 
     # A worker's own internal try/except already absorbs a cycle failure, so
     # anything that still escapes to here is a cancellation from _Stopper or

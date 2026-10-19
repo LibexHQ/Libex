@@ -14,8 +14,8 @@ from sqlalchemy import select
 # Database
 from app.db.models import Book
 
-# Services
-from app.services.db.filtering import apply_category_filter
+# Core
+from libex_core.storage.filtering import apply_category_filter
 
 
 def _sql(stmt) -> str:

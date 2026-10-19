@@ -51,6 +51,13 @@ def test_validate_region_raises_for_empty():
         validate_region("")
 
 
+@pytest.mark.parametrize("region", [None, 1, b"us"])
+def test_validate_region_raises_region_exception_for_a_non_string(region):
+    """A region that is not a string is refused like any other bad region."""
+    with pytest.raises(RegionException):
+        validate_region(region)
+
+
 def test_validate_all_supported_regions():
     """All documented regions pass validation."""
     for region in VALID_REGIONS:

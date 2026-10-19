@@ -388,6 +388,56 @@ def test_parse_series_returns_empty_for_no_relationships():
     assert _parse_series({}, "us") == []
 
 
+_NON_TEXT = [3, 2.5, True, ["a"], {"a": 1}]
+
+
+@pytest.mark.parametrize("field,published", [
+    ("asin", "asin"), ("title", "name"), ("sequence", "position"),
+])
+@pytest.mark.parametrize("bad", _NON_TEXT)
+def test_parse_series_non_text_scalar_publishes_null(field, published, bad):
+    """A series asin, title or sequence that is not text reads as null."""
+    entry = {"relationship_type": "series", "asin": "B00SERIES1", "title": "Dune", "sequence": "1"}
+    entry[field] = bad
+    result = _parse_series({"relationships": [entry]}, "us")
+    assert len(result) == 1
+    assert result[0][published] is None
+    intact = {"asin": "B00SERIES1", "name": "Dune", "position": "1"}
+    intact.pop(published)
+    assert {k: result[0][k] for k in intact} == intact
+
+
+@pytest.mark.parametrize("bad", _NON_TEXT)
+def test_series_non_text_sequence_validates_and_raw_stays_in_extras(bad):
+    """The series entry validates, and the value as sent stays in audibleExtras."""
+    from libex_core.models import SeriesRefResponse
+    entry = {"relationship_type": "series", "asin": "B00SERIES1", "title": "Dune", "sequence": bad}
+    product = {"asin": "B0SERTEST01", "title": "T", "relationships": [entry]}
+    book = _normalize_product(product, "us")
+    SeriesRefResponse.model_validate(book["series"][0])
+    assert book["series"][0]["position"] is None
+    assert book["audibleExtras"]["relationships"][0]["sequence"] == bad
+
+
+def test_parse_series_text_scalars_unchanged():
+    """Text, including empty and numeric-looking text, publishes as sent."""
+    entry = {"relationship_type": "series", "asin": "B00SERIES1", "title": "", "sequence": "1.5"}
+    result = _parse_series({"relationships": [entry]}, "us")
+    assert result[0]["name"] == ""
+    assert result[0]["position"] == "1.5"
+
+
+@pytest.mark.parametrize("bad", _NON_TEXT)
+def test_parse_genres_non_text_id_publishes_null_asin(bad):
+    """A genre rung id that is not text reads as no asin; the rung is kept."""
+    product = {"category_ladders": [{"ladder": [{"id": bad, "name": "Fantasy"}]}]}
+    result = _parse_genres(product)
+    assert result == [{
+        "asin": None, "name": "Fantasy", "type": "Genres",
+        "betterType": "genre", "updatedAt": None,
+    }]
+
+
 # ============================================================
 # GENRE TESTS
 # ============================================================
@@ -2031,12 +2081,12 @@ async def test_fetch_and_store_chapters_skips_when_book_absent_in_region():
     mock_session = _session_with_book(False)
 
     with patch("app.services.audible.books.audible_get") as mock_get, \
-         patch("app.services.audible.books.upsert_track", new_callable=AsyncMock) as mock_upsert:
+         patch("app.services.audible.books.write_track", new_callable=AsyncMock, return_value=0) as mock_write:
         result = await fetch_and_store_chapters("B08G9PRS1K", "uk", mock_session)
 
     assert result == "none"
     mock_get.assert_not_called()
-    mock_upsert.assert_not_called()
+    mock_write.assert_not_called()
     mock_session.commit.assert_not_awaited()
 
 
@@ -2049,11 +2099,11 @@ async def test_fetch_and_store_chapters_stores_and_marks():
     data = {"content_metadata": {"chapter_info": {"chapters": []}}}
 
     with patch("app.services.audible.books.audible_get", return_value=data), \
-         patch("app.services.audible.books.upsert_track", new_callable=AsyncMock) as mock_upsert:
+         patch("app.services.audible.books.write_track", new_callable=AsyncMock, return_value=0) as mock_write:
         result = await fetch_and_store_chapters("B08G9PRS1K", "us", mock_session)
 
     assert result == "stored"
-    mock_upsert.assert_called_once()
+    mock_write.assert_called_once()
     # marked checked (the update + commit happened)
     mock_session.execute.assert_awaited()
     mock_session.commit.assert_awaited()
@@ -2068,11 +2118,11 @@ async def test_fetch_and_store_chapters_none_when_no_chapter_info():
     data = {"content_metadata": {}}
 
     with patch("app.services.audible.books.audible_get", return_value=data), \
-         patch("app.services.audible.books.upsert_track", new_callable=AsyncMock) as mock_upsert:
+         patch("app.services.audible.books.write_track", new_callable=AsyncMock, return_value=0) as mock_write:
         result = await fetch_and_store_chapters("B08G9PRS1K", "us", mock_session)
 
     assert result == "none"
-    mock_upsert.assert_not_called()
+    mock_write.assert_not_called()
     mock_session.commit.assert_awaited()  # still marked checked
 
 
@@ -2085,11 +2135,11 @@ async def test_fetch_and_store_chapters_not_found_marks_checked():
     mock_session = _session_with_book(True)
 
     with patch("app.services.audible.books.audible_get", side_effect=NotFoundException()), \
-         patch("app.services.audible.books.upsert_track", new_callable=AsyncMock) as mock_upsert:
+         patch("app.services.audible.books.write_track", new_callable=AsyncMock, return_value=0) as mock_write:
         result = await fetch_and_store_chapters("0008278482", "us", mock_session)
 
     assert result == "not_found"
-    mock_upsert.assert_not_called()
+    mock_write.assert_not_called()
     mock_session.commit.assert_awaited()  # marked so it isn't retried
 
 
@@ -2101,28 +2151,49 @@ async def test_fetch_and_store_chapters_error_does_not_mark():
     mock_session = _session_with_book(True)
 
     with patch("app.services.audible.books.audible_get", side_effect=Exception("Audible 500")), \
-         patch("app.services.audible.books.upsert_track", new_callable=AsyncMock) as mock_upsert:
+         patch("app.services.audible.books.write_track", new_callable=AsyncMock, return_value=0) as mock_write:
         result = await fetch_and_store_chapters("B08G9PRS1K", "us", mock_session)
 
     assert result == "error"
-    mock_upsert.assert_not_called()
+    mock_write.assert_not_called()
     mock_session.commit.assert_not_awaited()  # NOT marked
 
 
 @pytest.mark.asyncio
-async def test_fetch_and_store_chapters_never_raises_on_store_failure():
-    """A write failure is swallowed (returns 'error'), never propagates."""
+async def test_fetch_and_store_chapters_write_failure_leaves_book_unstamped():
+    """A failed chapter write returns 'error' and never stamps the book checked,
+    so a later pass retries it instead of retiring it with no chapters."""
     from app.services.audible.books import fetch_and_store_chapters
 
     mock_session = _session_with_book(True)
     data = {"content_metadata": {"chapter_info": {"chapters": []}}}
 
     with patch("app.services.audible.books.audible_get", return_value=data), \
-         patch("app.services.audible.books.upsert_track", new_callable=AsyncMock, side_effect=Exception("DB write failed")):
+         patch("app.services.audible.books.write_track", new_callable=AsyncMock, side_effect=Exception("DB write failed")), \
+         patch("app.services.audible.books._mark_chapters_checked", new_callable=AsyncMock) as mark:
         result = await fetch_and_store_chapters("B08G9PRS1K", "us", mock_session)
 
     assert result == "error"
+    mark.assert_not_awaited()
+    mock_session.commit.assert_not_awaited()
     mock_session.rollback.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fetch_and_store_chapters_book_gone_is_none_and_unstamped():
+    """write_track returning None (no book row for the region) stamps nothing."""
+    from app.services.audible.books import fetch_and_store_chapters
+
+    mock_session = _session_with_book(True)
+    data = {"content_metadata": {"chapter_info": {"chapters": []}}}
+
+    with patch("app.services.audible.books.audible_get", return_value=data), \
+         patch("app.services.audible.books.write_track", new_callable=AsyncMock, return_value=None), \
+         patch("app.services.audible.books._mark_chapters_checked", new_callable=AsyncMock) as mark:
+        result = await fetch_and_store_chapters("B08G9PRS1K", "us", mock_session)
+
+    assert result == "none"
+    mark.assert_not_awaited()
 
 
 def test_the_unreadable_plans_warning_fires_on_a_freshly_booted_process():
@@ -3026,11 +3097,84 @@ async def test_fetch_and_store_chapters_writes_and_stamps_for_the_requests_regio
     data = {"content_metadata": {"chapter_info": {"chapters": []}}}
 
     with patch("app.services.audible.books.audible_get", return_value=data), \
-         patch("app.services.audible.books.upsert_track", new_callable=AsyncMock) as mock_upsert:
+         patch("app.services.audible.books.write_track", new_callable=AsyncMock, return_value=0) as mock_write:
         await fetch_and_store_chapters("B08G9PRS1K", "uk", session)
 
-    assert mock_upsert.await_args.kwargs == {"region": "uk", "confirm": True}
+    assert mock_write.await_args.kwargs == {"region": "uk", "confirm": True}
     stamp = session.execute.await_args.args[0]
     compiled = stamp.compile(dialect=postgresql.dialect())
     assert "books.region = " in str(compiled)
     assert "uk" in compiled.params.values()
+
+
+# ============================================================
+# ONE PRODUCT THAT WILL NOT NORMALIZE
+# ============================================================
+
+def _unnormalizable_product(asin):
+    """A product whose authors container is null: normalize_product raises on
+    it on purpose, so a bad answer never overwrites a stored book."""
+    return {**_hydration_product(asin), "authors": None}
+
+
+@pytest.mark.asyncio
+async def test_one_unnormalizable_product_costs_only_its_own_book():
+    good, bad = "B0GOODONE1", "B0BADONE01"
+    facts = ResponseFacts()
+    not_fetched: list[str] = []
+
+    async def _get(region, path, params):
+        return {"products": [_hydration_product(good), _unnormalizable_product(bad)]}
+
+    with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.books.persist_books_background") as mock_persist, \
+         patch("app.services.audible.books.get_books_from_db", new=AsyncMock(return_value=[])), \
+         patch("app.services.audible.books.cache.get", return_value=None):
+        result = await get_books_by_asins(
+            [good, bad], "us", AsyncMock(), facts=facts,
+            not_fetched_asins=not_fetched,
+        )
+
+    assert [b["asin"] for b in result] == [good]
+    assert not_fetched == [bad]
+    assert not facts.is_complete
+    assert [b["asin"] for b in mock_persist.call_args.args[0]] == [good]
+
+
+@pytest.mark.asyncio
+async def test_an_unnormalizable_product_is_served_from_the_database_when_stored():
+    good, bad = "B0GOODONE1", "B0BADONE01"
+    facts = ResponseFacts()
+    not_fetched: list[str] = []
+    stored = {"asin": bad, "title": "Stored copy"}
+
+    async def _get(region, path, params):
+        return {"products": [_hydration_product(good), _unnormalizable_product(bad)]}
+
+    with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.books.persist_books_background"), \
+         patch("app.services.audible.books.get_books_from_db", new=AsyncMock(return_value=[stored])), \
+         patch("app.services.audible.books.cache.get", return_value=None):
+        result = await get_books_by_asins(
+            [good, bad], "us", AsyncMock(), facts=facts, not_fetched_asins=not_fetched,
+        )
+
+    assert {b["asin"] for b in result} == {good, bad}
+    assert not_fetched == []
+    assert facts.is_complete
+
+
+@pytest.mark.asyncio
+async def test_every_product_unnormalizable_with_nothing_stored_is_an_outage():
+    bad, other = "B0BADONE01", "B0BADONE02"
+
+    async def _get(region, path, params):
+        return {"products": [_unnormalizable_product(bad), _unnormalizable_product(other)]}
+
+    with patch("app.services.audible.books.audible_get", new=AsyncMock(side_effect=_get)), \
+         patch("app.services.audible.books.persist_books_background"), \
+         patch("app.services.audible.books.get_books_from_db", new=AsyncMock(return_value=[])), \
+         patch("app.services.audible.books.cache.get_many", new=AsyncMock(return_value={})), \
+         patch("app.services.audible.books.cache.get", return_value=None):
+        with pytest.raises(AudibleAPIException):
+            await get_books_by_asins([bad, other], "us", AsyncMock())

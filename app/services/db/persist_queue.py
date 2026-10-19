@@ -25,7 +25,7 @@ from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # Database
-from app.db.models import Cache
+from app.db.models import Book, Cache
 from app.db.session import engine
 
 # Services
@@ -45,6 +45,13 @@ from app.services.db.writer import (
 # Core
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from libex_core.storage.read import people as _people
+from libex_core.storage.read import series as _series
+from libex_core.storage.read.shapes import (
+    BOOK_RELATIONS,
+    book_to_dict,
+    series_positions_by_book,
+)
 
 logger = get_logger()
 settings = get_settings()
@@ -255,6 +262,21 @@ def backlog_capacity() -> int:
 def queued_books() -> int:
     """Books currently queued or in flight across every entry point below."""
     return _queued_books
+
+
+async def wait_for_inflight() -> None:
+    """
+    Waits for every background write already in flight to finish, for a
+    caller about to read back rows it just handed to this queue. Writes
+    started while it waits are not waited for. asyncio.wait rather than
+    gather, so a caller cancelled mid-wait leaves the writes running. Only
+    tasks on the running loop are waited for: one left on a loop that has
+    since closed will never finish.
+    """
+    loop = asyncio.get_running_loop()
+    pending = {task for task in _inflight if task.get_loop() is loop}
+    if pending:
+        await asyncio.wait(pending)
 
 
 def set_bg_write_concurrency_limit(limit: int) -> None:
@@ -501,12 +523,68 @@ async def _clear_session(session: AsyncSession, fields: dict) -> None:
 # BOOK CHUNKS
 # ============================================================
 
+async def _stored_books(session: AsyncSession, asins: list[str], region: str) -> list[dict]:
+    """
+    The books as stored, in two queries however many there are: the rows with
+    their relations, then every series position at once. Never the incoming
+    payload, which the writer's merge may have kept more of than it took.
+
+    Run inside the transaction that wrote them, so the merged rows are what
+    it sees. populate_existing so a row the session already holds is re-read
+    rather than served from the identity map.
+    """
+    result = await session.execute(
+        select(Book)
+        .where(Book.asin.in_(asins), Book.region == region)
+        .options(*BOOK_RELATIONS)
+        .execution_options(populate_existing=True)
+    )
+    rows = result.scalars().all()
+    positions = await series_positions_by_book(session, rows)
+    return [book_to_dict(b, positions.get((b.asin, b.region), {})) for b in rows]
+
+
+async def _read_back(session: AsyncSession, read, fields: dict):
+    """
+    Runs a read of what was just stored inside a savepoint and returns its
+    result, or None when it failed. A failed read rolls back to the savepoint
+    only, so the write it follows still commits; the caller then caches
+    nothing rather than the payload, because less than the store holds must
+    never be what a cache hit serves.
+    """
+    try:
+        async with session.begin_nested():
+            return await read()
+    except Exception as e:
+        logger.warning(
+            "Read-back after persist failed; nothing cached",
+            extra={**fields, **_failure_fields(e)},
+        )
+        return None
+
+
 async def _write_book_chunk(
     session: AsyncSession, chunk: list[dict], region: str, confirm: bool = False
 ) -> None:
-    """One chunk's books and cache entries, committed together. Raises."""
+    """One chunk's books and cache entries, committed together. Raises.
+
+    The cache entries are the stored rows read back after the write, not the
+    incoming payloads: the writer keeps the richer value field by field, and a
+    cache entry built from the payload would serve the shrunken answer the
+    store refused for the whole TTL. A book with no stored row has nothing
+    richer to lose to, so its payload is cached as it always was; a failed
+    read-back caches nothing at all."""
     await write_books(session, chunk, confirm=confirm)
-    await _cache_set_many(session, [(book_key(b["asin"], region), b) for b in chunk])
+    stored = await _read_back(
+        session,
+        lambda: _stored_books(session, [b["asin"] for b in chunk], region),
+        {"region": region, "books": len(chunk)},
+    )
+    if stored is not None:
+        by_asin = {b["asin"]: b for b in stored}
+        await _cache_set_many(
+            session, [(book_key(b["asin"], region), by_asin.get(b["asin"], b)) for b in chunk]
+        )
     await session.commit()
     logger.info("DB write", extra={"books": len(chunk), "region": region})
 
@@ -553,7 +631,8 @@ async def _replay_book_chunk(
     A failed cache write leaves the row written. upsert_book has already
     committed by then, the row is the durable copy and the cache entry is
     derivable from it, so the loop reports the book and moves on rather than
-    unwinding a store that succeeded.
+    unwinding a store that succeeded. A failed read-back of the stored row
+    counts toward cache_failed the same way.
 
     One residue the guards cannot remove: the rollback is itself work against
     the connection, so it can fail when the connection is gone rather than
@@ -594,7 +673,11 @@ async def _replay_book_chunk(
             continue
 
         try:
-            await cache.set(session, book_key(book["asin"], region), book)
+            stored = await _read_back(session, lambda: _stored_books(session, [book["asin"]], region), fields)
+            if stored is None:
+                cache_failed += 1
+            else:
+                await cache.set(session, book_key(book["asin"], region), stored[0] if stored else book)
         except Exception as e:
             cache_failed += 1
             logger.warning(
@@ -743,7 +826,13 @@ def persist_author_background(data: dict, region: str, *, confirm: bool = False)
                 async with _BackgroundSession() as session:
                     await upsert_author_profile(session, data, confirm=confirm)
                     if data.get("asin"):
-                        await cache.set(session, author_key(data["asin"], region), data)
+                        stored = await _read_back(
+                            session,
+                            lambda: _people.get_author(session, data["asin"], region),
+                            {"asin": data["asin"], "region": region},
+                        )
+                        if stored:
+                            await cache.set(session, author_key(data["asin"], region), stored)
             except Exception as e:
                 logger.warning(
                     "Background persist failed for author",
@@ -762,7 +851,13 @@ def persist_series_background(data: dict, region: str, *, confirm: bool = False)
                 async with _BackgroundSession() as session:
                     await upsert_series_profile(session, data, confirm=confirm)
                     if data.get("asin"):
-                        await cache.set(session, series_key(data["asin"], region), data)
+                        stored = await _read_back(
+                            session,
+                            lambda: _series.get_series(session, data["asin"], region=region),
+                            {"asin": data["asin"], "region": region},
+                        )
+                        if stored:
+                            await cache.set(session, series_key(data["asin"], region), stored)
             except Exception as e:
                 logger.warning(
                     "Background persist failed for series",

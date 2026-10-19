@@ -56,7 +56,7 @@ from libex_core.audible.books import (
     fetch_products,
     filter_products,
     is_placeholder_record,
-    normalize_products,
+    normalize_products_each,
     settle_flags_list,
 )
 from libex_core.audible.chapters import (
@@ -70,7 +70,9 @@ from libex_core.audible.client import (
     upstream_status_of,
 )
 from libex_core.exceptions import ErrorCode, NotFoundException
+from libex_core.log_safety import safe_asin_for_log
 from libex_core.storage import merge
+from libex_core.storage.write.entities import write_track
 from app.core.logging import get_logger
 from app.core.response_headers import (
     REASON_HYDRATION_DEADLINE,
@@ -94,7 +96,6 @@ from app.services.db.persist_queue import (
     persist_books_background,
     persist_track_background,
 )
-from app.services.db.writer import upsert_track
 from app.services.db.reader import get_books_from_db, get_track_from_db
 
 logger = get_logger()
@@ -580,6 +581,30 @@ async def _get_books_by_asins_unsettled(
                 record_incomplete(facts, REASON_HYDRATION_NOT_FOUND)
             all_products.extend(kept)
 
+        # Each product on its own: one that raises (it does so on purpose, so
+        # a bad answer never overwrites stored data) is a transient failure
+        # for its own ASIN, answered by the backstop below like a failed
+        # chunk, and costs no other book its 200.
+        outcomes = await normalize_products_each(all_products, region)
+        requested = set(shaped_asins)
+        good_products: list[dict[str, Any]] = []
+        normalized: list[dict[str, Any]] = []
+        for product, item in zip(all_products, outcomes):
+            if isinstance(item, Exception):
+                transient_errors.append(item)
+                bad_asin = product.get("asin")
+                if bad_asin in requested and bad_asin not in transient_failed_asins:
+                    transient_failed_asins.append(bad_asin)
+                logger.warning("Product could not be normalized", extra={
+                    "asin": safe_asin_for_log(bad_asin),
+                    "region": region,
+                    "error_type": type(item).__name__,
+                })
+            else:
+                good_products.append(product)
+                normalized.append(item)
+        all_products = good_products
+
         if placeholder_asins is not None:
             placeholder_asins.extend(placeholders)
 
@@ -637,9 +662,7 @@ async def _get_books_by_asins_unsettled(
                     _unfetched(transient_failed_asins, backstop_asins)
                 )
 
-        normalized = await normalize_products(all_products, region)
-
-        if all_products:
+        if normalized:
             # Persist to DB and cache in the background
             outcome = persist_books_background(normalized, region, confirm=True)
             if persist_outcome is not None:
@@ -915,7 +938,26 @@ async def fetch_and_store_chapters(
 
     try:
         chapters = normalize_chapters(data, asin, region)
-        await upsert_track(session, asin, chapters, region=region, confirm=True)
+        # write_track raises on failure, where upsert_track would swallow it and
+        # leave this to stamp the book as checked with no chapters saved. It
+        # does not commit; the commit here is what ends the transaction that
+        # also carries chapters_confirmed_at.
+        stored_count = await write_track(
+            session, asin, chapters, region=region, confirm=True
+        )
+        await session.commit()
+        if stored_count is None:
+            logger.info(
+                "Chapters not stored: the book is not stored for the region",
+                extra={"asin": asin, "region": region},
+            )
+            return "none"
+        offered = chapters.get("chapters") if isinstance(chapters, dict) else None
+        if not offered and stored_count > 0:
+            logger.warning(
+                "Kept stored chapters over an empty response",
+                extra={"asin": asin, "region": region, "stored_chapters": stored_count},
+            )
         await _mark_chapters_checked(session, asin, region)
         return "stored"
     except Exception as e:

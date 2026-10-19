@@ -117,16 +117,11 @@ async def _author_links(session, prefix):
 
 async def _run_per_book_path(session, chunk):
     """The unbatched path exactly as it was before chunking: one transaction
-    per book row, one per cache entry."""
+    per book row, one per cache entry, the entry being the stored row."""
     for book in chunk:
         await upsert_book(session, book)
-        await cache_set(session, book_key(book["asin"], REGION), book)
-
-
-def _strip_prefix(value, prefix):
-    """Rewrites a book payload's ASIN to its suffix so payloads written under
-    two different prefixes compare equal when the outcome is the same."""
-    return {**value, "asin": value["asin"][len(prefix):]}
+        stored = await persist_queue._stored_books(session, [book["asin"]], REGION)
+        await cache_set(session, book_key(book["asin"], REGION), stored[0] if stored else book)
 
 
 # ============================================================
@@ -160,8 +155,13 @@ async def test_replay_writes_the_cache_entries_the_per_book_path_writes(db_sessi
     await _persist_book_chunk_background(_chunk("B0CHK"), REGION)
     await _run_per_book_path(db_session, _chunk("B0PBK"))
 
-    chunked = {k: _strip_prefix(v, "B0CHK") for k, v in (await _cached_books(db_session, "B0CHK")).items()}
-    per_book = {k: _strip_prefix(v, "B0PBK") for k, v in (await _cached_books(db_session, "B0PBK")).items()}
+    def _content(value):
+        # The stored rows carry their own write timestamps, which differ
+        # between two runs; what the two paths must agree on is the content.
+        return (value["title"], value["description"], [a["asin"] for a in value["authors"]])
+
+    chunked = {k: _content(v) for k, v in (await _cached_books(db_session, "B0CHK")).items()}
+    per_book = {k: _content(v) for k, v in (await _cached_books(db_session, "B0PBK")).items()}
 
     assert chunked == per_book
     assert set(chunked) == {"0000", "0001", "0002", "0003", POISON_SUFFIX}
@@ -254,7 +254,9 @@ async def test_a_sound_chunk_caches_each_book_under_its_own_key(db_session):
     await _persist_book_chunk_background(chunk, REGION)
 
     hits = await get_many(db_session, [book_key(b["asin"], REGION) for b in chunk])
-    assert hits == {book_key(b["asin"], REGION): b for b in chunk}
+    assert {k: (v["asin"], v["title"]) for k, v in hits.items()} == {
+        book_key(b["asin"], REGION): (b["asin"], b["title"]) for b in chunk
+    }
 
 
 @pytest.mark.integration
@@ -289,6 +291,47 @@ async def test_a_chunk_write_carries_a_live_expiry(db_session):
         select(Cache.expires_at).where(Cache.key == book_key(chunk[0]["asin"], REGION))
     )
     assert result.scalar_one() > datetime.now(timezone.utc)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replayed", [False, True])
+async def test_the_cache_holds_what_is_stored_when_the_payload_arrives_with_less(db_session, replayed):
+    """The writer keeps the richer value, so the cache must too: a payload
+    with no narrators and no description over a stored book that has both
+    leaves the cache serving the stored ones, not the shrunken payload. The
+    replayed case is the same chunk forced down the per-book path by a poison
+    book beside it."""
+    full = {
+        **_book("B0SHR", 0),
+        "narrators": [{"name": "Narrator One"}, {"name": "Narrator Two"}],
+        "description": "A description worth keeping",
+    }
+    await _persist_book_chunk_background([full], REGION)
+
+    shrunk = {**_book("B0SHR", 0), "narrators": [], "description": None}
+    chunk = [shrunk, _poison("B0SHR")] if replayed else [shrunk]
+    await _persist_book_chunk_background(chunk, REGION)
+
+    cached = (await _cached_books(db_session, "B0SHR"))["0000"]
+    assert [n["name"] for n in cached["narrators"]] == ["Narrator One", "Narrator Two"]
+    assert cached["description"] == "A description worth keeping"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_failed_read_back_caches_nothing_and_still_stores_the_books(db_session):
+    """If reading the rows back fails, the write still commits and no entry is
+    written: a cache holding the payload instead would be the shrunken answer
+    the store refused."""
+    async def _fails(session, asins, region):
+        await session.execute(text("SELECT 1 / 0"))
+
+    with patch.object(persist_queue, "_stored_books", _fails):
+        await _persist_book_chunk_background([_book("B0RBF", 0)], REGION)
+
+    assert await _stored_books(db_session, "B0RBF") == {"0000": "Book 0"}
+    assert await _cached_books(db_session, "B0RBF") == {}
 
 
 # ============================================================
@@ -659,7 +702,10 @@ async def test_clearing_the_session_keeps_what_earlier_books_already_committed(d
     assert set(cached) == {"0000", "0002", "0003", POISON_SUFFIX}
     # The value and not merely the key: an entry left holding a partial or
     # stale payload is a worse outcome than the missing one this looks for.
-    assert cached["0000"] == chunk[0]
+    assert (cached["0000"]["title"], cached["0000"]["description"]) == (
+        chunk[0]["title"], chunk[0]["description"]
+    )
+    assert cached[POISON_SUFFIX] == chunk[4]
 
 
 @pytest.mark.integration

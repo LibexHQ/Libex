@@ -57,8 +57,9 @@ anything you would rather not raise in public, use the email address in
 ### The request log
 
 Each request produces one log line with the fields below. The exceptions are
-`/health`, browser preflights, and requests that end in an unexpected error,
-all described further down.
+`/health` and browser preflights, both described further down. A request that
+ends in an unexpected error gets this line too, plus a separate error line
+([Errors](#errors)).
 
 | Field | Contents | Purpose |
 |---|---|---|
@@ -144,18 +145,22 @@ responses, with the two exceptions noted below.
   it is ignored.
 - It is not derived from anything about you, is never reused, and is not
   stored against anything else, so it cannot link your requests to each other.
-- If you quote it to me, I can find the matching log line. Normally that is the
-  request line above. If the request failed with an unexpected error, it is the
-  error line instead ([Errors](#errors)).
+- If you quote it to me, I can find the matching log line, the request line
+  above. If the request failed with an unexpected error, it also finds the
+  error line ([Errors](#errors)).
 - Two kinds of request carry no ID: one that fails before an ID is assigned,
   and a browser preflight. No ID is made up after the fact.
 
 ### Errors
 
-When a request fails in a way the code does not anticipate, no request line is
-written. Instead Libex logs an error line with the error message and stack
-trace, so the failure can be diagnosed. That line carries the request ID but
-none of the request-line fields: no path, query, user agent or host.
+When a request fails in a way the code does not anticipate, Libex logs two
+lines. One is the usual request line, with status `500` and `source`,
+`complete` and `incompleteReason` empty, since there is no response to read
+them from. The other is an error line with the error message and stack trace,
+so the failure can be diagnosed. The error line carries the request ID but
+none of the request-line fields: no path, query, user agent or host. The two
+share the request ID, so they can be read together. A failing `/health` check
+writes only the error line.
 
 If the error message quotes something you sent, as some library errors do with
 the input they were given, that text is in the error line. This is the only way
@@ -192,14 +197,15 @@ that can be searched by name. Some are worth describing individually:
   for a malformed author ASIN: that value and the author's name, both from
   Audible's catalogue, are logged, or `REDACTED` if either doesn't look like a
   short catalogue entry.
-- **Database failures.** These name the item being read in its own field
+- **Database failures.** Many name the item being read in its own field
   (`asin`, `author_asin`, `series_asin`, `plan_name` or `sku_group`), which
   repeats part of a path the request line already records. They include the
-  database error code and the schema, table, column and constraint names. Most
-  of them leave out the database's own error text, which can quote stored
-  catalogue rows. One, a failed author read, still includes it. Database errors
-  never include the values of a query's parameters, so search text passed to
-  a database query cannot appear in them. Failure lines outside the database
+  database error code and the schema, table, column and constraint names. They
+  leave out the database's own error text, which can quote stored catalogue
+  rows, though a background job's catch-all failure line, which includes the
+  error's text, can still carry it. Database errors never include the values
+  of a query's parameters, so search text passed to a database query cannot
+  appear in them. Failure lines outside the database
   include the error's text.
 - **How Libex reaches Audible.** At startup, the API and each background job
   that calls Audible log whether they connect to Audible directly or through a
@@ -446,7 +452,8 @@ The library is built around preventing that from happening by accident:
   given a store writes no files, opens no database and keeps no cache, so
   nothing about it outlasts the call that made it. The library also has an
   optional storage part, `libex_core.storage`, installed separately as the
-  `storage` extra, which can keep what was fetched in a SQLite file or a
+  `sqlite` extra or the `postgres` extra (`storage` is the older name for
+  `sqlite`), which can keep what was fetched in a SQLite file or a
   PostgreSQL database through `LocalStore`. Nothing in the library opens a
   store by itself: it does nothing until the application gives it a
   database's address, or a way of connecting to one, and the application
@@ -492,7 +499,17 @@ The library is built around preventing that from happening by accident:
   removed when Audible answers that the series or author has no books. An
   application that asks for it, with `max_age`, can have a recent, whole list
   answered from that record with no request to Audible; an answer given that
-  way leaves the record and its date as they were. The database address, and any password in it, is never logged, repeated in an error, or shown in the store's `repr`.
+  way leaves the record and its date as they were. `max_age` works the same
+  way for looking up a book or a list of books: a book stored for the region
+  asked, that Audible answered for recently enough, is given from the store
+  with no request to Audible and nothing written, and only the other books
+  are asked for. An application can also write into the store books, chapter
+  lists and series and author profiles it got from a Libex server rather
+  than from Audible, with `ingest_books`, `ingest_chapters`, `ingest_series`
+  and `ingest_author` in `libex_core.lookup`. These make no request of their
+  own. What they write is kept and dated like a lookup's, except that they
+  never set the date Audible last answered for a book, series or author, or
+  for a book's chapters. The database address, and any password in it, is never logged, repeated in an error, or shown in the store's `repr`.
   - **A SQLite file** is created only when the application runs the store's
     upgrade step (`libex-core db upgrade` on the command line). On Linux and
     macOS a new file is created readable and writable only by the user
@@ -650,6 +667,7 @@ The library is built around preventing that from happening by accident:
   - a completed lookup (info): region, how long Audible took and, except for a single chapters, series or author lookup or an author search, counts of what was asked for and what came back, including, for books, how many were answered from the store; for a search, the names of the fields searched; for a quick search, the length of the text and, when a compound query was split, how many parts it made; for an author's books by ASIN, the author ASIN, how each of the two ways of finding them went, and whether the list is whole; for new releases and coming soon, the number of days and the category ID, if one was given;
   - an author's books by name that stopped before a confirmed end (info): region, why it stopped, pages fetched, books found;
   - a lookup Audible only partly answered (warning): region, counts, and the kind of error where one occurred, including how many identifiers were skipped for not being ASINs; for an author's books by ASIN, also the author ASIN and the error messages from the parts that failed;
+  - a book in Audible's answer that could not be read (warning): its ASIN, region and the kind of error; for a search, a single line with how many results there were, how many could not be read and their ASINs;
   - Audible unavailable (warning, or error for a book or narrator search, a quick search, or a new releases or coming soon scan): region; except for a book lookup, the kind of error; except for a book lookup, a book or narrator search, a quick search or an author's books by ASIN, Audible's status where there was one; for a chapters, series, series' books, author or author's books lookup, the ASIN asked for, and for an author's books by ASIN, the error messages from the parts that failed and whether reading the store failed; for a search for a series or an author, or for an author's books by name, the length of the name; for new releases and coming soon, the category ID.
 
   From a local store, which is used only when an application passes one to a lookup or uses the storage part directly (on the command line, only when `LIBEX_CORE_STORAGE` is set):
@@ -657,8 +675,9 @@ The library is built around preventing that from happening by accident:
   - the record of a series' or an author's list of books written or removed (info, also logged when a newer record was kept or there was none to remove): which of the two it was, region, and when written, how many books it names;
   - a chapter list not stored because the store doesn't hold its book for that region (info): title ASIN, region;
   - a series profile not stored because it has no ASIN, name or region (info): what was being written, the reason, which is a fixed phrase, and the region;
-  - a write that failed (warning; the answer from Audible is still returned): what was being written, the kind of error, region, for books, how many were in the batch, and for the record of a series' or an author's list, which of the two it was and how many books it named;
+  - a write that failed (warning; a lookup still returns Audible's answer): what was being written, the kind of error, region, for books, how many were in the batch, and when a batch of books fails and its books are then written one at a time, the ASIN of each book that still fails; for the record of a series' or an author's list, which of the two it was and how many books it named;
   - a read that failed, which is treated as nothing stored (warning): what was being read, the kind of error. This includes the check, before a chapter list is stored, that its book is in the store; when that check fails, nothing is written;
+  - stored books checked under `max_age` for whether they can be given without asking Audible (info): region, how many were asked for and how many could;
   - a series' or an author's books answered from the record of that list under `max_age`, with no request to Audible (info): whether a series or an author, its ASIN, region, how many books, and how old the record was in seconds;
   - a record of a series' or an author's list that could not be used, so the list was fetched from Audible (info): whether a series or an author, its ASIN, region, and the reason, one of absent, stale, incomplete, malformed or unreadable. When the record could not even be judged, a warning comes first with the same ASIN and region and the kind of error;
   - an answer given from the store in place of Audible because Audible was unavailable (warning, always "Answered from the store while Audible was unavailable"): what kind of answer it was and the region; for a chapter list, a series or an author, its ASIN; for a series' books, the series ASIN and how many books the store held; for books, how many were asked for and how many the store held; for a quick search split into an author and a title, how many stored books matched and whether Audible's search failed, since the same line is written when Audible's search worked but found nothing;
@@ -684,9 +703,10 @@ The library is built around preventing that from happening by accident:
   the records from Audible's answers any ASIN, name or value not shaped like
   an ASIN or a short catalogue entry is logged as `REDACTED`. Most local-store
   records hold only fixed words, counts and the region. Of those that hold an
-  ASIN, the chapter-list record, the record of an answer from the store and
-  the records of a stored series' or author's list log one that has already
-  been checked, the author-row record logs its
+  ASIN, the chapter-list record, the record of an answer from the store, the
+  failed write of a single book and the records of a stored series' or
+  author's list log one that has already been checked (a single book's ASIN
+  is logged as `REDACTED` if it isn't shaped like one), the author-row record logs its
   author ASIN and region only once both have matched rows already in the
   store, and the publication-date record takes its title ASIN from the data
   being stored, without the `REDACTED` check. The records that name a SQLite

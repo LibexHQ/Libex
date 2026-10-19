@@ -5,6 +5,7 @@ Audible API calls are mocked — we test our code not Audible's.
 """
 
 # Standard library
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Third party
@@ -12,6 +13,7 @@ import pytest
 from httpx import AsyncClient, ASGITransport
 
 # Local
+from app.api.routes.large_response import LARGE_RESPONSE_THREAD_THRESHOLD, _build_and_serialize
 from app.db.session import get_session
 from app.main import app
 from libex_core.exceptions import AudibleAPIException, NotFoundException
@@ -210,6 +212,37 @@ async def test_get_series_books_default_region_is_us(async_client):
         mock_books.return_value = [MOCK_BOOK]
         await async_client.get("/series/books/B00SERIES1")
         assert mock_series.call_args[0][1] == "us"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/series/books/B00SERIES1", "/series/B00SERIES1/books"])
+async def test_a_large_series_is_serialized_off_the_loop_with_its_headers(async_client, path):
+    """A series list past the threshold is built on a worker thread, and the
+    pre-built response still carries every book and the headers the route set."""
+    async def fetch(count):
+        books = [{**MOCK_BOOK, "asin": f"B{i:09d}"} for i in range(count)]
+        with patch("app.api.routes.series.router.get_series_books", new_callable=AsyncMock) as mock_series, \
+             patch("app.api.routes.series.router.get_books_by_asins", new_callable=AsyncMock) as mock_books:
+            mock_series.return_value = [b["asin"] for b in books]
+            mock_books.return_value = books
+            return await async_client.get(path)
+
+    small = await fetch(1)
+    real_to_thread = asyncio.to_thread
+    offloaded = []
+
+    async def spy(fn, *args, **kwargs):
+        offloaded.append(fn)
+        return await real_to_thread(fn, *args, **kwargs)
+
+    with patch("app.api.routes.large_response.asyncio.to_thread", side_effect=spy):
+        large = await fetch(LARGE_RESPONSE_THREAD_THRESHOLD)
+
+    assert _build_and_serialize in offloaded
+    assert large.status_code == 200
+    assert len(large.json()) == LARGE_RESPONSE_THREAD_THRESHOLD
+    for header in ("cache-control", "x-libex-complete"):
+        assert large.headers.get(header) == small.headers.get(header)
 
 
 # ============================================================
@@ -828,3 +861,48 @@ async def test_a_null_series_product_serves_the_stored_copy(null_product_client)
 
     assert response.status_code == 200
     assert response.json()["name"] == "Dune Chronicles"
+
+
+class _AbortedTransactionSession:
+    """
+    Postgres semantics for one failed statement: every later statement raises
+    until rollback() runs. The first execute is the up-front cache miss, the
+    second is the stored-series read timing out, and the cache lookup after it
+    answers a miss only if the reader rolled back.
+    """
+
+    def __init__(self):
+        self._calls = 0
+        self._aborted = False
+
+    async def execute(self, *args, **kwargs):
+        self._calls += 1
+        if self._calls == 2:
+            self._aborted = True
+            raise TimeoutError("statement timeout")
+        if self._aborted:
+            raise RuntimeError("current transaction is aborted, commands ignored")
+        miss = MagicMock()
+        miss.scalar_one_or_none.return_value = None
+        return miss
+
+    async def rollback(self):
+        self._aborted = False
+
+
+@pytest.mark.asyncio
+async def test_get_series_outage_with_failed_db_read_is_503_not_500(async_client):
+    """A timed-out stored read during an Audible outage must not poison the
+    session for the cache lookup that follows it."""
+    app.dependency_overrides[get_session] = lambda: _AbortedTransactionSession()
+    try:
+        with patch(
+            "app.services.audible.series.fetch_series",
+            new_callable=AsyncMock,
+            side_effect=AudibleAPIException("Audible down"),
+        ):
+            response = await async_client.get("/series/B00SERIES1")
+    finally:
+        app.dependency_overrides.pop(get_session, None)
+
+    assert_outage_503(response, "Audible unavailable and no cached series data found")

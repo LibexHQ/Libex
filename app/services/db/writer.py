@@ -62,7 +62,6 @@ _extras_union = merge.extras_union
 
 _STATEMENTS = statements_for(_DIALECT)
 _BOOK_UPSERT = _STATEMENTS.book_upsert
-_SERIES_UPSERT = _STATEMENTS.series_upsert
 
 
 def _failure_fields(exc: BaseException) -> dict:
@@ -128,16 +127,6 @@ async def upsert_author(session: AsyncSession, author: dict) -> int | None:
 # ============================================================
 # BOOK WRITER
 # ============================================================
-
-async def _resolve_author_ids(
-    session: AsyncSession, books: list[dict]
-) -> dict[tuple[str, str | None], list[int]]:
-    """Resolves every book's authors to DB ids, once per distinct author,
-    keyed by the book's (asin, region)."""
-    return await _books.resolve_author_ids(
-        session, books, dialect=_DIALECT, conflict_errors=_CONFLICT_ERRORS
-    )
-
 
 async def write_books(
     session: AsyncSession, books: list[dict], *, confirm: bool = False
@@ -492,21 +481,8 @@ async def reconcile_genres(
     """
     if not genres:
         return
-    now = _now()
     fresh_keys = [(g["genre_id"], g.get("parent_id", "")) for g in genres]
-    for genre in genres:
-        parent_id = genre.get("parent_id", "")
-        stmt = insert(CatalogGenre).values(
-            region=region,
-            genre_id=genre["genre_id"],
-            parent_id=parent_id,
-            name=genre["name"],
-            last_checked=now,
-        ).on_conflict_do_update(
-            index_elements=["region", "genre_id", "parent_id"],
-            set_={"name": genre["name"], "last_checked": now},
-        )
-        await session.execute(stmt)
+    await upsert_genres(session, region, genres)
     # Prune stale placements — e.g. a category's old parent_id after Audible
     # moves it. Everything in the fresh (complete) fetch is kept; anything stored
     # for this region but absent from it is removed.

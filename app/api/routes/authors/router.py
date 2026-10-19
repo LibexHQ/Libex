@@ -205,6 +205,7 @@ def _mark_completeness(
     )
 
 
+@router.get("/{asin}/books", response_model=list[BookResponse], include_in_schema=False)
 @router.get(
     "/books/{asin}",
     response_model=list[BookResponse],
@@ -215,8 +216,7 @@ async def get_books_by_author(
     response: Response,
     region: str = Depends(valid_region),
     # See cache_param.CacheAuthorBooksParam for why this defaults to True
-    # and what cache=false does -- the reasoning is shared with this route's
-    # legacy twin below and lives in one place rather than two.
+    # and what cache=false does.
     cache: CacheAuthorBooksParam = True,
     filters: LiveBookFilters = Depends(),
     sort: Annotated[BookSortField | None, Query(description="Field to sort the returned books by")] = None,
@@ -251,70 +251,6 @@ async def get_books_by_author(
     # pairing running serialized behind the default Audible concurrency pool
     # -- see get_books_by_asins' own docstring and client.py's
     # AUDIBLE_AUTHOR_BOOKS_CONCURRENCY_LIMIT for the measurements.
-    books = await outage_as_unavailable(
-        get_books_by_asins(
-            asins, region, session, use_cache=cache, high_concurrency=True, deadline=deadline
-        )
-    )
-    # Marked here rather than above, and given the hydrated books rather than
-    # the walk alone. walk.is_complete describes DISCOVERY -- whether the ASIN
-    # list is whole -- while the body a caller receives is what hydration
-    # returned, and get_books_by_asins has three documented paths that return
-    # fewer books than it was handed: chunks that failed transiently and were
-    # only partly recovered from the DB backstop, the outage fallback, and
-    # ASINs Audible no longer knows. Marking on discovery alone advertised a
-    # half-hydrated body as complete and, once these responses became
-    # cacheable, let an edge hold that body for the entry's whole remaining
-    # life. Counted before filtering, since filters legitimately shrink the
-    # list and say nothing about whether the fetch succeeded.
-    _mark_completeness(
-        response,
-        walk.is_complete and len(books) == len(asins),
-        walk.cache_expires_at,
-        cache,
-    )
-    books = filter_dicts(books, filters.as_kwargs())
-    books = sort_dicts(books, sort.value if sort is not None else None, order.value, BOOK_SORT_FIELDS)
-    return await build_large_list_response(
-        list[BookResponse],
-        len(books),
-        lambda: [BookResponse(**b) for b in books],
-        injected_response=response,
-    )
-
-
-@router.get(
-    "/{asin}/books",
-    response_model=list[BookResponse],
-    include_in_schema=False,
-    responses={200: {"headers": COMPLETE_ONLY_RESPONSE_HEADERS}},
-)
-async def get_books_by_author_primary(
-    asin: Annotated[str, Depends(valid_asin("Author ASIN"))],
-    response: Response,
-    region: str = Depends(valid_region),
-    # See cache_param.CacheAuthorBooksParam for the full reasoning. This is
-    # get_books_by_author's legacy-route twin and the two must never
-    # disagree on it.
-    cache: CacheAuthorBooksParam = True,
-    filters: LiveBookFilters = Depends(),
-    sort: Annotated[BookSortField | None, Query(description="Field to sort the returned books by")] = None,
-    order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
-    session: AsyncSession = Depends(get_session),
-) -> list[BookResponse] | Response:
-    """Legacy endpoint. Use /author/books/{asin} instead."""
-    # One deadline shared by both phases, same as get_books_by_author above
-    # -- this is its legacy-route twin; see that call site's comment.
-    deadline = time.monotonic() + AUTHOR_BOOKS_TIME_BUDGET_SECONDS
-    walk = await outage_as_unavailable(
-        get_author_books(asin, region, session, cache, deadline=deadline)
-    )
-    asins = walk.asins
-    if not asins:
-        raise NotFoundException("No books found for author")
-    # use_cache=cache and high_concurrency=True: same pairing as
-    # get_books_by_author above (this is its legacy-route twin) -- see that
-    # call site's comments.
     books = await outage_as_unavailable(
         get_books_by_asins(
             asins, region, session, use_cache=cache, high_concurrency=True, deadline=deadline

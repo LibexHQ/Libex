@@ -18,6 +18,7 @@ from app.api.routes.errors import ERROR_RESPONSES
 from app.api.routes.audible_outage import outage_as_unavailable
 from app.api.routes.cache_param import CacheStandardParam, apply_cache_control
 from app.api.routes.facts_headers import FACTS_RESPONSE_HEADERS, stamp_facts_headers
+from app.api.routes.large_response import build_large_list_response
 from app.api.routes.sort_params import BookSortField, SortOrder
 from app.api.routes.filter_params import LiveBookFilters
 
@@ -39,6 +40,7 @@ router = APIRouter(prefix="/series", tags=["Series"])
 # ENDPOINTS
 # ============================================================
 
+@router.get("", response_model=list[SeriesResponse], include_in_schema=False)
 @router.get("/search", response_model=list[SeriesResponse], responses=ERROR_RESPONSES)
 async def search(
     name: Annotated[str, Query(description="Series name to search for")],
@@ -52,19 +54,7 @@ async def search(
     return [SeriesResponse(**s) for s in results]
 
 
-@router.get("", response_model=list[SeriesResponse], include_in_schema=False)
-async def search_legacy(
-    name: Annotated[str, Query(description="Series name to search for")],
-    region: str = Depends(valid_region),
-    session: AsyncSession = Depends(get_session),
-) -> list[SeriesResponse]:
-    """Legacy endpoint. Use /series/search instead."""
-    results = await outage_as_unavailable(search_series(name, region, session))
-    if not results:
-        raise NotFoundException("No series found")
-    return [SeriesResponse(**s) for s in results]
-
-
+@router.get("/{asin}/books", response_model=list[BookResponse], include_in_schema=False)
 @router.get("/books/{asin}", response_model=list[BookResponse], responses={**ERROR_RESPONSES, 200: {"headers": FACTS_RESPONSE_HEADERS}})
 async def get_books_by_series(
     asin: Annotated[str, Depends(valid_asin("Series ASIN"))],
@@ -93,38 +83,12 @@ async def get_books_by_series(
     books = sort_dicts(books, sort.value if sort is not None else None, order.value, BOOK_SORT_FIELDS)
     apply_cache_control(response, cache)
     stamp_facts_headers(response, facts, entities=books)
-    return [BookResponse(**b) for b in books]
-
-
-@router.get(
-    "/{asin}/books",
-    response_model=list[BookResponse],
-    include_in_schema=False,
-    responses={200: {"headers": FACTS_RESPONSE_HEADERS}},
-)
-async def get_books_by_series_primary(
-    asin: Annotated[str, Depends(valid_asin("Series ASIN"))],
-    response: Response,
-    region: str = Depends(valid_region),
-    cache: CacheStandardParam = True,
-    filters: LiveBookFilters = Depends(),
-    sort: Annotated[BookSortField | None, Query(description="Field to sort by (overrides default series position order)")] = None,
-    order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.asc,
-    session: AsyncSession = Depends(get_session),
-) -> list[BookResponse]:
-    """Legacy endpoint. Use /series/books/{asin} instead."""
-    asins = await outage_as_unavailable(get_series_books(asin, region, session, cache))
-    if not asins:
-        raise NotFoundException("No books found for series")
-    facts = ResponseFacts()
-    books = await outage_as_unavailable(
-        get_books_by_asins(asins, region, session, use_cache=cache, facts=facts)
+    return await build_large_list_response(
+        list[BookResponse],
+        len(books),
+        lambda: [BookResponse(**b) for b in books],
+        injected_response=response,
     )
-    books = filter_dicts(books, filters.as_kwargs())
-    books = sort_dicts(books, sort.value if sort is not None else None, order.value, BOOK_SORT_FIELDS)
-    apply_cache_control(response, cache)
-    stamp_facts_headers(response, facts, entities=books)
-    return [BookResponse(**b) for b in books]
 
 
 @router.get("/{asin}", response_model=SeriesResponse, responses={**ERROR_RESPONSES, 200: {"headers": FACTS_RESPONSE_HEADERS}})

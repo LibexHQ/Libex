@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 # Core
 from libex_core.audible.books import settle_flags_list
+from libex_core.log_safety import safe_asin_for_log
 
 if TYPE_CHECKING:
     from libex_core.storage.store import LocalStore
@@ -86,7 +87,8 @@ async def persist_books(
     """
     Writes normalized books, unsettled (the writer needs the tri-state flags as
     normalization produced them), and returns the ASINs that were committed and
-    whether any chunk failed to be.
+    whether any book failed to be. A chunk that fails is replayed a book at a
+    time, so one bad book costs only itself.
 
     A book is keyed by its ASIN and its marketplace, so the same ASIN written
     for two regions is two rows and neither write touches the other. Every
@@ -108,8 +110,21 @@ async def persist_books(
             async with store.write() as session:
                 await write.write_books(session, chunk, confirm=confirm)
         except Exception as exc:
-            failed = True
             _log_write_failure("books", exc, books=len(chunk), region=region)
+            # One bad book must not keep the rest of its chunk out of the
+            # store: replay the chunk a book at a time, as the hosted writer
+            # does, and fail only for the books that still do not write.
+            for book in chunk:
+                try:
+                    async with store.write() as session:
+                        await write.write_books(session, [book], confirm=confirm)
+                except Exception as single:
+                    failed = True
+                    _log_write_failure(
+                        "book", single, asin=safe_asin_for_log(book["asin"]), region=region
+                    )
+                else:
+                    written.add(book["asin"])
             continue
         written.update(b["asin"] for b in chunk)
     if written:
@@ -164,14 +179,16 @@ async def persist_series(
 async def persist_author(
     store: "LocalStore", data: dict[str, Any], region: str, *, confirm: bool = False
 ) -> bool:
-    """Writes an author profile. False when the write failed. confirm stamps
-    the author as confirmed, for an author profile fetch."""
+    """Writes an author profile. False when the write failed or the profile
+    lacks the asin, name or region it is keyed by. confirm stamps the author
+    as confirmed, for an author profile fetch."""
     from libex_core.storage import write
 
     return await _persist_one(
         store,
         "author",
         lambda s: write.write_author_profile(s, data, confirm=confirm),
+        refusal="the author has no asin, name or region",
         region=region,
     )
 
@@ -444,6 +461,17 @@ async def stored_series_books(
     return settle_flags_list(rows)
 
 
+def _literal(text: str) -> str:
+    """The text with LIKE's wildcards and its escape character made literal.
+
+    The readers behind these two searches read % and _ as wildcards, which is
+    right for the hosted /db search that shares them. A fallback after Audible
+    found nothing is a substring search for what the caller typed, so a stray
+    % or _ must not match unrelated rows. Backslash is the escape character on
+    both Postgres (by default) and the SQLite variant, which states it."""
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 async def search_stored_series(
     store: "LocalStore", name: str, region: str | None = None
 ) -> list[dict[str, Any]]:
@@ -454,7 +482,7 @@ async def search_stored_series(
     return await _read(
         store,
         "series search",
-        lambda s: read_series.search_series(s, name, region=region),
+        lambda s: read_series.search_series(s, _literal(name), region=region),
         [],
     )
 
@@ -480,14 +508,16 @@ async def stored_author_book_asins(
 
 
 async def stored_track(
-    store: "LocalStore", asin: str, region: str | None = None
-) -> dict[str, Any] | None:
+    store: "LocalStore", asin: str, region: str | None = None, *, default: Any = None
+) -> dict[str, Any] | None | object:
     """The stored chapters. A listing belongs to one marketplace's record of the
-    book: with a region, that listing; without, the first-stored one."""
+    book: with a region, that listing; without, the first-stored one. A failed
+    read answers `default`; a caller that must tell it from nothing stored
+    passes _READ_FAILED."""
     from libex_core.storage.read import books as read_books
 
     return await _read(
-        store, "chapters", lambda s: read_books.get_track(s, asin, region=region), None
+        store, "chapters", lambda s: read_books.get_track(s, asin, region=region), default
     )
 
 
@@ -502,7 +532,7 @@ async def search_stored_books(
         store,
         "book search",
         lambda s: read_books.search_books(
-            s, title=title, author_name=author, region=region, limit=10
+            s, title=_literal(title), author_name=_literal(author), region=region, limit=10
         ),
         [],
     )

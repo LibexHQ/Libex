@@ -471,6 +471,45 @@ async def test_a_finished_task_is_dropped_from_the_registry():
     assert pq._inflight == set()
 
 
+@pytest.mark.asyncio
+async def test_wait_for_inflight_returns_once_the_write_in_flight_has_finished():
+    finished = []
+    release = asyncio.Event()
+
+    async def _work():
+        await release.wait()
+        finished.append(True)
+
+    pq._spawn(_work, 1)
+    waiter = asyncio.create_task(pq.wait_for_inflight())
+    await asyncio.sleep(0)
+    assert not waiter.done()
+
+    release.set()
+    await asyncio.wait_for(waiter, 1)
+
+    assert finished == [True]
+
+
+@pytest.mark.asyncio
+async def test_cancelling_wait_for_inflight_leaves_the_write_running():
+    release = asyncio.Event()
+
+    async def _work():
+        await release.wait()
+
+    pq._spawn(_work, 1)
+    (task,) = pq._inflight
+    waiter = asyncio.create_task(pq.wait_for_inflight())
+    await asyncio.sleep(0)
+    waiter.cancel()
+    await asyncio.sleep(0)
+
+    assert not task.cancelled()
+    release.set()
+    await asyncio.wait_for(task, 1)
+
+
 # ============================================================
 # THE BOUNDED BACKLOG
 # ============================================================
@@ -716,3 +755,15 @@ async def test_books_without_an_asin_are_not_counted_against_the_backlog():
         pq.persist_books_background(_books(3) + [{"title": "No ASIN"}], REGION)
 
     assert captured["books"] == 3
+
+
+@pytest.mark.asyncio
+async def test_the_replay_counts_a_failed_read_back_as_a_cache_failure():
+    with patch.object(pq, "upsert_book", new=AsyncMock()), \
+         patch.object(pq, "_read_back", new=AsyncMock(return_value=None)), \
+         patch.object(pq.cache, "set", new=AsyncMock()) as cache_set, \
+         patch.object(pq, "logger") as log:
+        await pq._replay_book_chunk(AsyncMock(), _books(2), REGION)
+
+    cache_set.assert_not_awaited()
+    assert log.info.call_args.kwargs["extra"]["cache_failed"] == 2

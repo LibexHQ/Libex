@@ -21,7 +21,11 @@ here.
 # Standard library
 import asyncio
 import logging
+import signal
+import subprocess
 import sys
+import time
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Third party
@@ -39,6 +43,8 @@ from scripts.seed import (
     main,
 )
 import scripts.seed as seed
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 # ============================================================
@@ -448,8 +454,10 @@ async def test_run_creates_and_tracks_both_tasks_before_registering_signal_handl
         order.append("track")
         return real_track(self, task)
 
+    loop = asyncio.get_running_loop()
+
     def _tracking_signal(sig, handler):
-        order.append("signal.signal")
+        order.append("add_signal_handler")
 
     fake_engine = MagicMock()
     fake_engine.dispose = AsyncMock()
@@ -463,14 +471,66 @@ async def test_run_creates_and_tracks_both_tasks_before_registering_signal_handl
     ), \
          patch("scripts.seed.asyncio.create_task", side_effect=_tracking_create_task), \
          patch.object(_Stopper, "track", _tracking_track), \
-         patch("scripts.seed.signal.signal", side_effect=_tracking_signal):
+         patch.object(loop, "add_signal_handler", side_effect=_tracking_signal):
         exit_code = await _run(once=True)
 
     assert order == [
         "create_task", "create_task", "track", "track",
-        "signal.signal", "signal.signal",
+        "add_signal_handler", "add_signal_handler",
     ]
     assert exit_code == 0
+
+
+_IDLE_SEEDER_CHILD = """
+import asyncio
+import sys
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from scripts import seed
+from tests.scripts.conftest import set_hosted_transport
+
+set_hosted_transport("http://libex-seeder-vpn:8888")
+
+
+async def idle(once):
+    print("READY", flush=True)
+    await asyncio.sleep(3600)
+
+
+engine = MagicMock()
+engine.dispose = AsyncMock()
+with patch.multiple(
+    seed,
+    run_seeder=idle,
+    run_new_releases_seeder=idle,
+    _drain_persist_queue=AsyncMock(return_value=True),
+    engine=engine,
+):
+    sys.exit(asyncio.run(seed._run(once=False)))
+"""
+
+
+def test_a_real_sigterm_ends_a_seeder_idle_in_its_sleep_within_seconds():
+    """The workers sleep about a day between cycles. A signal.signal handler
+    does not wake an idle loop, so the cancel waited out the whole sleep and
+    `docker stop` ended in a SIGKILL. This runs the real _run in its own
+    process, idle, and sends it a real SIGTERM."""
+    child = subprocess.Popen(
+        [sys.executable, "-c", _IDLE_SEEDER_CHILD],
+        cwd=_REPO_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    try:
+        assert child.stdout.readline().strip() == "READY"
+        time.sleep(0.5)  # let the loop settle into its sleep
+        child.send_signal(signal.SIGTERM)
+        assert child.wait(timeout=5) == 0
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
 
 
 # ============================================================

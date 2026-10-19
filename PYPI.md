@@ -16,8 +16,8 @@ Libex also runs as a hosted API, and a free public instance is at
 
 ```
 pip install libex-core
-pip install "libex-core[storage]"    # adds the optional local store (SQLite)
-pip install "libex-core[postgres]"   # the store, with Postgres as well
+pip install "libex-core[sqlite]"     # adds the optional local store, on SQLite
+pip install "libex-core[postgres]"   # the local store, on Postgres
 pip install "libex-core[socks]"      # lets the proxy be a SOCKS5 proxy
 ```
 
@@ -121,14 +121,15 @@ By default nothing is kept. Setting `LIBEX_CORE_STORAGE` turns on a local
 database that lookups write what Audible answered into, under the same merge
 rules as the hosted service, and that serves the stored copy when Audible is
 unreachable. It needs the
-`storage` extra.
+`sqlite` extra, or the `postgres` extra for Postgres. (`storage` is the older
+name for `sqlite` and still works.)
 
 | `LIBEX_CORE_STORAGE` | Store |
 |---|---|
 | unset, empty or `off` | none (default) |
 | `sqlite` | `libex.db` in your user data directory: `~/.local/share/libex-core/` on Linux (or under `$XDG_DATA_HOME`), `~/Library/Application Support/libex-core/` on macOS, `%LOCALAPPDATA%\libex-core\` on Windows |
 | an absolute path | that SQLite file |
-| a `sqlite:///` or `postgresql://` URL | that database (`postgres` extra for Postgres) |
+| a `sqlite:///` or `postgresql://` URL | that database (`postgres` extra) |
 
 ```
 export LIBEX_CORE_STORAGE=sqlite
@@ -182,6 +183,37 @@ if found is not None:
   last answered for the book's chapters, empty answers included, or `None`
   if it never has. A date with no `stored_chapters` result means Audible
   confirmed the book has none.
+
+### Writing another Libex server's answers into the store
+
+If you fetch from a hosted or self-hosted Libex server instead of Audible,
+`libex_core.lookup` can write what it returned into a store you hold:
+`ingest_books`, `ingest_chapters`, `ingest_series` and `ingest_author`. Each
+takes the `LocalStore` first, the parsed `libex_core.models` response, and a
+required `region`, and writes under the same merge rules as the lookups: an
+existing value is never replaced by less and the relationships only grow.
+
+```python
+from libex_core.lookup import ingest_books
+from libex_core.models import BookResponse
+
+books = [BookResponse(**item) for item in payload]   # from the server's JSON
+written = await ingest_books(store, books, region="us")   # the ASINs committed
+```
+
+- Nothing is confirmed: `confirmed_at` and the chapters stamp are left as they
+  were, because a server's answer may itself have come from its cache.
+- A server's answer is settled for the wire, so a flag it cannot tell from
+  "unknown" is written as unknown, not as a fact. `explicit`, `hasPdf`,
+  `whisperSync` and `isVvab` as `false`, `isListenable` and `isBuyable` as
+  `true`, and an empty `plans` list store nothing over what is held. The
+  opposite values are kept. `isAvailable` is not read; it is the same
+  Audible value as `isBuyable`.
+- A record naming a different region than `region` raises `ValueError` before
+  anything is written. A write that fails is logged and left out of the
+  result, as for the lookups; a closed store raises `StoreClosed`.
+- `ingest_chapters` needs the book already stored for the region and skips an
+  empty listing. `ingest_author` writes the profile, not the author's books.
 
 ## Use it as a library
 
@@ -240,6 +272,22 @@ from a record. `max_age` without a store is a `ValueError`. A list Audible
 confirms has no books is never answered from the store, and its record is
 removed. The record is part of the plaintext store, so it also notes which
 series and authors you looked up, and when.
+
+`get_book` and `get_books` (and their `_with_nulls` forms) take `max_age` the
+same way. A book stored for exactly the region asked, which Audible last
+confirmed no longer ago than `max_age`, is served with no request to Audible;
+`get_books` asks Audible, in one hydration, for only the other ASINs, and
+returns the books in the order requested. A book that was never confirmed
+(for instance one ingested from a hosted server), one confirmed longer ago, one
+stamped ahead of the local clock, one stored only for another region, and one
+the store cannot be read for are all asked for live. Books served from the
+store carry no `explicit_nulls` entry (`None` for `get_book_with_nulls`), since
+Audible said nothing this time, and they are never in `notFound`,
+`placeholderRecords` or `notFetched`. If Audible is down for the rest, the
+fresh books are still returned and the others are `notFetched`. A book Audible
+confirms it has no record of is never answered from the store. `max_age` that
+is not a `timedelta`, is zero or negative, or is given without a `store` is a
+`ValueError`, raised before anything is sent.
 
 ### Supplying your own connection
 

@@ -2,7 +2,7 @@
 The hosted image is Postgres-only: requirements.lock carries asyncpg and not
 aiosqlite, while the dev lock carries both. Importing a name from a
 libex_core.storage package goes through that package's lazy __getattr__ and
-require_storage(), which refuses to run without aiosqlite. The hosted code
+require_storage(). The hosted code
 must import the defining submodules directly, and a suite that has aiosqlite
 installed cannot notice when it doesn't. Each module is imported here in a
 fresh interpreter with aiosqlite made unfindable, as it is in the image.
@@ -57,7 +57,9 @@ def test_probe_hides_aiosqlite():
             "-c",
             _PROBE.replace(
                 "importlib.import_module(sys.argv[1])",
-                "from libex_core.storage import require_storage; require_storage()",
+                "from libex_core.storage import require_storage; require_storage(); "
+                "from libex_core.storage.store import LocalStore; "
+                "LocalStore('sqlite+aiosqlite:///:memory:')",
             ),
         ],
         cwd=ROOT,

@@ -147,6 +147,38 @@ async def stored_list(
     return None
 
 
+async def fresh_books(
+    store: "LocalStore", asins: list[str], region: str, max_age: timedelta
+) -> list[dict[str, Any]]:
+    """The stored books, among these ASINs, that Audible confirmed within
+    max_age, settled, in the order asked. Never raises for anything the store
+    holds.
+
+    A book counts only when it is stored for exactly this region and carries a
+    confirmed_at stamp inside the same window a stored list is judged by: not
+    older than max_age and not further ahead of the local clock than the
+    allowed skew. A book never confirmed (stamp None) is never fresh. A failed
+    read of the stamps or of the books is a miss, so the ASINs go to Audible.
+    Logged with counts only."""
+    from libex_core.lookup import stored
+
+    stamps = await stored._stamps(store, "books", sorted(set(asins)), region, "confirmed_at")
+    fresh: list[str] = []
+    for asin in asins:
+        try:
+            _age(stamps.get(asin), max_age)
+        except _Miss:
+            continue
+        fresh.append(asin)
+    rows = await _store.stored_books(store, fresh, region) if fresh else []
+    logger.info("Checked stored books for freshness", extra={
+        "region": region,
+        "requested_num": len(asins),
+        "fresh_num": len(rows),
+    })
+    return rows
+
+
 async def record_walk(
     store: "LocalStore",
     kind: str,

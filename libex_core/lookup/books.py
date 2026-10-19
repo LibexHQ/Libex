@@ -6,7 +6,10 @@ These are the library's counterparts of the hosted routes -- fetch, normalize,
 settle the tri-state flags, split what Audible answered from what it did not --
 without the cache. With no store, nothing is persisted and an outage is simply
 an outage: an ASIN whose request failed is reported in notFetched, and a
-request in which nothing could be served raises AudibleAPIException. Audible
+request in which nothing could be served raises AudibleAPIException. A
+product that Audible answered but that could not be normalized counts as a
+failed request for its own ASIN: it is in notFetched, and when no book can be
+served it is the failure that raises. Audible
 confirming it has no record is a different fact and stays NotFoundException (a
 bulk lookup reports it in notFound), never retried and never mixed with an
 outage.
@@ -16,7 +19,8 @@ hosted merge rules and each book is served as the store then holds it, which
 is never less than either side; a chunk or a whole request that fails is
 answered from the stored copies, and only what the store lacks too is
 notFetched, or raises. A confirmed absence is never answered from the store.
-See libex_core.lookup._store.
+See libex_core.lookup._store. With max_age as well, a book the store holds that
+Audible confirmed recently enough is served without asking.
 
 Every function takes the callable that makes the request (an AudibleGet) as its
 first argument and the region as a keyword. Nothing here reads the
@@ -30,7 +34,8 @@ import asyncio
 import logging
 import time
 from contextlib import nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 # Core
@@ -41,7 +46,7 @@ from libex_core.audible.books import (
     filter_products,
     is_placeholder_record,
     explicit_nulls_by_asin,
-    normalize_products,
+    normalize_products_each,
     settle_flags_list,
 )
 from libex_core.audible.chapters import (
@@ -56,8 +61,9 @@ from libex_core.audible.client import (
     upstream_status_of,
     validate_region,
 )
-from libex_core.exceptions import ErrorCode, NotFoundException
-from libex_core.lookup import _store
+from libex_core.exceptions import AudibleAPIException, ErrorCode, NotFoundException
+from libex_core.log_safety import safe_asin_for_log
+from libex_core.lookup import _store, _walks
 from libex_core.lookup._common import OUTAGE_MESSAGE
 from libex_core.lookup._shaping import check_shaping, shape_books
 from libex_core.models import BookResponse, BulkBookResponse, ChapterResponse
@@ -90,10 +96,11 @@ class Hydration:
     not_fetched holds ASINs whose request failed, so nothing is known about
     them. deadline_abandoned is the part of not_fetched whose request was cut
     off because the caller's deadline arrived rather than because it failed.
-    from_store holds the ASINs
-    of the books that were answered from the store because Audible could not
-    answer for them; it is a subset of books, and those books are the stored
-    copies, not anything Audible said this time. store_write_failed is True
+    from_store holds the ASINs of the books that were answered from the store,
+    either because Audible could not answer for them or, with max_age, because
+    they were fresh enough that Audible was never asked; it is a subset of
+    books, and those books are the stored copies, not anything Audible said
+    this time. store_write_failed is True
     when a store was given and some fetched book could not be written to it.
     explicit_nulls maps an ASIN to the published fields Audible sent as an
     explicit null in this response, as opposed to omitting them (see
@@ -142,9 +149,10 @@ async def hydrate_books(
     would read as an outage.
 
     A chunk that fails with NotFoundException puts its ASINs in not_found. A
-    chunk that fails any other way puts its ASINs in not_fetched, and the
-    chunks that answered are still returned. When any chunk failed and no chunk
-    produced a servable book, nothing can be told apart from an outage, so the
+    chunk that fails any other way puts its ASINs in not_fetched, as does a
+    product in an answered chunk that cannot be normalized (that ASIN alone),
+    and the rest that answered are still returned. When any chunk or product
+    failed and nothing servable came back, nothing can be told apart from an outage, so the
     call raises AudibleAPIException carrying the first failure's upstream
     status, even if another chunk confirmed some ASINs absent.
 
@@ -283,6 +291,29 @@ async def hydrate_books(
             placeholders.extend(chunk_placeholders)
             all_products.extend(kept)
 
+        # Each product on its own: one that raises (it does so on purpose, so
+        # a bad answer never overwrites stored data) is an outage for its own
+        # ASIN, answered like a failed chunk, and costs no other book.
+        outcomes = await normalize_products_each(all_products, region)
+        requested = set(shaped)
+        good_products: list[dict[str, Any]] = []
+        normalized: list[dict[str, Any]] = []
+        for product, outcome in zip(all_products, outcomes):
+            if isinstance(outcome, Exception):
+                errors.append(outcome)
+                bad_asin = product.get("asin")
+                if bad_asin in requested and bad_asin not in failed:
+                    failed.append(bad_asin)
+                logger.warning("Product could not be normalized", extra={
+                    "asin": safe_asin_for_log(bad_asin),
+                    "region": region,
+                    "error_type": type(outcome).__name__,
+                })
+            else:
+                good_products.append(product)
+                normalized.append(outcome)
+        all_products = good_products
+
         if not_found or placeholders or failed:
             logger.warning("Partial hydration shortfall", extra={
                 "requested_num": len(shaped),
@@ -295,9 +326,8 @@ async def hydrate_books(
         if failed and not all_products:
             raise errors[0]
 
-        normalized = await normalize_products(all_products, region)
-        # Read after normalizing, so a product whose container null raises
-        # there is an outage and never reaches a report of nulls.
+        # Read over the products that normalized, so one whose container null
+        # raises is an outage and never reaches a report of nulls.
         explicit_nulls = explicit_nulls_by_asin(all_products)
 
         # The books are written as normalized, tri-state flags and all, and
@@ -401,6 +431,54 @@ async def _hydrate_from_store(
 # PUBLIC API
 # ============================================================
 
+async def _hydrate(
+    get: AudibleGet,
+    asins: list[str],
+    region: str,
+    store: "LocalStore | None",
+    max_age: timedelta | None,
+) -> Hydration:
+    """
+    hydrate_books for the single and bulk lookups, answering from the store the
+    books it confirmed within max_age and asking Audible, in one hydration, for
+    only the rest.
+
+    With max_age None this is hydrate_books. Otherwise the books that are
+    stored for exactly this region and were confirmed no longer ago than
+    max_age (see libex_core.lookup._walks.fresh_books) are taken from the
+    store, and only the other ASINs are sent. The books come back in the order
+    requested, the fresh ones are listed in from_store and have no explicit_nulls
+    entry, and notFound, placeholders and not_fetched speak only for what was
+    sent. When Audible cannot answer for the rest and the store has fresh
+    books, those are still served and the rest are not_fetched; with none
+    fresh the outage behaves exactly as it does without max_age.
+    """
+    if max_age is None:
+        return await hydrate_books(get, asins, region, store=store)
+    region = validate_region(region)
+    await _store.check(store)
+    unique = list(dict.fromkeys(asins))
+    fresh = await _walks.fresh_books(store, unique, region, max_age)
+    if not fresh:
+        return await hydrate_books(get, asins, region, store=store)
+    held = {b["asin"] for b in fresh}
+    stale = [a for a in unique if a not in held]
+    if stale:
+        try:
+            live = await hydrate_books(get, stale, region, store=store)
+        except AudibleAPIException:
+            live = Hydration(not_fetched=stale)
+    else:
+        live = Hydration()
+    position = {a: i for i, a in enumerate(unique)}
+    books = sorted(
+        live.books + fresh, key=lambda b: position.get(b.get("asin"), len(position))
+    )
+    return replace(
+        live, books=books, from_store=[b["asin"] for b in fresh] + live.from_store
+    )
+
+
 def _canonical_asin(asin: str) -> str:
     """The uppercase form of a valid ASIN; the rejected value is not echoed."""
     if not isinstance(asin, str) or not is_valid_asin(asin):
@@ -429,6 +507,7 @@ async def get_book_with_nulls(
     *,
     region: str = "us",
     store: "LocalStore | None" = None,
+    max_age: timedelta | None = None,
 ) -> BookLookup:
     """
     get_book, returning the book together with its explicit nulls.
@@ -436,8 +515,9 @@ async def get_book_with_nulls(
     Same arguments, same errors and same book as get_book; see it. The only
     addition is BookLookup.explicit_nulls, which reports and changes nothing.
     """
+    _walks.check_max_age(max_age, store)
     canonical = _canonical_asin(asin)
-    hydration = await hydrate_books(get, [canonical], region, store=store)
+    hydration = await _hydrate(get, [canonical], region, store, max_age)
     if not hydration.books:
         if canonical in hydration.placeholders:
             raise NotFoundException(
@@ -458,6 +538,7 @@ async def get_book(
     *,
     region: str = "us",
     store: "LocalStore | None" = None,
+    max_age: timedelta | None = None,
 ) -> BookResponse:
     """
     Fetches one book by ASIN.
@@ -472,10 +553,24 @@ async def get_book(
     written through and served as the store holds it, and an outage is
     answered from the stored copy.
 
+    max_age (a timedelta, default None) lets the store answer in place of
+    Audible: when the book is stored for exactly this region and Audible
+    confirmed it no longer ago than max_age, it is served with no request. A
+    book never confirmed (for instance one ingested from elsewhere), an older
+    one, a stamp ahead of the local clock beyond the allowed skew and a store
+    that cannot be read are all a live lookup, which then updates the store.
+    Without max_age Audible is always asked. max_age that is not a timedelta, is
+    zero or negative, or is given without a store is ValueError, before
+    anything is sent. A book Audible has no record of is never answered from
+    the store.
+
     get_book_with_nulls is the same lookup that also reports which fields
-    Audible sent as an explicit null.
+    Audible sent as an explicit null; for a book served under max_age that is
+    None, since Audible said nothing this time.
     """
-    return (await get_book_with_nulls(get, asin, region=region, store=store)).book
+    return (await get_book_with_nulls(
+        get, asin, region=region, store=store, max_age=max_age
+    )).book
 
 
 @dataclass(frozen=True)
@@ -502,6 +597,7 @@ async def get_books_with_nulls(
     sort: str | None = None,
     order: str = "asc",
     store: "LocalStore | None" = None,
+    max_age: timedelta | None = None,
 ) -> BooksLookup:
     """
     get_books, returning the response together with each book's explicit nulls.
@@ -536,10 +632,25 @@ async def get_books_with_nulls(
     and an ASIN whose request failed is answered from its stored copy; only
     what the store lacks too is notFetched.
 
+    max_age (a timedelta, default None) lets the store answer for the books it
+    holds fresh: those stored for exactly this region that Audible confirmed no
+    longer ago than max_age are served from the store with no request, and only
+    the other ASINs are sent, in one hydration. A book never confirmed, an older
+    one or one whose stamp is ahead of the local clock is sent. The books come
+    back in the order requested, as without max_age; the ones served from the
+    store have no explicit_nulls entry. notFound, placeholderRecords and
+    notFetched speak only for the ASINs sent, so a book served from the store is
+    never in them. When Audible cannot answer for the rest the fresh books are
+    still returned and the rest are notFetched (or, if the store holds them
+    too, served as the outage fallback does). max_age that is not a timedelta,
+    is zero or negative, or is given without a store is ValueError, before
+    anything is sent.
+
     Raises AudibleAPIException when a request failed and no book came back at
     all (the store included), and RegionException for an unknown region.
     """
     check_shaping(filters, sort, order)
+    _walks.check_max_age(max_age, store)
     asin_list = [
         a.strip()
         for entry in asins
@@ -560,8 +671,8 @@ async def get_books_with_nulls(
             f"Maximum {MAX_BULK_ASINS} ASINs per request", code=ErrorCode.INVALID_REQUEST
         )
 
-    hydration = await hydrate_books(
-        get, [normalise_asin(a) for a in asin_list], region, store=store
+    hydration = await _hydrate(
+        get, [normalise_asin(a) for a in asin_list], region, store, max_age
     )
 
     found = {normalise_asin(book["asin"]) for book in hydration.books}
@@ -603,6 +714,7 @@ async def get_books(
     sort: str | None = None,
     order: str = "asc",
     store: "LocalStore | None" = None,
+    max_age: timedelta | None = None,
 ) -> BulkBookResponse:
     """
     Fetches up to 1000 books by ASIN. See get_books_with_nulls, which this
@@ -610,7 +722,8 @@ async def get_books(
     store behaviour, and the errors.
     """
     return (await get_books_with_nulls(
-        get, asins, region=region, filters=filters, sort=sort, order=order, store=store
+        get, asins, region=region, filters=filters, sort=sort, order=order, store=store,
+        max_age=max_age,
     )).response
 
 

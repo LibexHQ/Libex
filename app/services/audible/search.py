@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # Core
 from libex_core.audible.books import (
     filter_products,
-    normalize_product,
+    normalize_products_each,
     settle_flags_list,
 )
 from libex_core.audible.client import as_audible_failure
@@ -22,6 +22,7 @@ from libex_core.audible.search import (
     fetch_suggestion_asins,
 )
 from libex_core.exceptions import AudibleAPIException, NotFoundException
+from libex_core.log_safety import safe_asin_for_log
 from app.core.logging import get_logger
 
 # Services
@@ -90,7 +91,27 @@ async def search(
             return []
 
         # Normalize directly from search results -- no re-fetch needed
-        normalized = [normalize_product(p, region) for p in products]
+        # A result that raises on normalization (it does so on purpose, so a
+        # bad answer never overwrites stored data) is left out and logged;
+        # the rest of the page is served. When every result raises, nothing
+        # was answered, which is an outage.
+        outcomes = await normalize_products_each(products, region)
+        normalized = [o for o in outcomes if not isinstance(o, Exception)]
+        errors = [o for o in outcomes if isinstance(o, Exception)]
+        if errors:
+            logger.warning("Search results could not be normalized", extra={
+                "region": region,
+                "skipped": len(errors),
+                "skipped_asins": ",".join(
+                    safe_asin_for_log(p.get("asin"))
+                    for p, o in zip(products, outcomes)
+                    if isinstance(o, Exception)
+                ),
+                "results": len(outcomes),
+                "error_type": type(errors[0]).__name__,
+            })
+            if not normalized:
+                raise errors[0]
 
         # Persist to DB and cache in the background. Unsettled: the writer
         # needs the tri-state flags None/True/False as normalize_product

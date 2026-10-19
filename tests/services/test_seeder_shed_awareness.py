@@ -46,6 +46,7 @@ raise-path bool-return tests, mocking get_books_by_asins directly.
 """
 
 # Standard library
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Third party
@@ -64,6 +65,7 @@ from libex_core.exceptions import AudibleAPIException, NotFoundException
 # Services
 from app.core.response_headers import REASON_DISCOVERY_INCOMPLETE, record_incomplete
 from app.services import seeder
+from app.services.db import persist_queue
 from app.services.db.persist_queue import PersistOutcome
 
 _AUDIBLE_CLIENT_GET = "app.services.audible.audible_get"
@@ -364,7 +366,7 @@ async def test_expand_narrators_does_not_stamp_or_count_when_persist_is_shed():
          patch.object(seeder, "_get_missing_asins", new=AsyncMock(return_value=[book_asin])), \
          patch.object(seeder, "_fetch_and_persist", new=AsyncMock(return_value=False)), \
          patch.object(seeder, "_stamp_narrator", new=AsyncMock()) as mock_stamp:
-        stats = await seeder._expand_narrators("us", delay=0)
+        stats = await seeder._expand_narrators(["us"], delay=0)
 
     mock_stamp.assert_not_awaited()
     assert stats["narrators_processed"] == 0
@@ -382,7 +384,7 @@ async def test_expand_narrators_stamps_and_counts_when_persist_is_admitted():
          patch.object(seeder, "_get_missing_asins", new=AsyncMock(return_value=[book_asin])), \
          patch.object(seeder, "_fetch_and_persist", new=AsyncMock(return_value=True)), \
          patch.object(seeder, "_stamp_narrator", new=AsyncMock()) as mock_stamp:
-        stats = await seeder._expand_narrators("us", delay=0)
+        stats = await seeder._expand_narrators(["us"], delay=0)
 
     mock_stamp.assert_awaited_once_with(narrator_name)
     assert stats["narrators_processed"] == 1
@@ -406,12 +408,69 @@ async def test_expand_narrators_does_not_stamp_or_count_when_a_chunk_raises():
          patch.object(seeder, "_get_missing_asins", new=AsyncMock(return_value=[book_asin])), \
          patch.object(seeder, "get_books_by_asins", new=AsyncMock(side_effect=_raising_get_books)), \
          patch.object(seeder, "_stamp_narrator", new=AsyncMock()) as mock_stamp:
-        stats = await seeder._expand_narrators("us", delay=0)
+        stats = await seeder._expand_narrators(["us"], delay=0)
 
     mock_stamp.assert_not_awaited()
     assert stats["narrators_processed"] == 0
     assert stats["books_discovered"] == 1
     assert stats["errors"] == 0
+
+
+@pytest.mark.asyncio
+async def test_expand_narrators_expands_every_region_and_stamps_once():
+    """Narrator carries no region, so a stamp after the first region would
+    hide it from the rest: every region is searched, one stamp at the end."""
+    narrator_name = "Simon Vance"
+    get = AsyncMock(return_value=_narrator_products_response(narrator_name, "B0NARBOOK1"))
+
+    with patch(_AUDIBLE_CLIENT_GET, new=get), \
+         patch.object(seeder, "SessionFactory", return_value=_FakeSessionCM(_select_session([(narrator_name,)]))), \
+         patch.object(seeder, "_get_missing_asins", new=AsyncMock(return_value=[])), \
+         patch.object(seeder, "_stamp_narrator", new=AsyncMock()) as mock_stamp:
+        stats = await seeder._expand_narrators(["us", "uk"], delay=0)
+
+    assert [c.args[0] for c in get.await_args_list] == ["us", "uk"]
+    mock_stamp.assert_awaited_once_with(narrator_name)
+    assert stats["narrators_processed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_expand_narrators_single_region_makes_one_call_and_one_stamp():
+    narrator_name = "Simon Vance"
+    get = AsyncMock(return_value=_narrator_products_response(narrator_name, "B0NARBOOK1"))
+
+    with patch(_AUDIBLE_CLIENT_GET, new=get), \
+         patch.object(seeder, "SessionFactory", return_value=_FakeSessionCM(_select_session([(narrator_name,)]))), \
+         patch.object(seeder, "_get_missing_asins", new=AsyncMock(return_value=[])), \
+         patch.object(seeder, "_stamp_narrator", new=AsyncMock()) as mock_stamp:
+        await seeder._expand_narrators(["us"], delay=0)
+
+    assert get.await_count == 1
+    mock_stamp.assert_awaited_once_with(narrator_name)
+
+
+@pytest.mark.asyncio
+async def test_expand_narrators_leaves_narrator_stale_when_one_region_fails():
+    """A region that errors must not be stamped over, and must not stop the
+    other regions from being expanded."""
+    narrator_name = "Simon Vance"
+
+    async def _get(region, path, params):
+        if region == "us":
+            raise RuntimeError("boom")
+        return _narrator_products_response(narrator_name, "B0NARBOOK1")
+
+    get = AsyncMock(side_effect=_get)
+    with patch(_AUDIBLE_CLIENT_GET, new=get), \
+         patch.object(seeder, "SessionFactory", return_value=_FakeSessionCM(_select_session([(narrator_name,)]))), \
+         patch.object(seeder, "_get_missing_asins", new=AsyncMock(return_value=[])), \
+         patch.object(seeder, "_stamp_narrator", new=AsyncMock()) as mock_stamp:
+        stats = await seeder._expand_narrators(["us", "uk"], delay=0)
+
+    assert get.await_count == 2
+    mock_stamp.assert_not_awaited()
+    assert stats["narrators_processed"] == 0
+    assert stats["errors"] == 1
 
 
 # ============================================================
@@ -449,6 +508,31 @@ async def test_fetch_and_persist_returns_true_when_every_chunk_is_admitted():
         result = await seeder._fetch_and_persist(["B0ONE00001"], "us", delay=0)
 
     assert result is True
+
+
+@pytest.mark.asyncio
+async def test_fetch_and_persist_gathers_chapters_only_after_the_background_write_lands():
+    """_gather_chapters reads the chunk's books back from the database, so it
+    has to run after the background write commits, not alongside it."""
+    events = []
+
+    async def _write():
+        await asyncio.sleep(0.01)
+        events.append("written")
+
+    async def _get_books(asins, region, session, persist_outcome=None):
+        persist_queue._spawn(_write, len(asins))
+        return []
+
+    async def _gather(asins, region, delay):
+        events.append("gathered")
+
+    with patch.object(seeder, "SessionFactory", return_value=_FakeSessionCM(_passthrough_session())), \
+         patch.object(seeder, "get_books_by_asins", new=AsyncMock(side_effect=_get_books)), \
+         patch.object(seeder, "_gather_chapters", new=AsyncMock(side_effect=_gather)):
+        await seeder._fetch_and_persist(["B0ONE00001"], "us", delay=0)
+
+    assert events == ["written", "gathered"]
 
 
 @pytest.mark.asyncio

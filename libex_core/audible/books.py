@@ -456,6 +456,18 @@ def _parse_narrators(product: dict) -> list[dict]:
     return narrators
 
 
+def _text_or_none(value: Any) -> str | None:
+    """
+    A scalar the published shape carries as text, read as text or as nothing.
+
+    A string is returned as sent. Anything else (a number, a boolean, a list)
+    would fail the response model's validation and take the whole book with it,
+    so it reads as absent instead. The value is not lost: the key it came from
+    is not in _REPRODUCED_KEYS, so audibleExtras carries it as sent.
+    """
+    return value if isinstance(value, str) else None
+
+
 def _parse_genres(product: dict) -> list[dict]:
     """
     Extracts genre objects matching AudiMeta's GenreDto with type and betterType.
@@ -466,7 +478,8 @@ def _parse_genres(product: dict) -> list[dict]:
     A null inner ladder, a non-object ladder or rung and a name
     that is not a string are dropped rather than failing the book, and a
     dropped rung still counts toward the position of the ones after it, so a
-    later rung keeps its Genres or Tags type. category_ladders is not in
+    later rung keeps its Genres or Tags type. A rung id that is not a string
+    publishes as no asin. category_ladders is not in
     _REPRODUCED_KEYS, so everything dropped here still reaches audibleExtras.
     """
     genres = []
@@ -479,7 +492,7 @@ def _parse_genres(product: dict) -> list[dict]:
             if not isinstance(rung, dict):
                 continue
             name = rung.get("name")
-            asin = rung.get("id")
+            asin = _text_or_none(rung.get("id"))
             if isinstance(name, str) and name.strip() and name not in seen:
                 seen.add(name)
                 genre_type = "Genres" if rung_index == 0 else "Tags"
@@ -580,16 +593,17 @@ def _parse_series(product: dict, region: str) -> list[dict]:
     Extracts series objects matching AudiMeta's MinimalSeriesDto.
 
     A non-object entry is skipped rather than
-    failing the book; relationships is not in _REPRODUCED_KEYS, so the raw
+    failing the book, and an asin, title or sequence that is not a string
+    publishes as null; relationships is not in _REPRODUCED_KEYS, so the raw
     list still reaches audibleExtras.
     """
     series_list = []
     for item in _entries(product, "relationships"):
         if item.get("relationship_type") == "series":
             series_list.append({
-                "asin": item.get("asin"),
-                "name": item.get("title"),
-                "position": item.get("sequence"),
+                "asin": _text_or_none(item.get("asin")),
+                "name": _text_or_none(item.get("title")),
+                "position": _text_or_none(item.get("sequence")),
                 "region": region,
                 "updatedAt": None,
             })
@@ -1093,6 +1107,35 @@ async def normalize_products(products: list[dict], region: str) -> list[dict[str
     if len(products) < NORMALIZE_THREAD_THRESHOLD:
         return [normalize_product(p, region) for p in products]
     return await asyncio.to_thread(lambda: [normalize_product(p, region) for p in products])
+
+
+def _normalize_each(products: list[dict], region: str) -> list[dict[str, Any] | Exception]:
+    out: list[dict[str, Any] | Exception] = []
+    for p in products:
+        try:
+            out.append(normalize_product(p, region))
+        except Exception as e:
+            out.append(e)
+    return out
+
+
+async def normalize_products_each(
+    products: list[dict], region: str
+) -> list[dict[str, Any] | Exception]:
+    """
+    Normalizes each raw product on its own, so one product that raises costs
+    only itself. The result lines up with `products` by index: the normalized
+    dict where it normalized, the exception normalize_product raised where it
+    did not. A product raises deliberately when serving it would let a bad
+    answer overwrite stored data, so the caller owes that product's ASIN the
+    answer for a failed fetch (served from the store if held, otherwise
+    reported not fetched), never an absence.
+
+    Threading is as in normalize_products: one hop for the whole batch.
+    """
+    if len(products) < NORMALIZE_THREAD_THRESHOLD:
+        return _normalize_each(products, region)
+    return await asyncio.to_thread(_normalize_each, products, region)
 
 
 def is_placeholder_record(p: dict) -> bool:

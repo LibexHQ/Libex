@@ -63,8 +63,8 @@ ENVIRONMENT.
     DATABASE_URL               required. Same database the app uses, host libex-postgres.
     AUDIBLE_PROXY_URL          required. Hostname must contain "backfill".
     LOG_LEVEL                  INFO    DEBUG, INFO, WARNING or ERROR. WARNING+
-                                       drops the RESUME CURSOR line and the
-                                       429/5xx signals the ratchet depends on.
+                                       drops the 429/5xx signals the ratchet
+                                       depends on.
     AXIOM_TOKEN                (unset) set to also ship logs to Axiom.
     AXIOM_DATASET              libex
     LOG_RETENTION_DAYS         7       0 keeps everything.
@@ -753,11 +753,6 @@ def _advance_cursor(
     return (rows[-1][0], rows[-1][1]), wrapped, False
 
 
-def _format_cursor(cursor: _Cursor | None) -> str:
-    """The RESUME CURSOR log text: "ASIN:region", or "(start)" before page one."""
-    return "(start)" if cursor is None else f"{cursor[0]}:{cursor[1]}"
-
-
 async def _mark_checked(
     session: AsyncSession, asin: str, region: str, *, confirmed: bool = False
 ) -> None:
@@ -846,11 +841,10 @@ async def _store_chapters(
     offered_count = len(offered) if isinstance(offered, list) else 0
     if offered_count == 0 and stored_count > 0:
         # Deliberately unprefixed, where nearly every line in this script
-        # carries "Backfill:" and only the two RESUME CURSOR lines do not:
-        # upsert_track emits this exact message for the same event on
-        # the service path, and one string across both is what lets a search
-        # find every suppressed overwrite rather than half of them. The asin
-        # says which path it came from.
+        # carries "Backfill:": upsert_track emits this exact message for the
+        # same event on the service path, and one string across both is what
+        # lets a search find every suppressed overwrite rather than half of
+        # them. The asin says which path it came from.
         logger.warning(
             "Kept stored chapters over an empty response",
             extra={"asin": asin, "region": region, "stored_chapters": stored_count},
@@ -1222,7 +1216,6 @@ async def _run(limit: int | None) -> int:
                 )
                 continue
             cursor = next_cursor
-            logger.info(f"RESUME CURSOR: {_format_cursor(cursor)}")
 
             work = _select_work(rows, _now())
             if not work:
@@ -1274,7 +1267,6 @@ async def _run(limit: int | None) -> int:
                 "ratchet_tripped": run.ratchet.tripped,
             },
         )
-        logger.info(f"RESUME CURSOR: {_format_cursor(cursor)}")
 
     # 0: clean (finished the corpus, hit --limit, or a plain stop request).
     # 1: aborted -- a second 429/401/403 after the ratchet's floor, sustained

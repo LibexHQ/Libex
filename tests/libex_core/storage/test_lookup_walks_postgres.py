@@ -134,3 +134,15 @@ async def test_a_stored_author_list_is_the_live_list_field_for_field(store, monk
     stored = await get_author_books(_no_requests(), AUTHOR, store=store, max_age=DAY)
     assert stored.snapshot_at is not None
     assert_same_answer(live, stored)
+
+
+async def test_an_over_width_book_costs_only_itself_on_postgres(store):
+    from libex_core.lookup import _store
+
+    books = [{"asin": a, "title": a, "region": "us"} for a in ("B0PGOK0000", "B0PGOK0001")]
+    bad = {"asin": "B0PGBAD000", "title": "x", "region": "us", "sku": "s" * 21}
+
+    written, failed = await _store.persist_books(store, [books[0], bad, books[1]], "us")
+
+    assert failed is True
+    assert written == {"B0PGOK0000", "B0PGOK0001"}

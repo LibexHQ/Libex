@@ -2355,6 +2355,24 @@ async def test_get_distinct_genres_from_db_logs_structured_fields_on_dbapi_error
 
 
 @pytest.mark.asyncio
+async def test_get_author_from_db_failure_logs_structured_fields_not_the_message(caplog):
+    """Postgres puts row content in its error text, so the author read logs the
+    same structured fields as every other read and never the message itself."""
+    session = _session_raising(Exception("Failing row contains (B000APF21M, secret)"))
+
+    with caplog.at_level(logging.WARNING):
+        result = await get_author_from_db(session, "B000APF21M", "us")
+
+    assert result is None
+    matches = [r for r in caplog.records if "DB read failed for author" == r.getMessage()]
+    assert len(matches) == 1
+    record = matches[0]
+    assert record.error_type == "Exception"
+    assert not hasattr(record, "error")
+    assert "Failing row" not in str(vars(record))
+
+
+@pytest.mark.asyncio
 async def test_get_books_by_plan_from_db_returns_empty_list_on_exception():
     session = _session_raising(Exception("DB error"))
     result = await get_books_by_plan_from_db(session, "Plus Catalog")
@@ -2551,3 +2569,45 @@ async def test_single_record_readers_log_the_region_they_were_asked_for(caplog):
     records = [r for r in caplog.records if "DB read failed" in r.getMessage()]
     assert len(records) == 3
     assert all(r.region == "uk" and r.asin == "B0X" for r in records)
+
+
+@pytest.mark.asyncio
+async def test_failed_guarded_read_rolls_back_so_the_next_statement_runs():
+    """
+    A failed read leaves Postgres's transaction aborted, so the cache lookup
+    the services make next on the same session would fail too. Rolling back
+    in the reader is what lets that second statement through.
+    """
+    live = _cache_miss_result()
+    session = _TransactionAbortingSession(
+        first_error=Exception("statement timeout"), live_results=[live]
+    )
+
+    assert await get_books_from_db(session, ["B08G9PRS1K"]) == []
+    assert session.rollback_called is True
+    assert await session.execute("SELECT 1") is live
+
+
+@pytest.mark.asyncio
+async def test_failed_stored_genres_read_rolls_back_so_the_next_statement_runs():
+    live = _cache_miss_result()
+    session = _TransactionAbortingSession(
+        first_error=Exception("statement timeout"), live_results=[live]
+    )
+
+    assert await get_stored_genres(session, "us") == ([], None)
+    assert session.rollback_called is True
+    assert await session.execute("SELECT 1") is live
+
+
+@pytest.mark.asyncio
+async def test_failed_rollback_after_a_failed_read_is_logged_not_raised(caplog):
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=Exception("statement timeout"))
+    session.rollback = AsyncMock(side_effect=Exception("connection lost"))
+
+    with caplog.at_level(logging.WARNING):
+        assert await get_books_from_db(session, ["B08G9PRS1K"]) == []
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert "Rollback after failed DB read failed" in messages

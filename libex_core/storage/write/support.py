@@ -52,8 +52,13 @@ async def lock_asins(
     for a different region cannot see each other's uncommitted row, so both
     would decide they are first. Taking this lock first makes the second wait
     for the first to commit; its insert then sees the committed row and is
-    written as not primary. `kind` ("book" or "series") keeps the two tables'
-    ASINs from contending with each other.
+    written as not primary. `kind` ("book", "series", "author", "genre" or "narrator") keeps the
+    tables' keys from contending with each other. The keys are ASINs, except an
+    author's, which may be an ASIN or a region-scoped name ("us:Name"), and a
+    narrator's, which is the name. Taking them in sorted order is also what
+    lets a caller write its rows in the order Audible credited them without two
+    writers deadlocking. That is write order only; it does not fix the order
+    the rows are later served in.
 
     A no-op on SQLite, where a write transaction already excludes every other.
     """

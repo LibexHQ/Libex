@@ -301,6 +301,8 @@ def _track_pending_close(coro: Coroutine[Any, Any, None]) -> None:
 
 def validate_region(region: str) -> str:
     """Validates and normalises region string. Raises RegionException if invalid."""
+    if not isinstance(region, str):
+        raise RegionException(region)
     region = region.lower().strip()
     if region not in VALID_REGIONS:
         raise RegionException(region)

@@ -15,12 +15,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # Local
 from app.api.routes.errors import ERROR_RESPONSES
 from app.api.routes.large_response import build_large_list_response
-from app.api.routes.narrators.schemas import NarratorProfileResponse
 from app.core.middleware import valid_asin, valid_region
 from app.db.session import get_session
 from libex_core.audible.client import validate_region
 from libex_core.exceptions import ErrorCode, NotFoundException
-from libex_core.models import AuthorResponse, BookResponse, ChapterResponse, SeriesResponse
+from libex_core.models import (
+    AuthorResponse,
+    BookResponse,
+    ChapterResponse,
+    NarratorProfileResponse,
+    SeriesResponse,
+)
 from app.api.routes.db.badge import badge_router
 from app.api.routes.db.filters import (
     book_filters,
@@ -33,13 +38,13 @@ from app.api.routes.sort_params import (
     SortOrder,
 )
 from app.api.routes.release_params import ReleaseWindow
-from app.services.db.reader import (
+from app.services.db.reader import get_db_stats
+from app.services.db.stored import (
     get_author_books_from_db,
     get_author_from_db,
     get_book_from_db,
     get_books_by_plan_from_db,
     get_books_by_sku_from_db,
-    get_db_stats,
     get_coming_soon_from_db,
     get_distinct_genres_from_db,
     get_distinct_plans_from_db,
@@ -49,8 +54,8 @@ from app.services.db.reader import (
     get_series_from_db,
     get_track_from_db,
     get_vvab_books_from_db,
-    search_narrators_from_db,
     search_books_from_db,
+    search_narrators_from_db,
 )
 
 router = APIRouter(prefix="/db", tags=["Database"])
@@ -396,7 +401,7 @@ async def get_db_author_books(
         session,
         asin,
         region,
-        book_region=book_region,
+        book_region=validate_region(book_region) if book_region is not None else None,
         **filters.as_kwargs(),
         sort=sort.value if sort is not None else None,
         order=order.value,

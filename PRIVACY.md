@@ -57,8 +57,9 @@ anything you would rather not raise in public, use the email address in
 ### The request log
 
 Each request produces one log line with the fields below. The exceptions are
-`/health`, browser preflights, and requests that end in an unexpected error,
-all described further down.
+`/health` and browser preflights, both described further down. A request that
+ends in an unexpected error gets this line too, plus a separate error line
+([Errors](#errors)).
 
 | Field | Contents | Purpose |
 |---|---|---|
@@ -144,18 +145,22 @@ responses, with the two exceptions noted below.
   it is ignored.
 - It is not derived from anything about you, is never reused, and is not
   stored against anything else, so it cannot link your requests to each other.
-- If you quote it to me, I can find the matching log line. Normally that is the
-  request line above. If the request failed with an unexpected error, it is the
-  error line instead ([Errors](#errors)).
+- If you quote it to me, I can find the matching log line, the request line
+  above. If the request failed with an unexpected error, it also finds the
+  error line ([Errors](#errors)).
 - Two kinds of request carry no ID: one that fails before an ID is assigned,
   and a browser preflight. No ID is made up after the fact.
 
 ### Errors
 
-When a request fails in a way the code does not anticipate, no request line is
-written. Instead Libex logs an error line with the error message and stack
-trace, so the failure can be diagnosed. That line carries the request ID but
-none of the request-line fields: no path, query, user agent or host.
+When a request fails in a way the code does not anticipate, Libex logs two
+lines. One is the usual request line, with status `500` and `source`,
+`complete` and `incompleteReason` empty, since there is no response to read
+them from. The other is an error line with the error message and stack trace,
+so the failure can be diagnosed. The error line carries the request ID but
+none of the request-line fields: no path, query, user agent or host. The two
+share the request ID, so they can be read together. A failing `/health` check
+writes only the error line.
 
 If the error message quotes something you sent, as some library errors do with
 the input they were given, that text is in the error line. This is the only way
@@ -192,7 +197,7 @@ that can be searched by name. Some are worth describing individually:
   for a malformed author ASIN: that value and the author's name, both from
   Audible's catalogue, are logged, or `REDACTED` if either doesn't look like a
   short catalogue entry.
-- **Database failures.** These name the item being read in its own field
+- **Database failures.** Many name the item being read in its own field
   (`asin`, `author_asin`, `series_asin`, `plan_name` or `sku_group`), which
   repeats part of a path the request line already records. They include the
   database error code and the schema, table, column and constraint names. Most

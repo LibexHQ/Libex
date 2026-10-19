@@ -376,10 +376,10 @@ what a task actually did.
 - `not_in_libex` — Libex's stored copy has no record. This is what the `/db` routes and `/book/sku` return when they find nothing.
 - `not_on_audible` — Audible has no record.
 - `withheld` — Audible answered, but Libex deliberately doesn't return it (a placeholder record, for example).
-- `upstream_unavailable` — Audible couldn't answer right now and Libex has no stored copy to fall back on. Retry later.
+- `upstream_unavailable` — Audible couldn't answer right now and Libex has no stored copy to fall back on, or, on the routes that answer from the local database alone, the database couldn't be read. Retry later.
 - `invalid_request` — the request itself is malformed.
 
-An Audible outage is always a `503`, never a `404`. That response carries `Retry-After: 30` and `Cache-Control: no-store`, and its body adds `retryAfter` (seconds, matching the header): `{error, status_code: 503, code: "upstream_unavailable", retryAfter: 30}`. `retryAfter` appears on no other error.
+An Audible outage is always a `503`, never a `404`, and so is a database failure on a route that only reads the local database (the `/db` routes other than stats, and `/book/sku`); a record that isn't there is still a `404`. That response carries `Retry-After: 30` and `Cache-Control: no-store`, and its body adds `retryAfter` (seconds, matching the header): `{error, status_code: 503, code: "upstream_unavailable", retryAfter: 30}`. `retryAfter` appears on no other error.
 
 FastAPI's own request-validation errors (`422`) and unknown-route responses keep their `{detail}` body, and an unhandled server error (`500`) is still just `{error, status_code}`.
 
@@ -475,7 +475,7 @@ The same filter set is available on the other book-list DB endpoints too — `/d
 | `publisher` | string | ILIKE |
 | `copyright` | string | ILIKE |
 | `isbn` | string | ILIKE |
-| `region` | string | exact. Omitted: each ASIN appears once, as its first-stored record, and filters are tested against that record |
+| `region` | string | exact, any case; an unknown region is a `400`. Omitted: each ASIN appears once, as its first-stored record, and filters are tested against that record |
 | `language` | string | exact |
 | `book_format` | string | exact |
 | `content_type` | string | exact |
@@ -545,7 +545,7 @@ Copy `.env.example` to `.env` and configure:
 | `AXIOM_TOKEN` | — | Axiom API token (optional — leave blank for stdout only) |
 | `AXIOM_DATASET` | `libex` | Axiom dataset name |
 | `AUDIBLE_PROXY_URL` | blank | Optional, recommended. Proxy URL for outbound Audible requests only. Blank, the API calls Audible directly from your host and logs that at startup. Set, Audible sees the proxy's address instead of the one your API answers on. Only `http://` and `https://` are supported; any other scheme, or a value that doesn't parse as a proxy URL, refuses to start rather than send traffic out unproxied. API serving, the database, and logging are unaffected either way. See VPN / Egress below for how to supply one |
-| `SEED_SECRET` | — | PBKDF2 hash for the internal seed endpoint. Empty = endpoint disabled. Generate with `python -m app.api.routes.internal.router` |
+| `SEED_SECRET` | — | SHA-256 hex digest (64 characters) of the bearer token for the internal seed endpoint. Empty, or anything that isn't a 64-character hex digest (such as an old PBKDF2 hash), disables the endpoint. Generate with `python -m app.api.routes.internal.router` |
 
 `DATABASE_URL` is constructed automatically by docker-compose from `DB_NAME`, `DB_USER`, and `DB_PASSWORD`. Only set it manually if running outside of Docker — and whatever it points at must be PostgreSQL 14 or newer, see Self-Hosting Notes below.
 

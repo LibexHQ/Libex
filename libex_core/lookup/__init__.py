@@ -13,6 +13,9 @@ answers an outage from the stored copy where the hosted service does. Nothing
 about the storage is imported unless a store is passed, so this package works
 without the storage extra. The stored_* functions are the exception to the
 shape: they read a store alone, never ask Audible, and take the store first.
+The ingest_* functions are the other: they write the published models a Libex
+server returned into a store, under the same merge rules, without asking
+Audible and without confirming anything.
 
 With a store, get_series_books and get_author_books (by ASIN) also record each
 live walk as a stored list, and given max_age (a timedelta) answer from that
@@ -41,6 +44,7 @@ from libex_core.lookup.books import (
     get_books_with_nulls,
     get_chapters,
 )
+from libex_core.lookup.ingest import ingest_author, ingest_books, ingest_chapters, ingest_series
 from libex_core.lookup.releases import RELEASE_WINDOWS, categories, coming_soon, new_releases
 from libex_core.lookup.search import (
     abs_quick_search,
@@ -82,6 +86,10 @@ __all__ = [
     "get_chapters",
     "get_series",
     "get_series_books",
+    "ingest_author",
+    "ingest_books",
+    "ingest_chapters",
+    "ingest_series",
     "narrator_books",
     "new_releases",
     "quick_search",

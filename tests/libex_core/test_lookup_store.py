@@ -535,6 +535,10 @@ def test_without_a_store_the_lookups_load_and_run_without_the_storage_libraries(
 
 STORE_ONLY_READS = {
     "chapters_confirmed_at",
+    "ingest_author",
+    "ingest_books",
+    "ingest_chapters",
+    "ingest_series",
     "stored_author",
     "stored_book",
     "stored_books",

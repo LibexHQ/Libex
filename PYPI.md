@@ -184,6 +184,37 @@ if found is not None:
   if it never has. A date with no `stored_chapters` result means Audible
   confirmed the book has none.
 
+### Writing another Libex server's answers into the store
+
+If you fetch from a hosted or self-hosted Libex server instead of Audible,
+`libex_core.lookup` can write what it returned into a store you hold:
+`ingest_books`, `ingest_chapters`, `ingest_series` and `ingest_author`. Each
+takes the `LocalStore` first, the parsed `libex_core.models` response, and a
+required `region`, and writes under the same merge rules as the lookups: an
+existing value is never replaced by less and the relationships only grow.
+
+```python
+from libex_core.lookup import ingest_books
+from libex_core.models import BookResponse
+
+books = [BookResponse(**item) for item in payload]   # from the server's JSON
+written = await ingest_books(store, books, region="us")   # the ASINs committed
+```
+
+- Nothing is confirmed: `confirmed_at` and the chapters stamp are left as they
+  were, because a server's answer may itself have come from its cache.
+- A server's answer is settled for the wire, so a flag it cannot tell from
+  "unknown" is written as unknown, not as a fact. `explicit`, `hasPdf`,
+  `whisperSync` and `isVvab` as `false`, `isListenable` and `isBuyable` as
+  `true`, and an empty `plans` list store nothing over what is held. The
+  opposite values are kept. `isAvailable` is not read; it is the same
+  Audible value as `isBuyable`.
+- A record naming a different region than `region` raises `ValueError` before
+  anything is written. A write that fails is logged and left out of the
+  result, as for the lookups; a closed store raises `StoreClosed`.
+- `ingest_chapters` needs the book already stored for the region and skips an
+  empty listing. `ingest_author` writes the profile, not the author's books.
+
 ## Use it as a library
 
 ```python

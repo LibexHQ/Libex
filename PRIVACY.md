@@ -200,11 +200,12 @@ that can be searched by name. Some are worth describing individually:
 - **Database failures.** Many name the item being read in its own field
   (`asin`, `author_asin`, `series_asin`, `plan_name` or `sku_group`), which
   repeats part of a path the request line already records. They include the
-  database error code and the schema, table, column and constraint names. Most
-  of them leave out the database's own error text, which can quote stored
-  catalogue rows. One, a failed author read, still includes it. Database errors
-  never include the values of a query's parameters, so search text passed to
-  a database query cannot appear in them. Failure lines outside the database
+  database error code and the schema, table, column and constraint names. They
+  leave out the database's own error text, which can quote stored catalogue
+  rows, though a background job's catch-all failure line, which includes the
+  error's text, can still carry it. Database errors never include the values
+  of a query's parameters, so search text passed to a database query cannot
+  appear in them. Failure lines outside the database
   include the error's text.
 - **How Libex reaches Audible.** At startup, the API and each background job
   that calls Audible log whether they connect to Audible directly or through a

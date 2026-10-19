@@ -102,7 +102,7 @@ All response field names use **camelCase** because the response shapes derive fr
 
 Examples: `releaseDate`, `lengthMinutes`, `imageUrl`, `whisperSync`, `contentDeliveryType`, `isVvab`, `bookFormat`
 
-The response models (`BookResponse`, `BulkBookResponse`, `ChapterResponse`, `SeriesResponse`, `AuthorResponse`, `NarratorProfileResponse` and the objects nested in them), and the Audiobookshelf search response (`AbsSearchResponse`), live in `libex_core/models.py`. What stays in `app/api/routes/<resource>/schemas.py` is the search query parameters.
+The response models (`BookResponse`, `BulkBookResponse`, `ChapterResponse`, `SeriesResponse`, `AuthorResponse`, `NarratorProfileResponse` and the objects nested in them), and the Audiobookshelf search response (`AbsSearchResponse`), live in `libex_core/models.py`.
 
 ---
 

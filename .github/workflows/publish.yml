@@ -1,5 +1,17 @@
 name: Publish Docker Image
 
+# One publish at a time, and never cancel one that is running: a half-pushed
+# image is worse than a late one. The tip-of-main check below needs this, or
+# two runs could each see themselves as the tip and race to push `latest`.
+# `queue: max` keeps every waiting run instead of only the newest. With the
+# default, a third run arriving would cancel the one already waiting, and if
+# that one was the tip of main its sha tag never ships and `latest` stays
+# behind until the next merge.
+concurrency:
+  group: publish-main
+  cancel-in-progress: false
+  queue: max
+
 on:
   workflow_run:
     workflows: ["Tests"]
@@ -38,6 +50,31 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      # Tests runs can finish out of order, so a commit can reach this job after
+      # a newer one has already published. Moving `latest` back to it would
+      # roll the API back onto a schema the newer image already migrated past,
+      # and its startup `alembic upgrade head` cannot find that revision.
+      # Only the current tip of main gets `latest`; every commit gets its sha.
+      # GITHUB_SHA on workflow_run is the tip of main, not the commit tested,
+      # so the sha tag and revision label come from head_sha instead.
+      - name: Check whether this commit is still the tip of main
+        id: tip
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          tip=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [ -z "$tip" ]; then
+            echo "Could not read the tip of main" >&2
+            exit 1
+          fi
+          echo "short=${HEAD_SHA::7}" >> "$GITHUB_OUTPUT"
+          if [ "$tip" = "$HEAD_SHA" ]; then
+            echo "latest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "main has moved on to $tip, publishing $HEAD_SHA without latest"
+            echo "latest=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Generate image tags
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
@@ -46,8 +83,10 @@ jobs:
             ghcr.io/libexhq/libex
             sunbrolynk/libex
           tags: |
-            type=raw,value=latest,enable=true
-            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ steps.tip.outputs.latest == 'true' }}
+            type=raw,value=sha-${{ steps.tip.outputs.short }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.event.workflow_run.head_sha }}
 
       - name: Build and push
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0

@@ -8,7 +8,13 @@ on:
 
 jobs:
   build-and-push:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    # `branches: [main]` above matches the head branch NAME only, and Tests
+    # also runs on pull_request, so a fork PR from its own branch called main
+    # would get here too. Only a push to this repository's main may publish.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     permissions:
       contents: read

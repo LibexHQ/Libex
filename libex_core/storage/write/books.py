@@ -71,15 +71,28 @@ async def resolve_author_ids(
             author.get("image"),
         )
 
-    # Written in key order, not in the order the books name them: the author
-    # rows are unique-keyed inserts and a prolific author shared between two
-    # chunks is exactly where crossed orders meet. Which author a later book
-    # maps to is looked up in the memo afterwards, so the result is the same.
+    # Written in the order the books credit them: authors are served in id
+    # order, so the first credited has to get the lowest id. The advisory locks,
+    # taken in key order, are what keep two writers that meet the same authors
+    # in opposite orders from deadlocking. Both an author's asin and their
+    # region-scoped name are locked, because a null-asin row is upgraded in
+    # place and the same row is reached by either.
     distinct = {memo_key(author): author for data in books for author in data.get("authors", [])}
+    await lock_asins(
+        session,
+        "author",
+        [
+            key
+            for author in distinct.values()
+            for key in (author.get("asin"), f"{author.get('region')}:{author.get('name', '').strip()}")
+            if key
+        ],
+        dialect=dialect,
+    )
     memo: dict[tuple, int | None] = {}
-    for key in _key_order(distinct):
+    for key, author in distinct.items():
         memo[key] = await upsert_author(
-            session, distinct[key], dialect=dialect, conflict_errors=conflict_errors
+            session, author, dialect=dialect, conflict_errors=conflict_errors
         )
 
     ids_by_book: dict[tuple[str, str | None], list[int]] = {}
@@ -269,6 +282,6 @@ async def write_books(
                 })
 
     if author_books:
-        await session.execute(statements.author_book_insert, _in_key_order(author_books))
+        await session.execute(statements.author_book_insert, list(author_books.values()))
     if series_authors:
         await session.execute(statements.series_author_insert, _in_key_order(series_authors))

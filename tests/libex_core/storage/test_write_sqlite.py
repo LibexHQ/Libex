@@ -11,6 +11,7 @@ import pytest
 from sqlalchemy import event, insert, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.orm import selectinload
 
 from libex_core.storage.dialect import configure_sqlite
 from libex_core.storage.models import Author, Book
@@ -315,3 +316,30 @@ def test_a_json_document_nested_past_the_limit_is_refused():
         sqlite_json_merge(nested(MAX_JSON_DEPTH + 1), "{}")
     with pytest.raises(ValueError, match="nests deeper"):
         sqlite_json_merge(nested(100000), "{}")
+
+
+CREDITED = {
+    "asin": "B0CREDIT01",
+    "region": "us",
+    "title": "credited",
+    "authors": [{"asin": f"A{n}", "name": f"author {n}", "region": "us"} for n in ("Z", "M", "A")],
+}
+
+
+async def _served_authors(factory) -> list[str]:
+    async with factory() as session:
+        book = (
+            await session.execute(
+                select(Book)
+                .where(Book.asin == CREDITED["asin"])
+                .options(selectinload(Book.authors))
+            )
+        ).scalar_one()
+        return [a.name for a in book.authors]
+
+
+async def test_authors_are_served_in_the_order_audible_credited_them(factory):
+    async with factory() as session:
+        await write_books(session, [CREDITED])
+        await session.commit()
+    assert await _served_authors(factory) == ["author Z", "author M", "author A"]

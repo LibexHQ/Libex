@@ -10,9 +10,10 @@ import asyncio
 import pytest
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.orm import selectinload
 from sqlalchemy.pool import NullPool
 
-from libex_core.storage.models import Author, Genre, Narrator, author_book, book_genre, book_narrator
+from libex_core.storage.models import Author, Book, Genre, Narrator, author_book, book_genre, book_narrator
 from libex_core.storage.write.books import write_books
 from tests.libex_core.storage import _write_cases as cases
 
@@ -105,3 +106,30 @@ async def test_crossed_orders_do_not_deadlock(factory, kind, entity, link):
     async with factory() as session:
         assert await session.scalar(select(func.count()).select_from(entity)) == ROUNDS * WIDTH
         assert await session.scalar(select(func.count()).select_from(link)) == ROUNDS * WIDTH * 2
+
+
+CREDITED = {
+    "asin": "B0CREDIT01",
+    "region": "us",
+    "title": "credited",
+    "authors": [{"asin": f"A{n}", "name": f"author {n}", "region": "us"} for n in ("Z", "M", "A")],
+}
+
+
+async def _served_authors(factory) -> list[str]:
+    async with factory() as session:
+        book = (
+            await session.execute(
+                select(Book)
+                .where(Book.asin == CREDITED["asin"])
+                .options(selectinload(Book.authors))
+            )
+        ).scalar_one()
+        return [a.name for a in book.authors]
+
+
+async def test_authors_are_served_in_the_order_audible_credited_them(factory):
+    async with factory() as session:
+        await write_books(session, [CREDITED])
+        await session.commit()
+    assert await _served_authors(factory) == ["author Z", "author M", "author A"]

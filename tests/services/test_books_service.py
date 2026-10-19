@@ -2031,12 +2031,12 @@ async def test_fetch_and_store_chapters_skips_when_book_absent_in_region():
     mock_session = _session_with_book(False)
 
     with patch("app.services.audible.books.audible_get") as mock_get, \
-         patch("app.services.audible.books.upsert_track", new_callable=AsyncMock) as mock_upsert:
+         patch("app.services.audible.books.write_track", new_callable=AsyncMock, return_value=0) as mock_write:
         result = await fetch_and_store_chapters("B08G9PRS1K", "uk", mock_session)
 
     assert result == "none"
     mock_get.assert_not_called()
-    mock_upsert.assert_not_called()
+    mock_write.assert_not_called()
     mock_session.commit.assert_not_awaited()
 
 
@@ -2049,11 +2049,11 @@ async def test_fetch_and_store_chapters_stores_and_marks():
     data = {"content_metadata": {"chapter_info": {"chapters": []}}}
 
     with patch("app.services.audible.books.audible_get", return_value=data), \
-         patch("app.services.audible.books.upsert_track", new_callable=AsyncMock) as mock_upsert:
+         patch("app.services.audible.books.write_track", new_callable=AsyncMock, return_value=0) as mock_write:
         result = await fetch_and_store_chapters("B08G9PRS1K", "us", mock_session)
 
     assert result == "stored"
-    mock_upsert.assert_called_once()
+    mock_write.assert_called_once()
     # marked checked (the update + commit happened)
     mock_session.execute.assert_awaited()
     mock_session.commit.assert_awaited()
@@ -2068,11 +2068,11 @@ async def test_fetch_and_store_chapters_none_when_no_chapter_info():
     data = {"content_metadata": {}}
 
     with patch("app.services.audible.books.audible_get", return_value=data), \
-         patch("app.services.audible.books.upsert_track", new_callable=AsyncMock) as mock_upsert:
+         patch("app.services.audible.books.write_track", new_callable=AsyncMock, return_value=0) as mock_write:
         result = await fetch_and_store_chapters("B08G9PRS1K", "us", mock_session)
 
     assert result == "none"
-    mock_upsert.assert_not_called()
+    mock_write.assert_not_called()
     mock_session.commit.assert_awaited()  # still marked checked
 
 
@@ -2085,11 +2085,11 @@ async def test_fetch_and_store_chapters_not_found_marks_checked():
     mock_session = _session_with_book(True)
 
     with patch("app.services.audible.books.audible_get", side_effect=NotFoundException()), \
-         patch("app.services.audible.books.upsert_track", new_callable=AsyncMock) as mock_upsert:
+         patch("app.services.audible.books.write_track", new_callable=AsyncMock, return_value=0) as mock_write:
         result = await fetch_and_store_chapters("0008278482", "us", mock_session)
 
     assert result == "not_found"
-    mock_upsert.assert_not_called()
+    mock_write.assert_not_called()
     mock_session.commit.assert_awaited()  # marked so it isn't retried
 
 
@@ -2101,28 +2101,49 @@ async def test_fetch_and_store_chapters_error_does_not_mark():
     mock_session = _session_with_book(True)
 
     with patch("app.services.audible.books.audible_get", side_effect=Exception("Audible 500")), \
-         patch("app.services.audible.books.upsert_track", new_callable=AsyncMock) as mock_upsert:
+         patch("app.services.audible.books.write_track", new_callable=AsyncMock, return_value=0) as mock_write:
         result = await fetch_and_store_chapters("B08G9PRS1K", "us", mock_session)
 
     assert result == "error"
-    mock_upsert.assert_not_called()
+    mock_write.assert_not_called()
     mock_session.commit.assert_not_awaited()  # NOT marked
 
 
 @pytest.mark.asyncio
-async def test_fetch_and_store_chapters_never_raises_on_store_failure():
-    """A write failure is swallowed (returns 'error'), never propagates."""
+async def test_fetch_and_store_chapters_write_failure_leaves_book_unstamped():
+    """A failed chapter write returns 'error' and never stamps the book checked,
+    so a later pass retries it instead of retiring it with no chapters."""
     from app.services.audible.books import fetch_and_store_chapters
 
     mock_session = _session_with_book(True)
     data = {"content_metadata": {"chapter_info": {"chapters": []}}}
 
     with patch("app.services.audible.books.audible_get", return_value=data), \
-         patch("app.services.audible.books.upsert_track", new_callable=AsyncMock, side_effect=Exception("DB write failed")):
+         patch("app.services.audible.books.write_track", new_callable=AsyncMock, side_effect=Exception("DB write failed")), \
+         patch("app.services.audible.books._mark_chapters_checked", new_callable=AsyncMock) as mark:
         result = await fetch_and_store_chapters("B08G9PRS1K", "us", mock_session)
 
     assert result == "error"
+    mark.assert_not_awaited()
+    mock_session.commit.assert_not_awaited()
     mock_session.rollback.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fetch_and_store_chapters_book_gone_is_none_and_unstamped():
+    """write_track returning None (no book row for the region) stamps nothing."""
+    from app.services.audible.books import fetch_and_store_chapters
+
+    mock_session = _session_with_book(True)
+    data = {"content_metadata": {"chapter_info": {"chapters": []}}}
+
+    with patch("app.services.audible.books.audible_get", return_value=data), \
+         patch("app.services.audible.books.write_track", new_callable=AsyncMock, return_value=None), \
+         patch("app.services.audible.books._mark_chapters_checked", new_callable=AsyncMock) as mark:
+        result = await fetch_and_store_chapters("B08G9PRS1K", "us", mock_session)
+
+    assert result == "none"
+    mark.assert_not_awaited()
 
 
 def test_the_unreadable_plans_warning_fires_on_a_freshly_booted_process():
@@ -3026,10 +3047,10 @@ async def test_fetch_and_store_chapters_writes_and_stamps_for_the_requests_regio
     data = {"content_metadata": {"chapter_info": {"chapters": []}}}
 
     with patch("app.services.audible.books.audible_get", return_value=data), \
-         patch("app.services.audible.books.upsert_track", new_callable=AsyncMock) as mock_upsert:
+         patch("app.services.audible.books.write_track", new_callable=AsyncMock, return_value=0) as mock_write:
         await fetch_and_store_chapters("B08G9PRS1K", "uk", session)
 
-    assert mock_upsert.await_args.kwargs == {"region": "uk", "confirm": True}
+    assert mock_write.await_args.kwargs == {"region": "uk", "confirm": True}
     stamp = session.execute.await_args.args[0]
     compiled = stamp.compile(dialect=postgresql.dialect())
     assert "books.region = " in str(compiled)

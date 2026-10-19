@@ -71,6 +71,7 @@ from libex_core.audible.client import (
 )
 from libex_core.exceptions import ErrorCode, NotFoundException
 from libex_core.storage import merge
+from libex_core.storage.write.entities import write_track
 from app.core.logging import get_logger
 from app.core.response_headers import (
     REASON_HYDRATION_DEADLINE,
@@ -94,7 +95,6 @@ from app.services.db.persist_queue import (
     persist_books_background,
     persist_track_background,
 )
-from app.services.db.writer import upsert_track
 from app.services.db.reader import get_books_from_db, get_track_from_db
 
 logger = get_logger()
@@ -915,7 +915,26 @@ async def fetch_and_store_chapters(
 
     try:
         chapters = normalize_chapters(data, asin, region)
-        await upsert_track(session, asin, chapters, region=region, confirm=True)
+        # write_track raises on failure, where upsert_track would swallow it and
+        # leave this to stamp the book as checked with no chapters saved. It
+        # does not commit; the commit here is what ends the transaction that
+        # also carries chapters_confirmed_at.
+        stored_count = await write_track(
+            session, asin, chapters, region=region, confirm=True
+        )
+        await session.commit()
+        if stored_count is None:
+            logger.info(
+                "Chapters not stored: the book is not stored for the region",
+                extra={"asin": asin, "region": region},
+            )
+            return "none"
+        offered = chapters.get("chapters") if isinstance(chapters, dict) else None
+        if not offered and stored_count > 0:
+            logger.warning(
+                "Kept stored chapters over an empty response",
+                extra={"asin": asin, "region": region, "stored_chapters": stored_count},
+            )
         await _mark_chapters_checked(session, asin, region)
         return "stored"
     except Exception as e:

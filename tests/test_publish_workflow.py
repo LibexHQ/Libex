@@ -7,8 +7,10 @@ push the fork's commit to both registries as `latest`. These checks hold the
 guard in place.
 """
 
+# Standard library
 from pathlib import Path
 
+# Third party
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent

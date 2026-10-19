@@ -388,6 +388,56 @@ def test_parse_series_returns_empty_for_no_relationships():
     assert _parse_series({}, "us") == []
 
 
+_NON_TEXT = [3, 2.5, True, ["a"], {"a": 1}]
+
+
+@pytest.mark.parametrize("field,published", [
+    ("asin", "asin"), ("title", "name"), ("sequence", "position"),
+])
+@pytest.mark.parametrize("bad", _NON_TEXT)
+def test_parse_series_non_text_scalar_publishes_null(field, published, bad):
+    """A series asin, title or sequence that is not text reads as null."""
+    entry = {"relationship_type": "series", "asin": "B00SERIES1", "title": "Dune", "sequence": "1"}
+    entry[field] = bad
+    result = _parse_series({"relationships": [entry]}, "us")
+    assert len(result) == 1
+    assert result[0][published] is None
+    intact = {"asin": "B00SERIES1", "name": "Dune", "position": "1"}
+    intact.pop(published)
+    assert {k: result[0][k] for k in intact} == intact
+
+
+@pytest.mark.parametrize("bad", _NON_TEXT)
+def test_series_non_text_sequence_validates_and_raw_stays_in_extras(bad):
+    """The series entry validates, and the value as sent stays in audibleExtras."""
+    from libex_core.models import SeriesRefResponse
+    entry = {"relationship_type": "series", "asin": "B00SERIES1", "title": "Dune", "sequence": bad}
+    product = {"asin": "B0SERTEST01", "title": "T", "relationships": [entry]}
+    book = _normalize_product(product, "us")
+    SeriesRefResponse.model_validate(book["series"][0])
+    assert book["series"][0]["position"] is None
+    assert book["audibleExtras"]["relationships"][0]["sequence"] == bad
+
+
+def test_parse_series_text_scalars_unchanged():
+    """Text, including empty and numeric-looking text, publishes as sent."""
+    entry = {"relationship_type": "series", "asin": "B00SERIES1", "title": "", "sequence": "1.5"}
+    result = _parse_series({"relationships": [entry]}, "us")
+    assert result[0]["name"] == ""
+    assert result[0]["position"] == "1.5"
+
+
+@pytest.mark.parametrize("bad", _NON_TEXT)
+def test_parse_genres_non_text_id_publishes_null_asin(bad):
+    """A genre rung id that is not text reads as no asin; the rung is kept."""
+    product = {"category_ladders": [{"ladder": [{"id": bad, "name": "Fantasy"}]}]}
+    result = _parse_genres(product)
+    assert result == [{
+        "asin": None, "name": "Fantasy", "type": "Genres",
+        "betterType": "genre", "updatedAt": None,
+    }]
+
+
 # ============================================================
 # GENRE TESTS
 # ============================================================

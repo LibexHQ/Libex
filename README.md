@@ -9,6 +9,7 @@
 [![Tests](https://github.com/LibexHQ/Libex/actions/workflows/tests.yml/badge.svg)](https://github.com/LibexHQ/Libex/actions/workflows/tests.yml)
 [![GHCR](https://img.shields.io/badge/ghcr.io-libexhq%2Flibex-blue)](https://github.com/LibexHQ/Libex/pkgs/container/libex)
 [![Docker Hub](https://img.shields.io/badge/docker%20hub-sunbrolynk%2Flibex-blue)](https://hub.docker.com/r/sunbrolynk/libex)
+[![Status](https://img.shields.io/endpoint?url=https%3A%2F%2Fstatus.libexdb.com%2Fapi%2Fbadge%3Fid%3Dapi%26label%3Dapi%26up%3Donline%26down%3Ddown)](https://status.libexdb.com)
 
 [![Books](https://libexdb.com/db/stats/badge/books.svg)](https://libexdb.com/db/stats)
 [![Books with Chapters](https://libexdb.com/db/stats/badge/booksWithChapters.svg)](https://libexdb.com/db/stats)

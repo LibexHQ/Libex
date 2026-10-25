@@ -35,8 +35,8 @@ restarting. For a supervised trial instead:
       python -m scripts.backfill_chapters --limit 5
 
 Stop with `docker stop libex-chapter-backfill` -- it finishes in-flight
-books, commits them, and exits cleanly (exit 0; exit 1 means the ratchet or
-the NONE-rate guard aborted the run). A plain `docker stop` reads the
+books, commits them, and exits cleanly (exit 0, unless a book errored; see
+the exit codes below). A plain `docker stop` reads the
 stack's own stop_grace_period (300s). The stop waits on every in-flight book
 with no deadline of its own, so that grace has to exceed the slowest one
 book can take; the books run side by side, since neither the Audible
@@ -80,6 +80,12 @@ ENVIRONMENT.
     BACKFILL_ERROR_MIN_SAMPLES      10     samples required before that rate can trip.
     BACKFILL_ERROR_COOLDOWN         1800.0 cooldown length (s); also the ratchet's own.
     BACKFILL_PROGRESS_EVERY         50     books between progress lines.
+
+Exit codes: 0 nothing errored, 1 aborted (a second 429/401/403 after the
+ratchet's floor, sustained 5xx, or a NONE-rate spike), 2 finished without
+aborting but at least one book errored (a fetch or write failure) and was
+left unstamped for the next run. Books Audible has no chapters for do not
+count. The final "Backfill: stopped" line carries the error total.
 """
 
 # Standard library
@@ -1268,10 +1274,14 @@ async def _run(limit: int | None) -> int:
             },
         )
 
-    # 0: clean (finished the corpus, hit --limit, or a plain stop request).
+    # 0: nothing errored (finished the corpus, hit --limit, or a stop request).
     # 1: aborted -- a second 429/401/403 after the ratchet's floor, sustained
     # 5xx, or a NONE-rate spike.
-    return 1 if run.abort_reason else 0
+    # 2: not aborted, but a book errored and was left unstamped. Only ERROR
+    # outcomes count: no-chapters, 404 and permanent-400 answers are settled.
+    if run.abort_reason:
+        return 1
+    return 2 if run.errors else 0
 
 
 def main() -> None:

@@ -1246,7 +1246,7 @@ def test_run_calls_handle_pending_pauses_both_inside_and_after_the_page_loop():
 # concurrency machinery is allowed to see
 # ============================================================
 
-async def _drive_run(*pages, limit=None):
+async def _drive_run(*pages, limit=None, outcome=_Outcome.NOT_FOUND):
     """
     Drives the real _run over the canned pages given (then two empty ones, so
     the wrap-around ends the walk) and hands back the run's own state objects
@@ -1281,7 +1281,7 @@ async def _drive_run(*pages, limit=None):
 
     async def _record(_session, asin, region):
         seen.append((asin, region))
-        return _Outcome.NOT_FOUND, False, False, 0.01
+        return outcome, False, False, 0.01
 
     def _make_run():
         captured["run"] = real_run_cls()
@@ -1336,6 +1336,20 @@ async def test_run_dispatches_a_re_admitted_book_end_to_end(restore_audible_tran
     assert run.not_found == 2
     assert run.errors == 0
     assert exit_code == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome,expected", [
+    (_Outcome.ERROR, 2),
+    (_Outcome.NONE, 0),
+    (_Outcome.NOT_FOUND, 0),
+    (_Outcome.PERMANENT, 0),
+    (_Outcome.STORED, 0),
+])
+async def test_run_exits_2_only_when_a_book_errored(restore_audible_transport, outcome, expected):
+    page = [("B00EXITCODE1", "us", None, OUT)]
+    _run_state, _ramp, _gate, _seen, exit_code = await _drive_run(page, outcome=outcome)
+    assert exit_code == expected
 
 
 @pytest.mark.asyncio

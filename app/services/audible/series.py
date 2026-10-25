@@ -26,6 +26,7 @@ from libex_core.audible.series import (
     normalize_series,
 )
 from libex_core.exceptions import AudibleAPIException, NotFoundException
+from libex_core.lookup._store import like_literal
 from app.core.logging import get_logger
 from app.core.response_headers import ResponseFacts, SOURCE_AUDIBLE, SOURCE_CACHE, SOURCE_DB, record_source
 
@@ -250,7 +251,7 @@ async def search_series(
             )
 
         # Also check DB for additional matches not found via Audible
-        db_results = await search_series_from_db(session, name, region=region)
+        db_results = await search_series_from_db(session, like_literal(name), region=region)
         for db_series in db_results:
             db_asin = db_series.get("asin")
             if db_asin and db_asin not in seen_asins:

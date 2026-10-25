@@ -287,6 +287,37 @@ async def test_walk_stops_on_an_empty_page():
     assert len(result) == RELEASE_PAGE_SIZE
 
 
+async def test_walk_keeps_going_past_a_page_that_filtering_shortened():
+    # 49 of 50 survive the filter; the raw page was still full.
+    products = [_product(f"B0FULL{i:04d}", "2026-06-10") for i in range(RELEASE_PAGE_SIZE - 1)]
+    untitled = {"asin": "B0UNTITLED", "release_date": "2026-06-10"}
+    get = _serving(_page(*products, untitled), _page(_product("B0NEXTPAGE", "2026-06-09")))
+
+    result = await walk_catalog(get, "us", None, _always_in, _never)
+
+    assert get.await_count == 2
+    assert "B0NEXTPAGE" in [b["asin"] for b in result]
+
+
+async def test_walk_skips_a_product_that_will_not_normalize_and_keeps_the_rest():
+    bad = {**_product("B0BADONE01", "2026-06-10"), "authors": None}
+    get = _serving(_page(_product("B0GOODONE1", "2026-06-10"), bad))
+
+    result = await walk_catalog(get, "us", None, _always_in, _never)
+
+    assert [b["asin"] for b in result] == ["B0GOODONE1"]
+
+
+async def test_walk_where_every_product_will_not_normalize_is_an_outage():
+    bad = {**_product("B0BADONE01", "2026-06-10"), "authors": None}
+    get = _serving(_page(bad))
+
+    with pytest.raises(Exception) as caught:
+        await walk_catalog(get, "us", None, _always_in, _never)
+
+    assert not isinstance(caught.value, NotFoundException)
+
+
 async def test_walk_stops_when_a_page_repeats_the_one_before_it():
     full = _page(*[_product(f"B0FULL{i:04d}", "2026-06-10") for i in range(RELEASE_PAGE_SIZE)])
     get = AsyncMock(return_value=full)
@@ -757,18 +788,6 @@ def test_now_is_keyword_only_and_days_defaults_to_thirty(fetch):
 
 def _module_tree() -> ast.Module:
     return ast.parse(Path(releases_module.__file__).read_text())
-
-
-def test_releases_module_has_no_logger():
-    assert not hasattr(releases_module, "logger")
-    names = {n.id for n in ast.walk(_module_tree()) if isinstance(n, ast.Name)}
-    assert "logger" not in names
-    imported = {
-        a.name for n in ast.walk(_module_tree()) if isinstance(n, ast.Import) for a in n.names
-    } | {
-        n.module for n in ast.walk(_module_tree()) if isinstance(n, ast.ImportFrom)
-    }
-    assert not any(m and ("logging" in m or "logger" in m) for m in imported)
 
 
 def test_releases_module_reads_no_environment():

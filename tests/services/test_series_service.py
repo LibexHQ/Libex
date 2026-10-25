@@ -637,3 +637,17 @@ async def test_search_series_stored_leg_never_surfaces_another_regions_series():
 
     assert [c.kwargs["region"] for c in reader.await_args_list] == ["uk", "us"]
     assert [s["asin"] for s in us] == ["B00SERIES1"]
+
+
+@pytest.mark.asyncio
+async def test_search_series_reads_the_stored_search_as_plain_text():
+    from app.services.audible.series import search_series
+    from libex_core.exceptions import NotFoundException
+
+    mock_db = AsyncMock(return_value=[])
+    with patch("app.services.audible.series.audible_get", new=AsyncMock(return_value={"products": []})), \
+         patch("app.services.audible.series.search_series_from_db", new=mock_db):
+        with pytest.raises(NotFoundException):
+            await search_series("50%_off", "us", AsyncMock())
+
+    assert mock_db.await_args.args[1] == "50\\%\\_off"

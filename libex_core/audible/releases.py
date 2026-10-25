@@ -260,7 +260,13 @@ async def walk_catalog(
     its near edge. The walk ends at the first book that satisfies
     should_stop, when a page repeats the one before it (Audible's wall:
     once it runs out it repeats the last page), or when a page comes back
-    short or empty. Books with no parseable date are skipped.
+    short or empty. Those page checks use the raw page Audible sent, before
+    filter_products, so a full page that filtering shrinks or empties does
+    not end the walk. Books with no parseable date are skipped.
+
+    A product that fails normalization is skipped and logged, so one
+    malformed product cannot lose the window. Only when every product walked
+    failed is the first error raised, since then nothing was answered.
 
     A NotFoundException or AudibleAPIException from `get` propagates as it is.
     """
@@ -283,10 +289,12 @@ async def walk_catalog(
         data = await get(region, SEARCH_PATH, params)
         raw_page = data.get("products", [])
         products = filter_products(raw_page)
-        if not products:
+        if not raw_page:
             break
 
-        page_asins = [p.get("asin") for p in products]
+        # Compared on the raw page: Audible repeats its last raw page at the
+        # wall, and two filtered-empty pages must not read as a repeat.
+        page_asins = [p.get("asin") for p in raw_page]
         if page_asins == prev_asins:
             break
         prev_asins = page_asins

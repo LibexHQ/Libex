@@ -42,6 +42,7 @@ from libex_core.audible.releases import (
 )
 from libex_core.audible.search import SEARCH_PATH
 from libex_core.exceptions import AudibleAPIException, NotFoundException, RegionException
+from libex_core.log_safety import safe_asin_for_log
 from libex_core.models import CategoryAncestor, CategoryNode, FlatCategoryNode
 
 BAD_REGIONS = ["xx", "", "usa", "mars"]
@@ -306,6 +307,32 @@ async def test_walk_skips_a_product_that_will_not_normalize_and_keeps_the_rest()
     result = await walk_catalog(get, "us", None, _always_in, _never)
 
     assert [b["asin"] for b in result] == ["B0GOODONE1"]
+
+
+async def test_walk_logs_the_products_it_skipped(caplog):
+    bad = {**_product("B0BADONE01", "2026-06-10"), "authors": None}
+    get = _serving(_page(_product("B0GOODONE1", "2026-06-10"), bad))
+
+    with caplog.at_level("WARNING"):
+        await walk_catalog(get, "us", None, _always_in, _never)
+
+    rec = next(r for r in caplog.records if r.getMessage() == "Catalog walk could not normalize products")
+    assert rec.region == "us"
+    assert rec.skipped == 1
+    assert rec.skipped_asins == safe_asin_for_log("B0BADONE01")
+    assert rec.results == 2
+    assert rec.error_type
+
+
+async def test_walk_keeps_going_past_a_full_page_that_filtering_empties():
+    untitled = [{"asin": f"B0NONE{i:04d}", "release_date": "2026-06-10"} for i in range(RELEASE_PAGE_SIZE)]
+    more = [{"asin": f"B0MORE{i:04d}", "release_date": "2026-06-10"} for i in range(RELEASE_PAGE_SIZE)]
+    get = _serving(_page(*untitled), _page(*more), _page(_product("B0NEXTPAGE", "2026-06-09")))
+
+    result = await walk_catalog(get, "us", None, _always_in, _never)
+
+    assert get.await_count == 3
+    assert [b["asin"] for b in result] == ["B0NEXTPAGE"]
 
 
 async def test_walk_where_every_product_will_not_normalize_is_an_outage():

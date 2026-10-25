@@ -85,6 +85,20 @@ def optional_region(
     return validate_region(region) if region is not None else None
 
 
+_LIST_REGION_DESCRIPTION = (
+    "Audible region code. Validated, so an unknown region is a 400, but not "
+    "used to filter: plans and genres are not stored per region, so the list "
+    "always spans every region."
+)
+
+
+def accepted_list_region(
+    region: Annotated[str | None, Query(description=_LIST_REGION_DESCRIPTION)] = None,
+) -> str | None:
+    """Validated region for a list that is not region-scoped; the value is unused."""
+    return validate_region(region) if region is not None else None
+
+
 class StatsResponse(BaseModel):
     """
     Counts of books, authors, narrators, series, and books with chapters.
@@ -206,7 +220,7 @@ async def search_db_books(
 
 @router.get("/plans", response_model=list[str], responses=ERROR_RESPONSES)
 async def get_db_plans(
-    _region: str | None = Depends(optional_region),
+    _region: str | None = Depends(accepted_list_region),
     session: AsyncSession = Depends(get_session),
 ) -> list[str]:
     """Get all distinct Audible plan names from the local DB."""
@@ -219,7 +233,7 @@ async def get_db_plans(
 @router.get("/genres", response_model=list[str], responses=ERROR_RESPONSES)
 async def get_db_genres(
     search: Annotated[str | None, Query(description="Filter genre names by partial match")] = None,
-    _region: str | None = Depends(optional_region),
+    _region: str | None = Depends(accepted_list_region),
     session: AsyncSession = Depends(get_session),
 ) -> list[str]:
     """Get all distinct genre and tag names from the local DB.

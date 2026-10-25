@@ -60,3 +60,13 @@ async def test_omitted_region_is_unchanged(async_client, url, reader):
     assert response.status_code == 200
     assert response.json() == ["a"]
     mock.assert_called_once()
+
+
+@pytest.mark.parametrize("url,_reader", _ROUTES)
+def test_openapi_describes_region_as_validated_not_filtering(url, _reader):
+    params = app.openapi()["paths"][url]["get"]["parameters"]
+    description = next(p for p in params if p["name"] == "region")["description"]
+    assert "unknown region is a 400" in description
+    assert "always spans every region" in description
+    assert "first-stored" not in description
+    assert "NOT_IN_LIBEX" not in description

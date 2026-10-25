@@ -206,6 +206,7 @@ async def search_db_books(
 
 @router.get("/plans", response_model=list[str], responses=ERROR_RESPONSES)
 async def get_db_plans(
+    _region: str | None = Depends(optional_region),
     session: AsyncSession = Depends(get_session),
 ) -> list[str]:
     """Get all distinct Audible plan names from the local DB."""
@@ -218,6 +219,7 @@ async def get_db_plans(
 @router.get("/genres", response_model=list[str], responses=ERROR_RESPONSES)
 async def get_db_genres(
     search: Annotated[str | None, Query(description="Filter genre names by partial match")] = None,
+    _region: str | None = Depends(optional_region),
     session: AsyncSession = Depends(get_session),
 ) -> list[str]:
     """Get all distinct genre and tag names from the local DB.

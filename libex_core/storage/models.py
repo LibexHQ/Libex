@@ -167,14 +167,20 @@ class Book(Base):
     )
 
     # Relationships
+    # Served in credit order. Links written before position existed are NULL
+    # and follow the positioned ones, tie-broken by the link's own key so the
+    # order is still deterministic.
     authors: Mapped[list["Author"]] = relationship(
-        "Author", secondary="author_book", back_populates="books"
+        "Author", secondary="author_book", back_populates="books",
+        order_by=lambda: (author_book.c.position.asc().nulls_last(), author_book.c.author_id),
     )
     narrators: Mapped[list["Narrator"]] = relationship(
-        "Narrator", secondary="book_narrator", back_populates="books"
+        "Narrator", secondary="book_narrator", back_populates="books",
+        order_by=lambda: (book_narrator.c.position.asc().nulls_last(), book_narrator.c.narrator_name),
     )
     genres: Mapped[list["Genre"]] = relationship(
-        "Genre", secondary="book_genre", back_populates="books"
+        "Genre", secondary="book_genre", back_populates="books",
+        order_by=lambda: (book_genre.c.position.asc().nulls_last(), book_genre.c.genre_asin),
     )
     series: Mapped[list["Series"]] = relationship(
         "Series", secondary="book_series", back_populates="books"
@@ -471,6 +477,7 @@ author_book = Table(
     Column("author_id", Integer, ForeignKey("authors.id", ondelete="CASCADE"), nullable=False),
     Column("book_asin", String(12), nullable=False),
     Column("book_region", REGION_ENUM, nullable=False),
+    Column("position", Integer, nullable=True),
     ForeignKeyConstraint(
         ["book_asin", "book_region"], ["books.asin", "books.region"], ondelete="CASCADE"
     ),
@@ -484,6 +491,7 @@ book_narrator = Table(
     Column("narrator_name", Text, ForeignKey("narrators.name", ondelete="CASCADE"), nullable=False),
     Column("book_asin", String(12), nullable=False),
     Column("book_region", REGION_ENUM, nullable=False),
+    Column("position", Integer, nullable=True),
     ForeignKeyConstraint(
         ["book_asin", "book_region"], ["books.asin", "books.region"], ondelete="CASCADE"
     ),
@@ -518,6 +526,7 @@ book_genre = Table(
     Column("book_asin", String(12), nullable=False),
     Column("book_region", REGION_ENUM, nullable=False),
     Column("genre_asin", String(12), ForeignKey("genres.asin", ondelete="CASCADE"), nullable=False),
+    Column("position", Integer, nullable=True),
     ForeignKeyConstraint(
         ["book_asin", "book_region"], ["books.asin", "books.region"], ondelete="CASCADE"
     ),

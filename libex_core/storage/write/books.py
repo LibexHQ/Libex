@@ -71,9 +71,8 @@ async def resolve_author_ids(
             author.get("image"),
         )
 
-    # Written in the order the books credit them, so the first credited gets the
-    # lowest id. Served order is not guaranteed: the relationship has no
-    # order_by, so it follows the query plan. The advisory locks, taken in key
+    # Written in the order the books credit them. The author_book position, not
+    # the id, is what fixes the served order. The advisory locks, taken in key
     # order, are what keep two writers that meet the same authors in opposite
     # orders from deadlocking. Both an author's asin and their
     # region-scoped name are locked, because a null-asin row is upgraded in
@@ -117,6 +116,13 @@ async def resolve_author_ids(
         merged.extend(i for i in ids if i not in merged)
 
     return ids_by_book
+
+
+def _next_position(counts: dict[tuple, int], key: tuple) -> int:
+    """The next free place in one book's credited list, counting from zero."""
+    position = counts.get(key, 0)
+    counts[key] = position + 1
+    return position
 
 
 async def write_books(
@@ -177,6 +183,8 @@ async def write_books(
     book_genres: dict[tuple, dict] = {}
     narrators: dict[str, dict] = {}
     book_narrators: dict[tuple, dict] = {}
+    genre_counts: dict[tuple, int] = {}
+    narrator_counts: dict[tuple, int] = {}
     series: dict[tuple, dict] = {}
     book_series_links: dict[tuple, dict] = {}
 
@@ -196,18 +204,22 @@ async def write_books(
                 "created_at": now,
                 "updated_at": now,
             })
-            book_genres.setdefault((asin, region, g_asin), {
-                "book_asin": asin, "book_region": region, "genre_asin": g_asin,
-            })
+            if (asin, region, g_asin) not in book_genres:
+                book_genres[(asin, region, g_asin)] = {
+                    "book_asin": asin, "book_region": region, "genre_asin": g_asin,
+                    "position": _next_position(genre_counts, (asin, region)),
+                }
 
         for narrator in data.get("narrators", []):
             name = (narrator.get("name") or "").strip()
             if not name:
                 continue
             narrators.setdefault(name, {"name": name, "created_at": now, "updated_at": now})
-            book_narrators.setdefault((asin, region, name), {
-                "book_asin": asin, "book_region": region, "narrator_name": name,
-            })
+            if (asin, region, name) not in book_narrators:
+                book_narrators[(asin, region, name)] = {
+                    "book_asin": asin, "book_region": region, "narrator_name": name,
+                    "position": _next_position(narrator_counts, (asin, region)),
+                }
 
         for entry in data.get("series", []):
             params = series_params(entry, now, region)
@@ -240,10 +252,9 @@ async def write_books(
                 "position": entry.get("position"),
             }
 
-    # Written in the order the books credit them. Served order for genres and
-    # narrators follows the query plan and is not guaranteed (the links carry no
-    # position column). The advisory locks, taken in key order, are what keep
-    # two writers that meet the same genres or narrators in opposite orders
+    # Each link carries its index in the book's credited list, which is the
+    # order it is served in. The advisory locks, taken in key order, are what
+    # keep two writers that meet the same genres or narrators in opposite orders
     # from deadlocking.
     if genres:
         await lock_asins(session, "genre", list(genres), dialect=dialect)
@@ -274,9 +285,10 @@ async def write_books(
         asin = data["asin"]
         region = data.get("region")
         author_ids = ids_by_book.get((asin, region), [])
-        for author_id in author_ids:
+        for position, author_id in enumerate(author_ids):
             author_books.setdefault((author_id, asin, region), {
                 "author_id": author_id, "book_asin": asin, "book_region": region,
+                "position": position,
             })
         for entry in data.get("series", []):
             s_asin = entry.get("asin")

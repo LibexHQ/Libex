@@ -24,7 +24,7 @@ from libex_core.storage.upgrade import _config, set_foreign_keys, upgrade_to_hea
 
 BEFORE = "438dbe70d041"
 AFTER = "a4d91f7c3b26"
-HEAD = "9d2f6b4e8a17"
+HEAD = "6e1b4c9a2d57"
 
 STAMP = "2026-01-01 00:00:00"
 BOOK_COLUMNS = (
@@ -434,4 +434,23 @@ def test_upgrade_to_head_runs_the_revision_the_way_the_store_does(engine):
         set_foreign_keys(connection, False)
         with connection.begin():
             upgrade_to_head(connection)
+    assert _revision(engine) == HEAD
+
+
+def _pivot_positions(engine):
+    inspector = inspect(engine)
+    return {
+        table: next((c for c in inspector.get_columns(table) if c["name"] == "position"), None)
+        for table in ("author_book", "book_narrator", "book_genre")
+    }
+
+
+def test_the_credit_order_revision_adds_and_drops_a_nullable_position(engine):
+    _run(engine, HEAD)
+    for column in _pivot_positions(engine).values():
+        assert column is not None and column["nullable"] and column["default"] is None
+    _run(engine, "-1", down=True)
+    assert _revision(engine) == "9d2f6b4e8a17"
+    assert set(_pivot_positions(engine).values()) == {None}
+    _run(engine, HEAD)
     assert _revision(engine) == HEAD

@@ -41,10 +41,16 @@ def test_the_book_series_link_conflicts_on_both_records():
     ("book_genre_insert", ("book_asin", "book_region", "genre_asin")),
     ("book_narrator_insert", ("book_asin", "book_region", "narrator_name")),
     ("author_book_insert", ("author_id", "book_asin", "book_region")),
-    ("series_author_insert", ("series_asin", "series_region", "author_id")),
 ])
-def test_every_do_nothing_link_carries_its_region(name, columns):
+def test_every_ordered_link_carries_its_region_and_only_ever_moves_its_position(name, columns):
     sql = _sql(name)
     inserted = sql.split("(", 1)[1].split(")", 1)[0]
-    assert sorted(c.strip() for c in inserted.split(",")) == sorted(columns)
+    assert sorted(c.strip() for c in inserted.split(",")) == sorted((*columns, "position"))
+    assert f"ON CONFLICT ({', '.join(columns)}) DO UPDATE SET position = excluded.position" in sql
+
+
+def test_the_series_author_link_carries_its_region():
+    sql = _sql("series_author_insert")
+    inserted = sql.split("(", 1)[1].split(")", 1)[0]
+    assert sorted(c.strip() for c in inserted.split(",")) == ["author_id", "series_asin", "series_region"]
     assert "ON CONFLICT DO NOTHING" in sql

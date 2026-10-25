@@ -39,6 +39,9 @@ service behaves. It is not legal advice.
 - **No selling or sharing** beyond the parties named in this notice.
 - **The database holds no data about callers**, only Audible catalogue
   metadata.
+- **Missing book reports stay on GitHub.** A book added by hand from a report
+  holds its metadata only, never who reported it
+  ([Reports of missing books](#reports-of-missing-books)).
 
 ## Who operates the service
 
@@ -298,6 +301,35 @@ container registries, are still served by shields.io.
 **Nobody else.** I don't sell, rent, trade or share log data with advertisers,
 data brokers or anyone else.
 
+## Reports of missing books
+
+Some books in the database were added by hand, because Audible stopped listing
+them and someone reported them through the *Missing book* issue form on GitHub.
+This is separate from the API. Nothing in this section applies to ordinary
+requests.
+
+- **The report is a public GitHub issue.** Everything in it is public as soon
+  as you submit it: your GitHub username, what you type, and any image you
+  attach. GitHub hosts it under GitHub's privacy terms, not mine.
+- **Only the book's metadata reaches Libex.** I check each report and enter the
+  book's details myself: title, authors, narrators, series, dates and so on. The
+  record is marked as entered by hand (`manualEntry`), and the database notes
+  when. It holds nothing about who reported it: not your username, not a link to
+  the issue, and nothing from your screenshots.
+- **Screenshots stay on GitHub.** The form accepts a screenshot of an order, or
+  of the book in your Audible library, as proof the book was sold. I look at it
+  to check the report and don't copy it, or anything in it, into Libex. It is
+  still public on GitHub, though, and it shows that your GitHub account has that
+  book. Crop out your name, email address and order details before you upload
+  it. An archived copy of the product page, such as one on the Wayback Machine,
+  proves the same thing without showing anything about you, so use one if you
+  can.
+- **Taking a report down.** You can edit your issue on GitHub to remove text or
+  an image. Whether an uploaded image stays reachable at its own link after you
+  remove it from the issue is up to GitHub. I can delete the whole issue if you
+  ask, on the issue or by the email address in [`SECURITY.md`](SECURITY.md).
+  Deleting it doesn't change the book's record, which holds nothing about you.
+
 ## Retention
 
 | Where | How long | Where this is set |
@@ -330,6 +362,8 @@ you kept. This is what I can do:
   applies to records written before 1.13.0 that contain an IP address.
 - **Objection, portability and correction.** Each of these needs data about you
   to act on, and Libex holds none.
+- **Missing book reports** are GitHub issues, not Libex records. See
+  [Reports of missing books](#reports-of-missing-books) for what I can remove.
 - **Cloudflare** holds your IP address under its own policy. Requests about
   that data need to go to Cloudflare.
 

@@ -44,6 +44,18 @@ If you rely on Libex for a project or tool, we recommend self-hosting your own i
 
 ---
 
+## Delisted Books
+
+Audible sometimes removes a book from sale. Once it's gone, Audible's own API stops returning it, so most tools lose it for good. Libex keeps the ones it can.
+
+A delisted book is served only from the `/db` endpoints, for example `/db/book/<ASIN>?region=us` or a `/db/book` search. The live `/books` endpoint still returns `404` for it, because Audible no longer has it.
+
+Records I add this way carry `"manualEntry": true`. It stays true even if Audible lists the book again, and from then on Audible's data takes over as normal. Live `/books` responses always read `false`.
+
+If a book Audible has delisted is missing from `/db`, [open a Missing book issue](https://github.com/LibexHQ/Libex/issues/new?template=missing-book.yml). I check every report before adding anything: that the book isn't already in `/db`, that Audible really has delisted it, and that the ASIN is a real Audible one. Books that were never sold on Audible aren't accepted.
+
+---
+
 ## Regions
 
 Libex serves all eleven Audible marketplaces. The counts are the public
@@ -496,6 +508,8 @@ The same filter set is available on the other book-list DB endpoints too — `/d
 | `category` | string | Exact match on a category id from `/categories` (e.g. `18580628011`), or a comma-separated list to match any of several (e.g. `18580628011,18573212011`). Use `genre` for broad name matching |
 
 Use `/db/genres` to discover the genre/tag names for `genre` (optionally with `?search=`), or `/categories` to discover the category ids for `category`.
+
+`manualEntry` is true for a record that was first entered by hand, because Audible had stopped listing the book. It stays true after Audible lists the book again. Live `/books` responses always read false. See [Delisted Books](#delisted-books).
 
 ### Sorting
 

@@ -124,6 +124,12 @@ A maintainer will review and merge your PR. You don't need to do anything after 
 
 ---
 
+## Reporting a Delisted Book
+
+If an audiobook Audible has delisted is missing from `/db`, use the [Missing book issue form](https://github.com/LibexHQ/Libex/issues/new?template=missing-book.yml), not a pull request. Catalogue data never lives in the repository, and contributors never write to the database. I enter reported books myself after checking them.
+
+---
+
 ## Questions?
 
 Open an issue or comment on an existing one. We're happy to help.

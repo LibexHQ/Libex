@@ -16,18 +16,19 @@ from sqlalchemy import select
 
 # Local
 from app.db.models import Cache
-from app.services.cache.manager import author_key, series_key
+from app.services.cache.manager import author_key, chapters_key, series_key
 from app.services.db import persist_queue
+from app.services.db.writer import upsert_book
 
 REGION = "us"
 
 
-async def _persist(persist, data):
+async def _persist(persist, data, *extra):
     """Runs the task a persist_*_background entry point would have spawned, to
     completion, against the real session factory."""
     spawned = []
     with patch.object(persist_queue, "_spawn", side_effect=lambda make, n: spawned.append(make)):
-        persist(data, REGION)
+        persist(data, *extra, REGION)
     await spawned[0]()
 
 
@@ -58,3 +59,17 @@ async def test_the_series_cache_holds_the_stored_description(db_session):
 
     cached = await _cached(db_session, series_key(asin, REGION))
     assert cached["description"] == "A real summary"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_the_chapters_cache_holds_the_stored_listing(db_session):
+    asin = "B0PROFTRK1"
+    await upsert_book(db_session, {"asin": asin, "title": "Some Book", "region": REGION})
+    full = {"asin": asin, "region": REGION, "chapters": [{"title": "One", "lengthMs": 1000}]}
+    empty = {"asin": asin, "region": REGION, "chapters": []}
+    await _persist(persist_queue.persist_track_background, asin, full)
+    await _persist(persist_queue.persist_track_background, asin, empty)
+
+    cached = await _cached(db_session, chapters_key(asin, REGION))
+    assert len(cached["chapters"]) == 1

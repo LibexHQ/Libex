@@ -45,6 +45,7 @@ from app.services.db.writer import (
 # Core
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from libex_core.storage.read import books as _books
 from libex_core.storage.read import people as _people
 from libex_core.storage.read import series as _series
 from libex_core.storage.read.shapes import (
@@ -880,7 +881,15 @@ def persist_track_background(
                     await upsert_track(
                         session, asin, chapters_data, region=region, confirm=confirm
                     )
-                    await cache.set(session, chapters_key(asin, region), chapters_data)
+                    # The stored listing, not Audible's payload: the writer keeps
+                    # the chaptered side over an empty answer.
+                    stored = await _read_back(
+                        session,
+                        lambda: _books.get_track(session, asin, region=region),
+                        {"asin": asin, "region": region},
+                    )
+                    if stored:
+                        await cache.set(session, chapters_key(asin, region), stored)
             except Exception as e:
                 logger.warning(
                     "Background persist failed for track",

@@ -224,6 +224,18 @@ async def test_skips_entries_without_name(async_client):
     assert response.json()["skipped"] == 1
 
 
+@pytest.mark.asyncio
+async def test_malformed_entries_are_skipped_not_a_500(async_client):
+    """A bare number, a string or a non-string name skips that entry only."""
+    body = [5, "x", None, {"name": 7}, {"name": ""}, {"name": ["a"]}]
+    with patch(f"{MOD}.settings") as mock_settings, \
+         patch(f"{MOD}.AsyncSessionFactory", _factory()):
+        mock_settings.seed_secret = SEED_HASH
+        response = await async_client.post(URL, json=body, headers=_bearer())
+    assert response.status_code == 200
+    assert response.json()["skipped"] == len(body)
+
+
 # ============================================================
 # CRYPTO TESTS
 # ============================================================

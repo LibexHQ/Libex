@@ -1,30 +1,33 @@
 {
  "author_book_insert": {
-  "asyncpg": "INSERT INTO author_book (author_id, book_asin, book_region) VALUES ($1::INTEGER, $2::VARCHAR, $3::region_enum) ON CONFLICT DO NOTHING",
+  "asyncpg": "INSERT INTO author_book (author_id, book_asin, book_region, position) VALUES ($1::INTEGER, $2::VARCHAR, $3::region_enum, $4::INTEGER) ON CONFLICT (author_id, book_asin, book_region) DO UPDATE SET position = excluded.position WHERE author_book.position IS DISTINCT FROM excluded.position",
   "asyncpg_positions": [
    "author_id",
    "book_asin",
-   "book_region"
+   "book_region",
+   "position"
   ],
-  "pyformat": "INSERT INTO author_book (author_id, book_asin, book_region) VALUES (%(author_id)s, %(book_asin)s, %(book_region)s) ON CONFLICT DO NOTHING"
+  "pyformat": "INSERT INTO author_book (author_id, book_asin, book_region, position) VALUES (%(author_id)s, %(book_asin)s, %(book_region)s, %(position)s) ON CONFLICT (author_id, book_asin, book_region) DO UPDATE SET position = excluded.position WHERE author_book.position IS DISTINCT FROM excluded.position"
  },
  "book_genre_insert": {
-  "asyncpg": "INSERT INTO book_genre (book_asin, book_region, genre_asin) VALUES ($1::VARCHAR, $2::region_enum, $3::VARCHAR) ON CONFLICT DO NOTHING",
+  "asyncpg": "INSERT INTO book_genre (book_asin, book_region, genre_asin, position) VALUES ($1::VARCHAR, $2::region_enum, $3::VARCHAR, $4::INTEGER) ON CONFLICT (book_asin, book_region, genre_asin) DO UPDATE SET position = excluded.position WHERE book_genre.position IS DISTINCT FROM excluded.position",
   "asyncpg_positions": [
    "book_asin",
    "book_region",
-   "genre_asin"
+   "genre_asin",
+   "position"
   ],
-  "pyformat": "INSERT INTO book_genre (book_asin, book_region, genre_asin) VALUES (%(book_asin)s, %(book_region)s, %(genre_asin)s) ON CONFLICT DO NOTHING"
+  "pyformat": "INSERT INTO book_genre (book_asin, book_region, genre_asin, position) VALUES (%(book_asin)s, %(book_region)s, %(genre_asin)s, %(position)s) ON CONFLICT (book_asin, book_region, genre_asin) DO UPDATE SET position = excluded.position WHERE book_genre.position IS DISTINCT FROM excluded.position"
  },
  "book_narrator_insert": {
-  "asyncpg": "INSERT INTO book_narrator (narrator_name, book_asin, book_region) VALUES ($1::VARCHAR, $2::VARCHAR, $3::region_enum) ON CONFLICT DO NOTHING",
+  "asyncpg": "INSERT INTO book_narrator (narrator_name, book_asin, book_region, position) VALUES ($1::VARCHAR, $2::VARCHAR, $3::region_enum, $4::INTEGER) ON CONFLICT (book_asin, book_region, narrator_name) DO UPDATE SET position = excluded.position WHERE book_narrator.position IS DISTINCT FROM excluded.position",
   "asyncpg_positions": [
    "narrator_name",
    "book_asin",
-   "book_region"
+   "book_region",
+   "position"
   ],
-  "pyformat": "INSERT INTO book_narrator (narrator_name, book_asin, book_region) VALUES (%(narrator_name)s, %(book_asin)s, %(book_region)s) ON CONFLICT DO NOTHING"
+  "pyformat": "INSERT INTO book_narrator (narrator_name, book_asin, book_region, position) VALUES (%(narrator_name)s, %(book_asin)s, %(book_region)s, %(position)s) ON CONFLICT (book_asin, book_region, narrator_name) DO UPDATE SET position = excluded.position WHERE book_narrator.position IS DISTINCT FROM excluded.position"
  },
  "book_series_upsert": {
   "asyncpg": "INSERT INTO book_series (book_asin, book_region, series_asin, series_region, position) SELECT $1::VARCHAR AS anon_1, $2::region_enum AS anon_2, $3::VARCHAR AS anon_3, $4::region_enum AS anon_4, $5::VARCHAR AS anon_5 \nWHERE EXISTS (SELECT * \nFROM series \nWHERE series.asin = $3::VARCHAR AND series.region = $4::region_enum) ON CONFLICT (book_asin, book_region, series_asin, series_region) DO UPDATE SET position = coalesce(excluded.position, book_series.position)",

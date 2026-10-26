@@ -461,7 +461,7 @@ async def stored_series_books(
     return settle_flags_list(rows)
 
 
-def _literal(text: str) -> str:
+def like_literal(text: str) -> str:
     """The text with LIKE's wildcards and its escape character made literal.
 
     The readers behind these two searches read % and _ as wildcards, which is
@@ -482,7 +482,7 @@ async def search_stored_series(
     return await _read(
         store,
         "series search",
-        lambda s: read_series.search_series(s, _literal(name), region=region),
+        lambda s: read_series.search_series(s, like_literal(name), region=region),
         [],
     )
 
@@ -532,7 +532,7 @@ async def search_stored_books(
         store,
         "book search",
         lambda s: read_books.search_books(
-            s, title=_literal(title), author_name=_literal(author), region=region, limit=10
+            s, title=like_literal(title), author_name=like_literal(author), region=region, limit=10
         ),
         [],
     )

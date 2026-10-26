@@ -22,6 +22,7 @@ here repeat nothing a caller passed in.
 """
 
 # Standard library
+import logging
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -31,11 +32,14 @@ from libex_core.audible.books import (
     BOOK_RESPONSE_GROUPS,
     IMAGE_SIZES,
     filter_products,
-    normalize_product,
+    normalize_products_each,
 )
 from libex_core.audible.client import AudibleGet, validate_region
 from libex_core.audible.search import SEARCH_PATH
+from libex_core.log_safety import safe_asin_for_log
 from libex_core.models import CategoryAncestor, CategoryNode, FlatCategoryNode
+
+logger = logging.getLogger("libex")
 
 CATEGORIES_PATH = "/1.0/catalog/categories"
 
@@ -256,7 +260,13 @@ async def walk_catalog(
     its near edge. The walk ends at the first book that satisfies
     should_stop, when a page repeats the one before it (Audible's wall:
     once it runs out it repeats the last page), or when a page comes back
-    short or empty. Books with no parseable date are skipped.
+    short or empty. Those page checks use the raw page Audible sent, before
+    filter_products, so a full page that filtering shrinks or empties does
+    not end the walk. Books with no parseable date are skipped.
+
+    A product that fails normalization is skipped and logged, so one
+    malformed product cannot lose the window. Only when every product walked
+    failed is the first error raised, since then nothing was answered.
 
     A NotFoundException or AudibleAPIException from `get` propagates as it is.
     """
@@ -264,6 +274,8 @@ async def walk_catalog(
     collected: dict[str, dict[str, Any]] = {}
     page = 0
     prev_asins: list[str] | None = None
+    walked = failures = 0
+    first_error: Exception | None = None
     while True:
         params: dict[str, Any] = {
             "num_results": RELEASE_PAGE_SIZE,
@@ -275,18 +287,39 @@ async def walk_catalog(
         if category_id:
             params["category_id"] = category_id
         data = await get(region, SEARCH_PATH, params)
-        products = filter_products(data.get("products", []))
-        if not products:
+        raw_page = data.get("products", [])
+        products = filter_products(raw_page)
+        if not raw_page:
             break
 
-        page_asins = [p.get("asin") for p in products]
+        # Compared on the raw page: Audible repeats its last raw page at the
+        # wall, and two filtered-empty pages must not read as a repeat.
+        page_asins = [p.get("asin") for p in raw_page]
         if page_asins == prev_asins:
             break
         prev_asins = page_asins
 
+        # A product that raises on normalization is skipped and logged, so
+        # one malformed product cannot take the whole window down. When every
+        # product walked fails, nothing was answered, which is an outage.
+        outcomes = await normalize_products_each(products, region)
+        failed = [(p, o) for p, o in zip(products, outcomes) if isinstance(o, Exception)]
+        if failed:
+            logger.warning("Catalog walk could not normalize products", extra={
+                "region": region,
+                "skipped": len(failed),
+                "skipped_asins": ",".join(safe_asin_for_log(p.get("asin")) for p, _ in failed),
+                "results": len(outcomes),
+                "error_type": type(failed[0][1]).__name__,
+            })
+            first_error = first_error or failed[0][1]
+        walked += len(outcomes)
+        failures += len(failed)
+
         stop = False
-        for product in products:
-            book = normalize_product(product, region)
+        for book in outcomes:
+            if isinstance(book, Exception):
+                continue
             dt = release_datetime(book)
             if dt is None:
                 continue
@@ -300,10 +333,14 @@ async def walk_catalog(
 
         if stop:
             break
-        if len(products) < RELEASE_PAGE_SIZE:
+        # The raw page length decides the last page: filtering a full page
+        # down is not the end of the catalog.
+        if len(raw_page) < RELEASE_PAGE_SIZE:
             break
         page += 1
 
+    if first_error is not None and failures == walked:
+        raise first_error
     return list(collected.values())
 
 

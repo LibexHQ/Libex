@@ -4,13 +4,19 @@ off them, in a fixed handful of statements.
 """
 
 # Third party
+from sqlalchemy import tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Local
+from libex_core.storage.models import author_book, book_genre, book_narrator
 from libex_core.storage.write.entities import upsert_author
 from libex_core.storage.write.params import book_params, series_params
 from libex_core.storage.write.statements import statements_for
 from libex_core.storage.write.support import dialect_of, lock_asins, utc_now
+
+
+# Bound parameters per release statement, well under the 32,766 both drivers allow.
+_PARAM_BUDGET = 20_000
 
 
 def _key_order(keys) -> list:
@@ -71,9 +77,8 @@ async def resolve_author_ids(
             author.get("image"),
         )
 
-    # Written in the order the books credit them, so the first credited gets the
-    # lowest id. Served order is not guaranteed: the relationship has no
-    # order_by, so it follows the query plan. The advisory locks, taken in key
+    # Written in the order the books credit them. The author_book position, not
+    # the id, is what fixes the served order. The advisory locks, taken in key
     # order, are what keep two writers that meet the same authors in opposite
     # orders from deadlocking. Both an author's asin and their
     # region-scoped name are locked, because a null-asin row is upgraded in
@@ -119,6 +124,58 @@ async def resolve_author_ids(
     return ids_by_book
 
 
+def _next_position(counts: dict[tuple, int], key: tuple) -> int:
+    """The next free place in one book's credited list, counting from zero."""
+    position = counts.get(key, 0)
+    counts[key] = position + 1
+    return position
+
+
+async def _release_stale_positions(session: AsyncSession, table, link: str, links: list[dict]) -> None:
+    """
+    Clears the position of every stored link of a written book that the
+    incoming credited list no longer names. Those links keep their old places
+    otherwise and collide with the new list's, so a shorter list served its
+    survivors among the stale ones. NULL sorts after every credited place,
+    and nothing is deleted. The position IS NOT NULL guard leaves
+    already-released rows untouched.
+
+    A book with no incoming links is not in `links`, so an empty list changes
+    nothing. Books are taken in key order and grouped into statements of at
+    most _PARAM_BUDGET bound parameters, because one statement for a whole
+    chunk would pass the driver's cap on a large write. A book's links are
+    never split, so a book with a very large link list gets a statement to
+    itself. The key order fixes the order of the statements, not the order in
+    which Postgres locks the rows inside one of them.
+    """
+    by_book: dict[tuple, list[tuple]] = {}
+    for row in links:
+        by_book.setdefault((row["book_asin"], row["book_region"]), []).append(
+            (row["book_asin"], row["book_region"], row[link])
+        )
+    batches: list[list[tuple]] = []
+    used = _PARAM_BUDGET
+    for key in _key_order(by_book):
+        cost = 2 + 3 * len(by_book[key])
+        if used + cost > _PARAM_BUDGET:
+            batches.append([])
+            used = 0
+        batches[-1].append(key)
+        used += cost
+    c = table.c
+    for books in batches:
+        keep = [link_key for key in books for link_key in by_book[key]]
+        await session.execute(
+            update(table)
+            .where(
+                tuple_(c.book_asin, c.book_region).in_(books),
+                c.position.is_not(None),
+                tuple_(c.book_asin, c.book_region, c[link]).not_in(keep),
+            )
+            .values(position=None)
+        )
+
+
 async def write_books(
     session: AsyncSession,
     books: list[dict],
@@ -159,9 +216,12 @@ async def write_books(
     books with two sets of links rather than one overwriting the other.
 
     Rows are ordered so a table is written before anything referencing it, and
-    duplicates are collapsed in Python before binding: the ON CONFLICT DO
-    NOTHING sets keep the first of a repeat, matching what a per-row loop
-    would have left, and the DO UPDATE sets keep the last, matching the same.
+    duplicates are collapsed in Python before binding. The genre, narrator
+    and author links keep the first of a repeat, which is the one with the
+    earliest credited place; they are ON CONFLICT DO UPDATE on position only.
+    The series link keeps the last, matching what a per-row loop would have
+    left. A written book's links that its credited list no longer names are
+    kept, with their position cleared.
     """
     if not books:
         return
@@ -177,6 +237,8 @@ async def write_books(
     book_genres: dict[tuple, dict] = {}
     narrators: dict[str, dict] = {}
     book_narrators: dict[tuple, dict] = {}
+    genre_counts: dict[tuple, int] = {}
+    narrator_counts: dict[tuple, int] = {}
     series: dict[tuple, dict] = {}
     book_series_links: dict[tuple, dict] = {}
 
@@ -196,18 +258,22 @@ async def write_books(
                 "created_at": now,
                 "updated_at": now,
             })
-            book_genres.setdefault((asin, region, g_asin), {
-                "book_asin": asin, "book_region": region, "genre_asin": g_asin,
-            })
+            if (asin, region, g_asin) not in book_genres:
+                book_genres[(asin, region, g_asin)] = {
+                    "book_asin": asin, "book_region": region, "genre_asin": g_asin,
+                    "position": _next_position(genre_counts, (asin, region)),
+                }
 
         for narrator in data.get("narrators", []):
             name = (narrator.get("name") or "").strip()
             if not name:
                 continue
             narrators.setdefault(name, {"name": name, "created_at": now, "updated_at": now})
-            book_narrators.setdefault((asin, region, name), {
-                "book_asin": asin, "book_region": region, "narrator_name": name,
-            })
+            if (asin, region, name) not in book_narrators:
+                book_narrators[(asin, region, name)] = {
+                    "book_asin": asin, "book_region": region, "narrator_name": name,
+                    "position": _next_position(narrator_counts, (asin, region)),
+                }
 
         for entry in data.get("series", []):
             params = series_params(entry, now, region)
@@ -240,20 +306,23 @@ async def write_books(
                 "position": entry.get("position"),
             }
 
-    # Written in the order the books credit them. Served order for genres and
-    # narrators follows the query plan and is not guaranteed (the links carry no
-    # position column). The advisory locks, taken in key order, are what keep
-    # two writers that meet the same genres or narrators in opposite orders
+    # Each link carries its index in the book's credited list, which is the
+    # order it is served in. The advisory locks, taken in key order, are what
+    # keep two writers that meet the same genres or narrators in opposite orders
     # from deadlocking.
     if genres:
         await lock_asins(session, "genre", list(genres), dialect=dialect)
         await session.execute(statements.genre_insert, list(genres.values()))
         await session.execute(statements.book_genre_insert, list(book_genres.values()))
+        await _release_stale_positions(session, book_genre, "genre_asin", list(book_genres.values()))
 
     if narrators:
         await lock_asins(session, "narrator", list(narrators), dialect=dialect)
         await session.execute(statements.narrator_insert, list(narrators.values()))
         await session.execute(statements.book_narrator_insert, list(book_narrators.values()))
+        await _release_stale_positions(
+            session, book_narrator, "narrator_name", list(book_narrators.values())
+        )
 
     if series:
         # Not key-ordered like the rest: the first series row stored for an
@@ -274,9 +343,10 @@ async def write_books(
         asin = data["asin"]
         region = data.get("region")
         author_ids = ids_by_book.get((asin, region), [])
-        for author_id in author_ids:
+        for position, author_id in enumerate(author_ids):
             author_books.setdefault((author_id, asin, region), {
                 "author_id": author_id, "book_asin": asin, "book_region": region,
+                "position": position,
             })
         for entry in data.get("series", []):
             s_asin = entry.get("asin")
@@ -291,5 +361,6 @@ async def write_books(
 
     if author_books:
         await session.execute(statements.author_book_insert, list(author_books.values()))
+        await _release_stale_positions(session, author_book, "author_id", list(author_books.values()))
     if series_authors:
         await session.execute(statements.series_author_insert, _in_key_order(series_authors))

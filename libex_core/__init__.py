@@ -36,6 +36,6 @@ the hosted app that embeds it, and an embedder needs a version to pin against
 that isn't tied to the hosted app's own release line.
 """
 
-__version__ = "0.23.0"
+__version__ = "0.24.0"
 
 __all__ = ["__version__"]

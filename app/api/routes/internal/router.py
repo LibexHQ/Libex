@@ -165,8 +165,9 @@ async def _apply_enrichment(session: Any, data: list[Any]) -> dict[str, int]:
     stats = {"matched": 0, "updated": 0, "skipped": 0}
 
     for entry in data:
-        name = entry.get("name")
-        if not name:
+        # Counted, never logged: an entry that is not an object has no shape to trust.
+        name = entry.get("name") if isinstance(entry, dict) else None
+        if not isinstance(name, str) or not name:
             stats["skipped"] += 1
             continue
 

@@ -13,6 +13,21 @@ the first published version. Entries for earlier versions record changes made
 before publication: they are historical record for whoever embeds this package,
 not evidence that anyone consumed a given version at the time it was cut.
 
+## [0.24.0]
+
+This release adds a migration: the author, narrator and genre links gain a `position` column, and reads and writes of a book use it. Run `alembic upgrade head` on any store you already have.
+
+### Added
+- **The author, narrator and genre links record the order Audible credits them in.** `author_book`, `book_narrator` and `book_genre` have a nullable `position`, written by `write_books` as the index in the book's credited list. The migration adds the column with no default and no backfill, on both the SQLite and the Postgres chains.
+
+### Changed
+- **A book's authors, narrators and genres are read in credit order.** They used to come back in whatever order the database produced. They are now ordered by `position`, with links that have none after the positioned ones, tied by the author id, narrator name or genre ASIN. A book stored before the migration keeps a deterministic order until it is next written.
+- **Writing a book again moves the position of a link that already exists.** The link insert was insert-or-ignore; it now updates `position` on a conflict, and only when the value differs. A shorter credit list renumbers the links it names and clears the `position` of the written book's links it no longer names, so the listed names come first. Nothing is deleted, and an empty list changes nothing. The clearing is batched by book, with a book's links never split, so a large write stays under the driver's bound-parameter limit; only a single book with more than about 6,600 links of one kind could still pass it. Any code that builds these statements itself has to carry `position`.
+- **`like_literal` replaces the private `_literal` in `libex_core.lookup._store`,** so the hosted fallbacks can share it. The module is internal; this is not a public name.
+
+### Fixed
+- **The new-releases and coming-soon walks skip one product that cannot be normalized.** It used to fail the whole window. Each skip is logged as a warning naming the ASINs, and the walk raises the first error only when every product it walked failed. The walk now decides the last page from the page Audible sent, not from the products left after filtering, so a full page filtered down no longer ends it early.
+
 ## [0.23.0]
 
 This release breaks embedders who install the storage extras: `[postgres]` no longer installs the SQLite driver. See Changed.

@@ -118,6 +118,19 @@ async def test_quick_search_compound_fallback_still_reaches_db_when_catalog_sear
 
 
 @pytest.mark.asyncio
+async def test_quick_search_compound_fallback_reads_the_stored_search_as_plain_text():
+    suggestions_response = {"model": {"items": []}}
+
+    with patch("app.services.audible.search.audible_get", new=AsyncMock(return_value=suggestions_response)), \
+         patch("app.services.audible.search.search", new=AsyncMock(return_value=[])), \
+         patch("app.services.audible.search.search_books_from_db", new=AsyncMock(return_value=[])) as mock_db:
+        await quick_search("50%_off - 100%_pure", "us", MagicMock())
+
+    assert mock_db.await_args.kwargs["author_name"] == "50\\%\\_off"
+    assert mock_db.await_args.kwargs["title"] == "100\\%\\_pure"
+
+
+@pytest.mark.asyncio
 async def test_quick_search_compound_fallback_returns_empty_list_when_db_also_has_nothing():
     """Same failed-catalog-search path, but the DB fallback also comes back
     empty -- this is a genuine "nothing found," not an outage, so it returns

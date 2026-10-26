@@ -1,8 +1,10 @@
 """
 manualEntry on the book surfaces: /book/{asin}, /book?asins=, /search and /db/book
 each gain that one key and no other. The live normalizer never emits it, so a
-live response reads false whatever is stored; only a stored row can read true,
-and only the /db reader produces it.
+fresh answer from Audible reads false. A response served from Libex's stored
+copy carries the stored value: /db always, and /book on a cache hit or the
+outage fallback (tests/integration/test_manual_entry_cache.py). This file mocks
+the service, so it pins the key set and the false of a fresh answer.
 
 The expected key set is the normalizer's own output plus manualEntry, so a key
 the model gained or lost for any other reason fails here too.

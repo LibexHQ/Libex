@@ -202,12 +202,15 @@ class BookResponse(BaseModel):
     manualEntry: bool = Field(
         default=False,
         description=(
-            "On a stored record, true means it was first entered by hand from a "
-            "public report of a book Audible had delisted. It stays true after "
-            "Audible relists and confirms the book, and Audible may since have "
-            "replaced its fields. A live fetch, and a cached copy of one, always "
-            "reads false, so /db and /books can differ for the same ASIN. No "
-            "timestamp is exposed."
+            "True means this record was first entered by hand, from a public "
+            "report of a book Audible had delisted. It stays true after Audible "
+            "lists the book again, and Audible's data may since have replaced "
+            "its fields. Any response served from the stored copy shows it: "
+            "every /db route, and /books on a cache hit or when it falls back "
+            "to the stored copy during an Audible outage. A fresh answer "
+            "straight from Audible carries no such history and reads false, so "
+            "/db and /books can differ for the same ASIN. If you need the flag "
+            "reliably, use /db. No timestamp is exposed."
         ),
     )
     plans: list[str] = Field(default_factory=list)

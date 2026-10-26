@@ -45,7 +45,7 @@ async def _row(session, asin=ASIN):
 
 @pytest.mark.asyncio
 async def test_the_chain_at_head_has_a_nullable_undefaulted_timestamptz_column(db_session):
-    """DB-3: the only guard on the hosted revision at the shared head."""
+    """The only guard on the hosted revision at the shared head."""
     result = await db_session.execute(text(
         "SELECT data_type, is_nullable, column_default FROM information_schema.columns "
         "WHERE table_name = 'books' AND column_name = 'manual_entry_at'"

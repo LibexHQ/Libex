@@ -74,6 +74,10 @@
 **/*.py[cod]
 app/static/docs/
 
+# CI-only, like the tooling lock it audits: tests.yml runs it on the runner
+# and nothing in the image calls it.
+scripts/audit-new-advisories.sh
+
 # Credential files, excluded wherever they sit. **/ matches the top level as
 # well, which is why the repo-root .env.example has to be admitted again on
 # the last line: a later match wins, so moving it above these would exclude it.

@@ -165,3 +165,46 @@ async def test_postgres_a_shorter_credit_list_serves_its_names_first_and_keeps_e
     await session.commit()
     session.expire_all()
     assert _served(await get_book(session, "B0CREDIT01", region="us"))[1] == narrators
+
+
+def _genre_book(asin, order):
+    return {
+        "asin": asin, "title": "T", "region": "us",
+        "genres": [{"asin": f"G{n}", "name": f"Genre {n}", "type": "Genres"} for n in order],
+    }
+
+
+async def _genre_positions(store):
+    async with store.session() as session:
+        rows = await session.execute(text("SELECT book_asin, genre_asin, position FROM book_genre"))
+        return {(a, g): p for a, g, p in rows}
+
+
+async def test_stale_positions_are_released_in_bounded_statements_and_other_books_are_untouched(
+    sqlite_store, monkeypatch
+):
+    from libex_core.storage.write import books as books_module
+
+    asins = [f"B0BOUND{i:03d}" for i in range(6)]
+    await _write(sqlite_store, [_genre_book(a, "ZMA") for a in asins + ["B0OUTSIDE1"]])
+    # 2 + 3 * 1 = 5 params per rewritten book; a budget of 12 fits two books.
+    monkeypatch.setattr(books_module, "_PARAM_BUDGET", 12)
+    updates = []
+
+    async with sqlite_store.write() as session:
+        real = session.execute
+
+        async def spy(stmt, *a, **k):
+            if getattr(stmt, "is_update", False):
+                updates.append(stmt)
+            return await real(stmt, *a, **k)
+
+        monkeypatch.setattr(session, "execute", spy)
+        await write_books(session, [_genre_book(a, "A") for a in asins])
+
+    positions = await _genre_positions(sqlite_store)
+    assert len(updates) == 3
+    for a in asins:
+        assert positions[(a, "GA")] == 0
+        assert positions[(a, "GZ")] is None and positions[(a, "GM")] is None
+    assert [positions[("B0OUTSIDE1", f"G{n}")] for n in "ZMA"] == [0, 1, 2]

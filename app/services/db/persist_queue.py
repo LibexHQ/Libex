@@ -551,11 +551,12 @@ _READ_FAILED = object()
 async def _read_back(session: AsyncSession, read, fields: dict, failed=None):
     """
     Runs a read of what was just stored inside a savepoint and returns its
-    result, or `failed` (None unless the caller passes a sentinel to tell a
-    failed read from one that found nothing) when it failed. A failed read rolls back to the savepoint
-    only, so the write it follows still commits; the caller then caches
-    nothing rather than the payload, because less than the store holds must
-    never be what a cache hit serves.
+    result. When the read fails it returns `failed` (None by default; a caller
+    that must tell a failed read from one that found nothing passes a
+    sentinel). A failed read rolls back to the savepoint only, so the write it
+    follows still commits; the caller then caches nothing rather than the
+    payload, because less than the store holds must never be what a cache hit
+    serves.
     """
     try:
         async with session.begin_nested():

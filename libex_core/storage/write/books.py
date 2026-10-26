@@ -15,6 +15,10 @@ from libex_core.storage.write.statements import statements_for
 from libex_core.storage.write.support import dialect_of, lock_asins, utc_now
 
 
+# Bound parameters per release statement, well under the 32,766 both drivers allow.
+_PARAM_BUDGET = 20_000
+
+
 def _key_order(keys) -> list:
     """
     The keys in one fixed order, whatever order they arrived in. A key's absent
@@ -130,29 +134,44 @@ def _next_position(counts: dict[tuple, int], key: tuple) -> int:
 async def _release_stale_positions(session: AsyncSession, table, link: str, links: list[dict]) -> None:
     """
     Clears the position of every stored link of a written book that the
-    incoming credited list no longer names, in one statement for the chunk.
+    incoming credited list no longer names. Those links keep their old places
+    otherwise and collide with the new list's, so a shorter list served its
+    survivors among the stale ones. NULL sorts after every credited place,
+    and nothing is deleted. The position IS NOT NULL guard leaves
+    already-released rows untouched.
 
-    Those links keep their old places otherwise and collide with the new
-    list's, so a shorter list served its survivors among the stale ones. NULL
-    sorts after every credited place, and nothing is deleted. The
-    position IS NOT NULL guard leaves already-released rows untouched. A book
-    with no incoming links is not in `links` at all, so an empty list -- most
-    likely a degraded answer -- changes nothing.
+    A book with no incoming links is not in `links`, so an empty list changes
+    nothing. Books are taken in key order, so two writers lock rows in the
+    same order, and are grouped into statements that each stay under
+    _PARAM_BUDGET bound parameters: one statement for a whole chunk would
+    pass the driver's cap on a large write.
     """
-    if not links:
-        return
-    c = table.c
-    books = {(row["book_asin"], row["book_region"]) for row in links}
-    keep = [(row["book_asin"], row["book_region"], row[link]) for row in links]
-    await session.execute(
-        update(table)
-        .where(
-            tuple_(c.book_asin, c.book_region).in_(books),
-            c.position.is_not(None),
-            tuple_(c.book_asin, c.book_region, c[link]).not_in(keep),
+    by_book: dict[tuple, list[tuple]] = {}
+    for row in links:
+        by_book.setdefault((row["book_asin"], row["book_region"]), []).append(
+            (row["book_asin"], row["book_region"], row[link])
         )
-        .values(position=None)
-    )
+    batches: list[list[tuple]] = []
+    used = _PARAM_BUDGET
+    for key in _key_order(by_book):
+        cost = 2 + 3 * len(by_book[key])
+        if used + cost > _PARAM_BUDGET:
+            batches.append([])
+            used = 0
+        batches[-1].append(key)
+        used += cost
+    c = table.c
+    for books in batches:
+        keep = [link_key for key in books for link_key in by_book[key]]
+        await session.execute(
+            update(table)
+            .where(
+                tuple_(c.book_asin, c.book_region).in_(books),
+                c.position.is_not(None),
+                tuple_(c.book_asin, c.book_region, c[link]).not_in(keep),
+            )
+            .values(position=None)
+        )
 
 
 async def write_books(

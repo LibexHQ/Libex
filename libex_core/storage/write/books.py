@@ -4,9 +4,11 @@ off them, in a fixed handful of statements.
 """
 
 # Third party
+from sqlalchemy import tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Local
+from libex_core.storage.models import author_book, book_genre, book_narrator
 from libex_core.storage.write.entities import upsert_author
 from libex_core.storage.write.params import book_params, series_params
 from libex_core.storage.write.statements import statements_for
@@ -125,6 +127,34 @@ def _next_position(counts: dict[tuple, int], key: tuple) -> int:
     return position
 
 
+async def _release_stale_positions(session: AsyncSession, table, link: str, links: list[dict]) -> None:
+    """
+    Clears the position of every stored link of a written book that the
+    incoming credited list no longer names, in one statement for the chunk.
+
+    Those links keep their old places otherwise and collide with the new
+    list's, so a shorter list served its survivors among the stale ones. NULL
+    sorts after every credited place, and nothing is deleted. The
+    position IS NOT NULL guard leaves already-released rows untouched. A book
+    with no incoming links is not in `links` at all, so an empty list -- most
+    likely a degraded answer -- changes nothing.
+    """
+    if not links:
+        return
+    c = table.c
+    books = {(row["book_asin"], row["book_region"]) for row in links}
+    keep = [(row["book_asin"], row["book_region"], row[link]) for row in links]
+    await session.execute(
+        update(table)
+        .where(
+            tuple_(c.book_asin, c.book_region).in_(books),
+            c.position.is_not(None),
+            tuple_(c.book_asin, c.book_region, c[link]).not_in(keep),
+        )
+        .values(position=None)
+    )
+
+
 async def write_books(
     session: AsyncSession,
     books: list[dict],
@@ -165,9 +195,12 @@ async def write_books(
     books with two sets of links rather than one overwriting the other.
 
     Rows are ordered so a table is written before anything referencing it, and
-    duplicates are collapsed in Python before binding: the ON CONFLICT DO
-    NOTHING sets keep the first of a repeat, matching what a per-row loop
-    would have left, and the DO UPDATE sets keep the last, matching the same.
+    duplicates are collapsed in Python before binding. The genre, narrator
+    and author links keep the first of a repeat, which is the one with the
+    earliest credited place; they are ON CONFLICT DO UPDATE on position only.
+    The series link keeps the last, matching what a per-row loop would have
+    left. A written book's links that its credited list no longer names are
+    kept, with their position cleared.
     """
     if not books:
         return
@@ -260,11 +293,15 @@ async def write_books(
         await lock_asins(session, "genre", list(genres), dialect=dialect)
         await session.execute(statements.genre_insert, list(genres.values()))
         await session.execute(statements.book_genre_insert, list(book_genres.values()))
+        await _release_stale_positions(session, book_genre, "genre_asin", list(book_genres.values()))
 
     if narrators:
         await lock_asins(session, "narrator", list(narrators), dialect=dialect)
         await session.execute(statements.narrator_insert, list(narrators.values()))
         await session.execute(statements.book_narrator_insert, list(book_narrators.values()))
+        await _release_stale_positions(
+            session, book_narrator, "narrator_name", list(book_narrators.values())
+        )
 
     if series:
         # Not key-ordered like the rest: the first series row stored for an
@@ -303,5 +340,6 @@ async def write_books(
 
     if author_books:
         await session.execute(statements.author_book_insert, list(author_books.values()))
+        await _release_stale_positions(session, author_book, "author_id", list(author_books.values()))
     if series_authors:
         await session.execute(statements.series_author_insert, _in_key_order(series_authors))

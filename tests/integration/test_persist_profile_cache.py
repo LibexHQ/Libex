@@ -73,3 +73,25 @@ async def test_the_chapters_cache_holds_the_stored_listing(db_session):
 
     cached = await _cached(db_session, chapters_key(asin, REGION))
     assert len(cached["chapters"]) == 1
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_the_chapters_payload_is_cached_when_no_book_row_is_stored(db_session):
+    asin = "B0PROFTRK2"
+    payload = {"asin": asin, "region": REGION, "chapters": [{"title": "One", "lengthMs": 1000}]}
+    await _persist(persist_queue.persist_track_background, asin, payload)
+
+    assert await _cached(db_session, chapters_key(asin, REGION)) == payload
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_nothing_is_cached_when_the_chapters_read_back_fails(db_session):
+    asin = "B0PROFTRK3"
+    await upsert_book(db_session, {"asin": asin, "title": "Some Book", "region": REGION})
+    payload = {"asin": asin, "region": REGION, "chapters": [{"title": "One", "lengthMs": 1000}]}
+    with patch.object(persist_queue._books, "get_track", side_effect=RuntimeError("read failed")):
+        await _persist(persist_queue.persist_track_background, asin, payload)
+
+    assert await _cached(db_session, chapters_key(asin, REGION)) is None

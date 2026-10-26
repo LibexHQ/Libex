@@ -115,3 +115,53 @@ async def test_postgres_serves_credit_order_when_the_planner_uses_the_index(post
     session.expire_all()
     book = await get_book(session, "B0CREDIT01", region="us")
     assert _served(book) == (["Z", "M", "A"],) * 3
+
+
+async def _link_counts(session):
+    return [
+        (await session.execute(text(f"SELECT count(*) FROM {t} WHERE book_asin = 'B0CREDIT01'"))).scalar_one()
+        for t in ("author_book", "book_narrator", "book_genre")
+    ]
+
+
+async def test_a_shorter_credit_list_serves_its_names_first_and_keeps_every_link(sqlite_store):
+    await _write(sqlite_store, [_book(["Z", "M", "A"])])
+    await _write(sqlite_store, [_book(["A"])])
+    async with sqlite_store.session() as session:
+        book = await get_book(session, "B0CREDIT01", region="us")
+        counts = await _link_counts(session)
+    names, narrators, genres = _served(book)
+    assert [names[0], narrators[0], genres[0]] == ["A", "A", "A"]
+    assert narrators[1:] == ["M", "Z"] and genres[1:] == ["M", "Z"]
+    assert sorted(names) == ["A", "M", "Z"]
+    assert counts == [3, 3, 3]
+
+
+async def test_an_empty_credit_list_changes_no_position(sqlite_store):
+    await _write(sqlite_store, [_book(["Z", "M", "A"])])
+    await _write(sqlite_store, [_book([])])
+    async with sqlite_store.session() as session:
+        book = await get_book(session, "B0CREDIT01", region="us")
+    assert _served(book) == (["Z", "M", "A"],) * 3
+
+
+@pytest.mark.integration
+async def test_postgres_a_shorter_credit_list_serves_its_names_first_and_keeps_every_link(postgres_session):
+    session = postgres_session
+    # The seeded authors carry explicit ids, so the sequence has to be moved
+    # past them before a new author can be inserted.
+    await session.execute(text("SELECT setval(pg_get_serial_sequence('authors', 'id'), (SELECT max(id) FROM authors))"))
+    await write_books(session, [_book(["Z", "M", "A"])])
+    await session.commit()
+    await write_books(session, [_book(["A"])])
+    await session.commit()
+    session.expire_all()
+    book = await get_book(session, "B0CREDIT01", region="us")
+    names, narrators, genres = _served(book)
+    assert [names[0], narrators[0], genres[0]] == ["A", "A", "A"]
+    assert narrators[1:] == ["M", "Z"] and genres[1:] == ["M", "Z"]
+    assert await _link_counts(session) == [3, 3, 3]
+    await write_books(session, [_book([])])
+    await session.commit()
+    session.expire_all()
+    assert _served(await get_book(session, "B0CREDIT01", region="us"))[1] == narrators

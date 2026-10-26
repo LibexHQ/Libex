@@ -545,10 +545,14 @@ async def _stored_books(session: AsyncSession, asins: list[str], region: str) ->
     return [book_to_dict(b, positions.get((b.asin, b.region), {})) for b in rows]
 
 
-async def _read_back(session: AsyncSession, read, fields: dict):
+_READ_FAILED = object()
+
+
+async def _read_back(session: AsyncSession, read, fields: dict, failed=None):
     """
     Runs a read of what was just stored inside a savepoint and returns its
-    result, or None when it failed. A failed read rolls back to the savepoint
+    result, or `failed` (None unless the caller passes a sentinel to tell a
+    failed read from one that found nothing) when it failed. A failed read rolls back to the savepoint
     only, so the write it follows still commits; the caller then caches
     nothing rather than the payload, because less than the store holds must
     never be what a cache hit serves.
@@ -561,7 +565,7 @@ async def _read_back(session: AsyncSession, read, fields: dict):
             "Read-back after persist failed; nothing cached",
             extra={**fields, **_failure_fields(e)},
         )
-        return None
+        return failed
 
 
 async def _write_book_chunk(
@@ -882,14 +886,21 @@ def persist_track_background(
                         session, asin, chapters_data, region=region, confirm=confirm
                     )
                     # The stored listing, not Audible's payload: the writer keeps
-                    # the chaptered side over an empty answer.
+                    # the chaptered side over an empty answer. A read that
+                    # succeeded and found no row has nothing richer to lose to,
+                    # so the payload is cached as the outage fallback; a read
+                    # that failed caches nothing.
                     stored = await _read_back(
                         session,
                         lambda: _books.get_track(session, asin, region=region),
                         {"asin": asin, "region": region},
+                        failed=_READ_FAILED,
                     )
-                    if stored:
-                        await cache.set(session, chapters_key(asin, region), stored)
+                    if stored is not _READ_FAILED:
+                        await cache.set(
+                            session, chapters_key(asin, region),
+                            stored if stored is not None else chapters_data,
+                        )
             except Exception as e:
                 logger.warning(
                     "Background persist failed for track",

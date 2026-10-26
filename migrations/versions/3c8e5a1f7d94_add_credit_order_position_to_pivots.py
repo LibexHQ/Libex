@@ -39,5 +39,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute("SET LOCAL lock_timeout = '5s'")
     for table in TABLES:
         op.execute(f'ALTER TABLE {table} DROP COLUMN IF EXISTS "position"')

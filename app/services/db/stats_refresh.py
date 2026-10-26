@@ -369,7 +369,8 @@ _STATS_REFRESH_ROTATION_SECONDS = 20
 # the pool hands that same physical connection out again a later single
 # unlock decrements two to one and it is still stuck.
 #
-# Arbitrary but fixed, and the only advisory lock Libex takes anywhere.
+# Arbitrary but fixed. The writer's lock_asins takes advisory locks too, keyed
+# per ASIN; this is the one id the stats refresh holds across a pass.
 _STATS_REFRESH_LOCK_ID = 4718201
 
 

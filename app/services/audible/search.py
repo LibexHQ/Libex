@@ -23,6 +23,7 @@ from libex_core.audible.search import (
 )
 from libex_core.exceptions import AudibleAPIException, NotFoundException
 from libex_core.log_safety import safe_asin_for_log
+from libex_core.lookup._store import like_literal
 from app.core.logging import get_logger
 
 # Services
@@ -214,8 +215,8 @@ async def quick_search(
                 # Catalog also returned nothing — try local DB
                 db_results = await search_books_from_db(
                     session=session,
-                    title=parsed_title,
-                    author_name=parsed_author,
+                    title=like_literal(parsed_title),
+                    author_name=like_literal(parsed_author),
                     limit=10,
                 )
                 if db_results:

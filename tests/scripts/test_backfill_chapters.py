@@ -1246,7 +1246,7 @@ def test_run_calls_handle_pending_pauses_both_inside_and_after_the_page_loop():
 # concurrency machinery is allowed to see
 # ============================================================
 
-async def _drive_run(*pages, limit=None):
+async def _drive_run(*pages, limit=None, outcome=_Outcome.NOT_FOUND, on_book=None):
     """
     Drives the real _run over the canned pages given (then two empty ones, so
     the wrap-around ends the walk) and hands back the run's own state objects
@@ -1281,7 +1281,15 @@ async def _drive_run(*pages, limit=None):
 
     async def _record(_session, asin, region):
         seen.append((asin, region))
-        return _Outcome.NOT_FOUND, False, False, 0.01
+        if on_book:
+            on_book(captured["run"], captured["stopper"])
+        return outcome, False, False, 0.01
+
+    real_stopper_cls = backfill_chapters._Stopper
+
+    def _make_stopper():
+        captured["stopper"] = real_stopper_cls()
+        return captured["stopper"]
 
     def _make_run():
         captured["run"] = real_run_cls()
@@ -1309,6 +1317,7 @@ async def _drive_run(*pages, limit=None):
          patch("scripts.backfill_chapters._read_page", new=_next_page), \
          patch("scripts.backfill_chapters._process_one", new=_record), \
          patch("scripts.backfill_chapters._Run", new=_make_run), \
+         patch("scripts.backfill_chapters._Stopper", new=_make_stopper), \
          patch("scripts.backfill_chapters._Ramp", new=_make_ramp):
         exit_code = await _run(limit)
 
@@ -1336,6 +1345,43 @@ async def test_run_dispatches_a_re_admitted_book_end_to_end(restore_audible_tran
     assert run.not_found == 2
     assert run.errors == 0
     assert exit_code == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome,expected", [
+    (_Outcome.ERROR, 2),
+    (_Outcome.NONE, 0),
+    (_Outcome.NOT_FOUND, 0),
+    (_Outcome.PERMANENT, 0),
+    (_Outcome.STORED, 0),
+])
+async def test_run_exits_2_only_when_a_book_errored(restore_audible_transport, outcome, expected):
+    page = [("B00EXITCODE1", "us", None, OUT)]
+    _run_state, _ramp, _gate, _seen, exit_code = await _drive_run(page, outcome=outcome)
+    assert exit_code == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("how,outcome,expected", [
+    ("abort", _Outcome.ERROR, 1),
+    ("abort", _Outcome.NOT_FOUND, 1),
+    ("stop", _Outcome.ERROR, 2),
+    ("stop", _Outcome.NOT_FOUND, 0),
+])
+async def test_run_exit_code_precedence_abort_over_errors_over_stop(
+    restore_audible_transport, how, outcome, expected
+):
+    """An abort exits 1 even when books also errored; a plain stop request
+    (no abort_reason) exits by the error count alone."""
+    def _interrupt(run, stopper):
+        if how == "abort":
+            run.abort("test abort")
+        else:
+            stopper.request()
+
+    page = [("B00PRECEDNC1", "us", None, OUT)]
+    _r, _ramp, _gate, _seen, exit_code = await _drive_run(page, outcome=outcome, on_book=_interrupt)
+    assert exit_code == expected
 
 
 @pytest.mark.asyncio

@@ -479,6 +479,26 @@ def _build_pivot_insert(insert, table, *columns):
     ).on_conflict_do_nothing()
 
 
+def _build_ordered_pivot_insert(insert, table, key, *columns):
+    """
+    A pivot insert whose rows carry their place in the credited list.
+
+    The link itself is still additive: nothing is ever deleted, and a conflict
+    changes nothing but position. Moving an ordinal loses no data, so a link
+    that already exists takes the incoming position, which is how a legacy NULL
+    is filled and how Audible re-crediting a book in another order is followed.
+    The WHERE keeps a rewrite of an unchanged order from touching the row.
+    """
+    stmt = insert(table).values(
+        **{column: bindparam(column) for column in (*columns, "position")}
+    )
+    return stmt.on_conflict_do_update(
+        index_elements=list(key),
+        set_={"position": stmt.excluded.position},
+        where=table.c.position.is_distinct_from(stmt.excluded.position),
+    )
+
+
 def _build_series_author_insert(insert):
     """
     The series-to-author link, written only when the series row it names is
@@ -544,14 +564,17 @@ def statements_for(dialect: str) -> Statements:
         series_upsert=_build_series_upsert(insert),
         genre_insert=_build_pivot_insert(insert, Genre, "asin", "name", "type", "created_at", "updated_at"),
         narrator_insert=_build_pivot_insert(insert, Narrator, "name", "created_at", "updated_at"),
-        book_genre_insert=_build_pivot_insert(
-            insert, book_genre, "book_asin", "book_region", "genre_asin"
+        book_genre_insert=_build_ordered_pivot_insert(
+            insert, book_genre, ("book_asin", "book_region", "genre_asin"),
+            "book_asin", "book_region", "genre_asin",
         ),
-        book_narrator_insert=_build_pivot_insert(
-            insert, book_narrator, "book_asin", "book_region", "narrator_name"
+        book_narrator_insert=_build_ordered_pivot_insert(
+            insert, book_narrator, ("book_asin", "book_region", "narrator_name"),
+            "book_asin", "book_region", "narrator_name",
         ),
-        author_book_insert=_build_pivot_insert(
-            insert, author_book, "author_id", "book_asin", "book_region"
+        author_book_insert=_build_ordered_pivot_insert(
+            insert, author_book, ("author_id", "book_asin", "book_region"),
+            "author_id", "book_asin", "book_region",
         ),
         series_author_insert=_build_series_author_insert(insert),
         book_series_upsert=_build_book_series_upsert(insert),

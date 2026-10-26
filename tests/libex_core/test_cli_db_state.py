@@ -21,7 +21,7 @@ from libex_core.storage.upgrade import VERSION_TABLE
 from tests.libex_core._cli_lookup_support import CASE_IDS, CASES, EGRESS, install_session
 from tests.libex_core._db_support import ALL_DB_COMMANDS, loads
 
-HEAD = "6e1b4c9a2d57"
+HEAD = "d3a8f1b65e90"
 
 
 def _error(message, code):

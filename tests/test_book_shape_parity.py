@@ -182,6 +182,9 @@ def test_the_fixture_answers_every_field_it_describes():
 # THE THREE RESPONSE SHAPES
 # ============================================================
 
+_READER_AND_MODEL_ONLY = {"manualEntry"}
+
+
 def test_the_builder_the_reader_and_the_model_hold_the_same_keys():
     """The identity that makes a widening complete rather than partial.
 
@@ -198,6 +201,16 @@ def test_the_builder_the_reader_and_the_model_hold_the_same_keys():
     from_audible = set(_normalize_product(_FIXTURE_PRODUCT_WITH_SOMETHING_WITHHELD, REGION))
     from_the_database = set(_book_to_dict(_stored_row(), {}))
     from_the_model = set(BookResponse.model_fields)
+
+    # manualEntry is stored-row provenance. Only the reader emits it, from
+    # manual_entry_at; the live normalizer never does, so a live response
+    # takes the model's False default. Held as a named exception here and
+    # pinned from both sides below, rather than loosening the identity.
+    from_the_model_less_provenance = from_the_model - _READER_AND_MODEL_ONLY
+    assert _READER_AND_MODEL_ONLY <= from_the_database, "the reader stopped emitting manualEntry"
+    assert not _READER_AND_MODEL_ONLY & from_audible, "the live normalizer started emitting manualEntry"
+    from_the_database = from_the_database - _READER_AND_MODEL_ONLY
+    from_the_model = from_the_model_less_provenance
 
     assert from_audible == from_the_model, (
         "_normalize_product and BookResponse disagree. "
@@ -298,7 +311,10 @@ _COLUMNS_THE_BOOK_UPSERT_DOES_NOT_BIND = {
 # of the key being matched on. created_at is absent so a later write cannot reset a
 # book's real creation time; tests/integration/test_book_merge_asymmetries.py
 # holds that behaviour against a real database.
-_BOUND_BUT_NEVER_UPDATED = {"asin", "region", "created_at"}
+#
+# manual_entry_at is written on insert and absent from the update, like created_at: it
+# records that the row started as a manual entry, so no later write may set or clear it.
+_BOUND_BUT_NEVER_UPDATED = {"asin", "region", "created_at", "manual_entry_at"}
 
 
 def test_the_writer_binds_every_column_the_book_table_has():

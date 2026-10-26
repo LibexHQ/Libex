@@ -125,6 +125,7 @@ def book_params(data: dict, now: datetime, *, confirm: bool = False) -> dict:
         # case here rather than a sign anything went wrong.
         "extras_withheld": data.get("extrasWithheld"),
         "confirmed_at": now if confirm else None,
+        "manual_entry_at": now if data.get("manualEntry") is True else None,
         "created_at": now,
         "updated_at": now,
     }

@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 # Third party
-from sqlalchemy import bindparam, exists, select
+from sqlalchemy import and_, bindparam, case, exists, select
 from sqlalchemy.orm import aliased
 
 # Local
@@ -41,6 +41,28 @@ def _first_of_its_asin(model):
     """
     other = aliased(model)
     return ~exists().where(other.asin == bindparam("asin"), other.region != bindparam("region"))
+
+
+def _relist_or_longer(new_value, existing_col, confirmed):
+    """
+    Text for a column of a book that started as a manual entry: the first
+    Audible answer to confirm it replaces what was typed in, whatever its
+    length. Every other write, and every row not born as a manual entry, takes
+    longer_wins. confirmed_at still NULL is what makes it one-shot; the update
+    sets it in the same statement.
+    """
+    return case(
+        (
+            and_(
+                Book.manual_entry_at.is_not(None),
+                Book.confirmed_at.is_(None),
+                confirmed.is_not(None),
+                merge._trimmed(new_value) != "",
+            ),
+            new_value,
+        ),
+        else_=merge.longer_wins(new_value, existing_col),
+    )
 
 
 @dataclass(frozen=True)
@@ -150,7 +172,7 @@ def _build_book_upsert(insert):
     Audible's product answer for those books, and the update only moves it
     forward (merge.latest); a NULL bind leaves the stored stamp as it is.
 
-    Four asymmetries in the merge are load-bearing and must survive any edit
+    Five asymmetries in the merge are load-bearing and must survive any edit
     that regenerates this from the column list:
 
     - created_at is written on insert and absent from the update. Deriving the
@@ -159,6 +181,9 @@ def _build_book_upsert(insert):
     - is_primary is written on insert and absent from the update, like
       created_at: it records whether the row was first of its ASIN when it was
       stored, and a later write must not reconsider that.
+    - manual_entry_at is written on insert and absent from the update, like
+      created_at: it records that the row started as a manual entry, and no
+      later write sets or clears it.
     - region is in the conflict target and never in the update. A book is
       identified by (asin, region), so a response fetched for another region
       conflicts with nothing and lands as that region's own row; it can never
@@ -228,6 +253,7 @@ def _build_book_upsert(insert):
         audible_extras=merge.json_bind("audible_extras"),
         extras_withheld=merge.json_bind("extras_withheld"),
         confirmed_at=confirmed,
+        manual_entry_at=bindparam("manual_entry_at"),
         created_at=bindparam("created_at"),
         updated_at=bindparam("updated_at"),
     )
@@ -288,8 +314,8 @@ def _build_book_upsert(insert):
             #                           the defect the other thirteen had.
             "title": merge.answered(bindparam("title"), Book.title),
             "subtitle": merge.answered(stmt.excluded.subtitle, Book.subtitle),
-            "description": merge.longer_wins(bindparam("description"), Book.description),
-            "summary": merge.longer_wins(bindparam("summary"), Book.summary),
+            "description": _relist_or_longer(bindparam("description"), Book.description, confirmed),
+            "summary": _relist_or_longer(bindparam("summary"), Book.summary, confirmed),
             "publisher": merge.answered(stmt.excluded.publisher, Book.publisher),
             "copyright": merge.answered(stmt.excluded.copyright, Book.copyright),
             "isbn": merge.answered(stmt.excluded.isbn, Book.isbn),
@@ -403,8 +429,10 @@ def _build_book_upsert(insert):
             "publication_datetime": merge.coalesce(
                 stmt.excluded.publication_datetime, Book.publication_datetime
             ),
-            "extended_product_description": merge.longer_wins(
-                bindparam("extended_product_description"), Book.extended_product_description
+            "extended_product_description": _relist_or_longer(
+                bindparam("extended_product_description"),
+                Book.extended_product_description,
+                confirmed,
             ),
             "product_state": merge.answered(stmt.excluded.product_state, Book.product_state),
             # Read through excluded rather than the bindparam deliberately:

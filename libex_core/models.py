@@ -199,6 +199,17 @@ class BookResponse(BaseModel):
     isAvailable: bool = False
     isBuyable: bool = False
     isVvab: bool = False
+    manualEntry: bool = Field(
+        default=False,
+        description=(
+            "On a stored record, true means it was first entered by hand from a "
+            "public report of a book Audible had delisted. It stays true after "
+            "Audible relists and confirms the book, and Audible may since have "
+            "replaced its fields. A live fetch, and a cached copy of one, always "
+            "reads false, so /db and /books can differ for the same ASIN. No "
+            "timestamp is exposed."
+        ),
+    )
     plans: list[str] = Field(default_factory=list)
     updatedAt: str | None = None
     authors: list[AuthorRefResponse] = Field(default_factory=list)

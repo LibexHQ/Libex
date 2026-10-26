@@ -154,6 +154,8 @@ class Book(Base):
     # confirmed.
     confirmed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     chapters_confirmed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    # Set on insert for a row that started as a manual entry; never updated, never cleared.
+    manual_entry_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime(),
         default=lambda: datetime.now(timezone.utc),

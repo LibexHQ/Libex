@@ -54,20 +54,47 @@ jobs:
       # that reports vulnerabilities as the one thing nothing checks is a gap
       # this slice exists to close.
       #
-      # One invocation each, not three -r flags on one command: pip-audit
-      # resolves everything it is handed as a single install, and these three
-      # sets are deliberately unsatisfiable together -- the application locks
-      # are held to constraints.txt (idna 3.15, pygments 2.20.0, requests
-      # 2.33.0) while the tooling lock resolves freely (3.18, 2.21.0, 2.34.2).
-      # That conflict is the isolation working as intended, and combining the
-      # flags fails the step with a pip install error rather than reporting
-      # anything. Actions runs this block under `bash -e`, so any one of the
-      # three failing still fails the job.
+      # Each lock is audited on its own, never three -r flags on one command:
+      # pip-audit resolves everything it is handed as a single install, and
+      # these three sets are deliberately unsatisfiable together -- the
+      # application locks are held to constraints.txt while the tooling lock
+      # resolves freely. Combining them fails with a pip install error rather
+      # than reporting anything.
+      #
+      # The step blocks only on advisories this change introduces, compared
+      # by advisory id against a base. An advisory that is already on the base
+      # is printed but does not fail the job: it was published against
+      # something that already shipped, and it gets fixed through a normal
+      # dependency update, not by turning every unrelated change red until a
+      # fix clears the cooldown. The base is the PR's target for a pull
+      # request, and dev for a push to any other branch. A push to dev or
+      # main compares against what the branch held before the push, so a
+      # merge that brings an advisory in is still caught there. A pip-audit
+      # crash, a skipped package or a base that cannot be fetched fails the
+      # step. The rules themselves live in scripts/audit-new-advisories.sh.
       - name: Audit dependencies
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
         run: |
-          "$RUNNER_TEMP/tooling/bin/pip-audit" -r requirements.lock
-          "$RUNNER_TEMP/tooling/bin/pip-audit" -r requirements-dev.lock
-          "$RUNNER_TEMP/tooling/bin/pip-audit" -r requirements-tooling.lock
+          if [ "$EVENT" = pull_request ]; then
+            git fetch --no-tags --depth=1 origin "refs/heads/$BASE_REF"
+            base=$(git rev-parse FETCH_HEAD)
+          elif [ "$GITHUB_REF" = refs/heads/dev ] || [ "$GITHUB_REF" = refs/heads/main ]; then
+            if [ "$BEFORE" = 0000000000000000000000000000000000000000 ]; then
+              git fetch --no-tags --depth=2 origin "$GITHUB_SHA"
+              base=$(git rev-parse HEAD^1)
+            else
+              git fetch --no-tags --depth=1 origin "$BEFORE"
+              base="$BEFORE"
+            fi
+          else
+            git fetch --no-tags --depth=1 origin refs/heads/dev
+            base=$(git rev-parse FETCH_HEAD)
+          fi
+          PATH="$RUNNER_TEMP/tooling/bin:$PATH" LIBEX_AUDIT_BASE="$base" \
+            scripts/audit-new-advisories.sh requirements.lock requirements-dev.lock requirements-tooling.lock
       # --ignore as well as -m: the dev lock carries testcontainers, and
       # tests/integration/conftest.py starts its container at MODULE IMPORT
       # rather than in a fixture, so deselecting by marker still pays for a

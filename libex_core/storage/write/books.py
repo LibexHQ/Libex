@@ -141,10 +141,12 @@ async def _release_stale_positions(session: AsyncSession, table, link: str, link
     already-released rows untouched.
 
     A book with no incoming links is not in `links`, so an empty list changes
-    nothing. Books are taken in key order, so two writers lock rows in the
-    same order, and are grouped into statements that each stay under
-    _PARAM_BUDGET bound parameters: one statement for a whole chunk would
-    pass the driver's cap on a large write.
+    nothing. Books are taken in key order and grouped into statements of at
+    most _PARAM_BUDGET bound parameters, because one statement for a whole
+    chunk would pass the driver's cap on a large write. A book's links are
+    never split, so a book with a very large link list gets a statement to
+    itself. The key order fixes the order of the statements, not the order in
+    which Postgres locks the rows inside one of them.
     """
     by_book: dict[tuple, list[tuple]] = {}
     for row in links:

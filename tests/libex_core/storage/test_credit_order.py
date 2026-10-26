@@ -12,6 +12,7 @@ from sqlalchemy.dialects import postgresql
 # Local
 from libex_core.storage.models import Book, author_book, book_genre, book_narrator
 from libex_core.storage.read.books import get_book
+from libex_core.storage.write import books as books_module
 from libex_core.storage.write import write_books
 
 pytest.importorskip("aiosqlite")
@@ -183,8 +184,6 @@ async def _genre_positions(store):
 async def test_stale_positions_are_released_in_bounded_statements_and_other_books_are_untouched(
     sqlite_store, monkeypatch
 ):
-    from libex_core.storage.write import books as books_module
-
     asins = [f"B0BOUND{i:03d}" for i in range(6)]
     await _write(sqlite_store, [_genre_book(a, "ZMA") for a in asins + ["B0OUTSIDE1"]])
     # 2 + 3 * 1 = 5 params per rewritten book; a budget of 12 fits two books.

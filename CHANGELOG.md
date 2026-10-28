@@ -10,6 +10,15 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [2.3.0]
+
+One additive response field and one database migration. I counted this a MINOR: `manualEntry` is new surface, and nothing existing changes shape.
+
+### Added
+- **Books carry a `manualEntry` flag.** It is true for a record that was first entered by hand, from a public report of a book Audible had delisted. It stays true after Audible lists the book again, and by then Audible's data may have replaced the fields. Every `/db` route serves it. `/books` serves it only when the answer comes from the cache or from the stored copy during an Audible outage. A fresh answer straight from Audible has no such history and reads `false`, so `/db` and `/books` can differ for the same ASIN; if you need the flag reliably, use `/db`. It is a boolean only and no timestamp is exposed.
+- **A relisted manual entry has its text replaced once.** When Audible lists a book that began as a manual entry, the first answer that confirms it replaces the description, summary and extended product description with Audible's text, even where the typed-in text was longer. That replacement overrides the usual rule that the longer text is kept. It happens only on that first confirming answer, and only for text Audible actually sent; every later write, and every book that did not begin as a manual entry, keeps the longer text as before.
+- **The migration adds a nullable `manual_entry_at` column to books.** It is set when a manual entry is first stored and is never updated or cleared; existing rows stay empty and nothing is backfilled. The column is added as a catalog change with a 5 second lock timeout, so a held lock makes the container restart and retry instead of queueing writers behind it.
+
 ## [2.2.16]
 
 No endpoint, parameter or response field changes. One database migration adds a nullable column to three link tables, and the order of authors, narrators and genres in a book's response changes to the order Audible credits them in. `/db/plans` and `/db/genres` now reject an unknown region. I counted this a PATCH: it fixes an order that was never defined and a region that was never checked, and adds no new surface.

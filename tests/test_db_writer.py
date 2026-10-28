@@ -1408,6 +1408,24 @@ def test_every_text_column_measures_a_blank_or_is_named_as_unguarded(column):
     in whether a blank one can win."""
     clause = _book_upsert_set_clauses().get(column, "")
 
+    # The three length-merged columns lead with the one-shot relist CASE, and
+    # its ELSE is the longer_wins guard this test has always measured. Read
+    # the ELSE branch as the clause, and hold the relist branch's own blank
+    # guard separately, so neither half can lose its check unseen.
+    relist_prefix = "CASE WHEN (books.manual_entry_at IS NOT NULL"
+    if column in _LENGTH_MERGED_COLUMNS:
+        assert clause.startswith(relist_prefix), (
+            f"{column} no longer leads with the relist CASE: {clause!r}"
+        )
+        relist_guard, separator, clause = clause.partition(" ELSE ")
+        assert separator
+        assert clause.endswith(" END")
+        clause = clause[: -len(" END")]
+        assert "btrim(" in relist_guard and ") != " in relist_guard, (
+            f"{column}'s relist branch does not skip a blank incoming value: "
+            f"{relist_guard!r}"
+        )
+
     answered_shaped = clause.startswith("CASE WHEN (btrim(")
     length_shaped = clause.startswith("CASE WHEN (coalesce(length(nullif(btrim(")
     guarded = answered_shaped or length_shaped

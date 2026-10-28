@@ -50,7 +50,7 @@ Audible sometimes removes a book from sale. Once it's gone, Audible's own API st
 
 A delisted book is served only from the `/db` endpoints, for example `/db/book/<ASIN>?region=us` or a `/db/book` search. The live `/books` endpoint still returns `404` for it, because Audible no longer has it.
 
-Records I add this way carry `"manualEntry": true`. It stays true even if Audible lists the book again, and from then on Audible's data takes over as normal. Live `/books` responses always read `false`.
+Records I add this way carry `"manualEntry": true`. It stays true even if Audible lists the book again, and from then on Audible's data takes over as normal. `/books` shows it too when it answers from my stored copy, on a cache hit or during an Audible outage; a fresh answer straight from Audible reads `false`.
 
 If a book Audible has delisted is missing from `/db`, [open a Missing book issue](https://github.com/LibexHQ/Libex/issues/new?template=missing-book.yml). I check every report before adding anything: that the book isn't already in `/db`, that Audible really has delisted it, and that the ASIN is a real Audible one. Books that were never sold on Audible aren't accepted.
 
@@ -509,7 +509,7 @@ The same filter set is available on the other book-list DB endpoints too — `/d
 
 Use `/db/genres` to discover the genre/tag names for `genre` (optionally with `?search=`), or `/categories` to discover the category ids for `category`.
 
-`manualEntry` is true for a record that was first entered by hand, because Audible had stopped listing the book. It stays true after Audible lists the book again. Live `/books` responses always read false. See [Delisted Books](#delisted-books).
+`manualEntry` is true for a record that was first entered by hand, because Audible had stopped listing the book. It stays true after Audible lists the book again. `/books` shows it when it answers from the stored copy (a cache hit, or during an Audible outage); a fresh answer from Audible reads false. See [Delisted Books](#delisted-books).
 
 ### Sorting
 

@@ -34,6 +34,10 @@ still tell apart:
 A flag or plans the model was built without is unknown too, whatever default
 the model fills in for it.
 
+manualEntry is provenance, not a flag: True is kept in the writer dict so the
+row is stamped as a manual entry, and anything else (False, None, absent) is
+removed, so a book never arrives as a manual entry by default.
+
 Unknown writes nothing over a stored value and takes the column's default on a
 new row, which is what a first normalization of a silent product would have
 stored. The cost is that a server's explicit False for the first four, or
@@ -73,6 +77,7 @@ __all__ = [
     "ingest_books",
     "ingest_chapters",
     "ingest_series",
+    "unsettled_book",
 ]
 
 # The flags whose settled default is the given value; see the module docstring.
@@ -91,12 +96,14 @@ def _check_region(records: Sequence[Any], region: str) -> str:
     return region
 
 
-def _unsettled(book: BookResponse, region: str) -> dict[str, Any]:
+def unsettled_book(book: BookResponse, region: str) -> dict[str, Any]:
     """The book as the writer takes it, with every settled default read back
-    as unknown."""
+    as unknown. manualEntry is kept only when it is True and removed otherwise."""
     data = book.model_dump()
     for key in _BOOK_DROPPED:
         data.pop(key, None)
+    if data.get("manualEntry") is not True:
+        data.pop("manualEntry", None)
     for key in _SETTLES_TO_TRUE:
         if key not in book.model_fields_set or data[key] is True:
             data[key] = None
@@ -132,7 +139,7 @@ async def ingest_books(
     for book in books:
         if not is_valid_asin(book.asin):
             continue
-        data = _unsettled(book, region)
+        data = unsettled_book(book, region)
         data["asin"] = normalise_asin(book.asin)
         prepared.append(data)
     if not prepared:

@@ -24,7 +24,8 @@ from libex_core.storage.upgrade import _config, set_foreign_keys, upgrade_to_hea
 
 BEFORE = "438dbe70d041"
 AFTER = "a4d91f7c3b26"
-HEAD = "6e1b4c9a2d57"
+HEAD = "d3a8f1b65e90"
+BEFORE_MANUAL_ENTRY = "6e1b4c9a2d57"
 
 STAMP = "2026-01-01 00:00:00"
 BOOK_COLUMNS = (
@@ -446,11 +447,62 @@ def _pivot_positions(engine):
 
 
 def test_the_credit_order_revision_adds_and_drops_a_nullable_position(engine):
-    _run(engine, HEAD)
+    # Its own revision is the head of the chain only up to the manual entry one.
+    _run(engine, BEFORE_MANUAL_ENTRY)
     for column in _pivot_positions(engine).values():
         assert column is not None and column["nullable"] and column["default"] is None
     _run(engine, "-1", down=True)
     assert _revision(engine) == "9d2f6b4e8a17"
     assert set(_pivot_positions(engine).values()) == {None}
+    _run(engine, BEFORE_MANUAL_ENTRY)
+    assert _revision(engine) == BEFORE_MANUAL_ENTRY
+
+
+# ============================================================
+# MANUAL ENTRY STAMP
+# ============================================================
+
+
+def _books_columns(engine):
+    return {c["name"]: c for c in inspect(engine).get_columns("books")}
+
+
+def test_the_manual_entry_revision_adds_a_nullable_column_and_drops_it(engine):
+    _run(engine, BEFORE_MANUAL_ENTRY)
+    assert "manual_entry_at" not in _books_columns(engine)
+    with engine.begin() as c:
+        c.exec_driver_sql(
+            f"INSERT INTO books (asin, title, region, {BOOK_COLUMNS}) VALUES "
+            f"('B1', 'one', 'us', {BOOK_VALUES}), ('B2', 'two', 'uk', {BOOK_VALUES})"
+        )
+
+    _run(engine, HEAD)
+    column = _books_columns(engine)["manual_entry_at"]
+    assert column["nullable"] and column["default"] is None
+    assert "TIMESTAMP" in str(column["type"]).upper() or "DATETIME" in str(column["type"]).upper()
+    with engine.connect() as c:
+        stamps = c.exec_driver_sql("SELECT asin, manual_entry_at FROM books ORDER BY asin").all()
+    assert stamps == [("B1", None), ("B2", None)]  # existing rows are not backfilled
+
+    with engine.begin() as c:
+        c.exec_driver_sql(f"UPDATE books SET manual_entry_at = '{STAMP}' WHERE asin = 'B1'")
+    _run(engine, "-1", down=True)
+    assert _revision(engine) == BEFORE_MANUAL_ENTRY
+    assert "manual_entry_at" not in _books_columns(engine)
+    with engine.connect() as c:
+        assert c.exec_driver_sql("SELECT asin FROM books ORDER BY asin").all() == [("B1",), ("B2",)]
+
     _run(engine, HEAD)
     assert _revision(engine) == HEAD
+    assert "manual_entry_at" in _books_columns(engine)
+
+
+def test_the_models_would_flag_a_missing_manual_entry_column(engine):
+    """compare_metadata is clean at head (above) only because the revision
+    really adds the column: one step earlier the same check reports it."""
+    _run(engine, BEFORE_MANUAL_ENTRY)
+    assert any(
+        d[0] == "add_column" and d[3].name == "manual_entry_at"
+        for d in _drift(engine)
+        if isinstance(d, tuple)
+    )

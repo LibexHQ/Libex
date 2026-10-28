@@ -13,6 +13,19 @@ the first published version. Entries for earlier versions record changes made
 before publication: they are historical record for whoever embeds this package,
 not evidence that anyone consumed a given version at the time it was cut.
 
+## [0.25.0]
+
+This release adds a migration: `books` gains a nullable `manual_entry_at` column. Run `alembic upgrade head` on any store you already have.
+
+### Added
+- **`BookResponse` has a `manualEntry` boolean,** default `false`. It is true for a book that was first entered by hand and stays true after Audible lists it again. Reads fill it from the stored column; only the boolean is exposed, not the timestamp.
+- **`unsettled_book` is a public export of `libex_core.lookup.ingest`.** It returns the book as the writer takes it, with every settled default read back as unknown. It was the private `_unsettled`.
+- **The `books` table has a nullable `manual_entry_at` column,** set on insert for a manual entry and never updated or cleared. The migration adds it with no default and no backfill, on both the SQLite and the Postgres chains.
+
+### Changed
+- **`ingest_books` keeps `manualEntry` only when it is `True`.** `False`, `None` or absent is removed before the write, so a book never arrives as a manual entry by default.
+- **A manual entry's text is replaced once, by the first answer that confirms it.** `write_books` replaces `description`, `summary` and `extended_product_description` with the confirming answer's text, whatever its length, overriding longer-wins. It applies only while the row has `manual_entry_at` set and `confirmed_at` still empty, and only to non-blank text; the update sets `confirmed_at`, so it happens once. Every other write keeps the longer text.
+
 ## [0.24.0]
 
 This release adds a migration: the author, narrator and genre links gain a `position` column, and reads and writes of a book use it. Run `alembic upgrade head` on any store you already have.

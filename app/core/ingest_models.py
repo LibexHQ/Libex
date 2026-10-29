@@ -6,8 +6,8 @@ one, nested ones included. A key is accepted only when the writer stores it,
 so the accepted set and the stored set are the same set by construction: a
 derived field (link, regions, betterType) is refused as an unknown key, and a
 field BookResponse gains later is refused too, never silently dropped. The
-per-key map below is the one list the form, the fill-in kit and the parser
-read; the models are checked against it at import.
+per-key map below is the one list of accepted keys; the models are checked
+against it at import.
 
 These are never a response_model. manualEntry is not accepted anywhere: the
 server stamps provenance after parsing.
@@ -48,7 +48,7 @@ __all__ = [
     "error_list",
 ]
 
-# Author and series description, image and extras are applied by the writer
+# Author description and image, and series description and extras, are applied by the writer
 # only when it inserts the entity; a differing value for a stored one is a
 # conflict, never an update. isListenable, isBuyable and isVvab default to
 # False: a book entered by hand is not on sale, whatever the column defaults say.

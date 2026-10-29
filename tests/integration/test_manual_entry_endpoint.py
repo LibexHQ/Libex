@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock, patch
 # Third party
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import event, insert, select, text
+from sqlalchemy import create_engine, event, insert, select, text
 from sqlalchemy.exc import IntegrityError
 
 # Local
@@ -30,7 +30,7 @@ from app.db.session import get_session
 from app.main import app
 from app.services.audible import books as books_mod
 from app.services.cache.manager import book_key, chapters_key, get, set as cache_set
-from app.services.db import manual_entry
+from app.services.db import manual_entry, persist_queue
 from app.services.db.writer import write_books
 from libex_core.exceptions import AudibleAPIException, NotFoundException
 from libex_core.storage.models import Book
@@ -201,8 +201,6 @@ async def test_a_refresh_chunk_that_404s_leaves_the_manual_row_unchanged(client,
                     await books_mod.get_books_by_asins([ASIN], "us", session)
                 except NotFoundException:
                     pass
-    from app.services.db import persist_queue
-
     await persist_queue.wait_for_inflight()
     await _fresh(db_session)
     assert await snapshot(db_session) == before
@@ -412,9 +410,8 @@ async def test_a_writer_integrity_error_is_a_500_and_the_log_holds_only_the_type
     assert all(n == 0 for n in (await counts(db_session)).values())
 
 
-async def test_a_real_database_rejection_rolls_the_whole_entry_back(client, db_session, env):
-    # An ASIN column holds 12 characters; the model allows what is_valid_asin allows,
-    # so push a long chapters title the model accepts past nothing: instead break the chapter write.
+async def test_a_failed_chapter_write_rolls_the_whole_entry_back(client, db_session, env):
+    # The chapter write fails after the book rows are written; the whole entry must roll back.
     with patch.object(manual_entry._entities, "write_track", AsyncMock(side_effect=RuntimeError("boom"))):
         response = await _post(client, url=COMMIT)
     assert response.status_code == 500
@@ -599,15 +596,11 @@ def template():
 
 
 def _index_exists(engine):
-    from sqlalchemy import text as t
-
     with engine.connect() as c:
-        return c.execute(t("SELECT count(*) FROM pg_indexes WHERE indexname = 'ix_books_manual_entry'")).scalar() == 1
+        return c.execute(text("SELECT count(*) FROM pg_indexes WHERE indexname = 'ix_books_manual_entry'")).scalar() == 1
 
 
 def test_the_revision_builds_the_index_and_downgrades_cleanly(template):
-    from sqlalchemy import create_engine
-
     name, sync_url, async_url = clone(template)
     engine = create_engine(sync_url)
     try:

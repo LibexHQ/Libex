@@ -147,7 +147,8 @@ def _ingest_authorized(authorization: str | None) -> bool:
         _warn_unusable_ingest_secret_once("is not a SHA-256 hex digest")
         return False
     seed = (settings.seed_secret or "").strip().lower()
-    if hmac.compare_digest(stored, seed):
+    # compare_digest raises on non-ASCII, and an unusable seed can never equal a usable digest.
+    if _secret_is_usable(seed) and hmac.compare_digest(stored, seed):
         _warn_unusable_ingest_secret_once("equals SEED_SECRET")
         return False
     return _token_matches(authorization, stored)
@@ -293,9 +294,9 @@ def _errors(errors: list[dict[str, Any]], status: int = 422) -> JSONResponse:
 
 def _writer_dict(body: IngestBody) -> dict[str, Any]:
     """
-    The parsed book as the writer takes it. The three flags the model defaults
-    to False are always present, so exclude_unset cannot drop them; the writer
-    then stores False rather than an unknown. manualEntry is set server-side
+    The parsed book as the writer takes it. exclude_unset drops the three flags
+    the model defaults to False when the caller leaves them out, so they are
+    put back here; the writer then stores False rather than an unknown. manualEntry is set server-side
     because the input model refuses it.
     """
     book = body.book.model_dump(exclude_unset=True)
@@ -309,7 +310,7 @@ async def _clear_cache(book: dict[str, Any], region: str) -> None:
     """
     Drops every cached entry that can hold the entered book or a list derived
     from its links. Called after a commit only; a failure here cannot undo the
-    commit, so it is logged by type and the response still reports it.
+    commit, so it is logged by type and the response still reports the commit.
     """
     asin = book["asin"]
     keys = [cache.book_key(asin, region), cache.chapters_key(asin, region)]

@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 # Third party
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 # Local
 from app.api.routes.internal.router import MAX_INGEST_BODY_BYTES, _ingest_authorized, hash_secret
@@ -436,8 +437,6 @@ async def test_a_writer_or_readback_failure_is_a_generic_500_and_clears_nothing(
 
 
 async def test_a_database_integrity_error_logs_only_the_type_name(async_client, env, caplog):
-    from sqlalchemy.exc import IntegrityError
-
     env.enter.side_effect = IntegrityError("INSERT ... VALUES ('SECRET-ROW')", {"title": "SECRET-ROW"}, Exception("dup"))
     with caplog.at_level(logging.DEBUG):
         response = await _post(async_client)
@@ -484,3 +483,9 @@ async def test_the_route_and_its_models_are_absent_from_openapi(async_client):
     assert not any(path.startswith("/internal") for path in schema["paths"])
     for name in ("IngestBody", "IngestBook", "IngestChapters", "IngestAuthor", "IngestSeries", "IngestGenre"):
         assert name not in dump
+
+
+def test_a_non_ascii_seed_secret_is_a_refusal_not_a_crash(env):
+    env.settings.seed_secret = "é" * 64
+    assert _ingest_authorized(f"Bearer {INGEST_TOKEN}") is True
+    assert _ingest_authorized("Bearer " + "x" * len(INGEST_TOKEN)) is False

@@ -15,10 +15,12 @@ not evidence that anyone consumed a given version at the time it was cut.
 
 ## [0.25.0]
 
-This release adds a migration: `books` gains a nullable `manual_entry_at` column. Run `alembic upgrade head` on any store you already have.
+This release adds two migrations: `books` gains a nullable `manual_entry_at` column and a partial index over it. Run `alembic upgrade head` on any store you already have.
 
 ### Added
 - **`BookResponse` has a `manualEntry` boolean,** default `false`. It is true for a book that was first entered by hand and stays true after Audible lists it again. Reads fill it from the stored column; only the boolean is exposed, not the timestamp.
+- **`get_delisted_books` in `libex_core.storage.read.books` lists the hand-entered books.** It takes `region`, `sort`, `order`, `limit` and `page` and returns the full hydrated records of every book with `manual_entry_at` set, newest entry first. A sort field replaces the default order; entry time, ASIN and region always break ties. Each regional record is its own entry.
+- **The `books` table has a partial index, `ix_books_manual_entry`,** over `manual_entry_at` (descending), `asin` and `region` where `manual_entry_at` is set, on both the SQLite and the Postgres chains.
 - **`unsettled_book` is a public export of `libex_core.lookup.ingest`.** It returns the book as the writer takes it, with every settled default read back as unknown. It was the private `_unsettled`.
 - **The `books` table has a nullable `manual_entry_at` column,** set on insert for a manual entry and never updated or cleared. The migration adds it with no default and no backfill, on both the SQLite and the Postgres chains.
 

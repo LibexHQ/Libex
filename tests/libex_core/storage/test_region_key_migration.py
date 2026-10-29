@@ -24,7 +24,8 @@ from libex_core.storage.upgrade import _config, set_foreign_keys, upgrade_to_hea
 
 BEFORE = "438dbe70d041"
 AFTER = "a4d91f7c3b26"
-HEAD = "d3a8f1b65e90"
+HEAD = "f2b8d6a40c17"
+MANUAL_ENTRY = "d3a8f1b65e90"
 BEFORE_MANUAL_ENTRY = "6e1b4c9a2d57"
 
 STAMP = "2026-01-01 00:00:00"
@@ -476,7 +477,7 @@ def test_the_manual_entry_revision_adds_a_nullable_column_and_drops_it(engine):
             f"('B1', 'one', 'us', {BOOK_VALUES}), ('B2', 'two', 'uk', {BOOK_VALUES})"
         )
 
-    _run(engine, HEAD)
+    _run(engine, MANUAL_ENTRY)
     column = _books_columns(engine)["manual_entry_at"]
     assert column["nullable"] and column["default"] is None
     assert "TIMESTAMP" in str(column["type"]).upper() or "DATETIME" in str(column["type"]).upper()
@@ -492,8 +493,8 @@ def test_the_manual_entry_revision_adds_a_nullable_column_and_drops_it(engine):
     with engine.connect() as c:
         assert c.exec_driver_sql("SELECT asin FROM books ORDER BY asin").all() == [("B1",), ("B2",)]
 
-    _run(engine, HEAD)
-    assert _revision(engine) == HEAD
+    _run(engine, MANUAL_ENTRY)
+    assert _revision(engine) == MANUAL_ENTRY
     assert "manual_entry_at" in _books_columns(engine)
 
 

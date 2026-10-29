@@ -243,8 +243,13 @@ Cloudflare still sees your address; see [Who receives data](#who-receives-data).
 - **Anything that links your requests to each other.** Request IDs are
   per-request, and the worker `pid` is shared by every caller.
 - **Request bodies.** Every endpoint open to the public is a `GET` and accepts
-  no body. One undocumented maintenance endpoint accepts uploads from the
-  operator's own tools and rejects everyone else.
+  no body. Two undocumented maintenance endpoints accept uploads, each with
+  its own token, and refuse anyone without it before reading what was sent.
+  One takes enrichment data from my own tools. The other is how I add a book
+  by hand ([Reports of missing books](#reports-of-missing-books)): it logs
+  the book's ASIN and region and counts of what it stored, never anything
+  else from the upload. Requests to either are logged like any other
+  request, refused ones included.
 - **`Authorization`, `Cookie` and `Referer` headers.** None of these is logged.
 - **Caller data in the database.** The PostgreSQL database, and any backup of
   it, holds Audible catalogue metadata (books, authors, narrators, series,
@@ -312,10 +317,12 @@ requests.
   as you submit it: your GitHub username, what you type, and any image you
   attach. GitHub hosts it under GitHub's privacy terms, not mine.
 - **Only the book's metadata reaches Libex.** I check each report and enter the
-  book's details myself: title, authors, narrators, series, dates and so on. The
-  record is marked as entered by hand (`manualEntry`), and the database notes
-  when. It holds nothing about who reported it: not your username, not a link to
-  the issue, and nothing from your screenshots.
+  book's details myself, through a maintenance endpoint only I can use: title,
+  authors, narrators, series, dates and so on. Before storing it, Libex asks
+  Audible whether that ASIN is still listed in that region, the same way as
+  any other lookup. The record is marked as entered by hand (`manualEntry`),
+  and the database notes when. It holds nothing about who reported it: not
+  your username, not a link to the issue, and nothing from your screenshots.
 - **Screenshots stay on GitHub.** The form accepts a screenshot of an order, or
   of the book in your Audible library, as proof the book was sold. I look at it
   to check the report and don't copy it, or anything in it, into Libex. It is
@@ -338,6 +345,7 @@ requests.
 | Container output (Docker's log), including the VPN client's connection log | The published compose files cap this at five 10 MB files per container, discarding the oldest first. The limit is on size, not age. The public instance does not yet run with these caps. Until it does, how long its container output is kept depends on the server's own Docker configuration. | The published compose files for deployments that use them. The server's Docker configuration for the public instance. |
 | Axiom | 30 days, then deleted. | A setting I configured in Axiom's console. It is not in the code, so it can't be checked from this repository. If it changes, this notice will change with it. |
 | Cloudflare | Set by Cloudflare. | Cloudflare. I have no visibility into it. |
+| Missing book reports | Public on GitHub until the issue is deleted. Nothing expires them, and closing an issue does not delete it. A book entered from a report stays in the database, but holds nothing about the report. | GitHub. You can edit your own issue, and I can delete it on request ([Reports of missing books](#reports-of-missing-books)). |
 
 ## Your rights
 

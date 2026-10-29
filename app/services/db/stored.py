@@ -31,6 +31,7 @@ __all__ = [
     "get_books_by_plan_from_db",
     "get_books_by_sku_from_db",
     "get_coming_soon_from_db",
+    "get_delisted_books_from_db",
     "get_distinct_genres_from_db",
     "get_distinct_plans_from_db",
     "get_narrator_books_from_db",
@@ -76,6 +77,7 @@ get_distinct_plans_from_db = _raising(_books.distinct_plans)
 get_distinct_genres_from_db = _raising(_books.distinct_genres)
 get_books_by_plan_from_db = _raising(_books.get_books_by_plan)
 get_vvab_books_from_db = _raising(_books.get_vvab_books)
+get_delisted_books_from_db = _raising(_books.get_delisted_books)
 get_new_releases_from_db = _raising(_books.get_new_releases)
 get_coming_soon_from_db = _raising(_books.get_coming_soon)
 get_track_from_db = _raising(_books.get_track)

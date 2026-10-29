@@ -50,6 +50,8 @@ Audible sometimes removes a book from sale. Once it's gone, Audible's own API st
 
 A delisted book is served only from the `/db` endpoints, for example `/db/book/<ASIN>?region=us` or a `/db/book` search. The live `/books` endpoint still returns `404` for it, because Audible no longer has it.
 
+To list every book I've entered this way, call `GET /db/delisted`. It's paginated like the other `/db` lists, takes an optional `region`, and puts the newest entry first. A book stays on the list after Audible lists it again, because `manualEntry` never resets.
+
 Records I add this way carry `"manualEntry": true`. It stays true even if Audible lists the book again, and from then on Audible's data takes over as normal. `/books` shows it too when it answers from my stored copy, on a cache hit or during an Audible outage; a fresh answer straight from Audible reads `false`.
 
 If a book Audible has delisted is missing from `/db`, [open a Missing book issue](https://github.com/LibexHQ/Libex/issues/new?template=missing-book.yml). I check every report before adding anything: that the book isn't already in `/db`, that Audible really has delisted it, and that the ASIN is a real Audible one. Books that were never sold on Audible aren't accepted.
@@ -449,6 +451,7 @@ ABS will then call `/us/search?title=...&author=...` which returns the `{"matche
 | GET | `/db/book/{asin}` | Get a single book from local DB. Books are stored per region; `?region=xx` picks one, otherwise you get the record stored first |
 | GET | `/db/book/{asin}/chapters` | Get chapter data from local DB (optional `?region=xx`, as above) |
 | GET | `/db/book/sku/{sku}` | Get books by SKU group from local DB |
+| GET | `/db/delisted` | List the books I entered by hand because Audible had delisted them, newest entry first. Each item is the full record `/db/book` returns, with `manualEntry` true. A book stays listed after Audible lists it again. `region` narrows the list (without it, every region's records are listed, each its own item), `sort` and `order` override the order, and `limit` (1 to 100, default 20) and `page` paginate. An empty list is `200` with `[]`, not a `404` |
 | GET | `/db/plans` | Get all distinct Audible plan names from local DB |
 | GET | `/db/plans/{plan_name}` | Get all books under a specific plan from local DB (`region` as for `/db/book`) |
 | GET | `/db/genres` | Get all distinct genre/tag names from local DB |
@@ -561,6 +564,7 @@ Copy `.env.example` to `.env` and configure:
 | `AXIOM_DATASET` | `libex` | Axiom dataset name |
 | `AUDIBLE_PROXY_URL` | blank | Optional, recommended. Proxy URL for outbound Audible requests only. Blank, the API calls Audible directly from your host and logs that at startup. Set, Audible sees the proxy's address instead of the one your API answers on. Only `http://` and `https://` are supported; any other scheme, or a value that doesn't parse as a proxy URL, refuses to start rather than send traffic out unproxied. API serving, the database, and logging are unaffected either way. See VPN / Egress below for how to supply one |
 | `SEED_SECRET` | — | SHA-256 hex digest (64 characters) of the bearer token for the internal seed endpoint. Empty, or anything that isn't a 64-character hex digest (such as an old PBKDF2 hash), disables the endpoint. Generate with `python -m app.api.routes.internal.router` |
+| `INGEST_SECRET` | — | SHA-256 hex digest (64 characters) of the bearer token for the internal endpoint that adds a book by hand. Empty, or anything that isn't a 64-character hex digest, disables the endpoint. It must differ from `SEED_SECRET`. Generate with `python -m app.api.routes.internal.router` |
 
 `DATABASE_URL` is constructed automatically by docker-compose from `DB_NAME`, `DB_USER`, and `DB_PASSWORD`. Only set it manually if running outside of Docker — and whatever it points at must be PostgreSQL 14 or newer, see Self-Hosting Notes below.
 

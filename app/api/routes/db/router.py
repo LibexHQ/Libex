@@ -46,6 +46,7 @@ from app.services.db.stored import (
     get_books_by_plan_from_db,
     get_books_by_sku_from_db,
     get_coming_soon_from_db,
+    get_delisted_books_from_db,
     get_distinct_genres_from_db,
     get_distinct_plans_from_db,
     get_narrator_books_from_db,
@@ -293,6 +294,36 @@ async def get_db_vvab_books(
     if not books:
         raise NotFoundException("No virtual voice audiobooks found in local database", code=ErrorCode.NOT_IN_LIBEX)
     return books
+
+
+@router.get("/delisted", response_model=list[BookResponse], responses=ERROR_RESPONSES)
+async def get_db_delisted_books(
+    region: Annotated[str | None, Query(description=(
+        "Audible region code to list. Validated, so an unknown region is a 400. "
+        "Omit to list the hand-entered records of every region."
+    ))] = None,
+    sort: Annotated[BookSortField | None, Query(description="Field to sort by (defaults to newest entry first)")] = None,
+    order: Annotated[SortOrder, Query(description="Sort direction")] = SortOrder.desc,
+    limit: Annotated[int, Query(ge=1, le=100, description="Results per page (max 100)")] = 20,
+    page: Annotated[int, Query(ge=1, description="Page number")] = 1,
+    session: AsyncSession = Depends(get_session),
+) -> list[dict[str, Any]]:
+    """
+    Get the books that were entered by hand because Audible no longer lists them.
+
+    Each item is the full stored record, as /db/book serves it, with manualEntry
+    true. A book stays in this list after Audible lists it again: manualEntry
+    never resets. Newest entry first unless a sort field is given. An empty
+    page is a 200 with an empty list, not a 404.
+    """
+    return await get_delisted_books_from_db(
+        session,
+        region=validate_region(region) if region is not None else None,
+        sort=sort.value if sort is not None else None,
+        order=order.value,
+        limit=limit,
+        page=page,
+    )
 
 
 @router.get("/new-releases", response_model=list[BookResponse], responses=ERROR_RESPONSES)

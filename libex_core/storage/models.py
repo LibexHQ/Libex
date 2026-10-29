@@ -224,6 +224,18 @@ class Book(Base):
         return f"<Book asin={self.asin} title={self.title}>"
 
 
+# Serves the manual-entry list: newest entry first, a stable tiebreak after it.
+# Partial, so it holds only the hand-entered rows and costs the catalog nothing.
+Index(
+    "ix_books_manual_entry",
+    Book.manual_entry_at.desc(),
+    Book.asin,
+    Book.region,
+    postgresql_where=Book.manual_entry_at.is_not(None),
+    sqlite_where=Book.manual_entry_at.is_not(None),
+)
+
+
 # ============================================================
 # AUTHORS
 # ============================================================

@@ -69,6 +69,11 @@ class Settings(BaseSettings):
     # Internal seed endpoint
     seed_secret: str = ""  # Empty = endpoint disabled. Set in env only.
 
+    # Internal book-entry endpoint: the same digest form as seed_secret, and a
+    # different secret. A value whose digest equals seed_secret's is refused at
+    # the endpoint, so one leaked token can never open both.
+    ingest_secret: str = ""  # Empty = endpoint disabled. Set in env only.
+
     # Backup — scheduling
     #
     # Read by the backup runner (the libex-backup service, its own stack in

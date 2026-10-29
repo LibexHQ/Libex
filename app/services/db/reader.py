@@ -58,6 +58,7 @@ __all__ = [
     "get_books_by_sku_from_db",
     "get_books_from_db",
     "get_coming_soon_from_db",
+    "get_delisted_books_from_db",
     "get_db_stats",
     "get_distinct_genres_from_db",
     "get_distinct_plans_from_db",
@@ -162,6 +163,7 @@ get_books_by_plan_from_db = _guarded(
     "DB read failed for plan", list, ("plan_name",)
 )(_books.get_books_by_plan)
 get_vvab_books_from_db = _guarded("DB read failed for VVAB books", list)(_books.get_vvab_books)
+get_delisted_books_from_db = _guarded("DB read failed for delisted books", list)(_books.get_delisted_books)
 get_new_releases_from_db = _guarded(
     "DB read failed for new releases", list
 )(_books.get_new_releases)

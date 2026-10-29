@@ -1,7 +1,8 @@
 """
-Internal seed endpoint.
-Completely undocumented. Requires SEED_SECRET env var to be set.
-Used to upload enrichment data from local scrapers to the production DB.
+Internal operator endpoints.
+Completely undocumented. The seed endpoint requires SEED_SECRET and uploads
+enrichment data from local scrapers to the production DB. The book-entry
+endpoint requires INGEST_SECRET and stores a book Audible no longer lists.
 
 SECURITY:
 - The bearer token is 32 random bytes, urlsafe-base64 (43 characters).
@@ -15,6 +16,9 @@ SECURITY:
 - A SEED_SECRET that is not a SHA-256 hex digest (the old PBKDF2 value
   included) is refused: the endpoint stays disabled and says why in the log.
 - include_in_schema=False = invisible in OpenAPI docs.
+- INGEST_SECRET follows the same rules under its own name. It is refused,
+  and the endpoint stays disabled, when its digest equals SEED_SECRET's, so
+  one leaked token can never open both.
 - Generate a secret with: python -m app.api.routes.internal.router
 """
 
@@ -30,6 +34,7 @@ from typing import Any
 # Third party
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 from sqlalchemy import select, update, func
 
 # Database
@@ -38,7 +43,16 @@ from app.db.session import AsyncSessionFactory
 
 # Core
 from app.core.config import get_settings
+from app.core.ingest_models import IngestBody, error_list
 from app.core.logging import get_logger
+from libex_core.audible.client import validate_region
+from libex_core.exceptions import AudibleAPIException
+from libex_core.models import BookResponse, ChapterResponse
+
+# Services
+from app.services.audible.listing import probe_listing
+from app.services.cache import manager as cache
+from app.services.db.manual_entry import ENTITY, STORED, enter_book
 
 logger = get_logger()
 settings = get_settings()
@@ -48,10 +62,12 @@ router = APIRouter(prefix="/internal", include_in_schema=False)
 TOKEN_BYTES = 32
 TOKEN_LENGTH = 43  # urlsafe base64 of 32 bytes, unpadded
 MAX_BODY_BYTES = 32 * 1024 * 1024
+MAX_INGEST_BODY_BYTES = 1024 * 1024
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{43}")
 _SECRET_RE = re.compile(r"[0-9a-f]{64}")
 _warned_unusable = False
+_warned_ingest_unusable = False
 
 
 # ============================================================
@@ -94,8 +110,25 @@ def _warn_unusable_secret_once() -> None:
         )
 
 
-def _seed_authorized(authorization: str | None) -> bool:
+def _warn_unusable_ingest_secret_once(reason: str) -> None:
+    global _warned_ingest_unusable
+    if not _warned_ingest_unusable:
+        _warned_ingest_unusable = True
+        logger.warning(
+            f"INGEST_SECRET {reason}; the book-entry endpoint is disabled until it is "
+            "regenerated with python -m app.api.routes.internal.router"
+        )
+
+
+def _token_matches(authorization: str | None, stored: str) -> bool:
     """Shape check first, hash only for a well-formed token."""
+    token = _extract_token(authorization)
+    if token is None:
+        return False
+    return verify_secret(token, stored)
+
+
+def _seed_authorized(authorization: str | None) -> bool:
     # Lowered and stripped so a digest pasted in uppercase or with stray whitespace still matches.
     stored = (settings.seed_secret or "").strip().lower()
     if not stored:
@@ -103,22 +136,33 @@ def _seed_authorized(authorization: str | None) -> bool:
     if not _secret_is_usable(stored):
         _warn_unusable_secret_once()
         return False
-    token = _extract_token(authorization)
-    if token is None:
+    return _token_matches(authorization, stored)
+
+
+def _ingest_authorized(authorization: str | None) -> bool:
+    stored = (settings.ingest_secret or "").strip().lower()
+    if not stored:
         return False
-    return verify_secret(token, stored)
+    if not _secret_is_usable(stored):
+        _warn_unusable_ingest_secret_once("is not a SHA-256 hex digest")
+        return False
+    seed = (settings.seed_secret or "").strip().lower()
+    if hmac.compare_digest(stored, seed):
+        _warn_unusable_ingest_secret_once("equals SEED_SECRET")
+        return False
+    return _token_matches(authorization, stored)
 
 
-async def _read_capped_body(request: Request) -> bytes | None:
-    """Reads the body, returning None once it passes MAX_BODY_BYTES."""
+async def _read_capped_body(request: Request, limit: int = MAX_BODY_BYTES) -> bytes | None:
+    """Reads the body, returning None once it passes limit."""
     declared = request.headers.get("content-length")
-    if declared and declared.isascii() and declared.isdigit() and int(declared) > MAX_BODY_BYTES:
+    if declared and declared.isascii() and declared.isdigit() and int(declared) > limit:
         return None
     chunks: list[bytes] = []
     total = 0
     async for chunk in request.stream():
         total += len(chunk)
-        if total > MAX_BODY_BYTES:
+        if total > limit:
             return None
         chunks.append(chunk)
     return b"".join(chunks)
@@ -240,6 +284,129 @@ async def _apply_enrichment(session: Any, data: list[Any]) -> dict[str, int]:
 
 
 # ============================================================
+# BOOK ENTRY
+# ============================================================
+
+def _errors(errors: list[dict[str, Any]], status: int = 422) -> JSONResponse:
+    return JSONResponse(status_code=status, content={"errors": errors})
+
+
+def _writer_dict(body: IngestBody) -> dict[str, Any]:
+    """
+    The parsed book as the writer takes it. The three flags the model defaults
+    to False are always present, so exclude_unset cannot drop them; the writer
+    then stores False rather than an unknown. manualEntry is set server-side
+    because the input model refuses it.
+    """
+    book = body.book.model_dump(exclude_unset=True)
+    for flag in ("isListenable", "isBuyable", "isVvab"):
+        book.setdefault(flag, False)
+    book["manualEntry"] = True
+    return book
+
+
+async def _clear_cache(book: dict[str, Any], region: str) -> None:
+    """
+    Drops every cached entry that can hold the entered book or a list derived
+    from its links. Called after a commit only; a failure here cannot undo the
+    commit, so it is logged by type and the response still reports it.
+    """
+    asin = book["asin"]
+    keys = [cache.book_key(asin, region), cache.chapters_key(asin, region)]
+    keys += [cache.author_books_key(a["asin"], region) for a in book.get("authors", []) if a.get("asin")]
+    keys += [cache.series_books_key(s["asin"], region) for s in book.get("series", []) if s.get("asin")]
+    try:
+        async with AsyncSessionFactory() as session:
+            for key in keys:
+                await cache.invalidate(session, key)
+    except Exception as e:
+        logger.warning("Book entry: cache clear failed", extra={"error_type": type(e).__name__})
+
+
+@router.post("/books")
+async def enter_delisted_book(
+    request: Request,
+    region: str | None = None,
+    dry_run: bool = True,
+) -> JSONResponse:
+    """
+    Stores one book Audible no longer lists, with its links and chapters.
+
+    Dry run by default: the whole write happens and is rolled back, so the
+    response shows what a commit would store. Nothing is read from the body
+    until the token has verified, and nothing in a response or a log line
+    echoes a submitted value.
+    """
+    if not _ingest_authorized(request.headers.get("authorization")):
+        return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+
+    region = validate_region(region)  # type: ignore[arg-type]  # None raises RegionException
+
+    raw = await _read_capped_body(request, MAX_INGEST_BODY_BYTES)
+    if raw is None:
+        return JSONResponse(status_code=413, content={"error": "Payload too large"})
+
+    try:
+        body = IngestBody.model_validate_json(raw)
+    except ValidationError as e:
+        return _errors(error_list(e))
+    if body.book.region != region:
+        return _errors([{"loc": ["book", "region"], "type": "region_mismatch"}])
+
+    asin = body.book.asin
+    context = {"request_id": getattr(request.state, "request_id", None), "asin": asin,
+              "region": region, "dry_run": dry_run}
+
+    try:
+        listing = await probe_listing(asin, region)
+    except AudibleAPIException:
+        logger.info("Book entry: Audible unavailable", extra={**context, "outcome": "audible_unavailable"})
+        return JSONResponse(status_code=503, content={"reason": "audible_unavailable"})
+    if listing == "live":
+        logger.info("Book entry: listed on Audible", extra={**context, "outcome": "live"})
+        return JSONResponse(status_code=409, content={"reason": "live"})
+
+    book = _writer_dict(body)
+    chapters = (
+        body.chapters.model_dump(exclude_none=True, exclude_unset=True) if body.chapters else None
+    )
+    try:
+        async with AsyncSessionFactory() as session:
+            result = await enter_book(session, book, chapters, region=region, dry_run=dry_run)
+    except Exception as e:
+        # Never the exception itself: a database error carries the row's values.
+        logger.error("Book entry failed", extra={**context, "outcome": "error", "error_type": type(e).__name__})
+        return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
+
+    counts = {kind: len(items) for kind, items in result.entities.items()}
+    if result.status == STORED:
+        logger.info("Book entry: already stored", extra={**context, "outcome": "stored"})
+        return JSONResponse(status_code=409, content={"reason": "stored"})
+    if result.status == ENTITY:
+        logger.info("Book entry: entity conflict", extra={**context, "outcome": "entity_conflict", "entities": counts})
+        return _errors([{"loc": c["loc"], "type": c["reason"]} for c in result.conflicts])
+
+    committed = not dry_run
+    if committed:
+        await _clear_cache(book, region)
+    logger.info("Book entry complete", extra={**context, "outcome": "committed" if committed else "dry_run",
+                                                "entities": counts})
+    return JSONResponse(
+        status_code=200,
+        content={
+            "dryRun": dry_run,
+            "committed": committed,
+            "book": BookResponse.model_validate(result.book).model_dump(mode="json"),
+            "chapters": (
+                ChapterResponse.model_validate(result.chapters).model_dump(mode="json")
+                if result.chapters else None
+            ),
+            "entities": result.entities,
+        },
+    )
+
+
+# ============================================================
 # CLI: Generate a seed secret
 # ============================================================
 # Usage: python -m app.api.routes.internal.router
@@ -255,6 +422,11 @@ if __name__ == "__main__":
     print()
     print("  SEED_SECRET (set this in Portainer/env):")
     print(f"  {hashed}")
+    print()
+    print("  INGEST_SECRET (a separate token and digest; never reuse the seed token):")
+    ingest_token = secrets.token_urlsafe(TOKEN_BYTES)
+    print(f"  token:  {ingest_token}")
+    print(f"  digest: {hash_secret(ingest_token)}")
     print()
     print("  Usage:")
     print('  curl -X POST https://libexdb.com/internal/seed/narrators \\')

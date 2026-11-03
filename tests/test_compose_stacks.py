@@ -517,3 +517,66 @@ def test_backup_stack_has_no_vpn_sidecar():
         f"{gluetun_services}. libex-backup has no VPN by design -- it never "
         "reaches Audible, only Postgres and its own backup destination."
     )
+
+
+# Stack prefix of the VPN selection variables each sidecar reads.
+SIDECAR_VPN_PREFIXES: dict[Path, str] = {
+    COMPOSE_PATH: "API",
+    SEEDER_COMPOSE_PATH: "SEEDER",
+    BACKFILL_COMPOSE_PATH: "BACKFILL",
+    REFRESH_COMPOSE_PATH: "REFRESH",
+}
+
+
+def _vpn_selection_problems(values: dict[str, str], prefix: str) -> list[str]:
+    """What is wrong with a sidecar's provider and countries entries, if anything."""
+    problems = []
+    provider = f"${{{prefix}_VPN_PROVIDER:-custom}}"
+    countries = f"${{{prefix}_VPN_SERVER_COUNTRIES:-}}"
+    if values.get("VPN_SERVICE_PROVIDER") != provider:
+        problems.append(f"VPN_SERVICE_PROVIDER is not exactly {provider}")
+    if values.get("SERVER_COUNTRIES") != countries:
+        problems.append(f"SERVER_COUNTRIES is not exactly {countries}")
+    return problems
+
+
+def test_sidecars_pick_provider_and_countries_from_their_own_stack():
+    """
+    Every sidecar's VPN_SERVICE_PROVIDER is exactly
+    `${<STACK>_VPN_PROVIDER:-custom}`: operator-chosen, custom when blank,
+    never a hardcoded provider and never another stack's variable. Its
+    SERVER_COUNTRIES is exactly `${<STACK>_VPN_SERVER_COUNTRIES:-}` with an
+    empty default, because gluetun refuses to start in custom mode with
+    SERVER_COUNTRIES set.
+    """
+    for path, (sidecar, _network) in SIDECAR_SERVICES.items():
+        values = _service_environment_values(_load_yaml(path), sidecar)
+        problems = _vpn_selection_problems(values, SIDECAR_VPN_PREFIXES[path])
+        assert not problems, f"{path.name}'s {sidecar} service: {problems}"
+
+
+def test_vpn_selection_check_rejects_wrong_values():
+    """The check above must flag each way an edit could get this wrong."""
+    good = {
+        "VPN_SERVICE_PROVIDER": "${API_VPN_PROVIDER:-custom}",
+        "SERVER_COUNTRIES": "${API_VPN_SERVER_COUNTRIES:-}",
+    }
+    assert _vpn_selection_problems(good, "API") == []
+
+    bad_variants = [
+        {"VPN_SERVICE_PROVIDER": "mullvad"},
+        {"VPN_SERVICE_PROVIDER": "${API_VPN_PROVIDER:-mullvad}"},
+        {"VPN_SERVICE_PROVIDER": "${API_VPN_PROVIDER}"},
+        {"VPN_SERVICE_PROVIDER": "${SEEDER_VPN_PROVIDER:-custom}"},
+        {"VPN_SERVICE_PROVIDER": "${API_VPN_PROVIDER:-custom} "},
+        {"SERVER_COUNTRIES": "${API_VPN_SERVER_COUNTRIES:-Canada}"},
+        {"SERVER_COUNTRIES": "${SEEDER_VPN_SERVER_COUNTRIES:-}"},
+        {"SERVER_COUNTRIES": "Canada"},
+        {"SERVER_COUNTRIES": "${API_VPN_SERVER_COUNTRIES}"},
+    ]
+    for change in bad_variants:
+        assert _vpn_selection_problems({**good, **change}, "API"), change
+
+    for key in good:
+        missing = {k: v for k, v in good.items() if k != key}
+        assert _vpn_selection_problems(missing, "API"), f"missing {key}"

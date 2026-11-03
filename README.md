@@ -126,8 +126,8 @@ curl -O https://raw.githubusercontent.com/LibexHQ/Libex/main/docker-compose.yml
 # 3. Create your environment file
 cp .env.example .env
 # Edit .env — DB_PASSWORD is required. AUDIBLE_PROXY_URL is recommended but
-# optional: fill in the six API_WG_* values to use the bundled example VPN
-# sidecar, or point it at a proxy of your own — see VPN / Egress below. Left
+# optional: fill in the API_VPN_* and API_WG_* values to use the bundled example
+# VPN sidecar, or point it at a proxy of your own — see VPN / Egress below. Left
 # blank, the API goes to Audible directly and logs that at startup. Everything
 # else has a sensible default.
 
@@ -212,8 +212,11 @@ services:
     cap_add:
       - NET_ADMIN
     environment:
-      - VPN_SERVICE_PROVIDER=custom
+      # a provider's server pool, not one pinned exit: a restart lands on another
+      # server when one goes bad. blank provider means custom; see .env.example.
+      - VPN_SERVICE_PROVIDER=${API_VPN_PROVIDER:-custom}
       - VPN_TYPE=wireguard
+      - SERVER_COUNTRIES=${API_VPN_SERVER_COUNTRIES:-}
       - WIREGUARD_PRIVATE_KEY=${API_WG_PRIVATE_KEY:-}
       - WIREGUARD_ADDRESSES=${API_WG_ADDRESS:-}
       - WIREGUARD_ENDPOINT_IP=${API_WG_ENDPOINT_IP:-}
@@ -671,7 +674,7 @@ Four stacks talk to Audible — the API, seeder, backfill, and refresh — and e
 
 Any `http://` or `https://` CONNECT-capable proxy works. Each of the four stacks ships an example VPN sidecar (`qmcgaw/gluetun`, WireGuard, pinned to its `v3` release line) as a working default, not as the only option. Three ways to supply one:
 
-- **Use the bundled example sidecar** — fill in that stack's six `*_WG_*` values in `.env` (endpoint, keys) from your provider's WireGuard config.
+- **Use the bundled example sidecar** — recommended: set that stack's `*_VPN_PROVIDER` to your provider's name and fill in its keys, and gluetun picks a server from the provider's pool; `*_VPN_SERVER_COUNTRIES` narrows it. For a provider gluetun doesn't support, leave the provider blank and fill in that stack's six `*_WG_*` values from your provider's WireGuard config for one pinned server. `.env.example` has the details for both.
 - **Run your own VPN container in the same stack** and point the proxy variable at it, in place of the bundled sidecar.
 - **Run a separate VPN stack** and join its container to that stack's egress network (`libex-egress`, `libex-seeder-egress`, `libex-backfill-egress`, or `libex-refresh-egress`) as `external: true`, deployed after the stack that creates that network.
 
@@ -683,7 +686,7 @@ Each egress network is created only by its own stack's compose file, which is wh
 2. It needs its own kill switch. A plain tinyproxy/privoxy/squid container falls back to the open internet the moment its VPN connection drops, unless it shares the VPN container's network stack (`network_mode: service:<vpn>`). Verify the exit IP once it's up.
 3. Percent-encode any `user:pass@` credentials in the proxy URL — and never paste `docker inspect` or `compose config` output anywhere public; both print the URL, credentials included, in plain text.
 4. Never publish the proxy's port, and never attach the VPN container to `libex-db` or to the stack's `default` network — egress only.
-5. Use a separate exit per stack. The hostname checks (`seeder`, `backfill`, `refresh`) only look at the proxy URL's name, not where it actually connects, so nothing technically stops two stacks sharing an exit — but sharing one defeats the point of separating them.
+5. Use a separate exit per stack. The hostname checks (`seeder`, `backfill`, `refresh`) only look at the proxy URL's name, not where it actually connects, so nothing technically stops two stacks sharing an exit — but sharing one defeats the point of separating them. Server pools over the same countries can land two stacks on the same server, so give each stack its own key and, ideally, its own countries.
 6. Only trusted containers belong on an egress network. If you run gluetun yourself, stay on `v3.40` or later and never set `HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE` to `{"auth":"none"}`.
 7. No TLS-intercepting proxy — Libex validates Audible's certificate itself, and a proxy that intercepts TLS breaks that.
 8. Whatever VPN you use, its operator can see which regional Audible host each stack calls, when, and how much data crosses each connection. The path, ASIN, and search terms travel over that same link, but encrypted — the operator can't read them.
@@ -744,7 +747,7 @@ Within Libex, fields and shapes are only ever added to, never removed or changed
 
 If you deployed Libex before the VPN requirement and the backup/backfill/refresh stacks existed — a single `docker-compose.yml` with an optional blank `AUDIBLE_PROXY_URL` and a bundled `libex-backup` service:
 
-1. Optionally set `AUDIBLE_PROXY_URL` in the API stack's `.env` — either the six `API_WG_*` values for the bundled example sidecar, or your own proxy. It is recommended, but the API stack deploys without it.
+1. Optionally set `AUDIBLE_PROXY_URL` in the API stack's `.env` — either the `API_VPN_*` and `API_WG_*` values for the bundled example sidecar, or your own proxy. It is recommended, but the API stack deploys without it.
 2. Redeploy the seeder stack with `SEEDER_PROXY_URL` set the same way (`http://libex-seeder-vpn:8888` with the bundled example sidecar).
 3. Backup moved out of `docker-compose.yml` into its own stack. Remove the old `libex-backup` container — `docker rm -f libex-backup`, or redeploy the API stack with `--remove-orphans` — then deploy `docker-compose.backup.yml` on its own.
 4. The old deployment's `libex-backup-spool` and `libex-backup-ca` volumes are safe to remove once the new backup stack is running, unless you'd put a certificate directly into the CA volume rather than mounting it from a host path.

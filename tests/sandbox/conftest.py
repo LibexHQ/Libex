@@ -80,6 +80,7 @@ class Sandbox:
         self.gets = 0
         self._last_audible = 0.0
         self._asins: set[str] = set()
+        self._path_proven = False
         self._live: dict[tuple[str, int], str] = {}
 
     # ------------------------------------------------------------ docker / sql
@@ -226,9 +227,18 @@ class Sandbox:
         return resp
 
     def get_live(self, asin, region="us", **params) -> httpx.Response:
-        """A live /books GET, which asks Audible for the record."""
+        """A live GET /book/{asin} (singular: the router prefix), which asks Audible for the record."""
+        if not self._path_proven:
+            # A 404 from a path that does not exist reads the same as a 404
+            # for a missing book, so prove the path with a listed ASIN first.
+            self._path_proven = True
+            listed = self.live_asin("us")
+            self.audible("get")
+            control = self.http.get(f"/book/{listed}", params={"region": "us"})
+            assert control.status_code == 200, "GET /book/{asin} did not serve a listed ASIN"
+            time.sleep(2)  # its background write must not land inside a later state comparison
         self.audible("get")
-        resp = self.http.get(f"/books/{asin}", params={"region": region, **params})
+        resp = self.http.get(f"/book/{asin}", params={"region": region, **params})
         self._last_audible = time.monotonic()
         return resp
 

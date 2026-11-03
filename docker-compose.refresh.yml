@@ -43,8 +43,11 @@ services:
     cap_add:
       - NET_ADMIN
     environment:
-      - VPN_SERVICE_PROVIDER=custom
+      # a provider's server pool, not one pinned exit: a restart lands on another
+      # server when one goes bad. blank provider means custom; see .env.example.
+      - VPN_SERVICE_PROVIDER=${REFRESH_VPN_PROVIDER:-custom}
       - VPN_TYPE=wireguard
+      - SERVER_COUNTRIES=${REFRESH_VPN_SERVER_COUNTRIES:-}
       - WIREGUARD_PRIVATE_KEY=${REFRESH_WG_PRIVATE_KEY:-}
       - WIREGUARD_ADDRESSES=${REFRESH_WG_ADDRESS:-}
       - WIREGUARD_ENDPOINT_IP=${REFRESH_WG_ENDPOINT_IP:-}

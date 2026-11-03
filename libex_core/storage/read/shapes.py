@@ -164,6 +164,7 @@ def book_to_dict(book: Book, series_positions: dict[str, str | None]) -> dict[st
         "summary": book.summary,
         "region": book.region,
         "regions": [book.region],
+        "manualEntry": book.manual_entry_at is not None,
         "publisher": book.publisher,
         "copyright": book.copyright,
         "isbn": book.isbn,

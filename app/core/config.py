@@ -33,7 +33,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "Libex"
-    app_version: str = "2.3.0"
+    app_version: str = "2.4.0"
     debug: bool = False
     host: str = "0.0.0.0"
     port: int = 3333
@@ -68,6 +68,11 @@ class Settings(BaseSettings):
 
     # Internal seed endpoint
     seed_secret: str = ""  # Empty = endpoint disabled. Set in env only.
+
+    # Internal book-entry endpoint: the same digest form as seed_secret, and a
+    # different secret. A value whose digest equals seed_secret's is refused at
+    # the endpoint, so one leaked token can never open both.
+    ingest_secret: str = ""  # Empty = endpoint disabled. Set in env only.
 
     # Backup — scheduling
     #

@@ -12,7 +12,8 @@ import pytest
 import pytest_asyncio
 
 # Local
-from libex_core.lookup.ingest import ingest_books, ingest_chapters
+from libex_core.lookup import ingest as ingest_module
+from libex_core.lookup.ingest import ingest_books, ingest_chapters, unsettled_book
 from libex_core.models import BookResponse, ChapterResponse
 from libex_core.storage.read import books as read_books
 from libex_core.storage.store import LocalStore, StoreClosed
@@ -58,6 +59,10 @@ async def test_ingest_never_shrinks_a_richer_row(store):
 
 async def test_nothing_is_confirmed(store):
     await cases.case_nothing_is_confirmed(store)
+
+
+async def test_manual_entry_is_stamped_only_when_true(store):
+    await cases.case_manual_entry_is_stamped_only_when_true(store)
 
 
 async def test_regions_are_kept_apart(store):
@@ -116,3 +121,24 @@ async def test_a_failed_read_of_the_stored_listing_writes_nothing(store):
     with patch.object(read_books, "get_track", side_effect=RuntimeError("read failed")):
         assert await ingest_chapters(store, cases.ASIN, other_listing, region="us") is False
     assert (await cases.stored_chapters(store, cases.ASIN, region="us")).value == stored
+
+
+def test_unsettled_book_is_part_of_the_export_surface():
+    assert "unsettled_book" in ingest_module.__all__
+    assert not hasattr(ingest_module, "_unsettled")
+
+
+def test_unsettled_book_keeps_manual_entry_only_when_true():
+    kept = unsettled_book(BookResponse(asin=cases.ASIN, region="us", title="T", manualEntry=True), "us")
+    assert kept["manualEntry"] is True
+    for book in (
+        BookResponse(asin=cases.ASIN, region="us", title="T", manualEntry=False),
+        BookResponse(asin=cases.ASIN, region="us", title="T"),
+    ):
+        assert "manualEntry" not in unsettled_book(book, "us")
+
+
+def test_unsettled_book_still_reads_settled_defaults_as_unknown():
+    data = unsettled_book(BookResponse(asin=cases.ASIN, region="us", title="T", manualEntry=True), "us")
+    assert data["explicit"] is None and data["isListenable"] is None
+    assert data["title"] == "T"

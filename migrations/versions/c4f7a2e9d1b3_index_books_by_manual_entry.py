@@ -44,21 +44,25 @@ logger = logging.getLogger('alembic.runtime.migration')
 
 
 def upgrade() -> None:
+    offline = context.is_offline_mode()
     with op.get_context().autocommit_block():
         # Offline there is no database to ask, so the drop is unconditional.
-        if context.is_offline_mode() or op.get_bind().execute(
+        if offline or op.get_bind().execute(
             text('SELECT 1 FROM pg_index WHERE indexrelid = to_regclass(:name) AND NOT indisvalid'),
             {'name': NAME},
         ).first():
-            logger.warning('dropping the invalid leftover %s from an interrupted build', NAME)
+            if not offline:
+                logger.warning('dropping the invalid leftover %s from an interrupted build', NAME)
             op.execute(f'DROP INDEX CONCURRENTLY IF EXISTS {NAME}')
-        logger.info('building %s on books', NAME)
+        if not offline:
+            logger.info('building %s on books', NAME)
         started = time.monotonic()
         op.execute(
             f'CREATE INDEX CONCURRENTLY IF NOT EXISTS {NAME} '
             'ON books (manual_entry_at DESC, asin, region) WHERE manual_entry_at IS NOT NULL'
         )
-        logger.info('built %s in %.1fs', NAME, time.monotonic() - started)
+        if not offline:
+            logger.info('built %s in %.1fs', NAME, time.monotonic() - started)
 
 
 def downgrade() -> None:

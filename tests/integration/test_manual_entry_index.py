@@ -133,9 +133,12 @@ def test_a_valid_index_is_left_in_place_on_rerun(db):
 
 def test_books_stays_readable_while_the_build_waits_on_an_older_snapshot(parent_db):
     sync_url, async_url = parent_db
-    holder = create_engine(sync_url, isolation_level="REPEATABLE READ").connect()
-    reader = create_engine(sync_url, isolation_level="AUTOCOMMIT").connect()
-    watcher = create_engine(sync_url, isolation_level="AUTOCOMMIT").connect()
+    engines = [
+        create_engine(sync_url, isolation_level="REPEATABLE READ"),
+        create_engine(sync_url, isolation_level="AUTOCOMMIT"),
+        create_engine(sync_url, isolation_level="AUTOCOMMIT"),
+    ]
+    holder, reader, watcher = (e.connect() for e in engines)
     errors = []
     try:
         # An open snapshot older than the build, which the concurrent build must wait out.
@@ -145,10 +148,12 @@ def test_books_stays_readable_while_the_build_waits_on_an_older_snapshot(parent_
         )
         thread.start()
         deadline = time.monotonic() + 60
-        while time.monotonic() < deadline:
+        waiting = 0
+        while thread.is_alive() and time.monotonic() < deadline:
             waiting = watcher.execute(text(
                 "SELECT count(*) FROM pg_stat_activity "
-                "WHERE query LIKE 'CREATE INDEX CONCURRENTLY%' AND wait_event_type = 'Lock'"
+                "WHERE query LIKE 'CREATE INDEX CONCURRENTLY%' AND wait_event_type = 'Lock' "
+                "AND datname = current_database()"
             )).scalar()
             if waiting:
                 break
@@ -156,6 +161,9 @@ def test_books_stays_readable_while_the_build_waits_on_an_older_snapshot(parent_
         assert waiting, "the build never reached its wait"
         reader.execute(text("SET statement_timeout = '2s'"))
         assert reader.execute(text("SELECT 1 FROM books LIMIT 1")).all() == []
+        # Longer than the 5s lock_timeout b7e2 sets, so a timeout put back on the build fails here.
+        time.sleep(6)
+        assert thread.is_alive() and errors == []
         holder.rollback()
         thread.join(60)
         assert not thread.is_alive()
@@ -164,6 +172,8 @@ def test_books_stays_readable_while_the_build_waits_on_an_older_snapshot(parent_
     finally:
         for c in (holder, reader, watcher):
             c.close()
+        for e in engines:
+            e.dispose()
 
 
 def _capture(errors, fn, *args):
@@ -175,14 +185,17 @@ def _capture(errors, fn, *args):
 
 def test_a_failed_upgrade_rolls_back_and_a_later_one_commits(parent_db):
     sync_url, async_url = parent_db
-    blocker = create_engine(sync_url).connect()
+    blocker_engine = create_engine(sync_url)
+    blocker = blocker_engine.connect()
     try:
         blocker.execute(text("LOCK TABLE books IN ACCESS EXCLUSIVE MODE"))
+        # The 5s lock_timeout that raises here is b7e2's; c4f7 sets none.
         with pytest.raises(Exception, match="lock timeout"):
             run_alembic(async_url, "upgrade", "head")
     finally:
         blocker.rollback()
         blocker.close()
+        blocker_engine.dispose()
     eng = create_engine(sync_url)
     with eng.connect() as c:
         assert c.execute(text("SELECT version_num FROM alembic_version")).scalar() == PARENT

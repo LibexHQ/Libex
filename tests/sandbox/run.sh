@@ -46,7 +46,7 @@ compose_file="$here/compose.yml"
 mode=${1:-}
 [[ $mode == empty || $mode == snapshot ]] || die "usage: run.sh empty|snapshot [options]"
 shift
-log_level=INFO smoke=0 dump="" dump_sha="" rollback_image=""
+log_level=INFO smoke=0 dump="" dump_sha="" rollback_image="" own_dump=""
 while (($#)); do
     case $1 in
         --log-level) log_level=${2:?}; shift 2 ;;
@@ -100,7 +100,9 @@ cleanup() {
     ((rollback_pulled)) && "${D[@]}" image rm "$rollback_image" >/dev/null 2>&1
     ((image_built)) && "${D[@]}" image rm "$image" >/dev/null 2>&1
     rm -rf "$tmp"
-    [[ -n $dump ]] && rm -f "$dump"
+    # Only a dump that passed every check below is ours to delete; until then
+    # --dump is whatever path was typed, and could be the master copy.
+    [[ -n $own_dump ]] && rm -f "$own_dump"
     local kind left
     for kind in container volume network; do
         if [[ $kind == container ]]; then
@@ -260,6 +262,7 @@ if [[ $mode == snapshot ]]; then
         || die "~/libex-sandbox must be 0700 and the dump 0600"
     dump=$real
     [[ $(sha256sum "$dump" | cut -d' ' -f1) == "$dump_sha" ]] || die "dump sha256 mismatch"
+    own_dump=$dump
     say "dump $dump sha256 $dump_sha"
 
     "${DC[@]}" up -d --wait db
@@ -277,8 +280,12 @@ allowed = re.compile(r"(SCHEMA|TYPE|TABLE|TABLE DATA|SEQUENCE|SEQUENCE OWNED BY|
                      r"|DEFAULT|CONSTRAINT|FK CONSTRAINT|INDEX|COMMENT - SCHEMA|ACL - SCHEMA) ")
 bad = {}
 for line in open(sys.argv[1]):
+    if not line.strip() or line.startswith(";"):
+        continue
     m = re.match(r"\d+; \d+ \d+ (.*)", line)
     if m is None:
+        # a shape this does not know is refused, never skipped past
+        bad["unparseable line"] = bad.get("unparseable line", 0) + 1
         continue
     rest = m.group(1)
     if not allowed.match(rest) or re.match(r"(DEFAULT ACL|TABLE ATTACH) ", rest):
@@ -306,20 +313,20 @@ if bad:
     start=$SECONDS
     "${DC[@]}" run --rm --no-deps -T api alembic upgrade head >"$tmp/upgrade.log" 2>&1 &
     upgrade=$!
-    blocked=0 probes=0
-    : >"$tmp/locks.log"
+    blocked=0 probes=0 locked=0
     while kill -0 "$upgrade" 2>/dev/null; do
         probes=$((probes + 1))
         psql_ -c "SET statement_timeout = '2s'" -c "SELECT 1 FROM books LIMIT 1" >/dev/null 2>&1 \
             || blocked=$((blocked + 1))
-        psql_ -c "SELECT now(), mode, granted FROM pg_locks
+        seen=$(psql_ -c "SELECT count(*) > 0 FROM pg_locks
                   WHERE relation = 'books'::regclass AND mode = 'AccessExclusiveLock'" \
-            >>"$tmp/locks.log" 2>&1 || true
+            2>/dev/null) || true
+        [[ $seen == t ]] && locked=$((locked + 1))
         sleep 1
     done
     wait "$upgrade" || { cat "$tmp/upgrade.log" >&2; die "alembic upgrade head failed"; }
     say "upgrade took $((SECONDS - start))s; books unreadable on $blocked of $probes probes;" \
-        "AccessExclusiveLock seen on $(grep -c . "$tmp/locks.log" || true) probes"
+        "AccessExclusiveLock on books seen on $locked of $probes probes"
 fi
 
 # ---------------------------------------------------------------------- up
@@ -370,7 +377,11 @@ pattern bearer Bearer
 pattern test-net-ip 203.0.113.77
 for ip in $gateway; do pattern "gateway-$ip" "$ip"; done
 for f in "$tmp"/patterns/*; do
-    hits=$(grep -rFc -f "$f" "$tmp/compose.log" "$tmp/applogs" "$tmp/pytest.out" | grep -v ':0$' || true)
+    # grep exits 1 for no match; 2 means a file was missing or unreadable,
+    # which is not the same as clean.
+    counts=$(grep -rFc -f "$f" "$tmp/compose.log" "$tmp/applogs" "$tmp/pytest.out") && rc=0 || rc=$?
+    ((rc <= 1)) || { say "leak grep for ${f##*/} failed (exit $rc)"; failed=1; }
+    hits=$(grep -v ':0$' <<<"$counts" || true)
     [[ -z $hits ]] || { say "leak: ${f##*/} found in: ${hits//$tmp\//}"; failed=1; }
 done
 # Positive controls: a grep that finds nothing proves nothing unless the

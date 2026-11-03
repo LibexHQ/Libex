@@ -1,6 +1,6 @@
 """
 GET /db/delisted: empty, its parameters, and a full run of paging, sorting and
-filtering over twelve committed entries. This file runs before any other that
+filtering over thirteen committed entries (twelve us, one uk). This file runs before any other that
 commits, so the list starts empty and the counts below are exact.
 """
 

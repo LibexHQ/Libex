@@ -119,8 +119,9 @@ class Sandbox:
         path = tmp_path / "override.env"
         path.write_text("".join(f"{k}={v}\n" for k, v in env.items()))
         path.chmod(0o600)
-        self.compose("up", "-d", "--wait", "--wait-timeout", "300", "api", env_file=path)
         try:
+            # Inside the try: a failed recreate may still have replaced the container.
+            self.compose("up", "-d", "--wait", "--wait-timeout", "300", "api", env_file=path)
             yield
         finally:
             self.compose("up", "-d", "--wait", "--wait-timeout", "300", "api")
@@ -227,7 +228,11 @@ class Sandbox:
         return resp
 
     def get_live(self, asin, region="us", **params) -> httpx.Response:
-        """A live GET /book/{asin} (singular: the router prefix), which asks Audible for the record."""
+        """
+        GET /book/{asin} (singular: the router prefix) with cache=false unless
+        a caller says otherwise, so Audible is asked rather than the cache.
+        """
+        params.setdefault("cache", "false")
         if not self._path_proven:
             # A 404 from a path that does not exist reads the same as a 404
             # for a missing book, so prove the path with a listed ASIN first.
@@ -282,7 +287,8 @@ class Sandbox:
             asin = resp.json()[nth]["asin"]
             # The search stores what it found in the background; let that land
             # before any test compares table state.
-            self.wait_for(lambda: self.count("books", asin, region) == 1, 30)
+            assert self.wait_for(lambda: self.count("books", asin, region) == 1, 30), \
+                f"the search hit for {region} was never stored"
             time.sleep(2)
         self._live[region, nth] = asin
         return asin

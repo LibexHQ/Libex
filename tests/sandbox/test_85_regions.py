@@ -3,6 +3,7 @@
 # Third party
 import pytest
 
+# Local
 from tests.sandbox.conftest import REGIONS
 
 SAME = "B0SBXREG01"

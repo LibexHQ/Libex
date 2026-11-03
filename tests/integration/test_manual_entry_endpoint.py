@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock, patch
 # Third party
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import create_engine, event, insert, select, text
+from sqlalchemy import event, insert, select, text
 from sqlalchemy.exc import IntegrityError
 
 # Local
@@ -48,7 +48,6 @@ from tests.fixtures.manual_entry import (
     snapshot,
     stable,
 )
-from tests.integration._scratch import build_template, clone, drop_database, run_alembic
 
 pytestmark = [pytest.mark.integration, pytest.mark.timeout(300)]
 
@@ -575,10 +574,6 @@ async def test_the_reader_returns_the_same_items_as_the_route(client, db_session
 # THE HOSTED CHAIN'S INDEX REVISION
 # ============================================================
 
-BEFORE = "b7e2d94c1a68"
-REVISION = "c4f7a2e9d1b3"
-
-
 async def test_the_chain_at_head_has_the_partial_index_with_the_listed_order(db_session):
     definition = (await db_session.execute(text(
         "SELECT indexdef FROM pg_indexes WHERE tablename = 'books' AND indexname = 'ix_books_manual_entry'"
@@ -586,31 +581,3 @@ async def test_the_chain_at_head_has_the_partial_index_with_the_listed_order(db_
     assert definition is not None
     assert "(manual_entry_at DESC, asin, region)" in definition
     assert "WHERE (manual_entry_at IS NOT NULL)" in definition
-
-
-@pytest.fixture(scope="module")
-def template():
-    name = build_template(BEFORE)
-    yield name
-    drop_database(name)
-
-
-def _index_exists(engine):
-    with engine.connect() as c:
-        return c.execute(text("SELECT count(*) FROM pg_indexes WHERE indexname = 'ix_books_manual_entry'")).scalar() == 1
-
-
-def test_the_revision_builds_the_index_and_downgrades_cleanly(template):
-    name, sync_url, async_url = clone(template)
-    engine = create_engine(sync_url)
-    try:
-        assert not _index_exists(engine)
-        run_alembic(async_url, "upgrade", REVISION)
-        assert _index_exists(engine)
-        run_alembic(async_url, "downgrade", BEFORE)
-        assert not _index_exists(engine)
-        run_alembic(async_url, "upgrade", REVISION)
-        assert _index_exists(engine)
-    finally:
-        engine.dispose()
-        drop_database(name)

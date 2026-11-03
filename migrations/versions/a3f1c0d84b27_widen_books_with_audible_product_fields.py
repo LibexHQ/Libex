@@ -42,8 +42,8 @@ corpus has been rewritten since this landed; with the default applied, the
 question cannot be asked at all.
 
 No backfill UPDATE in here either -- it would spend that same distinction on
-the way in, and migrations/env.py wraps the entire upgrade in one
-engine.begin(), so an UPDATE over 1.8M rows would run inside the transaction
+the way in, and migrations/env.py runs the entire upgrade in one
+transaction, so an UPDATE over 1.8M rows would run inside the transaction
 that gates application startup.
 
 lock_timeout is set because this connection has none of the safeguards a

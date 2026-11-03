@@ -80,7 +80,7 @@ class Sandbox:
         self.gets = 0
         self._last_audible = 0.0
         self._asins: set[str] = set()
-        self._live: dict[str, str] = {}
+        self._live: dict[tuple[str, int], str] = {}
 
     # ------------------------------------------------------------ docker / sql
 
@@ -198,7 +198,7 @@ class Sandbox:
             "no_scheme": ingest,
             "truncated": "Bearer " + ingest[:-1],
             "extended": "Bearer " + ingest + "x",
-            "bearer_alone": "Bearer ",
+            "bearer_alone": "Bearer",  # h11 refuses a trailing space client-side
         }
         value = shapes[kind]
         return {} if value is None else {"Authorization": value}
@@ -251,29 +251,30 @@ class Sandbox:
                 return out
             page += 1
 
-    def live_asin(self, region: str) -> str:
+    def live_asin(self, region: str, nth: int = 0) -> str:
         """
-        An ASIN Audible lists in this region. From a restored row when there is
+        The nth ASIN Audible lists in this region (the relist test takes its own, nth=1, so it never
+        marks the one the live-409 cases share). From a restored row when there is
         one (no Audible call), else one Libex search. Never a fabricated ASIN.
         """
-        if region in self._live:
-            return self._live[region]
+        if (region, nth) in self._live:
+            return self._live[region, nth]
         asin = ""
         if self.mode == "snapshot":
             asin = self.psql(
                 "SELECT asin FROM books WHERE region = '%s' AND confirmed_at IS NOT NULL "
-                "AND manual_entry_at IS NULL ORDER BY num_ratings DESC NULLS LAST LIMIT 1" % region
+                "AND manual_entry_at IS NULL ORDER BY num_ratings DESC NULLS LAST LIMIT 1 OFFSET %d" % (region, nth)
             )
         if not asin:
             self.audible("get")
-            resp = self.http.get("/search", params={"region": region, "title": _TITLES[region], "limit": 1})
+            resp = self.http.get("/search", params={"region": region, "title": _TITLES[region], "limit": nth + 1})
             assert resp.status_code == 200, f"search for a live {region} ASIN answered {resp.status_code}"
-            asin = resp.json()[0]["asin"]
+            asin = resp.json()[nth]["asin"]
             # The search stores what it found in the background; let that land
             # before any test compares table state.
             self.wait_for(lambda: self.count("books", asin, region) == 1, 30)
             time.sleep(2)
-        self._live[region] = asin
+        self._live[region, nth] = asin
         return asin
 
     # -------------------------------------------------------------------- sql

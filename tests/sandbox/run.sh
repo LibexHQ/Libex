@@ -229,6 +229,28 @@ health() {
     [[ $code == 200 ]] || die "/health returned ${code:-nothing}"
 }
 
+# Every Audible API host has to resolve before anything starts, or a resolver
+# fault (a SERVFAIL for one TLD) reads as failed tests. Resolved in a one-off
+# api container on the sandbox network, which is the DNS the app really uses,
+# and the hosts come from the image's own REGION_MAP, so the list can't drift.
+# A name lookup only: nothing is sent to Audible.
+"${DC[@]}" run --rm --no-deps -T --entrypoint python api -c '
+import socket, sys
+from libex_core.audible.client import REGION_MAP
+hosts = sorted({"api.audible" + tld for tld in REGION_MAP.values()})
+if len(hosts) != len(REGION_MAP):
+    sys.exit("refusing: REGION_MAP has %d regions but %d hosts" % (len(REGION_MAP), len(hosts)))
+bad = []
+for host in hosts:
+    try:
+        socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        bad.append("%s (%s)" % (host, exc))
+if bad:
+    sys.exit("refusing: does not resolve from the sandbox network: " + ", ".join(bad))
+print("sandbox: all %d Audible API hosts resolve" % len(hosts))' \
+    || die "fix DNS for the hosts above before running; this is the environment, not the tests"
+
 # ------------------------------------------------------------------ restore
 
 if [[ $mode == snapshot ]]; then

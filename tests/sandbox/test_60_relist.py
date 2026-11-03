@@ -3,25 +3,27 @@ A manual entry that Audible later lists again: Audible's text wins once,
 manual_entry_at stays, and the book stays on /db/delisted.
 """
 
-
-def _row(sbx, asin):
-    return sbx.psql(
-        "SELECT manual_entry_at::text, confirmed_at IS NOT NULL, confirmed_at::text, description "
-        f"FROM books WHERE asin = '{asin}' AND region = 'us'"
-    )
+# Standard library
+import time
 
 
 def test_relist_audible_description_wins_once_and_manual_entry_stays(sbx):
-    asin = sbx.live_asin("us")
+    asin = sbx.live_asin("us", nth=1)
+    # Before the row is marked, so a 404 below is about the mark and not about
+    # a search hit that /books cannot serve.
+    plain = sbx.get_live(asin, cache="false")
+    assert plain.status_code == 200, "this search hit is not fetchable through /books even unmarked"
     where = f"asin = '{asin}' AND region = 'us'"
-    assert sbx.count("books", asin, "us") == 1
+    assert sbx.wait_for(lambda: sbx.psql(
+        f"SELECT confirmed_at IS NOT NULL FROM books WHERE {where}") == "t", 30)
+    time.sleep(2)  # the background write that follows the GET has finished
     sbx.psql(f"UPDATE books SET manual_entry_at = now(), confirmed_at = NULL, "
              f"description = repeat('x', 5000) WHERE {where}")
     marked = sbx.psql(f"SELECT manual_entry_at::text FROM books WHERE {where}")
     sbx.psql(f"DELETE FROM cache WHERE key = 'book:us:{asin}'")
 
     first = sbx.get_live(asin)
-    assert first.status_code == 200
+    assert first.status_code == 200, "a listed book 404s on /books once it carries the manual mark"
     assert first.json()["manualEntry"] is False  # a live fetch never reads manual
     assert sbx.wait_for(
         lambda: sbx.psql(f"SELECT confirmed_at IS NOT NULL FROM books WHERE {where}") == "t", 30

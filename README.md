@@ -44,6 +44,20 @@ If you rely on Libex for a project or tool, we recommend self-hosting your own i
 
 ---
 
+## Delisted Books
+
+Audible sometimes removes a book from sale. Once it's gone, Audible's own API stops returning it, so most tools lose it for good. Libex keeps the ones it can.
+
+A delisted book is served only from the `/db` endpoints, for example `/db/book/<ASIN>?region=us` or a `/db/book` search. The live `/books` endpoint still returns `404` for it, because Audible no longer has it.
+
+To list every book I've entered this way, call `GET /db/delisted`. It's paginated like the other `/db` lists, takes an optional `region`, and puts the newest entry first. A book stays on the list after Audible lists it again, because `manualEntry` never resets.
+
+Records I add this way carry `"manualEntry": true`. It stays true even if Audible lists the book again, and from then on Audible's data takes over as normal. `/books` shows it too when it answers from my stored copy, on a cache hit or during an Audible outage; a fresh answer straight from Audible reads `false`.
+
+If a book Audible has delisted is missing from `/db`, [open a Missing book issue](https://github.com/LibexHQ/Libex/issues/new?template=missing-book.yml). I check every report before adding anything: that the book isn't already in `/db`, that Audible really has delisted it, and that the ASIN is a real Audible one. Books that were never sold on Audible aren't accepted.
+
+---
+
 ## Regions
 
 Libex serves all eleven Audible marketplaces. The counts are the public
@@ -112,8 +126,8 @@ curl -O https://raw.githubusercontent.com/LibexHQ/Libex/main/docker-compose.yml
 # 3. Create your environment file
 cp .env.example .env
 # Edit .env — DB_PASSWORD is required. AUDIBLE_PROXY_URL is recommended but
-# optional: fill in the six API_WG_* values to use the bundled example VPN
-# sidecar, or point it at a proxy of your own — see VPN / Egress below. Left
+# optional: fill in the API_VPN_* and API_WG_* values to use the bundled example
+# VPN sidecar, or point it at a proxy of your own — see VPN / Egress below. Left
 # blank, the API goes to Audible directly and logs that at startup. Everything
 # else has a sensible default.
 
@@ -198,8 +212,11 @@ services:
     cap_add:
       - NET_ADMIN
     environment:
-      - VPN_SERVICE_PROVIDER=custom
+      # a provider's server pool, not one pinned exit: a restart lands on another
+      # server when one goes bad. blank provider means custom; see .env.example.
+      - VPN_SERVICE_PROVIDER=${API_VPN_PROVIDER:-custom}
       - VPN_TYPE=wireguard
+      - SERVER_COUNTRIES=${API_VPN_SERVER_COUNTRIES:-}
       - WIREGUARD_PRIVATE_KEY=${API_WG_PRIVATE_KEY:-}
       - WIREGUARD_ADDRESSES=${API_WG_ADDRESS:-}
       - WIREGUARD_ENDPOINT_IP=${API_WG_ENDPOINT_IP:-}
@@ -437,6 +454,7 @@ ABS will then call `/us/search?title=...&author=...` which returns the `{"matche
 | GET | `/db/book/{asin}` | Get a single book from local DB. Books are stored per region; `?region=xx` picks one, otherwise you get the record stored first |
 | GET | `/db/book/{asin}/chapters` | Get chapter data from local DB (optional `?region=xx`, as above) |
 | GET | `/db/book/sku/{sku}` | Get books by SKU group from local DB |
+| GET | `/db/delisted` | List the books I entered by hand because Audible had delisted them, newest entry first. Each item is the full record `/db/book` returns, with `manualEntry` true. A book stays listed after Audible lists it again. `region` narrows the list (without it, every region's records are listed, each its own item), `sort` and `order` override the order, and `limit` (1 to 100, default 20) and `page` paginate. An empty list is `200` with `[]`, not a `404` |
 | GET | `/db/plans` | Get all distinct Audible plan names from local DB |
 | GET | `/db/plans/{plan_name}` | Get all books under a specific plan from local DB (`region` as for `/db/book`) |
 | GET | `/db/genres` | Get all distinct genre/tag names from local DB |
@@ -497,6 +515,8 @@ The same filter set is available on the other book-list DB endpoints too — `/d
 
 Use `/db/genres` to discover the genre/tag names for `genre` (optionally with `?search=`), or `/categories` to discover the category ids for `category`.
 
+`manualEntry` is true for a record that was first entered by hand, because Audible had stopped listing the book. It stays true after Audible lists the book again. `/books` shows it when it answers from the stored copy (a cache hit, or during an Audible outage); a fresh answer from Audible reads false. See [Delisted Books](#delisted-books).
+
 ### Sorting
 
 The DB list endpoints and the live book-list endpoints (`/author/{asin}/books`, `/series/{asin}/books`, `/author/books`, bulk `/book`) accept `sort` and `order` (`asc`/`desc`). Sortable fields: `title`, `releaseDate`, `rating`, `lengthMinutes`, `language`, `publisher`, `updatedAt`. Series book endpoints default to series position order unless a sort field is given. The live endpoints sort the returned set; sorting isn't offered on relevance-ranked search.
@@ -547,6 +567,7 @@ Copy `.env.example` to `.env` and configure:
 | `AXIOM_DATASET` | `libex` | Axiom dataset name |
 | `AUDIBLE_PROXY_URL` | blank | Optional, recommended. Proxy URL for outbound Audible requests only. Blank, the API calls Audible directly from your host and logs that at startup. Set, Audible sees the proxy's address instead of the one your API answers on. Only `http://` and `https://` are supported; any other scheme, or a value that doesn't parse as a proxy URL, refuses to start rather than send traffic out unproxied. API serving, the database, and logging are unaffected either way. See VPN / Egress below for how to supply one |
 | `SEED_SECRET` | — | SHA-256 hex digest (64 characters) of the bearer token for the internal seed endpoint. Empty, or anything that isn't a 64-character hex digest (such as an old PBKDF2 hash), disables the endpoint. Generate with `python -m app.api.routes.internal.router` |
+| `INGEST_SECRET` | — | SHA-256 hex digest (64 characters) of the bearer token for the internal endpoint that adds a book by hand. Empty, or anything that isn't a 64-character hex digest, disables the endpoint. It must differ from `SEED_SECRET`. Generate with `python -m app.api.routes.internal.router` |
 
 `DATABASE_URL` is constructed automatically by docker-compose from `DB_NAME`, `DB_USER`, and `DB_PASSWORD`. Only set it manually if running outside of Docker — and whatever it points at must be PostgreSQL 14 or newer, see Self-Hosting Notes below.
 
@@ -653,7 +674,7 @@ Four stacks talk to Audible — the API, seeder, backfill, and refresh — and e
 
 Any `http://` or `https://` CONNECT-capable proxy works. Each of the four stacks ships an example VPN sidecar (`qmcgaw/gluetun`, WireGuard, pinned to its `v3` release line) as a working default, not as the only option. Three ways to supply one:
 
-- **Use the bundled example sidecar** — fill in that stack's six `*_WG_*` values in `.env` (endpoint, keys) from your provider's WireGuard config.
+- **Use the bundled example sidecar** — recommended: set that stack's `*_VPN_PROVIDER` to your provider's name and fill in its keys, and gluetun picks a server from the provider's pool; `*_VPN_SERVER_COUNTRIES` narrows it. For a provider gluetun doesn't support, leave the provider blank and fill in that stack's six `*_WG_*` values from your provider's WireGuard config for one pinned server. `.env.example` has the details for both.
 - **Run your own VPN container in the same stack** and point the proxy variable at it, in place of the bundled sidecar.
 - **Run a separate VPN stack** and join its container to that stack's egress network (`libex-egress`, `libex-seeder-egress`, `libex-backfill-egress`, or `libex-refresh-egress`) as `external: true`, deployed after the stack that creates that network.
 
@@ -665,7 +686,7 @@ Each egress network is created only by its own stack's compose file, which is wh
 2. It needs its own kill switch. A plain tinyproxy/privoxy/squid container falls back to the open internet the moment its VPN connection drops, unless it shares the VPN container's network stack (`network_mode: service:<vpn>`). Verify the exit IP once it's up.
 3. Percent-encode any `user:pass@` credentials in the proxy URL — and never paste `docker inspect` or `compose config` output anywhere public; both print the URL, credentials included, in plain text.
 4. Never publish the proxy's port, and never attach the VPN container to `libex-db` or to the stack's `default` network — egress only.
-5. Use a separate exit per stack. The hostname checks (`seeder`, `backfill`, `refresh`) only look at the proxy URL's name, not where it actually connects, so nothing technically stops two stacks sharing an exit — but sharing one defeats the point of separating them.
+5. Use a separate exit per stack. The hostname checks (`seeder`, `backfill`, `refresh`) only look at the proxy URL's name, not where it actually connects, so nothing technically stops two stacks sharing an exit — but sharing one defeats the point of separating them. Server pools over the same countries can land two stacks on the same server, so give each stack its own key and, ideally, its own countries.
 6. Only trusted containers belong on an egress network. If you run gluetun yourself, stay on `v3.40` or later and never set `HTTP_CONTROL_SERVER_AUTH_DEFAULT_ROLE` to `{"auth":"none"}`.
 7. No TLS-intercepting proxy — Libex validates Audible's certificate itself, and a proxy that intercepts TLS breaks that.
 8. Whatever VPN you use, its operator can see which regional Audible host each stack calls, when, and how much data crosses each connection. The path, ASIN, and search terms travel over that same link, but encrypted — the operator can't read them.
@@ -726,7 +747,7 @@ Within Libex, fields and shapes are only ever added to, never removed or changed
 
 If you deployed Libex before the VPN requirement and the backup/backfill/refresh stacks existed — a single `docker-compose.yml` with an optional blank `AUDIBLE_PROXY_URL` and a bundled `libex-backup` service:
 
-1. Optionally set `AUDIBLE_PROXY_URL` in the API stack's `.env` — either the six `API_WG_*` values for the bundled example sidecar, or your own proxy. It is recommended, but the API stack deploys without it.
+1. Optionally set `AUDIBLE_PROXY_URL` in the API stack's `.env` — either the `API_VPN_*` and `API_WG_*` values for the bundled example sidecar, or your own proxy. It is recommended, but the API stack deploys without it.
 2. Redeploy the seeder stack with `SEEDER_PROXY_URL` set the same way (`http://libex-seeder-vpn:8888` with the bundled example sidecar).
 3. Backup moved out of `docker-compose.yml` into its own stack. Remove the old `libex-backup` container — `docker rm -f libex-backup`, or redeploy the API stack with `--remove-orphans` — then deploy `docker-compose.backup.yml` on its own.
 4. The old deployment's `libex-backup-spool` and `libex-backup-ca` volumes are safe to remove once the new backup stack is running, unless you'd put a certificate directly into the CA volume rather than mounting it from a host path.

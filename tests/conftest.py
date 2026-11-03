@@ -28,6 +28,11 @@ os.environ["AXIOM_DATASET"] = ""
 # Local
 from app.main import app
 
+# The sandbox suite drives a throwaway container stack from tests/sandbox/run.sh.
+# Collect-ignored rather than skipped, so the normal runs show no new test and
+# no new skip.
+collect_ignore = [] if os.environ.get("LIBEX_SANDBOX_URL") else ["sandbox"]
+
 
 @pytest.fixture(autouse=True)
 def block_network_sockets(request):

@@ -154,6 +154,8 @@ class Book(Base):
     # confirmed.
     confirmed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     chapters_confirmed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    # Set on insert for a row that started as a manual entry; never updated, never cleared.
+    manual_entry_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime(),
         default=lambda: datetime.now(timezone.utc),
@@ -220,6 +222,18 @@ class Book(Base):
 
     def __repr__(self) -> str:
         return f"<Book asin={self.asin} title={self.title}>"
+
+
+# Serves the manual-entry list: newest entry first, a stable tiebreak after it.
+# Partial, so it holds only the hand-entered rows and costs the catalog nothing.
+Index(
+    "ix_books_manual_entry",
+    Book.manual_entry_at.desc(),
+    Book.asin,
+    Book.region,
+    postgresql_where=Book.manual_entry_at.is_not(None),
+    sqlite_where=Book.manual_entry_at.is_not(None),
+)
 
 
 # ============================================================

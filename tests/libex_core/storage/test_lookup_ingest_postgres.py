@@ -68,6 +68,10 @@ async def test_nothing_is_confirmed(store):
     await cases.case_nothing_is_confirmed(store)
 
 
+async def test_manual_entry_is_stamped_only_when_true(store):
+    await cases.case_manual_entry_is_stamped_only_when_true(store)
+
+
 async def test_regions_are_kept_apart(store):
     await cases.case_regions_are_kept_apart(store)
 

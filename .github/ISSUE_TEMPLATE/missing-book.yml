@@ -1,0 +1,186 @@
+name: Missing book (delisted from Audible)
+description: Report an audiobook that Audible used to sell, no longer lists, and Libex's /db doesn't have.
+title: "[missing book] "
+labels: [missing-book]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for an audiobook that **was sold on Audible and has since been delisted**, and that Libex doesn't have yet. Books that were never on Audible can't be added, so please don't report them here.
+
+        Before you start, check whether I already have it:
+        `https://libexdb.com/db/book/<ASIN>?region=<xx>`
+        (swap in the ASIN and the region code, for example `us` or `de`). If that returns the book, there's nothing to report.
+
+        A report covers one marketplace. Each marketplace's copy of a book has its own ASIN, so if the same book was delisted in several marketplaces, please open one report per marketplace.
+
+        Everything you post here is public. Only paste the book's own details, never account details, order numbers, or an export of your library. I check every report myself before adding anything.
+
+        What happens to what you post is in [the privacy notice](https://github.com/LibexHQ/Libex/blob/main/PRIVACY.md#reports-of-missing-books).
+
+  - type: input
+    id: asin
+    attributes:
+      label: ASIN
+      description: |
+        The 10-character Audible ASIN in the marketplace you choose below, from that marketplace's product link, e.g. `audible.com/pd/<title>/B0XXXXXXXX`. Most start with `B0`. Some Audible ASINs are ISBN-10s (10 digits, sometimes ending in `X`), and that's fine when it's what Audible itself used. An ISBN-13 is never an ASIN. The book must have been sold on Audible; books that were never on Audible are refused.
+      placeholder: B0XXXXXXXX
+    validations:
+      required: true
+
+  - type: dropdown
+    id: region
+    attributes:
+      label: Marketplace it was delisted from
+      description: The Audible marketplace the ASIN belongs to.
+      options:
+        - us
+        - uk
+        - ca
+        - au
+        - de
+        - fr
+        - it
+        - es
+        - jp
+        - in
+        - br
+    validations:
+      required: true
+
+  - type: textarea
+    id: other_marketplaces
+    attributes:
+      label: Same book in other marketplaces
+      description: Optional. One per line, as `region ASIN live|delisted`. It's fine to mention a copy that's still live somewhere else, and it doesn't stop this report.
+      placeholder: uk B0YYYYYYYY live
+
+  - type: input
+    id: isbn
+    attributes:
+      label: ISBN
+      description: Optional. The book's ISBN-10 or ISBN-13 if you know it. This is separate from the ASIN above, even when the ASIN happens to be an ISBN-10.
+      placeholder: "9780000000000"
+
+  - type: input
+    id: title
+    attributes:
+      label: Title
+    validations:
+      required: true
+
+  - type: input
+    id: subtitle
+    attributes:
+      label: Subtitle
+
+  - type: textarea
+    id: authors
+    attributes:
+      label: Authors
+      description: One per line, as `Name (ASIN if known)`.
+      placeholder: Jane Doe (B000XXXXXX)
+    validations:
+      required: true
+
+  - type: textarea
+    id: narrators
+    attributes:
+      label: Narrators
+      description: One per line.
+
+  - type: textarea
+    id: series
+    attributes:
+      label: Series
+      description: One per line, as `Series name (ASIN if known) #position`.
+      placeholder: "Example Series (B0XXXXXXXX) #2"
+
+  - type: input
+    id: publisher
+    attributes:
+      label: Publisher
+
+  - type: input
+    id: release_date
+    attributes:
+      label: Release date
+      description: YYYY-MM-DD
+      placeholder: "2020-01-31"
+    validations:
+      required: true
+
+  - type: input
+    id: language
+    attributes:
+      label: Language
+      placeholder: english
+    validations:
+      required: true
+
+  - type: input
+    id: length
+    attributes:
+      label: Length
+      description: In minutes, or as h:mm.
+      placeholder: "11:42"
+
+  - type: input
+    id: cover_url
+    attributes:
+      label: Cover image link
+      description: An https link only.
+      placeholder: https://
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: The publisher's summary from the product page.
+
+  - type: textarea
+    id: genres
+    attributes:
+      label: Genres
+      description: As shown on the product page.
+
+  - type: textarea
+    id: chapters
+    attributes:
+      label: Chapters
+      description: One per line as `title start length`, or paste JSON.
+
+  - type: input
+    id: product_url
+    attributes:
+      label: Old product link
+      description: The audible.<tld> product link the book used to have.
+      placeholder: https://www.audible.com/pd/<title>/B0XXXXXXXX
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Proof it was on Audible
+      description: |
+        Show me the book was sold on Audible.
+        - Best: an archived copy of the product page, for example on the Wayback Machine (web.archive.org).
+        - If there's no archived copy: a screenshot of the order or of the book in your Audible library. It shows your account owns the book, so crop out your name, email and order details first.
+        - The old product link also helps, if it isn't already above.
+
+        Also say what you get now (a 404 or "not available") and the date you checked.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Before you submit
+      options:
+        - label: This book was sold on Audible and is no longer listed there.
+          required: true
+        - label: I checked `/db/book` and it isn't there.
+          required: true
+        - label: Apart from a cropped proof screenshot, everything here is the book's public metadata, not personal data.
+          required: true

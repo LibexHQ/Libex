@@ -103,7 +103,7 @@ _SAFE_QUERY_PARAMS = frozenset({
     "region", "book_region", "cache", "limit", "page", "sort", "order",
     "flat", "label", "depth", "days", "source", "products_sort_by",
     "category", "genre", "book_format", "language", "plan_name",
-    "explicit", "has_pdf", "is_vvab", "whisper_sync",
+    "explicit", "has_pdf", "is_vvab", "whisper_sync", "dry_run",
     "audiobooks_produced", "cultural_heritage", "gender",
     "longer_than", "shorter_than", "rating_better_than", "rating_worse_than",
 })

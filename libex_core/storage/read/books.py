@@ -363,6 +363,32 @@ async def get_vvab_books(
     return await hydrate_books(session, books)
 
 
+async def get_delisted_books(
+    session: AsyncSession,
+    region: str | None = None,
+    sort: str | None = None,
+    order: str | None = None,
+    limit: int = 20,
+    page: int = 1,
+) -> list[dict[str, Any]]:
+    """Fetches the books that were entered by hand, newest entry first.
+
+    A book stays listed after Audible lists it again: manual_entry_at is never
+    cleared. Every regional record is its own entry, so no row is narrowed to
+    the first-stored one. A sort field replaces the default order; the entry
+    time, ASIN and region always break ties, so a page boundary never repeats
+    or skips a book.
+    """
+    stmt = select(Book).where(Book.manual_entry_at.is_not(None))
+    if region is not None:
+        stmt = stmt.where(Book.region == region)
+    stmt = apply_sort(stmt.options(*BOOK_RELATIONS), sort, order, BOOK_SORT_FIELDS)
+    stmt = stmt.order_by(Book.manual_entry_at.desc(), Book.asin.asc(), Book.region.asc())
+    stmt = stmt.limit(limit).offset((page - 1) * limit)
+    result = await session.execute(stmt)
+    return await hydrate_books(session, result.scalars().all())
+
+
 async def get_new_releases(
     session: AsyncSession,
     days: int = 30,

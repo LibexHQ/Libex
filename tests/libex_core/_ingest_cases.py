@@ -171,6 +171,47 @@ async def case_nothing_is_confirmed(store):
     assert (await stored_book(store, "B0INGEST02", region="us")).confirmed_at is None
 
 
+async def manual_stamps(store, *asins, region="us"):
+    async with store.session() as session:
+        rows = (await session.execute(
+            select(Book.asin, Book.manual_entry_at).where(
+                Book.asin.in_(asins), Book.region == region
+            )
+        )).all()
+    return dict(rows)
+
+
+async def case_manual_entry_is_stamped_only_when_true(store):
+    def book(asin, **extra):
+        return BookResponse(asin=asin, region="us", title="Delisted", **extra)
+
+    manual, false, absent = "B0MANUAL01", "B0MANUAL02", "B0MANUAL03"
+    await ingest_books(
+        store,
+        [book(manual, manualEntry=True), book(false, manualEntry=False), book(absent)],
+        region="us",
+    )
+    stamps = await manual_stamps(store, manual, false, absent)
+    assert stamps[manual] is not None
+    assert stamps[false] is None
+    assert stamps[absent] is None
+    assert (await stored_book(store, manual, region="us")).value.manualEntry is True
+    assert (await stored_book(store, false, region="us")).value.manualEntry is False
+
+    # a later ingest neither clears the stamp nor adds one
+    first = stamps[manual]
+    await ingest_books(
+        store,
+        [book(manual, manualEntry=False), book(false, manualEntry=True), book(absent)],
+        region="us",
+    )
+    again = await manual_stamps(store, manual, false, absent)
+    assert again[manual] == first
+    assert again[false] is None
+    assert again[absent] is None
+    assert (await stored_book(store, manual, region="us")).confirmed_at is None
+
+
 async def case_regions_are_kept_apart(store):
     book = await response_of(rich(), "uk")
     with_wrong_region = [book]

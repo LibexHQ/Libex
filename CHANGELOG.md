@@ -10,6 +10,17 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [2.3.0]
+
+No endpoint, parameter or response field changes, no database migration and no change to the application. The four compose files and `.env.example` gain optional settings for the VPN sidecars, so I counted this a MINOR: it is a new capability for anyone running the bundled sidecars, and it is opt-in. An existing `.env` behaves as it did.
+
+### Added
+- **The bundled VPN sidecars can use a provider's server pool.** Each of the four Audible-facing stacks (API, seeder, backfill, refresh) has a gluetun sidecar that was pinned to one WireGuard endpoint, so when that one server went bad it stayed bad until I edited `.env`. Each stack now reads `<STACK>_VPN_PROVIDER` (`API_`, `SEEDER_`, `BACKFILL_` or `REFRESH_`). Set it to your provider's name as gluetun spells it and fill in the keys that provider needs, and gluetun picks a server from the provider's own list; restarting the sidecar picks again. This is now the recommended way to run them. `<STACK>_VPN_SERVER_COUNTRIES` narrows the pool to a comma-separated list of countries in gluetun's spelling, and blank uses every server the provider has. Leave `ENDPOINT_IP`, `ENDPOINT_PORT` and `PUBLIC_KEY` blank in this mode, since an `ENDPOINT_IP` pins the sidecar back to one server.
+- **`.env.example` and the README describe both modes.** That is eight new variables, two per stack. Because pools over the same countries can land two stacks on the same server, each stack should get its own key and, ideally, its own countries.
+
+### Changed
+- **The single pinned endpoint is still the default.** A blank `<STACK>_VPN_PROVIDER` runs gluetun's `custom` provider exactly as before, with the six `*_WG_*` values, and is the way to go for a provider gluetun doesn't support. In that mode `<STACK>_VPN_SERVER_COUNTRIES` must stay blank, as gluetun refuses to start a custom provider with it set. Nothing needs to change for an existing deployment, and the published image is not affected; only the compose files are.
+
 ## [2.2.16]
 
 No endpoint, parameter or response field changes. One database migration adds a nullable column to three link tables, and the order of authors, narrators and genres in a book's response changes to the order Audible credits them in. `/db/plans` and `/db/genres` now reject an unknown region. I counted this a PATCH: it fixes an order that was never defined and a region that was never checked, and adds no new surface.

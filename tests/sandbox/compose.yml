@@ -1,0 +1,75 @@
+# The sandbox stack for tests/sandbox. Only run.sh starts it: it supplies every
+# ${...} below through a generated --env-file, with the shell's own environment
+# cleared, and checks the resolved config before anything starts. Started any
+# other way, the checks that keep it apart from the real stacks never ran.
+#
+# Isolation is structural rather than by convention: its own project name, no
+# container_name, no external network or volume, no bind mount, and the API
+# published on loopback only. Postgres publishes nothing; it is reached with
+# `compose exec -T db psql`.
+name: libex-sandbox
+
+services:
+  api:
+    # Built locally from one commit by run.sh, never pulled and never pushed.
+    image: ${LIBEX_SANDBOX_IMAGE:?}
+    pull_policy: never
+    # No command: and no entrypoint: here. The image's CMD carries
+    # --no-access-log, the only thing keeping client IPs and raw query strings
+    # out of the logs, and run.sh refuses a config that overrides it.
+    ports:
+      - "127.0.0.1:${LIBEX_SANDBOX_PORT:-3390}:3333"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://libex:sandbox@db:5432/libex
+      - CACHE_ENABLED=true
+      - CACHE_TTL=86400
+      - DEFAULT_REGION=us
+      # production's count, so the concurrency cases cross processes.
+      - WEB_CONCURRENCY=6
+      - LOG_RETENTION_DAYS=7
+      - LOG_LEVEL=${LIBEX_SANDBOX_LOG_LEVEL:-INFO}
+      # a literal: nothing here may ever reach the production dataset.
+      - AXIOM_TOKEN=
+      - SEED_SECRET=${LIBEX_SANDBOX_SEED_DIGEST:-}
+      # `?` not `:?`: unset is a mistake, empty is the disabled-endpoint case.
+      - INGEST_SECRET=${LIBEX_SANDBOX_INGEST_DIGEST?}
+      # blank goes direct; the outage cases point it at a dead address.
+      - AUDIBLE_PROXY_URL=${LIBEX_SANDBOX_PROXY:-}
+      - MIGRATION_NOTICE_ENABLED=false
+    volumes:
+      - sandbox-logs:/app/logs
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3333/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: json-file
+
+  db:
+    image: postgres:16-alpine
+    command: ["postgres", "-c", "max_connections=200"]
+    shm_size: 1gb
+    environment:
+      - POSTGRES_DB=libex
+      - POSTGRES_USER=libex
+      # not a secret: nothing outside this project's network can reach it.
+      - POSTGRES_PASSWORD=sandbox
+    volumes:
+      - sandbox-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U libex"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    stop_grace_period: 120s
+    logging:
+      driver: json-file
+
+volumes:
+  sandbox-pg:
+  sandbox-logs:

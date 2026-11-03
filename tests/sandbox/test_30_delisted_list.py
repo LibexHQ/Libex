@@ -40,6 +40,11 @@ def test_parameters_are_validated(sbx, params, status):
     assert sbx.delisted(**params).status_code == status
 
 
+def _db_order(sbx):
+    return sbx.psql("SELECT asin FROM books WHERE region = 'us' AND manual_entry_at IS NOT NULL "
+                    "ORDER BY manual_entry_at DESC, asin, region").split()
+
+
 def _commit(sbx, **over):
     body = sbx.book(**over)
     resp = sbx.post(body, region=body["book"]["region"], dry_run=False)
@@ -56,7 +61,11 @@ def test_paging_order_sort_and_region_filter(sbx):
     assert [len(p) for p in pages] == [5, 5, 2, 0]
     got = [b["asin"] for p in pages for b in p]
     assert len(set(got)) == len(got)
-    assert got == list(reversed(asins))  # newest entry first, not insertion or ASIN order
+    # The promised order is manual_entry_at DESC, asin, region, which the database
+    # states directly. Not the commit order: the host clock can step backwards
+    # between two commits, and the stamp is taken from it per write.
+    assert got == _db_order(sbx)
+    assert set(got) == set(asins)
     assert all(b["manualEntry"] is True for p in pages for b in p)
 
     # Sorted pages are the sorted whole: no entry repeated or skipped at a boundary.
@@ -91,13 +100,14 @@ def test_a_new_commit_shows_on_the_next_read(sbx):
     asin = _commit(sbx, title="SBX List M")
     after = sbx.delisted(region="us", limit=100).json()
     assert asin not in [b["asin"] for b in before]
-    assert after[0]["asin"] == asin  # no server-side staleness
+    assert asin in [b["asin"] for b in after]  # no server-side staleness
+    assert [b["asin"] for b in after] == _db_order(sbx)
     assert len(after) == len(before) + 1
 
 
 def test_the_item_is_the_full_record(sbx):
     asin = _commit(sbx, title="SBX List N", publisher="SBX Pub")
-    listed = sbx.delisted(region="us", limit=1).json()[0]
+    listed = next(b for b in sbx.delisted(region="us", limit=100).json() if b["asin"] == asin)
     stored = sbx.db_book(asin).json()
     assert listed == stored
     assert json.dumps(listed).count("SBX Pub") == 1

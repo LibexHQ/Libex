@@ -247,7 +247,7 @@ Cloudflare still sees your address; see [Who receives data](#who-receives-data).
   its own token, and refuse anyone without it before reading what was sent.
   One takes enrichment data from my own tools. The other is how I add a book
   by hand ([Reports of missing books](#reports-of-missing-books)): it logs
-  the book's ASIN and region and counts of what it stored, never anything
+  the book's ASIN and region and counts of what it processed, never anything
   else from the upload. Requests to either are logged like any other
   request, refused ones included.
 - **`Authorization`, `Cookie` and `Referer` headers.** None of these is logged.

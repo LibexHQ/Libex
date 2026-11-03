@@ -11,14 +11,15 @@ SECURITY:
   SHA-256 and a constant-time compare.
 - The header is shape-checked (Bearer scheme, exact length and charset)
   before anything is hashed, and the body is not read until the token has
-  verified. An authorized body is capped at MAX_BODY_BYTES.
+  verified. An authorized seed body is capped at MAX_BODY_BYTES and an
+  authorized book-entry body at MAX_INGEST_BODY_BYTES.
 - Empty SEED_SECRET = endpoint fully disabled (returns 401).
 - A SEED_SECRET that is not a SHA-256 hex digest (the old PBKDF2 value
   included) is refused: the endpoint stays disabled and says why in the log.
 - include_in_schema=False = invisible in OpenAPI docs.
-- INGEST_SECRET follows the same rules under its own name. It is refused,
-  and the endpoint stays disabled, when its digest equals SEED_SECRET's, so
-  one leaked token can never open both.
+- INGEST_SECRET follows the same rules under its own name, apart from the
+  body cap above. It is also refused, and the endpoint stays disabled, when
+  its digest equals SEED_SECRET's, so one leaked token can never open both.
 - Generate a secret with: python -m app.api.routes.internal.router
 """
 
@@ -75,7 +76,7 @@ _warned_ingest_unusable = False
 # ============================================================
 
 def hash_secret(plaintext: str) -> str:
-    """SHA-256 hex digest of a token, the form SEED_SECRET stores."""
+    """SHA-256 hex digest of a token, the form SEED_SECRET and INGEST_SECRET store."""
     return hashlib.sha256(plaintext.encode()).hexdigest()
 
 
@@ -296,8 +297,8 @@ def _writer_dict(body: IngestBody) -> dict[str, Any]:
     """
     The parsed book as the writer takes it. exclude_unset drops the three flags
     the model defaults to False when the caller leaves them out, so they are
-    put back here; the writer then stores False rather than an unknown. manualEntry is set server-side
-    because the input model refuses it.
+    put back here; the writer then stores False rather than an unknown.
+    manualEntry is set server-side because the input model refuses it.
     """
     book = body.book.model_dump(exclude_unset=True)
     for flag in ("isListenable", "isBuyable", "isVvab"):

@@ -484,7 +484,13 @@ async def test_the_list_pages_newest_first_without_repeat_or_skip(client, db_ses
     await _enter_many(client, 5)
     await _fresh(db_session)
     everything = [b["asin"] for b in (await client.get("/db/delisted?limit=100")).json()]
-    assert everything == [f"B0LIST{i:04d}" for i in (4, 3, 2, 1, 0)]
+    # The host clock can step back between writes, so write order is no proxy for entry time:
+    # the database's own ordering is the expected answer.
+    expected = (await db_session.execute(text(
+        "SELECT asin FROM books WHERE manual_entry_at IS NOT NULL AND region = 'us' "
+        "ORDER BY manual_entry_at DESC, asin, region"))).scalars().all()
+    assert sorted(everything) == [f"B0LIST{i:04d}" for i in range(5)]
+    assert everything == expected
     paged = []
     for page in (1, 2, 3, 4):
         paged += [b["asin"] for b in (await client.get(f"/db/delisted?limit=2&page={page}")).json()]

@@ -107,7 +107,7 @@ async def _stored_other_book(**author):
     await _store([{
             "asin": "B0OTHER001", "region": "us", "title": "Other", "language": "english",
             "authors": [{"name": "First Author", "asin": AUTHOR_ASIN, "region": "us",
-                         "description": "stored bio", "image": "https://img.example/stored.jpg", **author}],
+                         "description": "stored bio", "image": "https://m.media-amazon.com/stored.jpg", **author}],
             "narrators": [{"name": "Amy Voice"}],
             "series": [{"asin": SERIES_ASIN, "name": "The Series", "position": "1",
                         "description": "stored about"}],
@@ -118,7 +118,7 @@ async def _stored_other_book(**author):
 def _matching(**over):
     payload = body(**over)
     payload["book"]["authors"] = [{"name": "First Author", "asin": AUTHOR_ASIN, "description": "stored bio",
-                                   "image": "https://img.example/stored.jpg"}]
+                                   "image": "https://m.media-amazon.com/stored.jpg"}]
     payload["book"]["series"] = [{"asin": SERIES_ASIN, "name": "The Series", "description": "stored about"}]
     return payload
 
@@ -320,7 +320,7 @@ async def test_a_placeholder_listing_proceeds_and_a_placeholder_is_never_a_store
 CONFLICTS = {
     "author-description": (lambda p: p["book"]["authors"][0].update(description="different"),
                            ["book", "authors", 0, "description"], "author_differs"),
-    "author-image": (lambda p: p["book"]["authors"][0].update(image="https://img.example/other.jpg"),
+    "author-image": (lambda p: p["book"]["authors"][0].update(image="https://m.media-amazon.com/other.jpg"),
                      ["book", "authors", 0, "image"], "author_differs"),
     "author-name": (lambda p: p["book"]["authors"][0].update(name="Someone Else"),
                     ["book", "authors", 0, "name"], "author_differs"),
@@ -376,7 +376,7 @@ async def test_a_new_author_and_series_take_their_description_and_image_on_inser
     await _fresh(db_session)
     row = (await db_session.execute(
         text("SELECT description, image FROM authors WHERE asin = :a"), {"a": AUTHOR_ASIN})).one()
-    assert tuple(row) == ("bio", "https://img.example/p.jpg")
+    assert tuple(row) == ("bio", "https://m.media-amazon.com/p.jpg")
     desc = (await db_session.execute(
         text("SELECT description FROM series WHERE asin = :a"), {"a": SERIES_ASIN})).scalar()
     assert desc == "about"

@@ -10,6 +10,17 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [2.4.1]
+
+No endpoint, parameter or response field changes, no database migration and no change to the published library. The only code touched is the input check for `POST /internal/books`, the undocumented operator endpoint that stays disabled until `INGEST_SECRET` is set. I counted this a PATCH: it tightens what that endpoint accepts and adds no surface.
+
+### Fixed
+- **A hand-entered book can no longer carry a lookalike ASIN.** An ASIN is now refused with a `422` on the ASIN field if it holds any non-ASCII character. Upper-casing folded a few of those characters (a dotless i, a long s, some ligatures) into plain ASCII, so a value that was not an ASIN could be stored as one, and the length could change in the process.
+- **Hand-entered text can no longer hold markup.** A text field containing a tag opener, or a `&lt;`-style entity for one, is refused with a `422` whose errors give the location of the refused field. Descriptions from Audible are plain text, so markup in a typed-in one would reach callers that show these fields as text. It is refused, never stripped, so what is stored is always what was sent.
+- **Hand-entered image URLs must be on an Amazon image host.** A cover or other image URL on any other host is refused with a `422` whose errors give the location of the refused field. The four hosts accepted are `m.media-amazon.com` and the `images-na`, `images-eu` and `images-fe` `ssl-images-amazon.com` hosts. The URL still has to be absolute `https`, as before.
+
+Books already stored are not rechecked or changed; the stricter checks apply to entries submitted from now on.
+
 ## [2.4.0]
 
 One new documented endpoint, one undocumented operator endpoint, one additive response field and two database migrations. I counted this a MINOR: `/db/delisted` and `manualEntry` are new surface, and nothing existing changes shape.

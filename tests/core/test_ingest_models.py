@@ -33,6 +33,7 @@ from app.core.ingest_models import (
     IngestSeries,
     error_list,
 )
+from libex_core.asin import is_valid_asin
 from libex_core.models import BookResponse
 from libex_core.storage.write.params import book_params
 from tests.fixtures.manual_entry import FULL_BOOK, FULL_CHAPTERS
@@ -259,10 +260,10 @@ def test_ints_are_not_coerced_from_strings_or_floats():
 @pytest.mark.parametrize(
     "image",
     [
-        "http://img.example/a.jpg", "ftp://x/y", "//img.example/a.jpg", "javascript:alert(1)",
-        "https://", "https://user:pw@img.example/a.jpg", "https://img.example:8443/a.jpg",
-        "https://img.example/a b.jpg", "https://img.example/a\n.jpg", "https://img.example/\x7f",
-        "https://img.example/" + "a" * 2050, "", "relative/path.jpg", "https://[::1/a",
+        "http://m.media-amazon.com/a.jpg", "ftp://x/y", "//m.media-amazon.com/a.jpg", "javascript:alert(1)",
+        "https://", "https://user:pw@m.media-amazon.com/a.jpg", "https://m.media-amazon.com:8443/a.jpg",
+        "https://m.media-amazon.com/a b.jpg", "https://m.media-amazon.com/a\n.jpg", "https://m.media-amazon.com/\x7f",
+        "https://m.media-amazon.com/" + "a" * 2050, "", "relative/path.jpg", "https://[::1/a",
     ],
 )
 def test_a_bad_image_url_is_refused_on_book_and_author(image):
@@ -272,7 +273,7 @@ def test_a_bad_image_url_is_refused_on_book_and_author(image):
 
 
 def test_a_good_image_url_is_accepted_with_the_default_port():
-    assert _parse({"book": {**_book(), "imageUrl": "https://img.example:443/a.jpg"}})
+    assert _parse({"book": {**_book(), "imageUrl": "https://m.media-amazon.com:443/a.jpg"}})
 
 
 # ============================================================
@@ -406,3 +407,132 @@ def test_malformed_json_is_a_validation_error_not_a_crash():
     assert set(error_list(caught.value)[0]) == {"loc", "type"}
     with pytest.raises(ValidationError):
         IngestBody.model_validate_json(b"[]")
+
+
+# ============================================================
+# ASCII-ONLY ASINS
+# ============================================================
+
+# Each upper()s to a valid-looking ASIN; the last grows from 9 to 10 characters.
+LOOKALIKE_ASINS = ["B0ı2345678", "B0ſ2345678", "ﬀ12345678"]
+
+
+@pytest.mark.parametrize("asin", LOOKALIKE_ASINS)
+def test_a_non_ascii_lookalike_asin_is_refused_on_book_author_and_series(asin):
+    assert _errors({"book": _book(asin=asin)})[0] == {"loc": ["book", "asin"], "type": "value_error"}
+    author = _errors({"book": _book(authors=[{"name": "A", "asin": asin}])})
+    assert author == [{"loc": ["book", "authors", 0, "asin"], "type": "value_error"}]
+    series = _errors({"book": _book(series=[{"asin": asin, "name": "S"}])})
+    assert series == [{"loc": ["book", "series", 0, "asin"], "type": "value_error"}]
+
+
+@pytest.mark.parametrize("asin", LOOKALIKE_ASINS)
+def test_the_read_side_validator_still_accepts_the_lookalikes(asin):
+    # the ingest refusal is local to the models; read routes behave as before
+    assert is_valid_asin(asin) is True
+
+
+def test_a_lowercase_ascii_asin_is_accepted_and_normalised_everywhere():
+    body = _parse({"book": _book(
+        asin="b0manual01", authors=[{"name": "A", "asin": "b000apf21m"}],
+        series=[{"asin": "b00series1", "name": "S"}],
+    )})
+    assert body.book.asin == "B0MANUAL01"
+    assert body.book.authors[0].asin == "B000APF21M"
+    assert body.book.series[0].asin == "B00SERIES1"
+
+
+# ============================================================
+# MARKUP IS REFUSED IN FREE TEXT
+# ============================================================
+
+MARKUP = ["<b>", "</p>", "<!--", "<?xml", "&lt;", "&LT;", "&#60;", "&#060;", "&#x3c;", "&#X3C;",
+          "hello <script>alert(1)</script>", "bold &lt;b&gt; text"]
+PLAIN = ["a < b", "5<6", "<3", "x &amp; y", "AT&T", "&#61;", "plain text", "a <", "<1 2"]
+
+# (where, builder) for the free-text kinds: description, title, author name,
+# chapter title, publisher.
+TEXT_SITES = {
+    "description": (lambda v: {"book": _book(description=v)}, ["book", "description"]),
+    "title": (lambda v: {"book": _book(title=v)}, ["book", "title"]),
+    "publisher": (lambda v: {"book": _book(publisher=v)}, ["book", "publisher"]),
+    "author-name": (lambda v: {"book": _book(authors=[{"name": v}])}, ["book", "authors", 0, "name"]),
+    "author-description": (
+        lambda v: {"book": _book(authors=[{"name": "A", "description": v}])},
+        ["book", "authors", 0, "description"],
+    ),
+    "chapter-title": (
+        lambda v: {"book": _book(), "chapters": {**MINIMAL_CHAPTERS, "chapters": [
+            {"title": v, "lengthMs": 1000, "startOffsetMs": 0}]}},
+        ["chapters", "chapters", 0, "title"],
+    ),
+}
+
+
+@pytest.mark.parametrize("site", TEXT_SITES)
+@pytest.mark.parametrize("value", MARKUP)
+def test_markup_is_refused_in_every_free_text_field(site, value):
+    build, loc = TEXT_SITES[site]
+    errors = _errors(build(value))
+    assert errors == [{"loc": loc, "type": "value_error"}]
+    assert value not in repr(errors)
+
+
+@pytest.mark.parametrize("site", TEXT_SITES)
+@pytest.mark.parametrize("value", PLAIN)
+def test_text_that_only_looks_a_little_like_markup_is_accepted(site, value):
+    build, _ = TEXT_SITES[site]
+    assert _parse(build(value))
+
+
+def test_the_markup_refusal_says_contains_markup():
+    with pytest.raises(ValidationError) as caught:
+        IngestBody.model_validate_json(json.dumps({"book": _book(description="<b>")}))
+    assert "contains markup" in str(caught.value)
+
+
+# ============================================================
+# IMAGE HOSTS
+# ============================================================
+
+ALLOWED_HOSTS = [
+    "m.media-amazon.com", "images-na.ssl-images-amazon.com",
+    "images-eu.ssl-images-amazon.com", "images-fe.ssl-images-amazon.com",
+]
+BAD_HOSTS = [
+    "img.example", "example.com", "m.media-amazon.com.evil.example", "evilm.media-amazon.com",
+    "cdn.m.media-amazon.com", "images-sa.ssl-images-amazon.com", "media-amazon.com",
+    "m.media-amazon.com@evil.example", "evil.example@m.media-amazon.com.evil.example",
+]
+
+
+@pytest.mark.parametrize("host", ALLOWED_HOSTS + [h.upper() for h in ALLOWED_HOSTS] + ["M.Media-Amazon.com"])
+def test_an_allowed_image_host_is_accepted_on_book_and_author_in_any_case(host):
+    url = f"https://{host}/images/I/x.jpg"
+    body = _parse({"book": {**_book(), "imageUrl": url, "authors": [{"name": "A", "image": url}]}})
+    assert body.book.imageUrl == url
+    assert body.book.authors[0].image == url
+
+
+@pytest.mark.parametrize("host", BAD_HOSTS)
+def test_an_off_list_image_host_is_refused_on_book_and_author(host):
+    url = f"https://{host}/"
+    assert _errors({"book": {**_book(), "imageUrl": url}}) == [
+        {"loc": ["book", "imageUrl"], "type": "value_error"}]
+    assert _errors({"book": _book(authors=[{"name": "A", "image": url}])}) == [
+        {"loc": ["book", "authors", 0, "image"], "type": "value_error"}]
+
+
+def test_an_allowed_host_over_http_is_still_refused():
+    url = "http://m.media-amazon.com/images/I/x.jpg"
+    assert _errors({"book": {**_book(), "imageUrl": url}})[0]["loc"] == ["book", "imageUrl"]
+
+
+def test_the_image_host_refusal_says_so_and_is_distinct_from_the_scheme_refusal():
+    def message(url):
+        with pytest.raises(ValidationError) as caught:
+            IngestBody.model_validate_json(json.dumps({"book": {**_book(), "imageUrl": url}}))
+        return str(caught.value)
+
+    assert "image host not allowed" in message("https://img.example/a.jpg")
+    assert "image host not allowed" not in message("http://m.media-amazon.com/a.jpg")

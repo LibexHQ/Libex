@@ -68,7 +68,7 @@ async def _live_book(session, **author):
     await write_books(session, [{
         "asin": "B0OTHER001", "region": "us", "title": "Other", "language": "english",
         "authors": [{"name": "First Author", "asin": AUTHOR_ASIN, "region": "us",
-                     "description": "stored bio", "image": "https://img.example/stored.jpg", **author}],
+                     "description": "stored bio", "image": "https://m.media-amazon.com/stored.jpg", **author}],
         "narrators": [{"name": "Amy Voice"}],
         "series": [{"asin": SERIES_ASIN, "name": "The Series", "position": "1",
                     "description": "stored about"}],
@@ -192,7 +192,7 @@ async def test_a_matching_stored_entity_is_linked_and_reported_existing(session)
     before = await snapshot(session)
     book = writer_dict()
     book["authors"] = [{"name": "First Author", "asin": AUTHOR_ASIN, "description": "stored bio",
-                        "image": "https://img.example/stored.jpg"}, {"name": "Second Author"}]
+                        "image": "https://m.media-amazon.com/stored.jpg"}, {"name": "Second Author"}]
     book["series"] = [{"asin": SERIES_ASIN, "name": "The Series", "position": "2"}]
     result = await _enter(session, book)
 
@@ -228,7 +228,7 @@ async def test_a_new_author_and_series_take_their_description_image_and_extras(s
     await _enter(session, book)
     author = (await session.execute(select(Author).filter_by(asin=AUTHOR_ASIN))).scalar_one()
     series = (await session.execute(select(Series).filter_by(asin=SERIES_ASIN))).scalar_one()
-    assert (author.description, author.image) == ("bio", "https://img.example/p.jpg")
+    assert (author.description, author.image) == ("bio", "https://m.media-amazon.com/p.jpg")
     assert (series.description, series.audible_extras, series.extras_withheld) == (
         "about", {"k": 1}, {"w": 2})
 
@@ -239,7 +239,7 @@ CONFLICTS = {
         lambda b: b["authors"][0].update(description="a different bio"),
         ["book", "authors", 0, "description"], "author_differs"),
     "author-image": (
-        lambda b: b["authors"][0].update(image="https://img.example/other.jpg"),
+        lambda b: b["authors"][0].update(image="https://m.media-amazon.com/other.jpg"),
         ["book", "authors", 0, "image"], "author_differs"),
     "author-name": (
         lambda b: b["authors"][0].update(name="Someone Else"),
@@ -265,7 +265,7 @@ CONFLICTS = {
 def _matching_book():
     book = writer_dict()
     book["authors"] = [{"name": "First Author", "asin": AUTHOR_ASIN, "description": "stored bio",
-                        "image": "https://img.example/stored.jpg"}]
+                        "image": "https://m.media-amazon.com/stored.jpg"}]
     book["series"] = [{"asin": SERIES_ASIN, "name": "The Series", "description": "stored about"}]
     return book
 

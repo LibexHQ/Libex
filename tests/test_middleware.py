@@ -595,7 +595,18 @@ async def test_monitoring_fields_survive(caplog):
     assert isinstance(record.took, float)
     assert record.query == "region=us"
     assert hasattr(record, "userAgent")
-    assert hasattr(record, "host")
+
+
+@pytest.mark.asyncio
+async def test_host_header_never_reaches_the_log_record(caplog):
+    """The Host header names where the request was aimed, and is no longer
+    logged. A distinctive value must appear nowhere in the record."""
+    records = await _request(caplog, "/probe", {"Host": "evil.example"})
+    assert len(records) == 1
+    record = records[0]
+
+    assert not hasattr(record, "host")
+    assert "evil.example" not in str(record.__dict__)
 
 
 @pytest.mark.asyncio
@@ -615,7 +626,7 @@ async def test_caller_authored_query_is_redacted_in_the_record(caplog):
 # already stamped on the response object this middleware is holding -- see
 # the comment at the log call in middleware.py. Exact key names: `complete`,
 # `incompleteReason`, `source`, matching that line's existing mixed style
-# (userAgent, took, host alongside camelCase and bare words).
+# (userAgent, took alongside camelCase and bare words).
 
 
 @pytest.mark.asyncio

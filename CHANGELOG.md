@@ -10,6 +10,18 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [2.4.2]
+
+No endpoint, parameter or response field changes, no database migration and no change to the published library. I counted this a PATCH: it removes the code that announced the move off the old host, `libex.lostcartographer.xyz`, which is retired. The response headers and the `/health` field were only ever sent on that host; three smaller traces also reached `libexdb.com`, and each is listed below.
+
+### Changed
+- **The old host is retired and its migration notice is gone.** The `Deprecation`, `Sunset` and `Link` headers, the `notice` field on `/health` and the migration section at the top of the API docs are removed. The headers and the `/health` field were only ever sent to requests for the old host; `libexdb.com` never carried them. The migration section at the top of the docs was built into the spec both hosts served, so it showed on `libexdb.com` too, and is now gone.
+- **Browsers are no longer told they may read `Deprecation`, `Sunset` and `Link`.** `Access-Control-Expose-Headers` named them on every cross-origin response, including those from `libexdb.com`, although `libexdb.com` never sent them. The rest of the list is unchanged.
+- **`/openapi.json` no longer carries a `servers` entry.** On the public instance it named `libexdb.com`; a self-hosted instance that never enabled the notice never had one. Tools that read the spec now work out the base URL from where they fetched it, which for `libexdb.com` is the same address. A generated client that baked in the old entry keeps what it already has.
+- **The five `MIGRATION_*` settings do nothing, and setting one logs a warning.** `MIGRATION_NOTICE_ENABLED`, `MIGRATION_NEW_HOST`, `MIGRATION_ANNOUNCED`, `MIGRATION_SUNSET` and `MIGRATION_INFO_URL` now start the same retired-variable warning as the other removed settings, and the container still starts. They were off by default, and the notice was only ever meant for the public instance, but if you set them on a self-hosted instance to announce your own move, that stops working. They are also gone from `docker-compose.yml` and `.env.example`. A self-hosted instance that never set them sees no change.
+- **The request log no longer records which hostname a request used.** The `host` field on each request line existed only to tell old-host traffic apart from new while both served the same instance. With the old host gone it has nothing to tell apart, so Libex stops recording it. The `User-Agent` is now the only request header read for logging.
+- **The README and the privacy notice now say the old host is retired.**
+
 ## [2.4.1]
 
 No endpoint, parameter or response field changes, no database migration and no change to the published library. The only code touched is the input check for `POST /internal/books`, the undocumented operator endpoint that stays disabled until `INGEST_SECRET` is set. I counted this a PATCH: it tightens what that endpoint accepts and adds no surface.

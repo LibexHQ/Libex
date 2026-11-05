@@ -17,7 +17,6 @@ from app.core.config import get_settings, check_retired_env_vars
 from app.core.logging import setup_logging, stop_axiom_listener
 from libex_core.exceptions import AudibleAPIException, LibexException
 from app.core.middleware import setup_middleware
-from app.core.migration_notice import build_migration_notice, is_new_host_request, MIGRATION_HEADER_NAMES
 from app.core.response_headers import HEADER_REQUEST_ID, EXPOSED_HEADER_NAMES, RETRY_AFTER_SECONDS
 
 
@@ -159,16 +158,8 @@ async def lifespan(app: FastAPI):
     stop_axiom_listener()
 
 
-# Off by default for self-hosters (migration_notice_enabled is False, migration_new_host
-# is empty) — only the public instance's env sets these. Built exactly once, here, and
-# threaded to every other consumer (setup_middleware, /health, the generic exception
-# handler) so none of them can derive a looser condition and render a notice the others
-# stayed silent on.
-migration_notice = build_migration_notice(settings)
-
 # The sections after the intro are collapsed <details> blocks so a returning reader
-# is not pushed below a wall of text; the migration notice above stays open because
-# it is time-sensitive. Each blank line after <summary> is what lets the markdown
+# is not pushed below a wall of text. Each blank line after <summary> is what lets the markdown
 # inside (tables, code spans) render.
 _BASE_DESCRIPTION = """Open, unrestricted Audible metadata API for the audiobook automation community.
 
@@ -252,22 +243,7 @@ live Audible fetch instead.
 
 </details>"""
 
-if migration_notice is not None:
-    # Served from both hostnames off one description built at import time, so this can't
-    # say "this host" or "this instance" — read from libexdb.com, "this" would name the
-    # host the reader is already on instead of the one being retired.
-    openapi_description = (
-        "## Migration notice\n\n"
-        f"**Libex's public instance has moved to {migration_notice.new_host}.**\n\n"
-        f"The previous host remains available until {migration_notice.sunset_display}, after which "
-        "it stops serving.\n"
-        "If you are using the old address, update your configuration.\n"
-    )
-    if migration_notice.info_url:
-        openapi_description += f"\n[Details and questions]({migration_notice.info_url})\n"
-    openapi_description += f"\n---\n\n{_BASE_DESCRIPTION}"
-else:
-    openapi_description = _BASE_DESCRIPTION
+openapi_description = _BASE_DESCRIPTION
 
 app = FastAPI(
     title="Libex",
@@ -275,11 +251,6 @@ app = FastAPI(
     version=settings.app_version,
     openapi_tags=openapi_tags,
     lifespan=lifespan,
-    # Unset (the self-hosted default) leaves `servers` out entirely, so OpenAPI tooling
-    # infers the base URL from wherever it fetched the spec — a self-hoster's own server.
-    # Hardcoding the new host here would send a self-hoster's "Try it out" requests and
-    # generated SDKs at the public instance instead of their own.
-    servers=[{"url": migration_notice.new_host}] if migration_notice is not None else None,
     # The interactive docs are served from assets Libex ships, not from a CDN
     # -- see the custom /docs and /redoc routes below. Disabling the built-in
     # routes here is what frees those paths for them.
@@ -320,11 +291,8 @@ _FAVICON = "/static/favicon.png"
 #
 # The usual recipe for that re-derives the whole document with get_openapi(),
 # which means restating every argument the FastAPI() call above passes. Miss one
-# and the served spec loses it with nothing to show for it: drop `servers` and
-# the public instance's spec stops naming the new host, so during a migration
-# "Try it out" and generated SDKs fire at whichever host served the spec —
-# including the one being retired; drop `openapi_tags` and every tag
-# description empties. Adding the key to the document FastAPI already built
+# and the served spec loses it with nothing to show for it: drop `openapi_tags` and every
+# tag description empties. Adding the key to the document FastAPI already built
 # cannot lose anything, because it never re-derives it.
 #
 # Delegating to the original method also keeps FastAPI's cache: that method
@@ -575,14 +543,6 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
         status_code=500,
         content={"error": "Internal server error", "status_code": 500},
     )
-    # ServerErrorMiddleware, which invokes this handler, sits outside every
-    # middleware added in setup_middleware — so MigrationNoticeMiddleware never
-    # sees this response. Apply the same headers here instead of leaving a
-    # 500 (exactly when a moving consumer most needs the pointer) silently
-    # bypass the notice.
-    if migration_notice is not None and not is_new_host_request(migration_notice, request.url.hostname):
-        response.headers.update(migration_notice.headers)
-
     if request_id is not None:
         response.headers[HEADER_REQUEST_ID] = request_id
 
@@ -590,8 +550,7 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
     # 500 otherwise carries no CORS headers at all — a browser discards the
     # entire response before any JS reaches the body, let alone a header.
     # Exposing headers without also allowing the origin would change
-    # nothing, so both are set by hand here, the same way the migration
-    # headers above already have to be.
+    # nothing, so both are set by hand here.
     #
     # Restricted to requests that actually carried an Origin header: a
     # same-origin page and a non-browser caller (curl, a server-side fetch)
@@ -602,16 +561,14 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
     # succeeded or failed.
     if request.headers.get("origin") is not None:
         response.headers["Access-Control-Allow-Origin"] = "*"
-        response.headers["Access-Control-Expose-Headers"] = ", ".join(
-            dict.fromkeys((*EXPOSED_HEADER_NAMES, *MIGRATION_HEADER_NAMES))
-        )
+        response.headers["Access-Control-Expose-Headers"] = ", ".join(EXPOSED_HEADER_NAMES)
     return response
 
 # ============================================================
 # MIDDLEWARE
 # ============================================================
 
-setup_middleware(app, migration_notice)
+setup_middleware(app)
 
 # ============================================================
 # ROUTERS
@@ -631,14 +588,8 @@ app.include_router(internal_router)
 # ============================================================
 
 @app.get("/health", tags=["System"])
-async def health(request: Request):
+async def health():
     payload = {"status": "ok", "version": settings.app_version}
-    # Not part of the AudiMeta DTO contract, so an additive field here is safe — unlike the
-    # book/author/series/search responses, where an unknown key can hard-break a strict
-    # (e.g. Jackson-based) consumer mid-migration. Suppressed on the new host itself, so
-    # libexdb.com never tells its own consumers that it stops serving.
-    if migration_notice is not None and not is_new_host_request(migration_notice, request.url.hostname):
-        payload["notice"] = migration_notice.health_message
     return payload
 
 # ============================================================

@@ -13,6 +13,11 @@ the first published version. Entries for earlier versions record changes made
 before publication: they are historical record for whoever embeds this package,
 not evidence that anyone consumed a given version at the time it was cut.
 
+## [0.25.1]
+
+### Fixed
+- **`libex-core[sqlite]` can be installed next to alembic 1.20.** The `sqlite`, `postgres` and `storage` extras capped alembic below 1.19, so pip refused the combination or held alembic back. The cap is now below 1.21. I ran the migration chain on alembic 1.20.0 against both SQLite and Postgres: it upgrades to head, downgrades to base and upgrades again. The lower bound, the schema and the public surface are unchanged, and there is nothing to migrate.
+
 ## [0.25.0]
 
 This release adds two migrations: `books` gains a nullable `manual_entry_at` column and a partial index over it. Run `alembic upgrade head` on any store you already have.

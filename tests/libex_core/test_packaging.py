@@ -109,18 +109,18 @@ _EXPECTED_REQUIRES_DIST = {
 _EXPECTED_EXTRAS = {
     "sqlite": {
         "sqlalchemy>=2.0.46,<2.1",
-        "alembic>=1.18.4,<1.19",
+        "alembic>=1.18.4,<1.21",
         "aiosqlite>=0.22.1,<0.23",
     },
     "postgres": {
         "sqlalchemy>=2.0.46,<2.1",
-        "alembic>=1.18.4,<1.19",
+        "alembic>=1.18.4,<1.21",
         "asyncpg>=0.31,<0.32",
     },
     # The older name for sqlite; installs the same set.
     "storage": {
         "sqlalchemy>=2.0.46,<2.1",
-        "alembic>=1.18.4,<1.19",
+        "alembic>=1.18.4,<1.21",
         "aiosqlite>=0.22.1,<0.23",
     },
     "socks": {

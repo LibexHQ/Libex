@@ -8,8 +8,7 @@ The conformance check has three parts, and (b) is the one that actually
 holds the line:
 
   (a) registry consistency -- every emitted-header constant is registered,
-      and CORSMiddleware's expose_headers is exactly the registry unioned
-      with the migration headers.
+      and CORSMiddleware's expose_headers is exactly the registry.
   (b) source scan -- walks app/ and libex_core/ for four literal assignment
       forms --
       `response.headers["Literal"] = ...`, `Response(headers={"Literal": ...})`,
@@ -47,7 +46,6 @@ from httpx import AsyncClient, ASGITransport
 # Local
 from app.main import app
 from app.api.routes.facts_headers import FACTS_RESPONSE_HEADERS
-from app.core.migration_notice import MIGRATION_HEADER_NAMES
 from app.core.response_headers import (
     EXPOSED_HEADER_NAMES,
     HEADER_COMPLETE,
@@ -294,14 +292,12 @@ def test_every_emitted_header_constant_is_registered():
         assert name in EXPOSED_HEADER_NAMES
 
 
-def test_cors_expose_headers_is_exactly_the_registry_unioned_with_migration_headers(client):
+def test_cors_expose_headers_is_exactly_the_registry(client):
     """The value handed to CORSMiddleware -- read back off a real response,
     not re-derived from setup_middleware's source -- is exactly
-    EXPOSED_HEADER_NAMES unioned with MIGRATION_HEADER_NAMES, deduped,
-    first-seen order."""
+    EXPOSED_HEADER_NAMES, in registry order, and names nothing else."""
     response = client.get("/health", headers={"Origin": "https://example.com"})
-    expected = ", ".join(dict.fromkeys((*EXPOSED_HEADER_NAMES, *MIGRATION_HEADER_NAMES)))
-    assert response.headers["access-control-expose-headers"] == expected
+    assert response.headers["access-control-expose-headers"] == ", ".join(EXPOSED_HEADER_NAMES)
 
 
 # ============================================================

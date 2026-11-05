@@ -1,10 +1,9 @@
 # Privacy Notice
 
-This notice covers the public Libex API at [libexdb.com](https://libexdb.com)
-and its former address, `libex.lostcartographer.xyz`, which serves the same
-instance until 4 November 2026. It sets out what the service records about the
-requests it receives, why, who else handles that data, how long it is kept, and
-what you can ask me to do about it.
+This notice covers the public Libex API at [libexdb.com](https://libexdb.com).
+It sets out what the service records about the requests it receives, why, who
+else handles that data, how long it is kept, and what you can ask me to do
+about it.
 
 If you run Libex yourself, or build the `libex_core` library into an
 application, you decide what is recorded, not me. See
@@ -72,7 +71,6 @@ ends in an unexpected error gets this line too, plus a separate error line
 | `status` | The HTTP status returned. | Detecting failures. |
 | `took` | Duration in milliseconds. | Performance. |
 | `userAgent` | Your `User-Agent` header, verbatim (e.g. `python-httpx/0.27`). | Identifies the client software, so I know which clients a change will affect. |
-| `host` | The `Host` header, i.e. which hostname you used. | Tells old-address traffic from new while both hostnames serve the same instance. |
 | `source` | Where the response data came from: `cache`, `db`, `audible`, or `mixed` with a count per source. | Shows how much the cache absorbs, and when Libex falls back to its database because Audible is unavailable. |
 | `complete` | `true` or `false`: whether the response contains everything requested. | Counting incomplete responses. |
 | `incompleteReason` | When `complete` is `false`, one or more of `discovery-incomplete`, `hydration-deadline`, `hydration-failed` and `hydration-not-found`. | Separates "Audible was too slow" from "Audible doesn't have it". |
@@ -94,8 +92,7 @@ About these fields:
   decides which worker takes a request. Two lines with the same `pid` are
   therefore no evidence of the same caller. It appears on every line Libex
   writes, not only on request lines.
-- **Only two of your request headers are read for logging:** `User-Agent` and
-  `Host`.
+- **Only one of your request headers is read for logging:** `User-Agent`.
 - **`/health` is not logged.** The one exception is a health check that takes
   longer than a second. That writes a single warning containing the path
   `/health`, the status and the duration, and nothing else, not even a query
@@ -161,7 +158,7 @@ lines. One is the usual request line, with status `500` and `source`,
 `complete` and `incompleteReason` empty, since there is no response to read
 them from. The other is an error line with the error message and stack trace,
 so the failure can be diagnosed. The error line carries the request ID but
-none of the request-line fields: no path, query, user agent or host. The two
+none of the request-line fields: no path, query or user agent. The two
 share the request ID, so they can be read together. A failing `/health` check
 writes only the error line.
 

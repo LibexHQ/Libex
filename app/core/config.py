@@ -33,7 +33,7 @@ class Settings(BaseSettings):
 
     # Application
     app_name: str = "Libex"
-    app_version: str = "2.4.0"
+    app_version: str = "2.4.2"
     debug: bool = False
     host: str = "0.0.0.0"
     port: int = 3333
@@ -285,13 +285,6 @@ class Settings(BaseSettings):
                 data[name] = field.default
         return data
 
-    # Migration notice
-    migration_notice_enabled: bool = False
-    migration_new_host: str = ""        # e.g. https://libexdb.com
-    migration_announced: str = ""       # ISO date, e.g. 2026-08-06
-    migration_sunset: str = ""          # ISO date, e.g. 2026-11-04
-    migration_info_url: str = ""        # URL of the pinned GitHub issue
-
 
 @lru_cache()
 def get_settings() -> Settings:
@@ -314,6 +307,31 @@ RETIRED_ENV_VARS: dict[str, str] = {
         "Retired in 1.18.0 — the seeder runs as its own container "
         "(scripts/seed.py, its own stack in docker-compose.seeder.yml), so "
         "deploying that stack is what enables it. Safe to remove."
+    ),
+    "MIGRATION_NOTICE_ENABLED": (
+        "Retired in 2.4.2 — the old public host is gone and the "
+        "host-migration notice with it, so nothing reads this any more. "
+        "Safe to remove."
+    ),
+    "MIGRATION_NEW_HOST": (
+        "Retired in 2.4.2 — the old public host is gone and the "
+        "host-migration notice with it, so nothing reads this any more. "
+        "Safe to remove."
+    ),
+    "MIGRATION_ANNOUNCED": (
+        "Retired in 2.4.2 — the old public host is gone and the "
+        "host-migration notice with it, so nothing reads this any more. "
+        "Safe to remove."
+    ),
+    "MIGRATION_SUNSET": (
+        "Retired in 2.4.2 — the old public host is gone and the "
+        "host-migration notice with it, so nothing reads this any more. "
+        "Safe to remove."
+    ),
+    "MIGRATION_INFO_URL": (
+        "Retired in 2.4.2 — the old public host is gone and the "
+        "host-migration notice with it, so nothing reads this any more. "
+        "Safe to remove."
     ),
 }
 

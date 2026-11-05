@@ -27,12 +27,12 @@ FULL_BOOK = {
     "rating": 4.5, "numRatings": 10, "numReviews": 3, "releaseDate": "2020-01-02",
     "publicationName": "pn", "publicationDatetime": "2020-01-02T03:04:05Z",
     "lengthMinutes": 600, "explicit": True, "whisperSync": True, "hasPdf": True,
-    "imageUrl": "https://img.example/a.jpg", "bookFormat": "unabridged",
+    "imageUrl": "https://m.media-amazon.com/a.jpg", "bookFormat": "unabridged",
     "contentType": "Product", "contentDeliveryType": "SinglePartBook",
     "episodeNumber": "1", "episodeType": "full", "sku": "SK1", "skuGroup": "SG1",
     "isListenable": True, "isBuyable": True, "isVvab": True, "plans": ["Plus"],
     "productState": "AVAILABLE", "audibleExtras": {"a": 1}, "extrasWithheld": {"b": 2},
-    "authors": [{"name": "A", "asin": "B000APF21M", "description": "x", "image": "https://img.example/p.jpg"}],
+    "authors": [{"name": "A", "asin": "B000APF21M", "description": "x", "image": "https://m.media-amazon.com/p.jpg"}],
     "narrators": [{"name": "N"}],
     "series": [{
         "asin": "B00SERIES1", "name": "S", "position": "1", "region": "us",
@@ -60,9 +60,9 @@ BODY = {
     "book": {
         "asin": ASIN, "region": "us", "title": "Delisted", "language": "english",
         "releaseDate": "2020-01-02", "description": "typed in by hand",
-        "imageUrl": "https://img.example/a.jpg", "lengthMinutes": 90,
+        "imageUrl": "https://m.media-amazon.com/a.jpg", "lengthMinutes": 90,
         "authors": [
-            {"name": "First Author", "asin": AUTHOR_ASIN, "description": "bio", "image": "https://img.example/p.jpg"},
+            {"name": "First Author", "asin": AUTHOR_ASIN, "description": "bio", "image": "https://m.media-amazon.com/p.jpg"},
             {"name": "Second Author"},
         ],
         "narrators": [{"name": "Zed Voice"}, {"name": "Amy Voice"}],
@@ -139,7 +139,7 @@ async def assert_full_round_trip(session, asin: str = ASIN, region: str = "us") 
     authors = (await session.execute(
         select(Author).where(Author.region == region).order_by(Author.id))).scalars().all()
     assert [(a.name, a.asin, a.description, a.image) for a in authors] == [
-        ("A", "B000APF21M", "x", "https://img.example/p.jpg")]
+        ("A", "B000APF21M", "x", "https://m.media-amazon.com/p.jpg")]
     series = (await session.execute(select(Series).filter_by(region=region))).scalar_one()
     sent = FULL_BOOK["series"][0]
     assert (series.asin, series.title, series.description, series.audible_extras,

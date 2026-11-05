@@ -9,12 +9,16 @@ field BookResponse gains later is refused too, never silently dropped. The
 per-key map below is the one list of accepted keys; the models are checked
 against it at import.
 
+Every free-text field refuses markup and image URLs must be on an Amazon image
+host; both are refusals, never rewrites.
+
 These are never a response_model. manualEntry is not accepted anywhere: the
 server stamps provenance after parsing.
 """
 
 # Standard library
 import json
+import re
 from datetime import datetime
 from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
@@ -144,6 +148,21 @@ CHAPTER_ITEM_FIELDS: dict[str, str] = {
 _MAX_CHAPTER_DEPTH = 4
 _MAX_EXTRAS_CHARS = 65536
 
+# Covers are Amazon's own CDN hosts; a hand-entered host of any other kind
+# would make every caller that loads covers fetch from it.
+_IMAGE_HOSTS = frozenset(
+    {
+        "m.media-amazon.com",
+        "images-na.ssl-images-amazon.com",
+        "images-eu.ssl-images-amazon.com",
+        "images-fe.ssl-images-amazon.com",
+    }
+)
+
+# A tag opener or its entity-encoded form. Refused rather than stripped so a
+# stored value is never silently different from the one submitted.
+_MARKUP = re.compile(r"<[A-Za-z/!?]|&lt;|&#0*60;|&#x0*3c;", re.IGNORECASE)
+
 
 def _no_nul(value: str) -> str:
     # Postgres cannot store NUL in text; refused here so it is a 422, not an
@@ -153,8 +172,17 @@ def _no_nul(value: str) -> str:
     return value
 
 
+def _no_markup(value: str) -> str:
+    # Descriptions are plain text everywhere else (the Audible path strips
+    # HTML), so markup in a hand-entered one would reach callers that render
+    # these fields as text.
+    if _MARKUP.search(value):
+        raise ValueError("contains markup")
+    return value
+
+
 def _text(limit: int):
-    return Annotated[str, Field(max_length=limit), AfterValidator(_no_nul)]
+    return Annotated[str, Field(max_length=limit), AfterValidator(_no_nul), AfterValidator(_no_markup)]
 
 
 def _name(value: str) -> str:
@@ -174,7 +202,9 @@ Millis = Annotated[int, Field(ge=0, le=10**10)]
 
 
 def _asin(value: str) -> str:
-    if not is_valid_asin(value):
+    # normalise_asin is str.upper(), which folds some non-ASCII characters
+    # (dotless i, long s, ligatures) to ASCII and can change the length.
+    if not value.isascii() or not is_valid_asin(value):
         raise ValueError("invalid ASIN")
     return normalise_asin(value)
 
@@ -226,6 +256,8 @@ def _image_url(value: str) -> str:
         or port not in (None, 443)
     ):
         raise ValueError("must be an absolute https URL")
+    if parts.hostname.lower() not in _IMAGE_HOSTS:
+        raise ValueError("image host not allowed")
     return value
 
 

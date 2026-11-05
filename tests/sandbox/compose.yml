@@ -35,7 +35,6 @@ services:
       - INGEST_SECRET=${LIBEX_SANDBOX_INGEST_DIGEST?}
       # blank goes direct; the outage cases point it at a dead address.
       - AUDIBLE_PROXY_URL=${LIBEX_SANDBOX_PROXY:-}
-      - MIGRATION_NOTICE_ENABLED=false
     volumes:
       - sandbox-logs:/app/logs
     depends_on:

@@ -35,9 +35,7 @@ from pydantic import BaseModel
 import app.api.routes.large_response as large_response_module
 import app.core.middleware as middleware_module
 from app.api.routes.large_response import build_large_list_response
-from app.core.config import Settings
 from app.core.middleware import setup_middleware
-from app.core.migration_notice import MIGRATION_HEADER_NAMES, build_migration_notice
 from app.core.response_headers import (
     EXPOSED_HEADER_NAMES,
     HEADER_COMPLETE,
@@ -56,22 +54,8 @@ from app.core.response_headers import (
 # response of the same route can be compared byte for byte.
 _BIG_PAYLOAD = {"data": "x" * 2000}
 
-# The real, validated migration-notice config (mirrors the runbook values
-# used in tests/test_migration_notice.py's ENABLED_SETTINGS_KWARGS), built
-# through the real predicate rather than hand-assembled, so a change to what
-# build_migration_notice requires shows up here too.
-_MIGRATION_SETTINGS_KWARGS = {
-    "migration_notice_enabled": True,
-    "migration_new_host": "https://libexdb.com",
-    "migration_announced": "2026-08-06",
-    "migration_sunset": "2026-11-04",
-    "migration_info_url": "https://github.com/LibexHQ/Libex/issues/999",
-}
-
-
-def _build_app(migration_notice=None, *, stamp_libex_headers=False):
-    """A minimal app run through the real setup_middleware, the same pattern
-    tests/test_migration_notice.py's _bare_app_with_migration_notice uses --
+def _build_app(*, stamp_libex_headers=False):
+    """A minimal app run through the real setup_middleware --
     what's under test is the real middleware stack and its registration
     order, not a hand-rolled stand-in for it."""
     app = FastAPI()
@@ -83,7 +67,7 @@ def _build_app(migration_notice=None, *, stamp_libex_headers=False):
             response.headers[HEADER_SOURCE] = "cache"
         return _BIG_PAYLOAD
 
-    setup_middleware(app, migration_notice)
+    setup_middleware(app)
     return app
 
 
@@ -169,11 +153,8 @@ def test_health_and_404_error_body_are_never_compressed(client):
 # ============================================================
 
 
-def test_libex_cors_and_migration_headers_survive_a_compressed_response():
-    notice = build_migration_notice(Settings(**_MIGRATION_SETTINGS_KWARGS))
-    assert notice is not None, "the migration-notice config used here must actually build a notice"
-
-    app = _build_app(migration_notice=notice, stamp_libex_headers=True)
+def test_libex_and_cors_headers_survive_a_compressed_response():
+    app = _build_app(stamp_libex_headers=True)
     client = TestClient(app)
 
     status, headers, raw = _raw_get(
@@ -195,17 +176,11 @@ def test_libex_cors_and_migration_headers_survive_a_compressed_response():
     assert headers.get(HEADER_COMPLETE) == "true"
     assert headers.get(HEADER_SOURCE) == "cache"
 
-    # Migration-notice headers, byte-exact against what build_migration_notice
-    # produced -- not substrings, since both wire formats are spec-sensitive.
-    for name, value in notice.headers.items():
-        assert headers.get(name) == value
-    assert set(MIGRATION_HEADER_NAMES) <= {h for h in notice.headers}
-
     # CORS: an Origin header was sent, so both the allow and expose headers
     # must be on the response, compressed or not.
     assert headers.get("access-control-allow-origin") == "*"
     exposed = headers.get("access-control-expose-headers", "")
-    for name in (*EXPOSED_HEADER_NAMES, *MIGRATION_HEADER_NAMES):
+    for name in EXPOSED_HEADER_NAMES:
         assert name in exposed
 
 
@@ -237,7 +212,7 @@ def _build_large_response_app():
             list[_Widget], len(_LARGE_ITEMS), lambda: _LARGE_ITEMS, injected_response=response
         )
 
-    setup_middleware(app, None)
+    setup_middleware(app)
     return app
 
 
@@ -310,7 +285,7 @@ def _build_sized_app(payload: dict, handler_thread_log: list):
         handler_thread_log.append(threading.get_ident())
         return payload
 
-    setup_middleware(app, None)
+    setup_middleware(app)
     return app
 
 

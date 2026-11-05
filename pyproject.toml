@@ -25,18 +25,18 @@ classifiers = [
 [project.optional-dependencies]
 sqlite = [
     "sqlalchemy>=2.0.46,<2.1",
-    "alembic>=1.18.4,<1.19",
+    "alembic>=1.18.4,<1.21",
     "aiosqlite>=0.22.1,<0.23",
 ]
 postgres = [
     "sqlalchemy>=2.0.46,<2.1",
-    "alembic>=1.18.4,<1.19",
+    "alembic>=1.18.4,<1.21",
     "asyncpg>=0.31,<0.32",
 ]
 # The old name for sqlite, kept so existing installs keep working.
 storage = [
     "sqlalchemy>=2.0.46,<2.1",
-    "alembic>=1.18.4,<1.19",
+    "alembic>=1.18.4,<1.21",
     "aiosqlite>=0.22.1,<0.23",
 ]
 socks = [

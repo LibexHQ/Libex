@@ -10,6 +10,29 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [2.4.2]
+
+No endpoint, parameter or response field changes, no database migration and no change to the published library. I counted this a PATCH: it removes the code that announced the move off the old host, `libex.lostcartographer.xyz`, which is retired. The response headers and the `/health` field were only ever sent on that host; three smaller traces also reached `libexdb.com`, and each is listed below.
+
+### Changed
+- **The old host is retired and its migration notice is gone.** The `Deprecation`, `Sunset` and `Link` headers, the `notice` field on `/health` and the migration section at the top of the API docs are removed. The headers and the `/health` field were only ever sent to requests for the old host; `libexdb.com` never carried them. The migration section at the top of the docs was built into the spec both hosts served, so it showed on `libexdb.com` too, and is now gone.
+- **Browsers are no longer told they may read `Deprecation`, `Sunset` and `Link`.** `Access-Control-Expose-Headers` named them on every cross-origin response, including those from `libexdb.com`, although `libexdb.com` never sent them. The rest of the list is unchanged.
+- **`/openapi.json` no longer carries a `servers` entry.** On the public instance it named `libexdb.com`; a self-hosted instance that never enabled the notice never had one. Tools that read the spec now work out the base URL from where they fetched it, which for `libexdb.com` is the same address. A generated client that baked in the old entry keeps what it already has.
+- **The five `MIGRATION_*` settings do nothing, and setting one logs a warning.** `MIGRATION_NOTICE_ENABLED`, `MIGRATION_NEW_HOST`, `MIGRATION_ANNOUNCED`, `MIGRATION_SUNSET` and `MIGRATION_INFO_URL` now start the same retired-variable warning as the other removed settings, and the container still starts. They were off by default, and the notice was only ever meant for the public instance, but if you set them on a self-hosted instance to announce your own move, that stops working. They are also gone from `docker-compose.yml` and `.env.example`. A self-hosted instance that never set them sees no change.
+- **The request log no longer records which hostname a request used.** The `host` field on each request line existed only to tell old-host traffic apart from new while both served the same instance. With the old host gone it has nothing to tell apart, so Libex stops recording it. The `User-Agent` is now the only request header read for logging.
+- **The README and the privacy notice now say the old host is retired.**
+
+## [2.4.1]
+
+No endpoint, parameter or response field changes, no database migration and no change to the published library. The only code touched is the input check for `POST /internal/books`, the undocumented operator endpoint that stays disabled until `INGEST_SECRET` is set. I counted this a PATCH: it tightens what that endpoint accepts and adds no surface.
+
+### Fixed
+- **A hand-entered book can no longer carry a lookalike ASIN.** An ASIN is now refused with a `422` on the ASIN field if it holds any non-ASCII character. Upper-casing folded a few of those characters (a dotless i, a long s, some ligatures) into plain ASCII, so a value that was not an ASIN could be stored as one, and the length could change in the process.
+- **Hand-entered text can no longer hold markup.** A text field containing a tag opener, or a `&lt;`-style entity for one, is refused with a `422` whose errors give the location of the refused field. Descriptions from Audible are plain text, so markup in a typed-in one would reach callers that show these fields as text. It is refused, never stripped, so what is stored is always what was sent.
+- **Hand-entered image URLs must be on an Amazon image host.** A cover or other image URL on any other host is refused with a `422` whose errors give the location of the refused field. The four hosts accepted are `m.media-amazon.com` and the `images-na`, `images-eu` and `images-fe` `ssl-images-amazon.com` hosts. The URL still has to be absolute `https`, as before.
+
+Books already stored are not rechecked or changed; the stricter checks apply to entries submitted from now on.
+
 ## [2.4.0]
 
 One new documented endpoint, one undocumented operator endpoint, one additive response field and two database migrations. I counted this a MINOR: `/db/delisted` and `manualEntry` are new surface, and nothing existing changes shape.

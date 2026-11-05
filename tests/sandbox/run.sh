@@ -211,8 +211,7 @@ env = api["environment"]
 # names themselves are pinned: nothing can arrive that compose.yml does not list.
 if set(env) != {"DATABASE_URL", "CACHE_ENABLED", "CACHE_TTL", "DEFAULT_REGION",
                 "WEB_CONCURRENCY", "LOG_RETENTION_DAYS", "LOG_LEVEL", "AXIOM_TOKEN",
-                "SEED_SECRET", "INGEST_SECRET", "AUDIBLE_PROXY_URL",
-                "MIGRATION_NOTICE_ENABLED"}: fail("api env names differ from compose.yml")
+                "SEED_SECRET", "INGEST_SECRET", "AUDIBLE_PROXY_URL"}: fail("api env names differ from compose.yml")
 if set(s["db"].get("environment") or {}) != {"POSTGRES_DB", "POSTGRES_USER",
                                              "POSTGRES_PASSWORD"}: fail("db env names")
 if env.get("AXIOM_TOKEN") != "": fail("AXIOM_TOKEN is not empty")

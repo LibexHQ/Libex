@@ -18,9 +18,8 @@ import pytest
 
 # Local
 # Read through the module rather than binding `app` and `openapi_tags` at
-# import time: test_migration_notice reloads app.main to exercise the enabled
-# config, which rebinds both. A name bound here at collection would go on
-# pointing at the app that reload replaced, and its openapi() delegates to the
+# import time: other modules reload app.main, which rebinds both. A name
+# bound here at collection would go on pointing at the app that reload replaced, and its openapi() delegates to the
 # module-level original that the reload has already moved on to.
 from app import main as main_module
 
@@ -145,10 +144,8 @@ def test_openapi_document_keeps_everything_the_app_was_built_with(client):
 
     `tags` is the one with no other guard: lose it and every tag description
     in the docs empties, which reads as a styling change rather than a
-    regression. `servers` is asserted here in its default (absent) form for
-    the same reason it exists -- a self-hoster's "Try it out" must fire at
-    their own host -- and is covered on the enabled path by
-    test_migration_notice.test_enabled_openapi_servers_entry_targets_new_host.
+    regression. `servers` is asserted absent so a
+    self-hoster's "Try it out" fires at their own host.
     """
     spec = client.get("/openapi.json").json()
 

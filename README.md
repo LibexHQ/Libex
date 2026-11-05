@@ -21,13 +21,8 @@ Open, unrestricted Audible metadata API for the audiobook automation community.
 
 </div>
 
-> [!WARNING]
-> **The public instance is moving to [libexdb.com](https://libexdb.com).**
->
-> The old address `libex.lostcartographer.xyz` **stops serving on 4 November 2026**.
-> If you use the public instance, update your configuration to `https://libexdb.com`.
->
-> [Details and questions →](https://github.com/LibexHQ/Libex/issues/183)
+> [!NOTE]
+> The public instance moved to [libexdb.com](https://libexdb.com) on 4 November 2026. The old address `libex.lostcartographer.xyz` is retired and no longer answers. [Details →](https://github.com/LibexHQ/Libex/issues/183)
 
 > [!NOTE]
 > **Self-hosting?** This doesn't affect you — you point at your own server. Nothing to do.
@@ -175,11 +170,6 @@ services:
       - AXIOM_TOKEN=${AXIOM_TOKEN:-}
       - AXIOM_DATASET=${AXIOM_DATASET:-libex}
       - SEED_SECRET=${SEED_SECRET:-}
-      - MIGRATION_NOTICE_ENABLED=${MIGRATION_NOTICE_ENABLED:-false}
-      - MIGRATION_NEW_HOST=${MIGRATION_NEW_HOST:-}
-      - MIGRATION_ANNOUNCED=${MIGRATION_ANNOUNCED:-}
-      - MIGRATION_SUNSET=${MIGRATION_SUNSET:-}
-      - MIGRATION_INFO_URL=${MIGRATION_INFO_URL:-}
     volumes:
       - ${LOGS_PATH:-./logs}:/app/logs
     depends_on:
@@ -324,9 +314,6 @@ disclosed transparently.
   in the `X-Request-Id` response header, so you can quote one request in a bug
   report. It's never taken from a header you send, and it isn't reused between
   requests
-- The `Host` header — which hostname the request came in on, currently useful
-  only for telling `libex.lostcartographer.xyz` traffic apart from
-  `libexdb.com` traffic during the migration
 - Whether the response was complete and, if not, why, plus where the data in
   it came from (Audible, cache, DB, or a mix) — the same `X-Libex-Complete`,
   `X-Libex-Incomplete-Reason` and `X-Libex-Source` values described under

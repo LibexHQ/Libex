@@ -27,7 +27,6 @@ from libex_core.audible.client import validate_region
 from app.core.logging import get_logger
 from libex_core.log_safety import is_safe_log_value
 from libex_core.exceptions import ErrorCode, NotFoundException
-from app.core.migration_notice import MigrationNotice, MIGRATION_HEADER_NAMES, is_new_host_request
 from app.core.response_headers import (
     HEADER_COMPLETE,
     HEADER_INCOMPLETE_REASON,
@@ -237,9 +236,6 @@ def _log_completed(
     # individual, so removing it on privacy grounds would blind the
     # monitoring for nothing.
     user_agent = request.headers.get("user-agent", "")
-    # The only signal, once both libex.lostcartographer.xyz and libexdb.com serve
-    # the same container, that tells old-host traffic apart from new-host traffic.
-    host = request.headers.get("host", "")
     logger.info(
         "Request completed",
         extra={
@@ -255,7 +251,6 @@ def _log_completed(
             "status": status,
             "userAgent": user_agent,
             "took": took,
-            "host": host,
             # The three fields below read whatever a route already
             # stamped on the response object this middleware is holding
             # -- nothing new is computed or looked up here, and none of
@@ -366,31 +361,6 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         return response
 
 # ============================================================
-# MIGRATION NOTICE
-# ============================================================
-
-class MigrationNoticeMiddleware(BaseHTTPMiddleware):
-    """
-    Adds the Deprecation/Sunset/Link headers to responses served on the old
-    host. Responses served on migration_new_host itself never get them — see
-    is_new_host_request — so libexdb.com never announces its own deprecation
-    once both hostnames serve the same container. Not reached for a 500 built
-    by the bare-Exception handler, since Starlette's ServerErrorMiddleware sits
-    outside every middleware registered here; app.main applies the same
-    headers itself on that one path.
-    """
-
-    def __init__(self, app: FastAPI, notice: MigrationNotice):
-        super().__init__(app)
-        self._notice = notice
-
-    async def dispatch(self, request: Request, call_next):
-        response = await call_next(request)
-        if not is_new_host_request(self._notice, request.url.hostname):
-            response.headers.update(self._notice.headers)
-        return response
-
-# ============================================================
 # SETUP
 # ============================================================
 
@@ -478,7 +448,7 @@ class OffloadingGZipMiddleware(GZipMiddleware):
         await responder(scope, receive, send)
 
 
-def setup_middleware(app: FastAPI, migration_notice: MigrationNotice | None = None) -> None:
+def setup_middleware(app: FastAPI) -> None:
     """Configures all middleware for the application."""
 
     # Must stay the first add_middleware call. Anything registered inside it
@@ -493,22 +463,13 @@ def setup_middleware(app: FastAPI, migration_notice: MigrationNotice | None = No
 
     app.add_middleware(LoggingMiddleware)
 
-    if migration_notice is not None:
-        app.add_middleware(MigrationNoticeMiddleware, notice=migration_notice)
-
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
         allow_credentials=False,
         allow_methods=["GET"],
         allow_headers=["*"],
-        # dict.fromkeys dedupes while keeping first-seen order -- unlike
-        # set(), whose iteration order Access-Control-Expose-Headers (a
-        # single comma-joined header value) has no business depending on.
-        # There is no overlap between the two tuples today; the union is
-        # written this way so one added later still dedupes instead of
-        # repeating a name in the header.
-        expose_headers=list(dict.fromkeys((*EXPOSED_HEADER_NAMES, *MIGRATION_HEADER_NAMES))),
+        expose_headers=list(EXPOSED_HEADER_NAMES),
     )
 
     logger.info("Middleware configured")

@@ -4,9 +4,8 @@ back (never re-minted) by app.main's generic exception handler for an
 unhandled 500, and never taken from a caller-supplied value.
 
 The 500 path needs a route that actually raises, so a handful of tests here
-add one to a freshly reloaded `app.main` instance (the same
-importlib.reload dance tests/test_migration_notice.py's `app_with_env`
-fixture already uses) rather than mutating the shared `app` object every
+add one to a freshly reloaded `app.main` instance (via importlib.reload)
+rather than mutating the shared `app` object every
 other test module imports at collection time.
 """
 

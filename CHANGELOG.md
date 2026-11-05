@@ -12,7 +12,7 @@ capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
 ## [2.4.2]
 
-No endpoint, parameter or response field changes, no database migration and no change to the published library. I counted this a PATCH: it removes the code that announced the move off the old host, `libex.lostcartographer.xyz`, which is retired. Everything it added was only ever sent on that host, and nothing on `libexdb.com` carried it.
+No endpoint, parameter or response field changes, no database migration and no change to the published library. I counted this a PATCH: it removes the code that announced the move off the old host, `libex.lostcartographer.xyz`, which is retired. The response headers and the `/health` field were only ever sent on that host; three smaller traces also reached `libexdb.com`, and each is listed below.
 
 ### Changed
 - **The old host is retired and its migration notice is gone.** The `Deprecation`, `Sunset` and `Link` headers, the `notice` field on `/health` and the migration section at the top of the API docs are removed. The headers and the `/health` field were only ever sent to requests for the old host; `libexdb.com` never carried them. The migration section at the top of the docs was built into the spec both hosts served, so it showed on `libexdb.com` too, and is now gone.

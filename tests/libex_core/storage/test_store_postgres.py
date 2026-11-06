@@ -33,7 +33,7 @@ from libex_core.storage.store import (
     StoreConnectionError,
     StoreNotInitialised,
 )
-from libex_core.storage.upgrade import CURRENT, VERSION_TABLE
+from libex_core.storage.upgrade import CURRENT, VERSION_TABLE, include_object_for
 from libex_core.storage.write import write_books
 from tests.libex_core.storage import _write_cases as cases
 
@@ -350,7 +350,7 @@ async def test_the_migrated_schema_matches_the_models_on_postgres(url):
     def diff(connection):
         context = MigrationContext.configure(connection, opts={
             "compare_type": True,
-            "include_object": lambda o, n, t, r, c: t != "table" or n in CORE_TABLES,
+            "include_object": include_object_for(connection.dialect.name),
         })
         return compare_metadata(context, Base.metadata)
 

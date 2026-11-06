@@ -13,6 +13,18 @@ the first published version. Entries for earlier versions record changes made
 before publication: they are historical record for whoever embeds this package,
 not evidence that anyone consumed a given version at the time it was cut.
 
+## [0.26.0]
+
+This release adds a migration and a new requirement for Postgres stores: the `pg_trgm` extension. Run `alembic upgrade head` on any store you already have. A SQLite store is not affected; the revision does nothing there.
+
+### Added
+- **Seven trigram indexes on Postgres,** so the contains-style filters on book title, subtitle, publisher and ISBN, author name, series title and narrator name no longer read the whole table. They are GIN indexes over `gin_trgm_ops`, named `ix_books_title_trgm`, `ix_books_subtitle_trgm`, `ix_books_publisher_trgm`, `ix_books_isbn_trgm`, `ix_authors_name_trgm`, `ix_series_title_trgm` and `ix_narrators_name_trgm`. Queries and results are unchanged. In my tests at about 3.3 million books, selective searches went from about 2 seconds to about 0.08 seconds and matched the unindexed results exactly. The models declare them for Postgres only, so building the tables from the models on Postgres creates them too and needs the extension; the long text columns are not indexed.
+- **The migration needs `pg_trgm` on Postgres.** If the extension is installed, the migration uses whatever schema it is in. If it is missing, the migration creates it in `public`, but only when the role can: the server must offer it and the role needs `CREATE` on the database and on `public`. That check is made before anything is changed, and a role that cannot create it gets an error giving the command to run, with the transaction rolled back and no revision stamped. This chain upgrades in one transaction, so the indexes cannot be built concurrently: while each is built, reads of its table carry on and writes to it wait. Downgrading drops the indexes and keeps the extension.
+
+### Changed
+- **The indexes cost disk and write volume.** About 0.75 GB at 3.3 million books, and bulk writes produce several times more WAL.
+- **Comparing the models with a SQLite database no longer reports the Postgres-only indexes as missing.** The comparison hook skips an index the models declare for a different dialect.
+
 ## [0.25.1]
 
 ### Fixed

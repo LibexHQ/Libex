@@ -19,12 +19,12 @@ from sqlalchemy.exc import IntegrityError
 # Local
 from libex_core.storage.base import Base
 from libex_core.storage.dialect import configure_sqlite
-from libex_core.storage.models import CORE_TABLES
-from libex_core.storage.upgrade import _config, set_foreign_keys, upgrade_to_head
+from libex_core.storage.upgrade import _config, include_object_for, set_foreign_keys, upgrade_to_head
 
 BEFORE = "438dbe70d041"
 AFTER = "a4d91f7c3b26"
 HEAD = "f2b8d6a40c17"
+CHAIN_HEAD = "b5e9c3a7f184"
 MANUAL_ENTRY = "d3a8f1b65e90"
 BEFORE_MANUAL_ENTRY = "6e1b4c9a2d57"
 
@@ -389,9 +389,7 @@ def _drift(engine):
             connection,
             opts={
                 "compare_type": True,
-                "include_object": lambda obj, name, type_, reflected, compare_to: (
-                    type_ != "table" or name in CORE_TABLES
-                ),
+                "include_object": include_object_for(connection.dialect.name),
             },
         )
         return compare_metadata(context, Base.metadata)
@@ -436,7 +434,7 @@ def test_upgrade_to_head_runs_the_revision_the_way_the_store_does(engine):
         set_foreign_keys(connection, False)
         with connection.begin():
             upgrade_to_head(connection)
-    assert _revision(engine) == HEAD
+    assert _revision(engine) == CHAIN_HEAD
 
 
 def _pivot_positions(engine):

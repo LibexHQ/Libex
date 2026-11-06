@@ -706,6 +706,7 @@ Within Libex, fields and shapes are only ever added to, never removed or changed
 ## Self-Hosting Notes
 
 - **PostgreSQL 14 or newer is required.** The compose file above pins `postgres:16-alpine`, so this only concerns you if you're pointing Libex at a database you already run. On an older server chapter writes fail — postgres rejects the jsonb subscript with a type error, not a syntax error — logged as a warning and nothing more: chapters never store, everything else keeps working, and nothing tells you the server is too old
+- **The `pg_trgm` extension is required.** From 2.5.0 the startup migration creates it (in the `public` schema) and builds the search indexes the `/db` filters use. The compose file's `postgres:16-alpine` ships it, so this only concerns you on a database you already run: the role running migrations needs to be able to create the extension, or someone with that privilege runs `CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public` first. On a large library the index build takes a while, and the API does not start serving until it finishes
 - Libex uses PostgreSQL as both a persistent library and a cache — no Redis required
 - Every book, author, series, narrator, and genre ever requested is stored in a full relational schema and survives cache expiry indefinitely
 - The local library powers the `/db/book` and `/book/sku/{sku}` endpoints and serves as an automatic fallback when Audible is unavailable

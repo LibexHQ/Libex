@@ -28,6 +28,9 @@ pytestmark = pytest.mark.integration
 NOT_NULL = "explicit, whisper_sync, has_pdf, is_listenable, is_buyable, is_vvab, created_at, updated_at"
 NOT_NULL_VALUES = "false, false, false, true, true, false, now(), now()"
 PRE = "f2b8d6a40c17"
+# The last revision that builds trigram indexes; the folded-index revision after
+# it needs pg_trgm in public, which this test deliberately avoids.
+TRIGRAM_HEAD = "b5e9c3a7f184"
 TRIGRAM_INDEXES = {
     "ix_books_title_trgm": "books",
     "ix_books_subtitle_trgm": "books",
@@ -159,7 +162,7 @@ async def test_up_down_up_on_a_populated_database_keeps_the_rows_and_the_extensi
 async def test_an_existing_extension_in_another_schema_is_used_to_qualify_the_class(url):
     await _query(url, "CREATE SCHEMA ext")
     await _query(url, "CREATE EXTENSION pg_trgm WITH SCHEMA ext")
-    await _upgrade_store(url)
+    await _upgrade_to(url, TRIGRAM_HEAD)
     defs = await _indexdefs(url)
     assert set(defs) == set(TRIGRAM_INDEXES)
     assert all("ext.gin_trgm_ops" in d for d in defs.values())

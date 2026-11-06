@@ -18,6 +18,20 @@ from libex_core.storage.read.shapes import BOOK_RELATIONS, hydrate_books
 from libex_core.storage.sorting import BOOK_SORT_FIELDS, apply_sort
 
 
+def series_to_dict(s: Series) -> dict[str, Any]:
+    """The published series shape, shared by every series reader."""
+    return {
+        "asin": s.asin,
+        "name": s.title,
+        "description": s.description,
+        "region": s.region,
+        "position": None,
+        "updatedAt": s.updated_at.isoformat() if s.updated_at else None,
+        "audibleExtras": s.audible_extras,
+        "extrasWithheld": s.extras_withheld,
+    }
+
+
 async def get_series(
     session: AsyncSession, asin: str, *, region: str | None = None
 ) -> dict[str, Any] | None:
@@ -34,16 +48,7 @@ async def get_series(
     if not series:
         return None
 
-    return {
-        "asin": series.asin,
-        "name": series.title,
-        "description": series.description,
-        "region": series.region,
-        "position": None,
-        "updatedAt": series.updated_at.isoformat() if series.updated_at else None,
-        "audibleExtras": series.audible_extras,
-        "extrasWithheld": series.extras_withheld,
-    }
+    return series_to_dict(series)
 
 
 async def search_series(
@@ -58,19 +63,7 @@ async def search_series(
         stmt = only_first_stored(stmt, Series)
     result = await session.execute(stmt.order_by(*first_stored_order(Series)).limit(10))
     series_list = result.scalars().all()
-    return [
-        {
-            "asin": s.asin,
-            "name": s.title,
-            "description": s.description,
-            "region": s.region,
-            "position": None,
-            "updatedAt": s.updated_at.isoformat() if s.updated_at else None,
-            "audibleExtras": s.audible_extras,
-            "extrasWithheld": s.extras_withheld,
-        }
-        for s in series_list
-    ]
+    return [series_to_dict(s) for s in series_list]
 
 
 async def get_series_books(

@@ -24,7 +24,7 @@ from libex_core.storage.upgrade import _config, include_object_for, set_foreign_
 BEFORE = "438dbe70d041"
 AFTER = "a4d91f7c3b26"
 HEAD = "f2b8d6a40c17"
-CHAIN_HEAD = "b5e9c3a7f184"
+CHAIN_HEAD = "c8d2a5e71f39"
 MANUAL_ENTRY = "d3a8f1b65e90"
 BEFORE_MANUAL_ENTRY = "6e1b4c9a2d57"
 

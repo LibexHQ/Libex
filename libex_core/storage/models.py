@@ -16,6 +16,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Column,
+    DDL,
     Double,
     Enum,
     ForeignKey,
@@ -26,6 +27,9 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    event,
+    func,
+    literal_column,
     text,
     true,
 )
@@ -429,6 +433,105 @@ for _name, _column in (
 
 
 # ============================================================
+# FOLDED SEARCH INDEXES
+# ============================================================
+# What the ranked /db search reads: the same text lowercased and with accents
+# removed by public.libex_fold, indexed for trigram matching, plus the btrees
+# behind exact matching and the popularity order. Postgres only; the migrations
+# (e6a1d4f93b27 hosted, c8d2a5e71f39 here) build the same set under the same
+# names. The separators in the title expression are SQL literals, not bound
+# values: a bound separator makes the expression something a generic plan cannot
+# match to the index. concat_ws is avoided because it is STABLE and cannot be
+# indexed.
+
+# The text of public.libex_fold. Each migration keeps its own copy, and a test
+# holds them identical: an existing function's body is compared character for
+# character, so it must not drift.
+FOLD_FUNCTION_BODY = "SELECT pg_catalog.lower(public.unaccent('public.unaccent'::regdictionary, $1))"
+FOLD_FUNCTION_DDL = (
+    "CREATE FUNCTION public.libex_fold(text) RETURNS text LANGUAGE sql "
+    f"IMMUTABLE STRICT PARALLEL SAFE AS $${FOLD_FUNCTION_BODY}$$"
+)
+
+# Every index this section declares. include_object_for keeps them out of a
+# compare with a database: alembic cannot compare an expression index, and the
+# migrations own them.
+FOLDED_INDEX_NAMES = frozenset({
+    "ix_books_fold_title_gin",
+    "ix_authors_fold_name_gin",
+    "ix_series_fold_title_gin",
+    "ix_narrators_fold_name_gin",
+    "ix_authors_fold_name_bt",
+    "ix_series_fold_title_bt",
+    "ix_books_fold_pop",
+    "ix_books_fold_region_pop",
+    "ix_book_narrator_fold_narrator_name",
+})
+
+
+def _fold(expression):
+    return func.public.libex_fold(expression)
+
+
+_BOOK_FOLDED_TEXT = _fold(
+    Book.title + literal_column("' '") + func.coalesce(Book.subtitle, literal_column("''"))
+)
+
+for _name, _expression in (
+    ("ix_books_fold_title_gin", _BOOK_FOLDED_TEXT),
+    ("ix_authors_fold_name_gin", _fold(Author.name)),
+    ("ix_series_fold_title_gin", _fold(Series.title)),
+    ("ix_narrators_fold_name_gin", _fold(Narrator.name)),
+):
+    Index(
+        _name,
+        _expression,
+        postgresql_using="gin",
+        postgresql_ops={_expression.key: "public.gin_trgm_ops"},
+    ).ddl_if(dialect="postgresql")
+
+Index("ix_authors_fold_name_bt", _fold(Author.name)).ddl_if(dialect="postgresql")
+Index("ix_series_fold_title_bt", _fold(Series.title)).ddl_if(dialect="postgresql")
+
+# The popularity order, for the shortcut that takes the most popular matches
+# first: one index for a search over every region's primary rows, one for a
+# search inside a region.
+Index(
+    "ix_books_fold_pop",
+    Book.num_ratings.desc().nulls_last(),
+    Book.asin,
+    Book.region,
+    postgresql_where=text("is_primary"),
+).ddl_if(dialect="postgresql")
+Index(
+    "ix_books_fold_region_pop",
+    Book.region,
+    Book.num_ratings.desc().nulls_last(),
+    Book.asin,
+).ddl_if(dialect="postgresql")
+
+# The indexes call the function, so it has to exist before they are built. It
+# needs the unaccent extension, which this module does not create: whatever
+# provides pg_trgm provides that too.
+_ENSURE_FOLD_FUNCTION = DDL(
+    "DO $do$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_proc p "
+    "WHERE p.proname = 'libex_fold' AND p.pronamespace = 'public'::regnamespace "
+    "AND p.proargtypes::text = '25') THEN "
+    f"{FOLD_FUNCTION_DDL}; END IF; END $do$"
+).execute_if(dialect="postgresql")
+
+# Skipped rather than failed while something still uses the function, so a drop
+# of only some of the tables does not abort on the indexes left behind.
+_DROP_FOLD_FUNCTION = DDL(
+    "DO $do$ BEGIN DROP FUNCTION IF EXISTS public.libex_fold(text); "
+    "EXCEPTION WHEN dependent_objects_still_exist THEN NULL; END $do$"
+).execute_if(dialect="postgresql")
+
+event.listen(Base.metadata, "before_create", _ENSURE_FOLD_FUNCTION)
+event.listen(Base.metadata, "after_drop", _DROP_FOLD_FUNCTION)
+
+
+# ============================================================
 # GENRES
 # ============================================================
 
@@ -532,6 +635,12 @@ book_narrator = Table(
     ),
     UniqueConstraint("book_asin", "book_region", "narrator_name", name="uq_book_narrator"),
 )
+
+# Serves the narrator search, which finds the matching narrators first and then
+# their books by narrator_name.
+Index(
+    "ix_book_narrator_fold_narrator_name", book_narrator.c.narrator_name
+).ddl_if(dialect="postgresql")
 
 book_series = Table(
     "book_series",

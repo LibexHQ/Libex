@@ -10,6 +10,26 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [2.6.0]
+
+Three new read-only routes; no existing endpoint, parameter or response field changes. One database migration, which adds the `unaccent` extension, a function, and nine indexes. I counted this a MINOR: the routes are new capability, and the migration runs when the container starts.
+
+### Added
+- **`GET /db/search/books`, `/db/search/authors` and `/db/search/series` search what is stored, best match first.** They match ignoring case and accents and tolerate typos, and they return full records, the same shape `/db/book`, `/db/author/{asin}` and `/db/series/{asin}` give. Books take `title`, `author`, `narrator` and `series` (at least one; when you give several a book has to match all of them, and the title counts for more), plus `region`, `language` and `limit`. Authors and series take `name`, `region`, `limit` and `match`, which is `fuzzy` by default; `match=exact` asks for the whole name to be equal, still ignoring case and accents. Each text is 2 to 200 characters and `limit` is 1 to 50, default 10. `language` is refused with a 422 if it contains a NUL character or is longer than 200 characters. An author found in a search is the same record `/db/author/{asin}` returns: all stored rows of that author and region are merged the same way. Book ties are broken by number of ratings, author and series ties by how closely the whole name matches and then by ASIN and region, so a page comes back the same every time. No match is a 404 `NOT_IN_LIBEX`, as on the other `/db` lookups.
+- **Series search results carry `bookCount`,** the number of stored books linked to that series in its region. It is on these results only; `/db/series` is unchanged.
+- **The migration adds `unaccent`, the function `public.libex_fold` and the indexes.** `libex_fold` lowercases text and removes accents, and is created in `public`; the indexes are built over it: four trigram indexes (book title with subtitle, author name, series title, narrator name), two btrees for exact author and series names, two on the order of ratings, and one on the narrator link table. `pg_trgm` from 2.5.0 must be in `public` too, and `unaccent` has to be in `public` or creatable there, otherwise the migration stops with an error saying so. The indexes are built concurrently, so reads and writes carry on, but a large library takes a while on first start and the build waits for every older open transaction, a running backup dump included, with no lock timeout. An interrupted build leaves an invalid index, which the next start drops and rebuilds. The migration never replaces an existing `libex_fold` or index of those names: if one is there with a different definition it stops with an error. Downgrading drops the indexes and the function and keeps both extensions; dropping `unaccent` yourself would break every write to books, authors, series and narrators.
+
+### Changed
+- **The new indexes cost disk and write volume,** on top of the seven from 2.5.0. I have not measured the added size.
+- **Books read from the database fetch their series positions in one batch.** Every `/db` route that returns books used to look up the series positions of each book separately. They are now read together. The records returned are the same.
+- **The request log now keeps the names `match` and `series`.** Their values are replaced, as with the other search parameters.
+
+### Not covered
+- **Searches of two Japanese, Chinese or Korean characters can be slow.** That text has no word boundaries, so it is matched as a substring and cannot use the trigram indexes.
+- **With `region` left out, only each book's first stored record is searched,** and only that record's text. Authors stored without an ASIN are not listed by `/db/search/authors`, though they still count towards an author match on books.
+- **With `region` given, a page can hold fewer than `limit` authors.** The limit is applied to stored name rows before the rows of one author are merged, so when several spellings of one author all match, they come back as one author.
+- **I have not set a time limit on these searches.** They run until the existing connection timeout. Some uncommon queries, such as one made only of common words, are slower than the rest.
+
 ## [2.5.0]
 
 No endpoint, parameter or response field changes. One database migration, which adds seven search indexes and the `pg_trgm` extension. I counted this a MINOR rather than a PATCH: nothing new is exposed to callers, but the migration runs when the container starts and now needs `pg_trgm` to be installed or creatable, which is a new requirement for anyone running the image.

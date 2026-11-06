@@ -9,7 +9,6 @@ from datetime import datetime, timedelta, timezone
 # Third party
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -19,7 +18,7 @@ from libex_core.storage.read.walks import get_walk_result
 from libex_core.storage.store import LocalStore
 from libex_core.storage.walk_limits import MAX_WALK_ASINS
 from libex_core.storage.write import delete_walk_result, write_walk_result
-from tests.libex_core.storage._support import core_tables
+from tests.libex_core.storage._support import core_tables, create_extensions
 
 pytest.importorskip("aiosqlite")
 
@@ -41,7 +40,7 @@ async def session(request):
     engine = create_async_engine(url, poolclass=NullPool)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all, tables=core_tables())
-        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public"))
+        await create_extensions(conn)
         await conn.run_sync(Base.metadata.create_all, tables=core_tables())
     async with AsyncSession(engine, expire_on_commit=False) as s:
         yield s

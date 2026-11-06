@@ -310,14 +310,14 @@ async def test_the_migrated_schema_matches_the_models(upgraded):
 
     import libex_core.storage.models  # noqa: F401
     from libex_core.storage.base import Base
-    from libex_core.storage.models import CORE_TABLES
+    from libex_core.storage.upgrade import include_object_for
 
     def diff(connection):
         context = MigrationContext.configure(
             connection,
             opts={
                 "compare_type": True,
-                "include_object": lambda o, n, t, r, c: t != "table" or n in CORE_TABLES,
+                "include_object": include_object_for(connection.dialect.name),
             },
         )
         return compare_metadata(context, Base.metadata)

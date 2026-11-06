@@ -49,6 +49,7 @@ def postgres_url():
         async def prepare():
             engine = create_async_engine(url, poolclass=NullPool)
             async with engine.begin() as connection:
+                await connection.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public"))
                 await connection.run_sync(lambda c: cases.Base.metadata.create_all(c, tables=cases.core_tables()))
             await engine.dispose()
 

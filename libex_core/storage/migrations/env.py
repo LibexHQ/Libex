@@ -19,17 +19,10 @@ from alembic import context
 import libex_core.storage.models  # noqa: F401 -- registers the tables on Base
 from libex_core.storage.base import Base
 from libex_core.storage.models import CORE_TABLES
-from libex_core.storage.upgrade import VERSION_TABLE
+from libex_core.storage.upgrade import VERSION_TABLE, include_object_for
 
 def include_name(name, type_, parent_names):
     """Only the core tables, on the database side of a comparison."""
-    if type_ == "table":
-        return name in CORE_TABLES
-    return True
-
-
-def include_object(obj, name, type_, reflected, compare_to):
-    """Only the core tables, on the metadata side of a comparison."""
     if type_ == "table":
         return name in CORE_TABLES
     return True
@@ -47,7 +40,7 @@ def run_migrations_online() -> None:
         target_metadata=Base.metadata,
         version_table=VERSION_TABLE,
         include_name=include_name,
-        include_object=include_object,
+        include_object=include_object_for(connection.dialect.name),
         compare_type=True,
         # SQLite's ALTER TABLE cannot do most of what a migration needs; batch
         # mode rebuilds the table instead. A no-op on Postgres.

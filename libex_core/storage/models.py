@@ -407,6 +407,27 @@ class Narrator(Base):
         return f"<Narrator name={self.name}>"
 
 
+# Trigram indexes behind the ILIKE '%term%' filters. Postgres only, and the
+# names and columns match the migrations' (a8c3e51f7d29 hosted, b5e9c3a7f184
+# here). The operator class is spelled public.gin_trgm_ops because that is where
+# the migrations put the extension.
+for _name, _column in (
+    ("ix_books_title_trgm", Book.title),
+    ("ix_books_subtitle_trgm", Book.subtitle),
+    ("ix_books_publisher_trgm", Book.publisher),
+    ("ix_books_isbn_trgm", Book.isbn),
+    ("ix_authors_name_trgm", Author.name),
+    ("ix_series_title_trgm", Series.title),
+    ("ix_narrators_name_trgm", Narrator.name),
+):
+    Index(
+        _name,
+        _column,
+        postgresql_using="gin",
+        postgresql_ops={_column.key: "public.gin_trgm_ops"},
+    ).ddl_if(dialect="postgresql")
+
+
 # ============================================================
 # GENRES
 # ============================================================

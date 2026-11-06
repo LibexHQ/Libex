@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 import pytest_asyncio
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -146,6 +147,7 @@ async def hosted_http(postgres_url):
     engine = create_async_engine(postgres_url, poolclass=NullPool)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all, tables=core_tables())
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public"))
         await conn.run_sync(Base.metadata.create_all, tables=core_tables())
     async with AsyncSession(engine, expire_on_commit=False) as session:
         await seed(session, odd_plans=False)

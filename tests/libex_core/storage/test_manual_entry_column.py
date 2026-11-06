@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 # Third party
 import pytest
 import pytest_asyncio
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -91,6 +91,7 @@ async def backend(request):
     engine = create_async_engine(url, poolclass=NullPool)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all, tables=core_tables())
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public"))
         await conn.run_sync(Base.metadata.create_all, tables=core_tables())
     factory = async_sessionmaker(engine, expire_on_commit=False)
 

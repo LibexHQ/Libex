@@ -44,6 +44,29 @@ class SchemaState:
     revision: str | None
 
 
+def include_object_for(dialect_name: str):
+    """The `include_object` hook for comparing the models with a database on
+    `dialect_name`: only the core tables, and not an index the models declare
+    for a different dialect.
+
+    compare_metadata ignores `ddl_if`, so without this the models' Postgres-only
+    trigram indexes read as missing from a SQLite database. Indexes reflected
+    from the database are always kept."""
+    from libex_core.storage.models import CORE_TABLES
+
+    def include_object(obj, name, type_, reflected, compare_to):
+        if type_ == "table":
+            return name in CORE_TABLES
+        if type_ == "index" and not reflected:
+            only = getattr(getattr(obj, "_ddl_if", None), "dialect", None)
+            if only is not None:
+                wanted = {only} if isinstance(only, str) else set(only)
+                return dialect_name in wanted
+        return True
+
+    return include_object
+
+
 def _config(connection: Connection):
     from alembic.config import Config
 

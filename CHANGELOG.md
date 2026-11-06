@@ -10,6 +10,17 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [2.5.0]
+
+No endpoint, parameter or response field changes. One database migration, which adds seven search indexes and the `pg_trgm` extension. I counted this a MINOR rather than a PATCH: nothing new is exposed to callers, but the migration runs when the container starts and now needs `pg_trgm` to be installed or creatable, which is a new requirement for anyone running the image.
+
+### Added
+- **The `/db` search filters use trigram indexes.** The filters that match with a contains search had no index to use, so every search read the whole table. Seven GIN trigram indexes now cover them: book title, subtitle, publisher and ISBN, author name, series title and narrator name. The queries are unchanged and return the same results; only the plan differs. On the lab copy at about 3.3 million books, selective searches dropped from about 2 seconds to about 0.08 seconds, and 514 queries across all eleven regions returned exactly what they did without the indexes. I measured selective searches only, so I am not claiming every search is that much faster. Descriptions, summaries and copyright text are not indexed.
+- **The migration creates `pg_trgm` and builds the indexes concurrently.** The extension goes in the `public` schema. If `pg_trgm` already lives in another schema the migration stops with an error saying so rather than building indexes that would not resolve. The role running migrations needs to be able to create the extension, or someone with the privilege has to run `CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public` first. Each index is built without blocking reads or writes on its table, but the build waits for every older open transaction to finish, a running backup dump included, and it has no lock timeout, so API startup waits for the oldest one. An interrupted build leaves an invalid index, which the next start drops and rebuilds. Creating the same indexes by hand beforehand is safe: the migration finds them valid and skips them. Downgrading drops the indexes and keeps the extension.
+
+### Changed
+- **The indexes cost disk and write volume.** They take about 0.75 GB at 3.3 million books. Writes in bulk produce several times more WAL than before, which matters if you replicate or archive it.
+
 ## [2.4.2]
 
 No endpoint, parameter or response field changes, no database migration and no change to the published library. I counted this a PATCH: it removes the code that announced the move off the old host, `libex.lostcartographer.xyz`, which is retired. The response headers and the `/health` field were only ever sent on that host; three smaller traces also reached `libexdb.com`, and each is listed below.

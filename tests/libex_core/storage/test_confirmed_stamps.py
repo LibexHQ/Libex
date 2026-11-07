@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 # Third party
 import pytest
 import pytest_asyncio
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -34,7 +34,7 @@ from libex_core.storage.write import (
     write_series_profile,
     write_track,
 )
-from tests.libex_core.storage._support import core_tables
+from tests.libex_core.storage._support import core_tables, create_extensions
 
 pytest.importorskip("aiosqlite")
 
@@ -93,7 +93,7 @@ async def backend(request):
     engine = create_async_engine(url, poolclass=NullPool)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all, tables=core_tables())
-        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public"))
+        await create_extensions(conn)
         await conn.run_sync(Base.metadata.create_all, tables=core_tables())
     factory = async_sessionmaker(engine, expire_on_commit=False)
 

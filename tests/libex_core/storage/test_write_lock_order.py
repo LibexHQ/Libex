@@ -17,6 +17,7 @@ from libex_core.storage.models import Author, Book, Genre, Narrator, author_book
 from libex_core.storage.read.books import get_books
 from libex_core.storage.write.books import write_books
 from tests.libex_core.storage import _write_cases as cases
+from tests.libex_core.storage._support import create_extensions
 
 pytestmark = pytest.mark.integration
 
@@ -49,7 +50,7 @@ def postgres_url():
         async def prepare():
             engine = create_async_engine(url, poolclass=NullPool)
             async with engine.begin() as connection:
-                await connection.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public"))
+                await create_extensions(connection)
                 await connection.run_sync(lambda c: cases.Base.metadata.create_all(c, tables=cases.core_tables()))
             await engine.dispose()
 

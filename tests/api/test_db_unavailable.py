@@ -39,6 +39,9 @@ DB_ONLY_ROUTES = [
     (f"/db/series/{ASIN}/books", "app.api.routes.db.router.get_series_books_from_db"),
     (f"/db/series/{ASIN}", "app.api.routes.db.router.get_series_from_db"),
     ("/book/sku/BK_1", "app.api.routes.books.router.get_books_by_sku_from_db"),
+    ("/db/search/books?title=xx", "app.api.routes.db.search.search_books_ranked_from_db"),
+    ("/db/search/authors?name=xx", "app.api.routes.db.search.search_authors_ranked_from_db"),
+    ("/db/search/series?name=xx", "app.api.routes.db.search.search_series_ranked_from_db"),
 ]
 
 

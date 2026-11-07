@@ -27,6 +27,7 @@ from libex_core.models import (
     SeriesResponse,
 )
 from app.api.routes.db.badge import badge_router
+from app.api.routes.db.search import search_router
 from app.api.routes.db.filters import (
     book_filters,
     NarratorFilters,
@@ -66,6 +67,7 @@ router = APIRouter(prefix="/db", tags=["Database"])
 # single router, and so the images cannot end up on a different prefix from
 # the numbers they draw.
 router.include_router(badge_router)
+router.include_router(search_router)
 
 _RECORD_REGION_DESCRIPTION = (
     "Audible region code. A book or series is stored once per region, so the "

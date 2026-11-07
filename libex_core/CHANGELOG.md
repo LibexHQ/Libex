@@ -13,6 +13,22 @@ the first published version. Entries for earlier versions record changes made
 before publication: they are historical record for whoever embeds this package,
 not evidence that anyone consumed a given version at the time it was cut.
 
+## [0.27.0]
+
+This release adds a migration and a new requirement for Postgres stores: the `unaccent` extension, in the `public` schema, next to `pg_trgm`, which must now be in `public` too. Run `alembic upgrade head` on any store you already have. A SQLite store is not affected; the revision does nothing there, and the new readers do not run on it.
+
+### Added
+- **Ranked search readers for books, authors and series:** `search_books_ranked`, `search_authors_ranked` and `search_series_ranked` in `libex_core.storage.read.search`. They match ignoring case and accents, tolerate typos, and return the same dicts as the single lookups, best match first. They are Postgres only: on any other dialect they raise `NotImplementedError`. `limit` is 1 to 50 and anything else raises `ValueError`. Authors and series also take `exact` for a whole-name match.
+- **`merge_author_rows`** in `libex_core.storage.read.people`, which turns every stored row of one author ASIN and region into the single record `get_author` returns. `get_author` now calls it and behaves as before; `search_authors_ranked` uses it, so a search result is the record `get_author` gives. It takes a non-empty list of `Author` rows ordered by id, and is not re-exported from a package root.
+- **`SeriesSearchResponse`,** a `SeriesResponse` with `bookCount`, the number of stored books linked to the series in its region.
+- **The migration creates the function `public.libex_fold` and nine indexes on Postgres.** The function lowercases text and removes accents. The indexes are four trigram indexes over it (book title with subtitle, author name, series title, narrator name), two btrees for exact author and series names, two on the order of ratings, and one on `book_narrator.narrator_name`. They are named `ix_books_fold_title_gin`, `ix_authors_fold_name_gin`, `ix_series_fold_title_gin`, `ix_narrators_fold_name_gin`, `ix_authors_fold_name_bt`, `ix_series_fold_title_bt`, `ix_books_fold_pop`, `ix_books_fold_region_pop` and `ix_book_narrator_fold_narrator_name`. The models declare them for Postgres only, and creating the tables from the models creates the function first; `unaccent` must already be installed.
+- **The migration needs `unaccent` in `public`.** If it is missing, the migration creates it, but only when the role can: the server must offer it and the role needs `CREATE` on the database and on `public`. `pg_trgm` must already be in `public`. That check is made before anything is changed, and a role that cannot get there gets an error giving the command to run, with the transaction rolled back and no revision stamped. An existing `libex_fold` or index of those names is checked against the expected definition and never replaced; any difference raises. This chain upgrades in one transaction, so the indexes cannot be built concurrently: while each is built, reads of its table carry on and writes to it wait. Downgrading drops the indexes and the function and keeps both extensions.
+
+### Changed
+- **`hydrate_books` reads series positions for all its books in one batch,** where it made one query per book. The result and its order are the same.
+- **Comparing the models with a database no longer reports the folded indexes.** Alembic cannot compare an expression index, so they are skipped on both sides and the migrations own them.
+- **The indexes cost disk and write volume,** on top of those from 0.26.0.
+
 ## [0.26.0]
 
 This release adds a migration and a new requirement for Postgres stores: the `pg_trgm` extension. Run `alembic upgrade head` on any store you already have. A SQLite store is not affected; the revision does nothing there.

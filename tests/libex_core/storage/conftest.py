@@ -5,14 +5,13 @@ Sessions over the same schema on SQLite and, when Docker is there, Postgres.
 # Third party
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
 
 # Local
 from libex_core.storage.base import Base
 from libex_core.storage.store import LocalStore
-from tests.libex_core.storage._support import core_tables, seed
+from tests.libex_core.storage._support import core_tables, seed, create_extensions
 
 
 @pytest_asyncio.fixture
@@ -52,7 +51,7 @@ async def postgres_session(postgres_url):
     engine = create_async_engine(postgres_url, poolclass=NullPool)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all, tables=core_tables())
-        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public"))
+        await create_extensions(conn)
         await conn.run_sync(Base.metadata.create_all, tables=core_tables())
     async with AsyncSession(engine, expire_on_commit=False) as session:
         await seed(session)

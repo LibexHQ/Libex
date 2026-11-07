@@ -27,7 +27,7 @@ from sqlalchemy.pool import NullPool
 # Local
 import scripts.region_keys as rk
 from libex_core.storage.base import Base
-from libex_core.storage.models import CORE_TABLES
+from libex_core.storage.models import CORE_TABLES, FOLDED_INDEX_NAMES
 from tests.integration._scratch import (
     ROOT,
     admin,
@@ -548,7 +548,7 @@ def _shape(engine) -> dict:
             "indexes": sorted(
                 (i["name"], tuple(i["column_names"]), bool(i["unique"]))
                 for i in inspector.get_indexes(table)
-                if not i.get("duplicates_constraint")
+                if not i.get("duplicates_constraint") and i["name"] not in FOLDED_INDEX_NAMES
             ),
         }
     return shape
@@ -572,7 +572,9 @@ def _model_shape() -> dict:
             ),
             "fks": fks,
             "indexes": sorted(
-                (i.name, tuple(c.name for c in i.columns), bool(i.unique)) for i in t.indexes
+                (i.name, tuple(c.name for c in i.columns), bool(i.unique))
+                for i in t.indexes
+                if i.name not in FOLDED_INDEX_NAMES
             ),
         }
     return shape

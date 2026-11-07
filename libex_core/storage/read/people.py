@@ -19,6 +19,7 @@ from libex_core.storage.read._regions import only_first_stored
 from libex_core.storage.read.shapes import (
     BOOK_RELATIONS,
     book_to_dict,
+    genre_to_dict,
     hydrate_books,
     narrator_to_dict,
     series_positions_by_book,
@@ -26,6 +27,61 @@ from libex_core.storage.read.shapes import (
 from libex_core.storage.sorting import BOOK_SORT_FIELDS, NARRATOR_SORT_FIELDS, apply_sort
 
 logger = logging.getLogger("libex")
+
+
+def merge_author_rows(authors: list[Author]) -> dict[str, Any]:
+    """One record from every stored row of an (asin, region), by the rules
+    get_author documents. `authors` is non-empty and ordered by id."""
+    base = authors[0]
+
+    def _measured_length(value: str | None) -> int:
+        """Trimmed length, floored to -1 for absent — same idea as
+        merge.longer_wins' absent-sentinel, applied to whichever text is
+        being ranked (description or image)."""
+        stripped = value.strip() if value else ""
+        return len(stripped) if stripped else -1
+
+    description = base.description
+    best_length = _measured_length(description)
+    for a in authors[1:]:
+        length = _measured_length(a.description)
+        if length > best_length:
+            description = a.description
+            best_length = length
+
+    image = next(
+        (a.image for a in authors if _measured_length(a.image) >= 0),
+        base.image,
+    )
+
+    # Defensive against a stored null slipping through despite the column
+    # being NOT NULL on every write path today: the `if a.updated_at`
+    # filter drops None candidates before max() ever sees them, so an
+    # all-None input leaves the generator empty rather than raising
+    # TypeError on a bad comparison — but max() on an empty iterable
+    # raises ValueError unless a default is given. `default=None` is
+    # what closes that: without it a null here would fail the whole
+    # read for a record that is otherwise readable.
+    updated_at = max((a.updated_at for a in authors if a.updated_at), default=None)
+
+    genres_by_asin: dict[str, Any] = {}
+    for a in authors:
+        for g in (a.genres or []):
+            genres_by_asin.setdefault(g.asin, g)
+
+    genres = [genre_to_dict(g) for g in genres_by_asin.values()]
+
+    return {
+        "id": base.id,
+        "asin": base.asin,
+        "name": base.name,
+        "description": description,
+        "image": image,
+        "region": base.region,
+        "regions": [base.region],
+        "genres": genres,
+        "updatedAt": updated_at.isoformat() if updated_at else None,
+    }
 
 
 async def get_author(session: AsyncSession, asin: str, region: str) -> dict[str, Any] | None:
@@ -97,65 +153,7 @@ async def get_author(session: AsyncSession, asin: str, region: str) -> dict[str,
             },
         )
 
-    base = authors[0]
-
-    def _measured_length(value: str | None) -> int:
-        """Trimmed length, floored to -1 for absent — same idea as
-        merge.longer_wins' absent-sentinel, applied to whichever text is
-        being ranked (description or image)."""
-        stripped = value.strip() if value else ""
-        return len(stripped) if stripped else -1
-
-    description = base.description
-    best_length = _measured_length(description)
-    for a in authors[1:]:
-        length = _measured_length(a.description)
-        if length > best_length:
-            description = a.description
-            best_length = length
-
-    image = next(
-        (a.image for a in authors if _measured_length(a.image) >= 0),
-        base.image,
-    )
-
-    # Defensive against a stored null slipping through despite the column
-    # being NOT NULL on every write path today: the `if a.updated_at`
-    # filter drops None candidates before max() ever sees them, so an
-    # all-None input leaves the generator empty rather than raising
-    # TypeError on a bad comparison — but max() on an empty iterable
-    # raises ValueError unless a default is given. `default=None` is
-    # what closes that: without it a null here would fail the whole
-    # read for a record that is otherwise readable.
-    updated_at = max((a.updated_at for a in authors if a.updated_at), default=None)
-
-    genres_by_asin: dict[str, Any] = {}
-    for a in authors:
-        for g in (a.genres or []):
-            genres_by_asin.setdefault(g.asin, g)
-
-    genres = [
-        {
-            "asin": g.asin,
-            "name": g.name,
-            "type": g.type,
-            "betterType": g.type.lower().rstrip("s"),
-            "updatedAt": g.updated_at.isoformat() if g.updated_at else None,
-        }
-        for g in genres_by_asin.values()
-    ]
-
-    return {
-        "id": base.id,
-        "asin": base.asin,
-        "name": base.name,
-        "description": description,
-        "image": image,
-        "region": base.region,
-        "regions": [base.region],
-        "genres": genres,
-        "updatedAt": updated_at.isoformat() if updated_at else None,
-    }
+    return merge_author_rows(authors)
 
 
 async def get_author_book_asins(

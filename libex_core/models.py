@@ -607,6 +607,13 @@ class SeriesResponse(BaseModel):
     )
 
 
+class SeriesSearchResponse(SeriesResponse):
+    bookCount: int = Field(
+        default=0,
+        description="How many stored books are linked to this series, in its region.",
+    )
+
+
 # ============================================================
 # CATEGORIES
 # ============================================================

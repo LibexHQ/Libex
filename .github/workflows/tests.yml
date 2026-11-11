@@ -147,5 +147,40 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --require-hashes -r requirements-dev.lock
+      # The backup round trip has to run a 16 client against the postgres:16
+      # container, because that is the pair production runs. The runner's own
+      # postgresql-client follows whatever the image ships, and once it moved
+      # past 16 its pg_restore started emitting SET transaction_timeout, which
+      # a 16 server rejects. So the two binaries come out of the same pinned
+      # image the Dockerfile copies them from, and CI tests the artefact that
+      # ships. The image reference is read out of the Dockerfile rather than
+      # repeated here, so a digest bump there moves CI with it. They are trixie
+      # builds running on Ubuntu: today they need nothing newer than
+      # GLIBC_2.38 plus libpq5, which the runner has, and the version check
+      # below fails the job if that ever stops being true.
+      - name: Install the PostgreSQL 16 client
+        run: |
+          image=$(sed -n 's/^FROM \(postgres:[^ ]*@sha256:[0-9a-f]\{64\}\) AS pgclient$/\1/p' Dockerfile)
+          test -n "$image"
+          dir="$RUNNER_TEMP/pg16/bin"
+          mkdir -p "$dir"
+          cid=$(docker create "$image")
+          docker cp "$cid:/usr/lib/postgresql/16/bin/pg_dump" "$dir/pg_dump"
+          docker cp "$cid:/usr/lib/postgresql/16/bin/pg_restore" "$dir/pg_restore"
+          docker rm "$cid"
+          echo "$dir" >> "$GITHUB_PATH"
+      # Resolved through PATH, the way the tests find them, so a runner change
+      # that shadows them or a binary that no longer loads fails here by name
+      # rather than as a restore error inside the test run.
+      - name: Check the PostgreSQL client is 16
+        run: |
+          for tool in pg_dump pg_restore; do
+            version=$("$tool" --version)
+            echo "$(command -v "$tool"): $version"
+            case "$version" in
+              "$tool (PostgreSQL) 16."*) ;;
+              *) echo "$tool is not 16.x" >&2; exit 1 ;;
+            esac
+          done
       - name: Run integration tests
         run: pytest tests/ -v -m integration

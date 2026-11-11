@@ -51,12 +51,16 @@ def include_object_for(dialect_name: str):
 
     compare_metadata ignores `ddl_if`, so without this the models' Postgres-only
     trigram indexes read as missing from a SQLite database. Indexes reflected
-    from the database are always kept."""
-    from libex_core.storage.models import CORE_TABLES
+    from the database are kept, except the folded search indexes: alembic cannot
+    compare an expression index, so those are left out on both sides and the
+    migrations alone own them."""
+    from libex_core.storage.models import CORE_TABLES, FOLDED_INDEX_NAMES
 
     def include_object(obj, name, type_, reflected, compare_to):
         if type_ == "table":
             return name in CORE_TABLES
+        if type_ == "index" and name in FOLDED_INDEX_NAMES:
+            return False
         if type_ == "index" and not reflected:
             only = getattr(getattr(obj, "_ddl_if", None), "dialect", None)
             if only is not None:

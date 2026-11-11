@@ -125,8 +125,8 @@ _SAFE_QUERY_PARAMS = frozenset({
 _KNOWN_QUERY_PARAMS = _SAFE_QUERY_PARAMS | frozenset({
     "asins", "author", "author_name", "content_delivery_type", "content_type",
     "copyright", "description", "is_buyable", "is_listenable", "isbn",
-    "keywords", "name", "narrator", "publisher", "query", "search",
-    "series_name", "subtitle", "summary", "title",
+    "keywords", "match", "name", "narrator", "publisher", "query", "search",
+    "series", "series_name", "subtitle", "summary", "title",
 })
 
 # Deliberately free of characters urlencode would escape -- "<redacted>"

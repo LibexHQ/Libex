@@ -330,7 +330,7 @@ def _ddl(name: str) -> str:
 def test_the_golden_covers_every_table():
     golden = _golden()
 
-    assert set(golden) == {*TABLES, "region_enum"}
+    assert set(golden) == {*TABLES, "region_enum", "libex_fold"}
 
 
 @pytest.mark.parametrize("name", TABLES)

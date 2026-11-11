@@ -20,6 +20,7 @@ from app.services.db.writer import _failure_fields
 from libex_core.exceptions import ErrorCode, LibexException
 from libex_core.storage.read import books as _books
 from libex_core.storage.read import people as _people
+from libex_core.storage.read import search as _search
 from libex_core.storage.read import series as _series
 
 logger = get_logger()
@@ -40,8 +41,11 @@ __all__ = [
     "get_series_from_db",
     "get_track_from_db",
     "get_vvab_books_from_db",
+    "search_authors_ranked_from_db",
     "search_books_from_db",
+    "search_books_ranked_from_db",
     "search_narrators_from_db",
+    "search_series_ranked_from_db",
 ]
 
 
@@ -89,3 +93,7 @@ get_narrator_books_from_db = _raising(_people.get_narrator_books)
 
 get_series_from_db = _raising(_series.get_series)
 get_series_books_from_db = _raising(_series.get_series_books)
+
+search_books_ranked_from_db = _raising(_search.search_books_ranked)
+search_authors_ranked_from_db = _raising(_search.search_authors_ranked)
+search_series_ranked_from_db = _raising(_search.search_series_ranked)

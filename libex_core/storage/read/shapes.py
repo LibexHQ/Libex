@@ -100,6 +100,17 @@ async def series_positions_by_book(
     return positions
 
 
+def genre_to_dict(g) -> dict[str, Any]:
+    """Converts a Genre model to the dict a book or an author carries."""
+    return {
+        "asin": g.asin,
+        "name": g.name,
+        "type": g.type,
+        "betterType": g.type.lower().rstrip("s"),
+        "updatedAt": g.updated_at.isoformat() if g.updated_at else None,
+    }
+
+
 def book_to_dict(book: Book, series_positions: dict[str, str | None]) -> dict[str, Any]:
     """Converts a Book ORM object to the dict shape that
     libex_core.audible.books.normalize_product produces."""
@@ -131,16 +142,7 @@ def book_to_dict(book: Book, series_positions: dict[str, str | None]) -> dict[st
         for n in (book.narrators or [])
     ]
 
-    genres = [
-        {
-            "asin": g.asin,
-            "name": g.name,
-            "type": g.type,
-            "betterType": g.type.lower().rstrip("s"),
-            "updatedAt": g.updated_at.isoformat() if g.updated_at else None,
-        }
-        for g in (book.genres or [])
-    ]
+    genres = [genre_to_dict(g) for g in (book.genres or [])]
 
     series = [
         {
@@ -266,9 +268,7 @@ def narrator_to_dict(n) -> dict[str, Any]:
 
 
 async def hydrate_books(session: AsyncSession, books) -> list[dict[str, Any]]:
-    """Builds the dict for each book, one series-position lookup per book."""
-    results = []
-    for book in books:
-        positions = await series_positions(session, book.asin, region=book.region)
-        results.append(book_to_dict(book, positions))
-    return results
+    """Builds the dict for each book, in the order given, with the series
+    positions of all of them read together."""
+    positions = await series_positions_by_book(session, books)
+    return [book_to_dict(book, positions.get((book.asin, book.region), {})) for book in books]

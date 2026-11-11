@@ -7,7 +7,7 @@ SQLite and Postgres so the two can be compared answer for answer.
 from datetime import datetime, timedelta, timezone
 
 # Third party
-from sqlalchemy import insert, select
+from sqlalchemy import insert, select, text
 
 # Local
 from libex_core.storage import read
@@ -32,6 +32,13 @@ from libex_core.storage.read._compat import NumericPosition
 assert read  # the package docstring is the contract; the import keeps it loaded
 
 STAMP = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+
+async def create_extensions(conn) -> None:
+    """The two extensions the schema's indexes need, in public. Every Postgres
+    fixture that builds the tables calls this, so a new extension is added once."""
+    for extension in ("pg_trgm", "unaccent"):
+        await conn.execute(text(f"CREATE EXTENSION IF NOT EXISTS {extension} WITH SCHEMA public"))
 
 # Release dates are offsets from one instant fixed when the module loads, so a
 # second seeding in the same run stores exactly the same values.

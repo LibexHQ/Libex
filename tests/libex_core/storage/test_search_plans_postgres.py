@@ -23,7 +23,8 @@ from libex_core.storage.base import Base
 from libex_core.storage.read import search
 from tests.libex_core.storage._support import core_tables, create_extensions
 
-pytestmark = pytest.mark.integration
+# The function-scoped big fixture rebuilds and indexes 30000 rows per test, over the 30s default under load.
+pytestmark = [pytest.mark.integration, pytest.mark.timeout(300)]
 
 ROWS = 30000
 NOT_NULL = "explicit, whisper_sync, has_pdf, is_listenable, is_buyable, is_vvab, created_at, updated_at"

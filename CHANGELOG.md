@@ -10,6 +10,13 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [2.6.1]
+
+No endpoint, parameter or response field changes.
+
+### Fixed
+- **Audible lookups no longer stay stuck failing with a 503 after a VPN reconnect.** If the connection to Audible through the proxy broke while a connection was being set up, which happens when the VPN restarts and can also happen when a request is cancelled on a cold connection, the connection pool lost a slot and never got it back. After enough of those every Audible call waited 30 seconds and then failed with a 503 `upstream_unavailable`, and only restarting the container cleared it. When the pool runs out like this the Audible client is now replaced. The request that finds the pool empty still waits 30 seconds and fails with that 503; the next one gets a fresh pool. Other timeouts and errors do not replace the client. The seeder, refresh and backfill jobs use the same client and get the same fix.
+
 ## [2.6.0]
 
 Three new read-only routes; no existing endpoint, parameter or response field changes. One database migration, which adds the `unaccent` extension, a function, and nine indexes. I counted this a MINOR: the routes are new capability, and the migration runs when the container starts.

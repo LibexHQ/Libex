@@ -13,6 +13,13 @@ the first published version. Entries for earlier versions record changes made
 before publication: they are historical record for whoever embeds this package,
 not evidence that anyone consumed a given version at the time it was cut.
 
+## [0.27.1]
+
+No change to the package's public surface.
+
+### Fixed
+- **`LibexClient` no longer stays wedged after its connection pool runs dry.** When a TLS handshake through the proxy's CONNECT tunnel failed or was cancelled, for example on a VPN restart or when a request was cancelled on a cold pool, httpcore leaked a pool slot and never reclaimed it. Once every slot was gone, each Audible call waited 30 seconds for a slot and raised `AudibleAPIException`, until the process restarted. The client now replaces its HTTP client when a request hits `PoolTimeout`. That request still fails after the 30 seconds; the next one gets a fresh pool. Other timeouts and errors do not replace it.
+
 ## [0.27.0]
 
 This release adds a migration and a new requirement for Postgres stores: the `unaccent` extension, in the `public` schema, next to `pg_trgm`, which must now be in `public` too. Run `alembic upgrade head` on any store you already have. A SQLite store is not affected; the revision does nothing there, and the new readers do not run on it.

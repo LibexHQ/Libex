@@ -706,6 +706,16 @@ class LibexClient:
                 _track_pending_close(_close_stale_client(stale))
         return self.__http
 
+    def _retire_client(self, client: httpx.AsyncClient) -> None:
+        """Drops a client whose connection pool has stopped handing out
+        slots, so the next _get_client builds a fresh one. Keyed on the
+        client the failing request actually used: a second request that
+        timed out on the same wedged pool arrives after the replacement
+        exists and must not throw that replacement away."""
+        if self.__http is client:
+            self.__http, self.__http_loop = None, None
+            _track_pending_close(_close_stale_client(client))
+
     async def get(
         self,
         region: str,
@@ -792,6 +802,25 @@ class LibexClient:
                         params=params,
                         timeout=30.0,
                         follow_redirects=False,
+                    )
+                except httpx.PoolTimeout as e:
+                    # Every request here holds one of the process-wide permits
+                    # and the pool is sized to their sum, so waiting 30s for a
+                    # slot is not contention: httpcore has leaked slots (a
+                    # tunnel whose TLS handshake failed or was cancelled, a
+                    # connection cancelled before it started) and never
+                    # reclaims them. Only a new pool recovers.
+                    logger.warning(
+                        "Audible HTTP pool exhausted, replacing the client",
+                        extra={
+                            "region": region,
+                            "path": path,
+                            "pool": _audible_concurrency_pool.get(),
+                        },
+                    )
+                    self._retire_client(client)
+                    raise AudibleAPIException(
+                        f"Audible API timed out: {type(e).__name__} for {url}"
                     )
                 except httpx.TimeoutException as e:
                     raise AudibleAPIException(

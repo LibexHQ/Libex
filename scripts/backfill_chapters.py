@@ -117,6 +117,7 @@ from app.core.logging import get_logger, setup_logging
 # Services
 import app.services.audible as audible_service
 from app.services.audible import audible_get
+from app.services.watch.heartbeat import Heartbeat
 
 
 logger = get_logger()
@@ -973,6 +974,7 @@ class _Run:
         self.ratchet = _Ratchet()
         self.backoff_window = _BackoffWindow()
         self.none_guard = _NoneRateGuard()
+        self.beat: Heartbeat | None = None
 
     @property
     def stopping(self) -> bool:
@@ -991,6 +993,8 @@ async def _interruptible_sleep(seconds: float, stopper: _Stopper, run: "_Run | N
     be passed whenever one is in scope, so a long sleep also wakes on
     run.abort_reason being set by another in-flight unit.
     """
+    if run is not None and run.beat is not None:
+        run.beat.defer(seconds)  # a deliberate sleep is not a stall
     end = time.monotonic() + seconds
     while time.monotonic() < end and not stopper.stopping and not (run is not None and run.stopping):
         await asyncio.sleep(min(1.0, end - time.monotonic()))
@@ -1181,7 +1185,10 @@ async def _run(limit: int | None) -> int:
     sentinel = _ThrottleSentinel()
     logging.getLogger("libex").addHandler(sentinel)
 
+    beat = Heartbeat("backfill", 1800).start()
     run = _Run()
+    run.beat = beat
+    finished = False
     gate = _Gate(CONCURRENCY_START)
     ramp = _Ramp(gate)
 
@@ -1211,7 +1218,9 @@ async def _run(limit: int | None) -> int:
                 rows = await _read_page(page_session, cursor, CHUNK_SIZE)
 
             next_cursor, wrapped, done = _advance_cursor(rows, cursor, wrapped)
+            beat.progress()
             if done:
+                beat.done = True
                 logger.info("Backfill: no more books need chapters after the wrap-around pass -- done!")
                 break
             if not rows:
@@ -1255,9 +1264,12 @@ async def _run(limit: int | None) -> int:
             if inflight:
                 await asyncio.gather(*list(inflight), return_exceptions=True)
             await _handle_pending_pauses(run, inflight, stopper)
+        finished = True
     finally:
         logging.getLogger("libex").removeHandler(sentinel)
         await engine.dispose()
+        # A crash or cancel leaves the last "running" beat, so the watcher reads it as dead.
+        await beat.stop("stopped" if finished and not run.abort_reason else None)
         if run.abort_reason:
             logger.error("Backfill: ABORTED", extra={"reason": run.abort_reason})
         logger.info(

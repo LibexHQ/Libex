@@ -15,7 +15,7 @@ holds the line:
       `response.headers.update({"Literal": ...})`, and
       `response.headers.setdefault("Literal", ...)` -- and asserts every
       custom (X-prefixed) header name assigned that way resolves into the
-      registry, or is one of the two already-identified, not-yet-ruled-on
+      registry, or is one of the already-identified, not-yet-ruled-on
       exceptions named where the scan is defined below. (a) and (c) both
       only ever see headers that were already registered; this one reads
       the header name out of the source text itself rather than out of a
@@ -403,8 +403,8 @@ def _extract_custom_headers(text: str) -> set[str]:
     run for real over both trees' own source (see
     _custom_headers_assigned_in_app). The two are deliberately split: unlike
     the original single-form scan, app/ does not assign zero custom headers
-    this way -- see _KNOWN_NON_RESPONSE_HEADER_NAMES below for the two names
-    the widened scan currently finds and why neither is registered -- so a
+    this way -- see _KNOWN_NON_RESPONSE_HEADER_NAMES below for the names
+    the widened scan currently finds and why none is registered -- so a
     fixture that does not depend on what either tree currently contains is
     what tells a broken regex apart from a codebase whose only findings are
     the ones already named.
@@ -468,8 +468,8 @@ def test_header_assignment_regex_extracts_a_known_positive():
     }
 
 
-# The widened scan below finds exactly two X-prefixed literals that are not
-# in EXPOSED_HEADER_NAMES, and neither is a defect this test can resolve on
+# The widened scan below finds X-prefixed literals that are not in
+# EXPOSED_HEADER_NAMES, and none of them is a defect this test can resolve on
 # its own -- each is an open scope question for the lane that owns its call
 # site, not something a test-only slice rules on:
 #
@@ -490,12 +490,20 @@ def test_header_assignment_regex_extracts_a_known_positive():
 #   shape the widened (2) form looks for, which a source-text scan cannot
 #   tell apart from the response-bound case just by reading it.
 #
-# Both are named exactly, rather than swept up in a broader "anything
-# already found is fine" allowance, so a third name appearing here later
+#   X-API-Key (app/services/watch/gluetun.py) and X-Gotify-Key
+#   (app/services/watch/gotify.py) -- request headers the stack watcher
+#   sends to its own gluetun control server and to Gotify, never on a Libex
+#   response. Same reason as X-Device-Type-Id: the `headers={...}` shape is
+#   request-bound and a source-text scan cannot tell the two apart.
+#
+# All are named exactly, rather than swept up in a broader "anything
+# already found is fine" allowance, so another name appearing here later
 # still fails this test loudly instead of being silently absorbed.
 _KNOWN_NON_RESPONSE_HEADER_NAMES = frozenset({
     "X-Content-Type-Options",
     "X-Device-Type-Id",
+    "X-API-Key",
+    "X-Gotify-Key",
 })
 
 
@@ -504,10 +512,10 @@ def test_every_custom_header_assigned_in_app_resolves_into_the_registry():
     header assigned somewhere in app/ or libex_core/ under a hand-typed
     literal name, with that literal never added to EXPOSED_HEADER_NAMES, is
     exactly the defect this test exists to catch -- now across all four
-    assignment forms, not only the subscript one. The two names in
+    assignment forms, not only the subscript one. The names in
     _KNOWN_NON_RESPONSE_HEADER_NAMES are asserted for exactly, not merely
-    excluded: this test fails if either tree ever assigns a third
-    unregistered custom header this way, and also fails if either of the two
+    excluded: this test fails if either tree ever assigns another
+    unregistered custom header this way, and also fails if any of the
     named ones stops being found, so a stale exception cannot outlive the
     code it was written against."""
     found = _custom_headers_assigned_in_app()

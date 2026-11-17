@@ -30,6 +30,7 @@ Rate-limited by a configurable delay between Audible requests.
 
 # Standard library
 import asyncio
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
 # Third party
@@ -924,7 +925,7 @@ async def _refresh_release_window(region: str, delay: float) -> dict[str, int]:
 # MAIN LOOP
 # ============================================================
 
-async def run_seeder(once: bool = False) -> None:
+async def run_seeder(once: bool = False, on_cycle: Callable[[], None] | None = None) -> None:
     """
     Runs the author/series/narrator expansion cycle on settings.seeder_interval_hours,
     forever by default.
@@ -932,6 +933,9 @@ async def run_seeder(once: bool = False) -> None:
     once, False by default, runs exactly one cycle and returns instead of looping —
     the standalone entry point's --once (scripts/seed.py) uses this for a single
     supervised pass. False preserves the original forever-loop behavior exactly.
+
+    on_cycle, when given, is called after each completed cycle, so a supervisor
+    sees progress without depending on the log level.
     """
     regions = [r.strip() for r in settings.seeder_regions.split(",") if r.strip()]
     interval = settings.seeder_interval_hours * 3600
@@ -978,6 +982,8 @@ async def run_seeder(once: bool = False) -> None:
             cycle_stats["errors"] += narrator_stats["errors"]
 
             logger.info("Seeder: cycle complete", extra=cycle_stats)
+            if on_cycle is not None:
+                on_cycle()
 
         except Exception as e:
             logger.error("Seeder: cycle failed", extra={"error": str(e)})

@@ -26,12 +26,13 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 # Third party
 import pytest
 
 # Local
+from app.services.watch.heartbeat import read
 from tests.scripts.conftest import set_hosted_transport
 from scripts.seed import (
     DRAIN_TIMEOUT_SECONDS,
@@ -334,7 +335,7 @@ async def test_run_passes_once_through_to_both_workers(restore_audible_transport
     with _patched_run(seeder=seeder, releases=releases):
         await _run(once=True)
 
-    seeder.assert_awaited_once_with(once=True)
+    seeder.assert_awaited_once_with(once=True, on_cycle=ANY)
     releases.assert_awaited_once_with(once=True)
 
 
@@ -345,7 +346,7 @@ async def test_run_passes_once_false_through_when_not_requested(restore_audible_
     with _patched_run(seeder=seeder, releases=releases):
         await _run(once=False)
 
-    seeder.assert_awaited_once_with(once=False)
+    seeder.assert_awaited_once_with(once=False, on_cycle=ANY)
     releases.assert_awaited_once_with(once=False)
 
 
@@ -358,7 +359,7 @@ async def test_run_returns_0_when_clean_and_drained(restore_audible_transport):
 
 @pytest.mark.asyncio
 async def test_run_returns_1_when_a_worker_raises(restore_audible_transport):
-    async def _boom(once):
+    async def _boom(once, on_cycle=None):
         raise RuntimeError("boom")
 
     with _patched_run(seeder=_boom, drained=True):
@@ -380,7 +381,7 @@ async def test_run_failure_exit_code_takes_priority_over_a_drain_timeout(restore
     not 2 -- a supervisor needs to know "a worker broke" even if the queue
     also failed to drain, not have that fact hidden behind the drain's own
     weaker signal."""
-    async def _boom(once):
+    async def _boom(once, on_cycle=None):
         raise RuntimeError("boom")
 
     with _patched_run(seeder=_boom, drained=False):
@@ -394,7 +395,7 @@ async def test_run_still_drains_and_disposes_when_a_worker_raises(restore_audibl
     """A worker exception must not skip the shutdown sequence -- the drain
     and dispose still have to run so nothing gets abandoned just because one
     of the two loops broke."""
-    async def _boom(once):
+    async def _boom(once, on_cycle=None):
         raise RuntimeError("boom")
 
     fake_engine = MagicMock()
@@ -484,7 +485,7 @@ async def test_run_creates_and_tracks_both_tasks_before_registering_signal_handl
 _IDLE_SEEDER_CHILD = """
 import asyncio
 import sys
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 from scripts import seed
 from tests.scripts.conftest import set_hosted_transport
@@ -492,7 +493,7 @@ from tests.scripts.conftest import set_hosted_transport
 set_hosted_transport("http://libex-seeder-vpn:8888")
 
 
-async def idle(once):
+async def idle(once, on_cycle=None):
     print("READY", flush=True)
     await asyncio.sleep(3600)
 
@@ -633,3 +634,156 @@ def test_main_does_not_raise_on_a_clean_exit_code(monkeypatch):
          patch("scripts.seed._run", new=MagicMock(return_value="sentinel-coro")), \
          patch("scripts.seed.asyncio.run", return_value=0):
         main()  # must not raise
+
+
+# ============================================================
+# _run -- the worker heartbeat the watcher reads
+# ============================================================
+
+class _FakeBeat:
+    """Stands in for Heartbeat at scripts.seed's import location and records how it was driven."""
+
+    made: list = []
+
+    def __init__(self, name, progress_due_s, directory=None):
+        self.name, self.progress_due_s, self.done = name, progress_due_s, False
+        self.started, self.stops, self.progressed = False, [], 0
+        _FakeBeat.made.append(self)
+
+    def start(self):
+        self.started = True
+        return self
+
+    def progress(self):
+        self.progressed += 1
+
+    async def stop(self, state="stopped"):
+        self.stops.append(state)
+
+
+def _heartbeat_state(tmp_path):
+    beat = read("seeder", str(tmp_path))
+    return beat.state if beat else None
+
+
+@pytest.mark.asyncio
+async def test_run_once_leaves_a_done_heartbeat(restore_audible_transport, tmp_path, monkeypatch):
+    monkeypatch.setenv("HEARTBEAT_DIR", str(tmp_path))
+    with _patched_run():
+        assert await _run(once=True) == 0
+    assert _heartbeat_state(tmp_path) == "done"
+
+
+@pytest.mark.asyncio
+async def test_run_clean_stop_without_once_leaves_a_stopped_heartbeat_not_done(
+    restore_audible_transport, tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("HEARTBEAT_DIR", str(tmp_path))
+    with _patched_run():
+        assert await _run(once=False) == 0
+    assert _heartbeat_state(tmp_path) == "stopped"  # "done" here would mean a daemon that quit looked finished
+
+
+@pytest.mark.asyncio
+async def test_run_with_a_failed_worker_leaves_the_last_running_beat_so_the_watcher_sees_it_dead(
+    restore_audible_transport, tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("HEARTBEAT_DIR", str(tmp_path))
+
+    async def _boom(**_kw):
+        raise RuntimeError("worker died")
+
+    with _patched_run(seeder=_boom):
+        assert await _run(once=True) == 1
+    # neither "stopped" nor "done": both are silent at the watcher, and an aborted run must not be
+    assert _heartbeat_state(tmp_path) == "running"
+
+
+@pytest.mark.asyncio
+async def test_run_wires_the_seeder_heartbeat_to_the_cycle_callback(restore_audible_transport):
+    _FakeBeat.made = []
+    seeder = AsyncMock(return_value=None)
+    releases = AsyncMock(return_value=None)
+    with _patched_run(seeder=seeder, releases=releases), patch.object(seed, "Heartbeat", _FakeBeat):
+        await _run(once=False)
+    (beat,) = _FakeBeat.made
+    assert beat.name == "seeder" and beat.started is True
+    assert beat.progress_due_s == 2 * seed.get_settings().seeder_interval_hours * 3600
+    # the seeder reports each cycle through the beat; the new-releases worker gets no callback
+    assert seeder.await_args.kwargs["on_cycle"] == beat.progress
+    assert "on_cycle" not in releases.await_args.kwargs
+    seeder.await_args.kwargs["on_cycle"]()
+    assert beat.progressed == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("once,fails,stops,done", [
+    (True, False, ["stopped"], True),    # done is set up front; Heartbeat.stop turns it into "done"
+    (False, False, ["stopped"], False),
+    (False, True, [None], False),        # a failure stops the ticker without rewriting the state
+    (True, True, [None], True),
+])
+async def test_run_stops_the_heartbeat_exactly_once_with_the_right_state(
+    restore_audible_transport, once, fails, stops, done,
+):
+    async def _boom(**_kw):
+        raise RuntimeError("x")
+
+    _FakeBeat.made = []
+    with _patched_run(seeder=_boom if fails else None), patch.object(seed, "Heartbeat", _FakeBeat):
+        await _run(once=once)
+    (beat,) = _FakeBeat.made
+    assert beat.stops == stops
+    assert beat.done is done
+
+
+class _TrackedBeat(seed.Heartbeat):
+    """The real Heartbeat, kept so a test can look at its ticker after _run returns or raises."""
+
+    made: list = []
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        _TrackedBeat.made.append(self)
+
+
+@pytest.mark.asyncio
+async def test_a_drain_that_raises_still_stops_the_ticker_and_leaves_the_running_beat(
+    restore_audible_transport, tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("HEARTBEAT_DIR", str(tmp_path))
+    _TrackedBeat.made = []
+    with _patched_run() as _, patch.object(seed, "Heartbeat", _TrackedBeat), \
+         patch.object(seed, "_drain_persist_queue", AsyncMock(side_effect=RuntimeError("drain broke"))):
+        with pytest.raises(RuntimeError, match="drain broke"):
+            await _run(once=True)
+        engine = seed.engine
+    (beat,) = _TrackedBeat.made
+    assert beat._ticker.done()  # a ticker left running would keep a dead run looking alive
+    engine.dispose.assert_awaited_once()
+    # the run did not finish, so neither "stopped" nor "done" is written: the watcher must see it dead
+    assert _heartbeat_state(tmp_path) == "running"
+
+
+@pytest.mark.asyncio
+async def test_a_dispose_that_raises_still_stops_the_ticker(restore_audible_transport, tmp_path, monkeypatch):
+    monkeypatch.setenv("HEARTBEAT_DIR", str(tmp_path))
+    _TrackedBeat.made = []
+    with _patched_run() as _, patch.object(seed, "Heartbeat", _TrackedBeat):
+        seed.engine.dispose = AsyncMock(side_effect=OSError("dispose broke"))
+        with pytest.raises(OSError, match="dispose broke"):
+            await _run(once=False)
+    (beat,) = _TrackedBeat.made
+    assert beat._ticker.done()
+    assert _heartbeat_state(tmp_path) == "stopped"  # the drain finished clean, so the stop is honest
+
+
+@pytest.mark.asyncio
+async def test_a_clean_run_stops_the_ticker_and_writes_stopped(restore_audible_transport, tmp_path, monkeypatch):
+    monkeypatch.setenv("HEARTBEAT_DIR", str(tmp_path))
+    _TrackedBeat.made = []
+    with _patched_run(), patch.object(seed, "Heartbeat", _TrackedBeat):
+        assert await _run(once=False) == 0
+    (beat,) = _TrackedBeat.made
+    assert beat._ticker.done()
+    assert _heartbeat_state(tmp_path) == "stopped"

@@ -10,6 +10,20 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [2.7.0]
+
+No endpoint, parameter or response field changes, no database migration and no change to the published library. I counted this a MINOR: the image now ships a new optional process, and the seeder and backfill write a new file. Nothing runs unless you start it.
+
+### Added
+- **A stack watcher, `python -m scripts.stack_watch`, that you can run beside a stack.** It sends alerts through Gotify, and refuses to start without `GOTIFY_URL` and `GOTIFY_TOKEN`. Each check turns on only when its own settings are present, and at startup it logs which are on and which are off. Run it as a separate container with `entrypoint: []`, so the migrations do not run for it. It never changes the database and never restarts a container.
+- **It watches the VPN exit and can rotate it.** Given `AUDIBLE_PROXY_URL` it probes Audible through the proxy in `us` and `uk` every 120 seconds. When both are blocked for 3 cycles in a row it rotates the exit through gluetun's control server, which needs `GLUETUN_API_KEY`. It stops after 3 rotations, waits 6 hours and then alerts that someone is needed. If gluetun's VPN is found stopped it starts it again. If the exit answers but a real search through Libex still fails, it only alerts, since rotating would not help. The intervals, counts and cooldown can be changed with `WATCH_*` settings.
+- **It also checks the rest of the stack, and only alerts.** A backup that is too old (26 hours by default), the books badge reading zero, `/health` failing, API workers restarting in a loop (counted from the startup lines in the log), a seeder or backfill that has stopped or stalled, database disk use over 85%, and the `books` table having too many dead tuples or an autovacuum that has not run or is stuck. Each one needs its own setting to turn on, and the thresholds are settings too.
+- **Every alert says what happened, what the watcher did, and whether someone is needed.** When the problem clears it sends a "cleared" alert.
+- **The seeder and the backfill now write a heartbeat file.** `seed.py` and `backfill_chapters.py` keep a small JSON file, `seeder.json` or `backfill.json`, in `/app/logs/heartbeat`, or in `HEARTBEAT_DIR` if you set it. They write it whether or not the watcher runs, so it will appear in the logs volume. It holds the times of the last sign of life and the last completed unit of work, and whether the run is running, stopped or done; the watcher reads it to tell a dead or stalled job from an idle one. A failure to write it is logged and never stops the job. The seeder now also closes its database engine on every exit path, where before it did so only after a clean run.
+
+### Not covered
+- **Rotation only works with gluetun's control server and an API key.** Without them the exit probe still runs and alerts, but nothing is rotated.
+
 ## [2.6.1]
 
 No endpoint, parameter or response field changes.

@@ -29,6 +29,7 @@ tests/integration/test_chapters_release_gate.py.
 """
 
 # Standard library
+import asyncio
 import inspect
 import logging
 import time
@@ -39,6 +40,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 # Local
+from app.services.watch.heartbeat import read
 from tests.scripts.conftest import set_hosted_transport
 from libex_core.exceptions import AudibleAPIException, NotFoundException
 from scripts.backfill_chapters import (
@@ -1246,7 +1248,7 @@ def test_run_calls_handle_pending_pauses_both_inside_and_after_the_page_loop():
 # concurrency machinery is allowed to see
 # ============================================================
 
-async def _drive_run(*pages, limit=None, outcome=_Outcome.NOT_FOUND, on_book=None):
+async def _drive_run(*pages, limit=None, outcome=_Outcome.NOT_FOUND, on_book=None, sleep=None):
     """
     Drives the real _run over the canned pages given (then two empty ones, so
     the wrap-around ends the walk) and hands back the run's own state objects
@@ -1313,7 +1315,7 @@ async def _drive_run(*pages, limit=None, outcome=_Outcome.NOT_FOUND, on_book=Non
          patch("scripts.backfill_chapters.async_sessionmaker", MagicMock(return_value=sessions)), \
          patch("scripts.backfill_chapters.signal.signal", MagicMock()), \
          patch("scripts.backfill_chapters._log_exit_ip", new=AsyncMock()), \
-         patch("scripts.backfill_chapters._interruptible_sleep", new=AsyncMock()), \
+         patch("scripts.backfill_chapters._interruptible_sleep", new=sleep or AsyncMock()), \
          patch("scripts.backfill_chapters._read_page", new=_next_page), \
          patch("scripts.backfill_chapters._process_one", new=_record), \
          patch("scripts.backfill_chapters._Run", new=_make_run), \
@@ -1605,6 +1607,224 @@ async def test_run_proceeds_past_the_check_when_correctly_named(
     with patch("scripts.backfill_chapters._log_exit_ip", new=AsyncMock()):
         with pytest.raises(KeyError, match="DATABASE_URL"):
             await _run(limit=1)
+
+
+# ============================================================
+# _run -- the worker heartbeat the watcher reads
+# ============================================================
+
+class _FakeBeat:
+    """Stands in for Heartbeat at scripts.backfill_chapters's import location."""
+
+    made: list = []
+
+    def __init__(self, name, progress_due_s, directory=None):
+        self.name, self.progress_due_s, self.done = name, progress_due_s, False
+        self.started, self.stops, self.progress_calls, self.deferred = False, [], 0, []
+        _FakeBeat.made.append(self)
+
+    def start(self):
+        self.started = True
+        return self
+
+    def progress(self):
+        self.progress_calls += 1
+
+    def defer(self, seconds):
+        self.deferred.append(seconds)
+
+    async def stop(self, state="stopped"):
+        self.stops.append(state)
+
+
+def _book(asin):
+    return (asin, "us", None, OUT)
+
+
+async def _run_with_fake_beat(*pages, on_book=None, sleep=None):
+    _FakeBeat.made = []
+    with patch("scripts.backfill_chapters.Heartbeat", _FakeBeat):
+        result = await _drive_run(*pages, on_book=on_book, sleep=sleep)
+    return _FakeBeat.made, result
+
+
+@pytest.mark.asyncio
+async def test_run_reports_progress_once_per_page_read(restore_audible_transport):
+    # one real page plus the two empty ones _drive_run appends: three pages read
+    (beat,), (_run_state, _ramp, _gate, _seen, exit_code) = await _run_with_fake_beat([_book("B000000001")])
+    assert beat.name == "backfill" and beat.progress_due_s == 1800 and beat.started is True
+    assert beat.progress_calls == 3
+    assert exit_code == 0
+
+
+@pytest.mark.asyncio
+async def test_run_with_more_pages_reports_more_progress(restore_audible_transport):
+    (beat,), _ = await _run_with_fake_beat([_book("B000000001")], [_book("B000000002")])
+    assert beat.progress_calls == 4  # progress follows the pages, not a constant
+
+
+@pytest.mark.asyncio
+async def test_run_marks_done_and_stops_stopped_when_the_corpus_is_finished(restore_audible_transport):
+    (beat,), _ = await _run_with_fake_beat([_book("B000000001")])
+    assert beat.done is True
+    assert beat.stops == ["stopped"]  # Heartbeat.stop writes "done" because done is set
+
+
+@pytest.mark.asyncio
+async def test_run_that_stops_on_request_is_not_marked_done(restore_audible_transport):
+    def _interrupt(_run, stopper):
+        stopper.request(None, None)
+
+    (beat,), _ = await _run_with_fake_beat([_book("B000000001")], on_book=_interrupt)
+    assert beat.done is False  # a stop request is not a finished backfill
+    assert beat.stops == ["stopped"]
+
+
+@pytest.mark.asyncio
+async def test_run_aborted_stops_the_heartbeat_without_rewriting_the_state(restore_audible_transport):
+    def _abort(run, _stopper):
+        run.abort_reason = "sustained 5xx"
+
+    (beat,), (_r, _ramp, _g, _s, exit_code) = await _run_with_fake_beat([_book("B000000001")], on_book=_abort)
+    assert exit_code == 1
+    assert beat.done is False
+    assert beat.stops == [None]  # the last "running" beat stays, so the watcher reads it as dead, not done
+
+
+@pytest.mark.asyncio
+async def test_run_stops_the_heartbeat_in_finally_without_a_stopped_state_when_the_loop_raises(restore_audible_transport):
+    _FakeBeat.made = []
+
+    async def _boom(*_a, **_kw):
+        raise RuntimeError("page read failed")
+
+    with patch("scripts.backfill_chapters.Heartbeat", _FakeBeat), \
+         patch("scripts.backfill_chapters._read_page", new=_boom), \
+         patch.dict("os.environ", {"DATABASE_URL": "postgresql+asyncpg://unused/unused"}), \
+         patch("scripts.backfill_chapters.create_async_engine", MagicMock(return_value=AsyncMock())), \
+         patch("scripts.backfill_chapters.async_sessionmaker", MagicMock(return_value=MagicMock(side_effect=lambda: AsyncMock(
+             __aenter__=AsyncMock(return_value=AsyncMock()), __aexit__=AsyncMock(return_value=False))))), \
+         patch("scripts.backfill_chapters.signal.signal", MagicMock()), \
+         patch("scripts.backfill_chapters._log_exit_ip", new=AsyncMock()):
+        set_hosted_transport("http://libex-backfill-vpn:8888")
+        with pytest.raises(RuntimeError, match="page read failed"):
+            await _run(None)
+    (beat,) = _FakeBeat.made
+    assert beat.stops == [None]  # the ticker is ended but the file stays "running": a crash reads as dead
+    assert beat.done is False  # and a crash is never reported as done
+
+
+@pytest.mark.asyncio
+async def test_run_cancelled_mid_loop_leaves_the_beat_running(restore_audible_transport):
+    _FakeBeat.made = []
+
+    async def _cancelled(*_a, **_kw):
+        raise asyncio.CancelledError()
+
+    with patch("scripts.backfill_chapters.Heartbeat", _FakeBeat), \
+         patch("scripts.backfill_chapters._read_page", new=_cancelled), \
+         patch.dict("os.environ", {"DATABASE_URL": "postgresql+asyncpg://unused/unused"}), \
+         patch("scripts.backfill_chapters.create_async_engine", MagicMock(return_value=AsyncMock())), \
+         patch("scripts.backfill_chapters.async_sessionmaker", MagicMock(return_value=MagicMock(side_effect=lambda: AsyncMock(
+             __aenter__=AsyncMock(return_value=AsyncMock()), __aexit__=AsyncMock(return_value=False))))), \
+         patch("scripts.backfill_chapters.signal.signal", MagicMock()), \
+         patch("scripts.backfill_chapters._log_exit_ip", new=AsyncMock()):
+        set_hosted_transport("http://libex-backfill-vpn:8888")
+        with pytest.raises(asyncio.CancelledError):
+            await _run(None)
+    (beat,) = _FakeBeat.made
+    assert beat.stops == [None]
+
+
+@pytest.mark.asyncio
+async def test_a_clean_finish_is_the_only_exit_that_writes_stopped(restore_audible_transport):
+    (clean,), _ = await _run_with_fake_beat([_book("B000000001")])
+    assert clean.stops == ["stopped"]
+
+    def _abort(run, _stopper):
+        run.abort_reason = "sustained 5xx"
+
+    (aborted,), _ = await _run_with_fake_beat([_book("B000000001")], on_book=_abort)
+    assert aborted.stops == [None]
+
+
+# --- a deliberate sleep is not a stall ------------------------------------------------
+
+def _stopped():
+    stopper = backfill_chapters._Stopper()
+    stopper.stopping = True  # the sleep loop never waits; only the entry work is observed
+    return stopper
+
+
+@pytest.mark.asyncio
+async def test_interruptible_sleep_defers_the_beat_by_the_sleep_length():
+    run = backfill_chapters._Run()
+    run.beat = _FakeBeat("backfill", 1800)
+    await backfill_chapters._interruptible_sleep(1234.0, _stopped(), run)
+    assert run.beat.deferred == [1234.0]
+
+
+@pytest.mark.asyncio
+async def test_interruptible_sleep_without_a_beat_or_a_run_just_sleeps():
+    await backfill_chapters._interruptible_sleep(5.0, _stopped(), backfill_chapters._Run())
+    await backfill_chapters._interruptible_sleep(5.0, _stopped())  # no run in scope: nothing to defer, no error
+
+
+@pytest.mark.asyncio
+async def test_the_per_book_delay_defers_the_beat():
+    run = backfill_chapters._Run()
+    run.beat = _FakeBeat("backfill", 1800)
+    run.delay_min = run.delay_max = 7.0
+    instance = AsyncMock()
+    instance.__aenter__.return_value = instance
+    instance.__aexit__.return_value = False
+    gate = _Gate(limit=5)
+    await gate.acquire()
+    with patch("scripts.backfill_chapters._process_one",
+               new=AsyncMock(return_value=(_Outcome.NOT_FOUND, False, False, 0.01))):
+        await _dispatch_one("B001", "us", MagicMock(return_value=instance), run, gate, _Ramp(gate),
+                            _ThrottleSentinel(), _stopped())
+    assert run.beat.deferred == [7.0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flag", ["floor_pending", "soft_pause_pending"])
+async def test_both_enforced_cooldowns_defer_the_beat(flag):
+    run = backfill_chapters._Run()
+    run.beat = _FakeBeat("backfill", 1800)
+    setattr(run, flag, True)
+    with patch("scripts.backfill_chapters._log_exit_ip", new=AsyncMock()):
+        await _handle_pending_pauses(run, inflight=set(), stopper=_stopped())
+    assert run.beat.deferred == [backfill_chapters.ERROR_COOLDOWN]
+
+
+@pytest.mark.asyncio
+async def test_no_cooldown_pending_defers_nothing():
+    run = backfill_chapters._Run()
+    run.beat = _FakeBeat("backfill", 1800)
+    await _handle_pending_pauses(run, inflight=set(), stopper=_stopped())
+    assert run.beat.deferred == []
+
+
+@pytest.mark.asyncio
+async def test_the_macro_pause_defers_the_beat_by_the_pause_length(restore_audible_transport):
+    real = backfill_chapters._interruptible_sleep
+
+    async def _sleep(seconds, _stopper, run=None):
+        await real(seconds, _stopped(), run)  # the real entry (the defer), no waiting
+
+    with patch.object(backfill_chapters, "ACTIVE_HOURS", 0.0), \
+         patch.object(backfill_chapters, "PAUSE_MIN_HOURS", 1.0), \
+         patch.object(backfill_chapters, "PAUSE_MAX_HOURS", 1.0):
+        (beat,), _ = await _run_with_fake_beat([_book("B000000001")], sleep=_sleep)
+    assert 3600.0 in beat.deferred
+
+
+@pytest.mark.asyncio
+async def test_run_leaves_a_done_heartbeat_file_when_finished(restore_audible_transport, tmp_path, monkeypatch):
+    monkeypatch.setenv("HEARTBEAT_DIR", str(tmp_path))
+    await _drive_run([_book("B000000001")])
+    assert read("backfill", str(tmp_path)).state == "done"
 
 
 # ============================================================

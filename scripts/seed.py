@@ -64,13 +64,14 @@ import time
 from app.db.session import engine
 
 # Core
-from app.core.config import check_retired_env_vars
+from app.core.config import check_retired_env_vars, get_settings
 from app.core.logging import get_logger, setup_logging
 
 # Services
 import app.services.audible as audible_service
 from app.services.db import persist_queue
 from app.services.seeder import run_new_releases_seeder, run_seeder
+from app.services.watch.heartbeat import Heartbeat
 
 logger = get_logger()
 
@@ -209,6 +210,10 @@ async def _run(once: bool) -> int:
         extra={"proxy_host": proxy_summary.host or proxy_summary.mode, "once": once},
     )
 
+    # The watcher reads this: stalled when no expansion cycle completes in two intervals.
+    beat = Heartbeat("seeder", 2 * get_settings().seeder_interval_hours * 3600).start()
+    beat.done = once
+
     # Tasks are created and tracked BEFORE the signal handlers are registered,
     # not after: a signal landing in the gap would call stopper.request()
     # against an empty task list -- requested=True gets set, but there is
@@ -220,36 +225,44 @@ async def _run(once: bool) -> int:
     # waking an idle event loop, so the cancel would sit unnoticed until the
     # sleep ended and `docker stop` would run out its grace period into a
     # SIGKILL. The loop's own handler wakes it immediately.
+    failures: list[BaseException] = []
+    finished = False
     stopper = _Stopper()
-    seeder_task = asyncio.create_task(run_seeder(once=once), name="seeder")
-    releases_task = asyncio.create_task(run_new_releases_seeder(once=once), name="seeder-new-releases")
-    stopper.track(seeder_task)
-    stopper.track(releases_task)
-    loop = asyncio.get_running_loop()
-    loop.add_signal_handler(signal.SIGTERM, stopper.request)
-    loop.add_signal_handler(signal.SIGINT, stopper.request)
+    try:
+        seeder_task = asyncio.create_task(run_seeder(once=once, on_cycle=beat.progress), name="seeder")
+        releases_task = asyncio.create_task(run_new_releases_seeder(once=once), name="seeder-new-releases")
+        stopper.track(seeder_task)
+        stopper.track(releases_task)
+        loop = asyncio.get_running_loop()
+        loop.add_signal_handler(signal.SIGTERM, stopper.request)
+        loop.add_signal_handler(signal.SIGINT, stopper.request)
 
-    # A worker's own internal try/except already absorbs a cycle failure, so
-    # anything that still escapes to here is a cancellation from _Stopper or
-    # a genuine bug -- worth distinguishing in the exit code, not swallowed.
-    results = await asyncio.gather(seeder_task, releases_task, return_exceptions=True)
-    failures = [
-        exc for exc in results
-        if isinstance(exc, BaseException) and not isinstance(exc, asyncio.CancelledError)
-    ]
-    for exc in failures:
-        logger.error(
-            "Seeder: a worker exited with an unhandled exception",
-            extra={"error_type": type(exc).__name__, "error": str(exc)},
-        )
+        # A worker's own internal try/except already absorbs a cycle failure, so
+        # anything that still escapes to here is a cancellation from _Stopper or
+        # a genuine bug -- worth distinguishing in the exit code, not swallowed.
+        results = await asyncio.gather(seeder_task, releases_task, return_exceptions=True)
+        failures = [
+            exc for exc in results
+            if isinstance(exc, BaseException) and not isinstance(exc, asyncio.CancelledError)
+        ]
+        for exc in failures:
+            logger.error(
+                "Seeder: a worker exited with an unhandled exception",
+                extra={"error_type": type(exc).__name__, "error": str(exc)},
+            )
 
-    # Both workers have stopped queuing new writes at this point (cancelled,
-    # or -- under --once -- finished on their own), but writes already
-    # in-flight through persist_queue's fire-and-forget tasks are awaited by
-    # neither -- this wait is what reaches them.
-    drained = await _drain_persist_queue(DRAIN_TIMEOUT_SECONDS)
-
-    await engine.dispose()
+        # Both workers have stopped queuing new writes at this point (cancelled,
+        # or -- under --once -- finished on their own), but writes already
+        # in-flight through persist_queue's fire-and-forget tasks are awaited by
+        # neither -- this wait is what reaches them.
+        drained = await _drain_persist_queue(DRAIN_TIMEOUT_SECONDS)
+        finished = True
+    finally:
+        try:
+            await engine.dispose()
+        finally:
+            # An aborted or crashed run leaves its last "running" beat, so the watcher reads it as dead.
+            await beat.stop("stopped" if finished and not failures else None)
 
     if failures:
         logger.error("Seeder: ABORTED", extra={"reason": f"{len(failures)} worker(s) raised"})

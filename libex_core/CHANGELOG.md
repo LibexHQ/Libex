@@ -13,6 +13,13 @@ the first published version. Entries for earlier versions record changes made
 before publication: they are historical record for whoever embeds this package,
 not evidence that anyone consumed a given version at the time it was cut.
 
+## [0.27.2]
+
+No change to the package's public surface.
+
+### Fixed
+- **`LibexClient` now retries a connection that was never established, once.** A `httpx.ConnectError` or `httpx.ProxyError` used to raise `AudibleAPIException` on the first occurrence, so a proxy that dropped a single connection attempt failed the whole call. The client now sends the request again once after a short backoff, which is safe because Audible never received it. Read, write and protocol errors and every timeout, including `ConnectTimeout`, are still not retried. Nor is a connect failure on the last of the `AUDIBLE_MAX_ATTEMPTS` attempts, or one that happens after the client was closed or replaced under the request. If the second attempt fails as well, `AudibleAPIException` is raised as before.
+
 ## [0.27.1]
 
 No change to the package's public surface.

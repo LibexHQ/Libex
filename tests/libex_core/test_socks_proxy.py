@@ -161,16 +161,18 @@ class _StubSocks5:
 
     def _serve(self):
         self._server.settimeout(15)
-        try:
-            conn, _ = self._server.accept()
-        except OSError:
-            return
-        with conn:
-            conn.settimeout(10)
-            conn.recv(256)
-            conn.sendall(b"\x05\x00")
-            self.request = conn.recv(4096)
-            conn.sendall(b"\x05\x05\x00\x01" + b"\x00" * 6)
+        # twice: the client resends once after a refused connect
+        for _ in range(2):
+            try:
+                conn, _addr = self._server.accept()
+            except OSError:
+                return
+            with conn:
+                conn.settimeout(10)
+                conn.recv(256)
+                conn.sendall(b"\x05\x00")
+                self.request = conn.recv(4096)
+                conn.sendall(b"\x05\x05\x00\x01" + b"\x00" * 6)
 
     def close(self):
         self._server.close()

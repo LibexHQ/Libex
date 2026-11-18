@@ -1509,9 +1509,11 @@ async def test_get_timeout_not_retried():
 
 @pytest.mark.asyncio
 async def test_get_request_error_not_retried():
-    """httpx.RequestError (connection failures) is deliberately NOT retried
-    either -- a single attempt, then AudibleAPIException."""
-    get_mock = AsyncMock(side_effect=httpx.ConnectError("refused"))
+    """httpx.RequestError other than a connect failure (here a ReadError, which
+    may have reached Audible) is deliberately NOT retried either -- a single
+    attempt, then AudibleAPIException. Connect failures are covered in
+    test_connect_retry.py."""
+    get_mock = AsyncMock(side_effect=httpx.ReadError("cut"))
 
     client = _client()
     with patch("httpx.AsyncClient.get", new=get_mock), \

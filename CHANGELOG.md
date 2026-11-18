@@ -10,6 +10,13 @@ contract: new fields, params, and endpoints are additive, and existing
 response shapes are never broken or removed. Expect MINOR bumps for new
 capabilities and PATCH bumps for fixes — MAJOR bumps should be rare.
 
+## [2.7.1]
+
+No endpoint, parameter or response field changes, and no database migration.
+
+### Fixed
+- **A dropped connection to Audible is now retried once instead of failing the request.** When the VPN proxy refused or dropped a connection attempt, the lookup failed straight away with a 503 `upstream_unavailable`. That happened now and then, on the order of 18 times a day, spread over the regions I saw it in (us, au, in, de, br, es and it), and it showed up on searches in particular. Now the request is sent again once after a short pause. This applies only when the connection was never established, so Audible never saw the request. Read and write errors and timeouts, including a timeout while connecting, are still not retried, and neither is a failure on the last of the three attempts a request is allowed, or when the client was closed or replaced while the request was running. If the second connection attempt fails too, you still get the 503. The seeder, refresh and backfill jobs use the same client and get the same change.
+
 ## [2.7.0]
 
 No endpoint, parameter or response field changes, no database migration and no change to the published library. I counted this a MINOR: the image now ships a new optional process, and the seeder and backfill write a new file. Nothing runs unless you start it.

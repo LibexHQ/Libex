@@ -259,7 +259,7 @@ def test_load_config_reads_both_variables(monkeypatch):
 # ============================================================
 
 class _StubProxy:
-    """Answers the first CONNECT with 407 and keeps what it was sent, so a
+    """Answers each CONNECT with 407 and keeps what it was sent, so a
     test can show the credential really was on the wire before it asserts the
     credential is nowhere in the output."""
 
@@ -274,17 +274,19 @@ class _StubProxy:
 
     def _serve(self):
         self._server.settimeout(10)
-        try:
-            conn, _ = self._server.accept()
-        except OSError:
-            return
-        with conn:
-            self.received = conn.recv(4096)
-            conn.sendall(
-                b"HTTP/1.1 407 Proxy Authentication Required\r\n"
-                b"Proxy-Authenticate: Basic realm=stub\r\n"
-                b"Content-Length: 0\r\n\r\n"
-            )
+        # twice: the client resends once after a refused tunnel
+        for _ in range(2):
+            try:
+                conn, _addr = self._server.accept()
+            except OSError:
+                return
+            with conn:
+                self.received = conn.recv(4096)
+                conn.sendall(
+                    b"HTTP/1.1 407 Proxy Authentication Required\r\n"
+                    b"Proxy-Authenticate: Basic realm=stub\r\n"
+                    b"Content-Length: 0\r\n\r\n"
+                )
 
     def close(self):
         self._server.close()

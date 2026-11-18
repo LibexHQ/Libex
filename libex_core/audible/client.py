@@ -741,9 +741,11 @@ class LibexClient:
         Bounded process-wide by AUDIBLE_CONCURRENCY_LIMIT concurrent
         in-flight requests regardless of caller or instance, and retries a
         429 or 5xx up to AUDIBLE_MAX_ATTEMPTS times with backoff (see the
-        _concurrency.py and _retry.py). A 404 stays
-        terminal and is never retried; neither is any other 4xx, nor a
-        timeout or connection failure.
+        _concurrency.py and _retry.py). A 404 and any other 4xx are
+        terminal. Timeouts and transport errors other than a connect
+        failure are not retried. A connect failure (ConnectError or
+        ProxyError) is resent once, except on the last attempt or when the
+        client was closed or replaced under the request.
 
         Which of the two concurrency pools this call draws from is read
         from a ContextVar (_current_audible_semaphore), never a parameter
@@ -785,7 +787,9 @@ class LibexClient:
         if extra_headers:
             headers = {**headers, **extra_headers}
 
+        connect_retried = False
         for attempt in range(AUDIBLE_MAX_ATTEMPTS):
+            retry_connect = False
             async with _current_audible_semaphore():
                 # Fetched here, after the permit above is already held, and
                 # not before: this call is synchronous, so nothing can run
@@ -834,14 +838,39 @@ class LibexClient:
                     # client's connections out from under a request already reading
                     # from one -- a RequestError, not the bare RuntimeError a fully
                     # closed client raises on its next call, so it converts correctly
-                    # here rather than escaping. It is not retried, since a 404-shaped
-                    # status was never received and this exception is not in
-                    # _retry._RETRYABLE_STATUS_CODES, and retrying against an instance whose
-                    # owner just closed it would defeat the close.
-                    detail = str(e) or type(e).__name__
-                    raise AudibleAPIException(
-                        f"Audible API request failed: {detail} for {url}"
-                    )
+                    # here rather than escaping.
+                    # Only ConnectError and ProxyError are retried, once: the
+                    # connection was never established, so Audible never saw the
+                    # request and resending it is safe. Read, write and protocol
+                    # errors may have reached Audible and are not retried, and
+                    # neither are timeouts. A client retired or closed since this
+                    # attempt began is not retried either, since resending through
+                    # an instance whose owner just closed it would defeat the close.
+                    if (
+                        isinstance(e, (httpx.ConnectError, httpx.ProxyError))
+                        and not connect_retried
+                        and attempt + 1 < AUDIBLE_MAX_ATTEMPTS
+                        and not self._closed
+                        and self.__http is client
+                    ):
+                        connect_retried = retry_connect = True
+                        logger.warning(
+                            "Audible connection failed, retrying once",
+                            extra={
+                                "region": region,
+                                "path": path,
+                                "error_type": type(e).__name__,
+                            },
+                        )
+                    else:
+                        detail = str(e) or type(e).__name__
+                        raise AudibleAPIException(
+                            f"Audible API request failed: {detail} for {url}"
+                        )
+
+            if retry_connect:
+                await asyncio.sleep(_compute_backoff_seconds(attempt, None))
+                continue
 
             if response.status_code == 404:
                 raise NotFoundException()
